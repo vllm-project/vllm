@@ -850,6 +850,7 @@ def _causal_conv1d_update_kernel(
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
+    COPY_NULL_INPUT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
@@ -857,6 +858,7 @@ def _causal_conv1d_update_kernel(
     BLOCK_N: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
+    state_dtype: tl.constexpr = conv_state_ptr.dtype.element_ty
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 
@@ -877,7 +879,12 @@ def _causal_conv1d_update_kernel(
 
     if HAS_NULL_BLOCK:  # noqa
         if conv_states_input_coord == null_block_id:
-            # not processing as this is not the actual sequence
+            if COPY_NULL_INPUT:
+                # Legacy in-place update leaves the temporary input row intact.
+                src = x_ptr + idx_seq * stride_x_seq + idx_feats * stride_x_dim
+                dst = o_ptr + idx_seq * stride_o_seq + idx_feats * stride_o_dim
+                values = tl.load(src, idx_feats < dim, 0.0)
+                tl.store(dst, values, idx_feats < dim)
             if launch_pdl:
                 tl.extra.cuda.gdc_launch_dependents()
             return
@@ -983,7 +990,7 @@ def _causal_conv1d_update_kernel(
         & (idx_tokens - VAL < seqlen)[:, None]
         & (idx_feats < dim)[None, :]
     )  # token-index  # token-index  # feature-index
-    loaded_x = tl.load(x_ptrs, mask_x, 0.0)
+    loaded_x = tl.load(x_ptrs, mask_x, 0.0).to(state_dtype)
     tl.debug_barrier()
 
     new_conv_state = tl.where(mask, conv_state, loaded_x)
@@ -1051,7 +1058,7 @@ def _causal_conv1d_update_kernel(
                 if j == 1:  # KERNEL_WIDTH-1:
                     matrix_w = w_col1
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(state_dtype)
             elif KERNEL_WIDTH == 3:
                 if j == 1:
                     matrix_w = w_col1
@@ -1059,7 +1066,7 @@ def _causal_conv1d_update_kernel(
                 elif j == 2:
                     matrix_w = w_col2
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(state_dtype)
             elif KERNEL_WIDTH == 4:
                 if j == 1:
                     matrix_w = w_col1
@@ -1070,7 +1077,7 @@ def _causal_conv1d_update_kernel(
                 elif j == 3:
                     matrix_w = w_col3
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(state_dtype)
             elif KERNEL_WIDTH == 5:
                 if j == 1:
                     matrix_w = w_col1
@@ -1084,7 +1091,7 @@ def _causal_conv1d_update_kernel(
                 elif j == 4:
                     matrix_w = w_col4
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(state_dtype)
             elif KERNEL_WIDTH == 6:
                 if j == 1:
                     matrix_w = w_col1
@@ -1101,7 +1108,7 @@ def _causal_conv1d_update_kernel(
                 elif j == 5:
                     matrix_w = w_col5
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(state_dtype)
             elif KERNEL_WIDTH == 7:
                 if j == 1:
                     matrix_w = w_col1
@@ -1121,7 +1128,7 @@ def _causal_conv1d_update_kernel(
                 elif j == 6:
                     matrix_w = w_col6
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(state_dtype)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
 
@@ -1222,9 +1229,18 @@ def causal_conv1d_update(
         assert activation in ["silu", "swish"]
 
     original_x_dtype = x.dtype
-    x = x.to(conv_state.dtype)
+    fuse_casts = (
+        x.dtype == torch.bfloat16
+        and conv_state.dtype == torch.float32
+        and x.dim() == 2
+        and out is None
+        and query_start_loc is None
+        and num_accepted_tokens is None
+    )
+    if not fuse_casts:
+        x = x.to(conv_state.dtype)
     if out is None:
-        out = x
+        out = torch.empty_like(x) if fuse_casts else x
     else:
         if out.shape != x.shape:
             raise ValueError(
@@ -1331,6 +1347,7 @@ def causal_conv1d_update(
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
+        COPY_NULL_INPUT=fuse_casts,
         IS_VARLEN=query_start_loc is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
