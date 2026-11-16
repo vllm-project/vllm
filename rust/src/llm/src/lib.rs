@@ -228,7 +228,7 @@ impl EngineCoreLlm {
         mut req: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
-        if !self.client.ready_response().supports_prompt_logprobs {
+        if !self.client.supports_prompt_logprobs() {
             let params = &req.sampling_params;
             // Python tests `prompt_logprobs` for truthiness, which lets `0`
             // through although those logprobs are just as incorrect.

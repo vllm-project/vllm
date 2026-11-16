@@ -657,6 +657,47 @@ where
     UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).unwrap())
 }
 
+/// A request may reach any engine, so prompt logprobs are supported only when
+/// every engine reports them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_logprobs_support_requires_every_engine() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let mut engines = Vec::new();
+    for (engine_id, supports_prompt_logprobs) in [([0x00, 0x00], true), ([0x01, 0x00], false)] {
+        engines.push(spawn_mock_engine_task_with_ready(
+            ipc.handshake_endpoint(),
+            engine_id.to_vec(),
+            EngineCoreReadyResponse {
+                supports_prompt_logprobs,
+                ..default_ready_response()
+            },
+            |_, _| Box::pin(async {}),
+        ));
+    }
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    assert!(client.ready_response().supports_prompt_logprobs);
+    assert!(!client.supports_prompt_logprobs());
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn coordinator_handshake_includes_engine_control_addresses() {
     init_tracing();
