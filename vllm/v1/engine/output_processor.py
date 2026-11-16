@@ -241,6 +241,8 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.indexer_chunks: list[np.ndarray] | None = None
+        self.aux_output_keys: list[str] | None = None
+        self.aux_version_segments: list[tuple[int, str | None]] | None = None
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
@@ -528,6 +530,8 @@ class RequestState:
             token_ids=token_ids,
             routed_experts=routed_experts,
             indexer_topk=indexer_topk,
+            aux_output_keys=self.aux_output_keys if finished else None,
+            aux_version_segments=self.aux_version_segments if finished else None,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -799,6 +803,9 @@ class OutputProcessor:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
                 )
+            if engine_core_output.aux_output_keys is not None:
+                req_state.aux_output_keys = engine_core_output.aux_output_keys
+                req_state.aux_version_segments = engine_core_output.aux_version_segments
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:

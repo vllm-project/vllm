@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+import time
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -12,6 +13,9 @@ import numpy as np
 import pytest
 import torch
 
+from tests.distributed.aux_output_connector.utils import fake_store
+from tests.v1.core.test_prefix_caching import _make_hybrid_kv_cache_config
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.aux_output_connector import connector as connector_module
 from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.artifacts import (
@@ -28,6 +32,13 @@ from vllm.distributed.aux_output_connector.connector import (
     PackedBlockHashes,
     retained_objects,
 )
+from vllm.distributed.aux_output_connector.object_store import (
+    aux_object_names,
+    read_aux_rows,
+)
+from vllm.distributed.aux_output_connector.session_objects import (
+    SessionObjectWriter,
+)
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
@@ -41,7 +52,10 @@ from vllm.model_executor.layers.fused_moe import (
     routed_experts_capturer as capturer_module,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu import async_utils
@@ -199,6 +213,7 @@ def _make_worker(
     *,
     shape_per_token: tuple[int, int] = _SHAPE,
     dtype: np.dtype = _DTYPE,
+    block_size: int = _BLOCK_SIZE,
 ) -> AuxOutputWorkerConnector:
     r3_nbytes = int(np.prod(shape_per_token)) * dtype.itemsize if enable_r3 else 0
     shape = (
@@ -207,7 +222,7 @@ def _make_worker(
         else shape_per_token
     )
     storage_dtype = np.dtype("uint8") if indexer_shape else dtype
-    object_nbytes = _BLOCK_SIZE * int(np.prod(shape)) * storage_dtype.itemsize
+    object_nbytes = block_size * int(np.prod(shape)) * storage_dtype.itemsize
     store = _make_store(
         max_bytes=(
             1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
@@ -233,9 +248,9 @@ def _make_worker(
     worker._buffer = AuxOutputBuffer(
         storage_dtype,
         shape,
-        _BLOCK_SIZE,
+        block_size,
         max_num_seqs,
-        max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
+        max_num_batched_tokens or max_num_seqs * block_size,
         max_concurrent_batches,
     )
     worker._requests = {}
@@ -244,6 +259,8 @@ def _make_worker(
     worker._pending_outputs = []
     worker._lock = threading.Lock()
     worker._max_concurrent_batches = max_concurrent_batches
+    worker._object_writer = None
+    worker._object_size = 0
     return worker
 
 
@@ -2743,3 +2760,226 @@ def test_connector_rolls_back_capture_when_routed_experts_binding_fails(monkeypa
         AuxOutputWorkerConnector(vllm_config=config, model=Mock())
 
     routed.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "groups,kwargs,error",
+    [
+        (["full"], {}, False),
+        (["full", "sliding_window"], {}, False),
+        (["full", "mamba"], {"hash_block_size": 8}, True),
+        (["full"], {"num_hash_lookahead_tokens": 2}, True),
+        (["sliding_window"], {}, True),
+        (["full", "replay"], {}, True),
+    ],
+    ids=[
+        "full-attention",
+        "sliding-window",
+        "partial-hash-hits",
+        "hash-lookahead",
+        "no-full-attention",
+        "prefix-replay",
+    ],
+)
+def test_sessions_reject_kv_layouts_that_break_objects(groups, kwargs, error):
+    config = _make_hybrid_kv_cache_config(
+        16, 10, [group for group in groups if group != "replay"]
+    )
+    if "replay" in groups:
+        spec = MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+        )
+        layer = SlidingWindowManager.layer_config(
+            spec, sliding_window=32, bounded_replay=True
+        )
+        config.kv_cache_groups.append(new_kv_cache_group(["replay"], layer))
+    kwargs = {"hash_block_size": 16, "scheduler_block_size": 16, **kwargs}
+    manager = KVCacheManager(config, max_model_len=8192, **kwargs)
+    AuxOutputSchedulerConnector(manager, 0)
+    if not error:
+        AuxOutputSchedulerConnector(manager, 0, key_prefix="job")
+        return
+    with pytest.raises(ValueError, match="object_key_prefix needs"):
+        AuxOutputSchedulerConnector(manager, 0, key_prefix="job")
+
+
+def _position_rows(start, end):
+    return np.arange(start, end, dtype=np.uint8).repeat(6).reshape(-1, *_SHAPE)
+
+
+def _session_worker(store):
+    worker = _make_worker(2)
+    worker._object_writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=4,
+        fields=worker._object_fields,
+    )
+    return worker
+
+
+def _session_step(worker, rows, start, end, hashes, *, object_blocks=1):
+    step = _metadata(
+        0, [_request_metadata("session", start, end - start, 0, hashes)], {}
+    )
+    step.metadata.session_object_size = object_blocks * _BLOCK_SIZE
+    if start == 0:
+        step.metadata.sessions = {"session": "s"}
+    _begin_step(worker, step)
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+        torch.from_numpy(rows[start:end])
+    )
+    pending = worker.prepare_output(
+        _input_batch(["session"], np.array([start]), np.array([0, end - start]))
+    )
+    pending.enqueue_cpu_copy(np.array([0]), np.array([0]))
+    return pending
+
+
+def test_worker_names_session_objects_by_their_last_hash_block():
+    client, store = fake_store()
+    worker = _session_worker(store)
+    rows = _position_rows(0, 2 * _BLOCK_SIZE)
+    for block in range(2):
+        start = block * _BLOCK_SIZE
+        step = _metadata(
+            0,
+            [
+                _request_metadata(
+                    "session", start, _BLOCK_SIZE, 0, _HASHES[block : block + 1]
+                ),
+                _request_metadata(
+                    "plain", start, _BLOCK_SIZE, 0, _HASHES[block + 2 : block + 3]
+                ),
+            ],
+            {},
+        )
+        step.metadata.session_object_size = _BLOCK_SIZE
+        if block == 0:
+            step.metadata.sessions = {"session": "s"}
+        _begin_step(worker, step)
+        worker._routed_experts_capturer = Mock()
+        worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+            torch.from_numpy(np.concatenate([rows[start : start + _BLOCK_SIZE]] * 2))
+        )
+        pending = worker.prepare_output(
+            _input_batch(
+                ["session", "plain"],
+                np.array([start, start]),
+                np.array([0, _BLOCK_SIZE, 2 * _BLOCK_SIZE]),
+            )
+        )
+        pending.enqueue_cpu_copy(np.array([0, 0]), np.array([0, 0]))
+        worker.process_output(pending)
+    local_store = worker._store
+    assert len(local_store.get_concatenated(aux_output_keys(_HASHES[2:], "0")))
+    with pytest.raises(BlockObjectStoreError):
+        local_store.get_concatenated(aux_output_keys(_HASHES[:1], "0"))
+    worker.close()
+
+    keys = [f"job/s/{_HASHES[0].hex()}", f"job/s/{_HASHES[1].hex()}"]
+    assert client.writes == [keys[:1], keys[1:]]
+    np.testing.assert_array_equal(read_aux_rows(store, keys, "routed_experts"), rows)
+
+
+@pytest.mark.parametrize(
+    "terminal_first", [True, False], ids=["terminal-first", "output-first"]
+)
+def test_worker_writes_a_session_object_of_two_hash_blocks_once(terminal_first):
+    client, store = fake_store()
+    worker = _session_worker(store)
+    rows = _position_rows(0, 2 * _BLOCK_SIZE)
+    pending = _session_step(worker, rows, 0, 2 * _BLOCK_SIZE, [], object_blocks=2)
+    terminal = _metadata(0, [], {"session": _HASHES[:2]})
+    terminal.metadata.session_object_size = 2 * _BLOCK_SIZE
+    if terminal_first:
+        _begin_step(worker, terminal)
+        worker.process_output(pending)
+    else:
+        worker.process_output(pending)
+        _begin_step(worker, terminal)
+    assert worker._requests == {}
+    worker.close()
+
+    key = f"job/s/{_HASHES[1].hex()}"
+    assert client.writes == [[key]]
+    np.testing.assert_array_equal(read_aux_rows(store, [key], "routed_experts"), rows)
+
+
+@pytest.mark.parametrize(
+    "hashes,object_blocks,tail_start",
+    [(_HASHES[:1], 1, _BLOCK_SIZE), ([], 1, 0), (_HASHES[:1], 2, 0)],
+    ids=["after-an-object", "unhashed-block", "staged-block"],
+)
+def test_worker_writes_the_session_tail_object_when_the_request_finishes(
+    hashes, object_blocks, tail_start
+):
+    client, store = fake_store()
+    worker = _session_worker(store)
+    end = _BLOCK_SIZE + 3
+    rows = _position_rows(0, end)
+    pending = _session_step(worker, rows, 0, end, hashes, object_blocks=object_blocks)
+    worker.process_output(pending)
+    terminal = _metadata(0, [], {"session": []})
+    terminal.metadata.session_object_size = object_blocks * _BLOCK_SIZE
+    terminal.metadata.session_tails = {"session": ("job/s/tail/t", tail_start, end)}
+    _begin_step(worker, terminal)
+    worker.close()
+
+    keys = [f"job/s/{_HASHES[0].hex()}"] if tail_start else []
+    assert client.writes == [[key] for key in [*keys, "job/s/tail/t"]]
+    np.testing.assert_array_equal(
+        read_aux_rows(store, [*keys, "job/s/tail/t"], "routed_experts"), rows
+    )
+
+
+def test_worker_step_fails_after_a_session_object_write_failed():
+    client, store = fake_store(-1)
+    worker = _session_worker(store)
+    pending = _session_step(
+        worker, _position_rows(0, _BLOCK_SIZE), 0, _BLOCK_SIZE, _HASHES[:1]
+    )
+    worker.process_output(pending)
+    with pytest.raises(BlockObjectStoreError, match="write failed"):
+        for _ in range(500):
+            _begin_step(worker, _metadata(0, [], {}))
+            time.sleep(0.01)
+    worker.close()
+    assert client.closed and worker._store is None
+
+
+def test_session_objects_hold_each_field_per_pipeline_stage():
+    client, store = fake_store()
+    routed = np.arange(_BLOCK_SIZE * 12, dtype=_DTYPE).reshape(_BLOCK_SIZE, 4, 3)
+    indexer = np.arange(_BLOCK_SIZE * 12, dtype=np.int32).reshape(_BLOCK_SIZE, 4, 3)
+    for stage in range(2):
+        layers = slice(2 * stage, 2 * stage + 2)
+        worker = _make_worker(2, indexer_shape=(2, 3), shape_per_token=(2, 3))
+        worker._object_writer = SessionObjectWriter(
+            store,
+            key_prefix="job",
+            max_pending_batches=4,
+            fields=worker._object_fields,
+            key_suffix=f"/pp{stage}",
+        )
+        step = _metadata(
+            0, [_request_metadata("session", 0, _BLOCK_SIZE, 0, _HASHES[:1])], {}
+        )
+        step.metadata.session_object_size = _BLOCK_SIZE
+        step.metadata.sessions = {"session": "s"}
+        pending = _prepare_output(
+            worker,
+            step,
+            np.ascontiguousarray(routed[:, layers]),
+            ["session"],
+            np.array([0]),
+            indexer_rows=np.ascontiguousarray(indexer[:, layers]),
+        )
+        worker.process_output(pending)
+        worker.close()
+
+    key = f"job/s/{_HASHES[0].hex()}"
+    assert client.writes == [[name] for name in aux_object_names([key], 2)]
+    for name, rows in (("routed_experts", routed), ("indexer_topk", indexer)):
+        np.testing.assert_array_equal(read_aux_rows(store, [key], name, 2), rows)

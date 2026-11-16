@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.session_objects import validate_aux_request
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -456,6 +457,7 @@ class InputProcessor:
                     parameter="indexer_topk_prompt_start",
                     value=sampling_params.indexer_topk_prompt_start,
                 )
+            validate_aux_request(self.vllm_config, sampling_params, resumable)
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
                 raise VLLMValidationError(

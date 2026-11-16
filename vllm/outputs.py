@@ -81,6 +81,13 @@ class CompletionOutput:
             single-sequence (`n == 1`) requests.
         weight_versions: Contiguous weight version spans over output-token indexes.
             Set on the final output only.
+        aux_output_keys: Keys of the shared objects that hold the routed
+            experts, for a request with `aux_session`. Set on the final output
+            only.
+        aux_version_segments: `[start, weight version]` of the positions the
+            keys name, up to the last full hash block, closed by
+            `[end, None]`; pass it back with the session's next request. Set
+            on the final output only.
 
     """
 
@@ -97,6 +104,8 @@ class CompletionOutput:
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
     indexer_topk: np.ndarray | None = None
+    aux_output_keys: list[str] | None = None
+    aux_version_segments: list[tuple[int, str | None]] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -246,6 +255,11 @@ class RequestOutput:
                             completion.routed_experts = next_completion.routed_experts
                         if next_completion.indexer_topk is not None:
                             completion.indexer_topk = next_completion.indexer_topk
+                        if next_completion.aux_output_keys is not None:
+                            completion.aux_output_keys = next_completion.aux_output_keys
+                            completion.aux_version_segments = (
+                                next_completion.aux_version_segments
+                            )
                         # Like finish_reason, spans come only with the terminal output.
                         completion.weight_versions = next_completion.weight_versions
                         completion.finish_reason = next_completion.finish_reason

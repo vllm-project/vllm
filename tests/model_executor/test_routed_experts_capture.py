@@ -859,6 +859,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
             max_bytes=None,
             enable_return_routed_experts=True,
             enable_return_indexer_topk=False,
+            object_key_prefix=None,
         ),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),

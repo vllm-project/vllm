@@ -147,3 +147,33 @@ def test_indexer_only_does_not_require_moe_routing():
     config = _config(is_moe=False)
     config.aux_output_config = AuxOutputConfig(enable_return_indexer_topk=True)
     VllmConfig._verify_aux_output_compatibility(config)
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"object_key_prefix": "run-1"}, None),
+        ({"object_key_prefix": ""}, "non-empty"),
+        ({"object_key_prefix": "runs/1"}, "without '/'"),
+        (
+            {"object_key_prefix": "run-1", "enable_return_routed_experts": False},
+            "enable_return_routed_experts",
+        ),
+        (
+            {
+                "object_key_prefix": "run-1",
+                "enable_return_routed_experts": False,
+                "enable_return_indexer_topk": True,
+            },
+            None,
+        ),
+    ],
+    ids=["valid", "empty-prefix", "slash", "no-capture", "indexer-only"],
+)
+def test_object_key_prefix_is_validated(kwargs, error):
+    kwargs = {"enable_return_routed_experts": True, **kwargs}
+    if error is None:
+        AuxOutputConfig(**kwargs)
+        return
+    with pytest.raises(ValueError, match=error):
+        AuxOutputConfig(**kwargs)

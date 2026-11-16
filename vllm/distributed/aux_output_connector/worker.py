@@ -24,11 +24,17 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     retained_objects,
 )
+from vllm.distributed.aux_output_connector.object_store import (
+    MooncakeAuxObjectStore,
+)
+from vllm.distributed.aux_output_connector.session_objects import (
+    SessionObjectWriter,
+)
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
@@ -48,6 +54,10 @@ logger = init_logger(__name__)
 @dataclass(slots=True)
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
+    session: str | None = None
+    block_hashes: list[bytes] = field(default_factory=list)
+    staged: list[tuple[int, np.ndarray]] = field(default_factory=list)
+    tail: tuple[str, np.ndarray] | None = None
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
     buffer_start: int = 0
@@ -127,6 +137,8 @@ class AuxOutputWorkerConnector:
         self._r3_nbytes = 0
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: AuxOutputBuffer | None = None
+        self._object_writer: SessionObjectWriter | None = None
+        self._object_size = 0
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -197,6 +209,18 @@ class AuxOutputWorkerConnector:
             raise
         self._store = store
         self._buffer = buffer
+        key_prefix = vllm_config.aux_output_config.object_key_prefix
+        if key_prefix is not None:
+            pp_group = get_pp_group()
+            self._object_writer = SessionObjectWriter(
+                MooncakeAuxObjectStore.create(),
+                key_prefix=key_prefix,
+                max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
+                fields=self._object_fields,
+                key_suffix=(
+                    f"/pp{pp_group.rank_in_group}" if pp_group.world_size > 1 else ""
+                ),
+            )
 
     def _get_storage_layout(
         self, max_num_batched_tokens: int
@@ -215,6 +239,14 @@ class AuxOutputWorkerConnector:
             (self._r3_nbytes + self._indexer.fixed_bytes_per_token,),
             np.dtype("uint8"),
         )
+
+    def _object_fields(self, rows: np.ndarray) -> dict[str, np.ndarray]:
+        output = self._make_output(0, rows)
+        fields = {
+            "routed_experts": output.routed_rows,
+            "indexer_topk": output.indexer_rows,
+        }
+        return {name: rows for name, rows in fields.items() if rows is not None}
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -360,7 +392,7 @@ class AuxOutputWorkerConnector:
             state.scheduled_cursor = token_start + request_num_tokens
             block_batches.append((state, completed))
 
-            if sampled > 0 and emit_start <= token_end:
+            if state.session is None and sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
                     output_slice = slice(
                         start + emit_start - capture_start, end - rejected
@@ -463,15 +495,25 @@ class AuxOutputWorkerConnector:
         ready_batches = []
         for state, completed in batches:
             blocks = state.pending_blocks + completed
-            keyed_end = len(state.aux_output_keys) * buffer.block_size
+            keys = (
+                state.aux_output_keys if state.session is None else state.block_hashes
+            )
+            keyed_end = len(keys) * buffer.block_size
             ready = [(start, rows) for start, rows in blocks if start < keyed_end]
             state.pending_blocks = [
                 (start, buffer.retain_block(rows))
                 for start, rows in blocks
                 if start >= keyed_end
             ]
-            if ready:
+            if not ready:
+                continue
+            if state.session is None:
                 ready_batches.append((state.aux_output_keys, ready))
+                continue
+            assert self._object_writer is not None
+            self._object_writer.add_blocks(state, ready, self._object_size)
+            for _, rows in ready:
+                buffer.release_block(rows)
         if ready_batches or retain_keys or release_keys:
             publish_aux_output(
                 store,
@@ -490,6 +532,9 @@ class AuxOutputWorkerConnector:
         assert buffer is not None
         for request_id in request_ids:
             state = self._requests.pop(request_id)
+            if state.tail is not None:
+                assert self._object_writer is not None
+                self._object_writer.add_tail(*state.tail)
             for _, rows in state.pending_blocks:
                 buffer.release_block(rows)
             buffer.discard(request_id)
@@ -502,6 +547,14 @@ class AuxOutputWorkerConnector:
                 namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
         return namespace
 
+    def _take_tail(
+        self, request_id: str, state: _WorkerRequestState, tail: tuple[str, int, int]
+    ) -> None:
+        assert self._buffer is not None
+        key, start, end = tail
+        blocks = state.staged + state.pending_blocks
+        state.tail = key, self._buffer.read(request_id, start, end, blocks)
+
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates.
 
@@ -509,8 +562,11 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
+        if self._object_writer is not None:
+            self._object_writer.check()
         if self._buffer is None or metadata is None:
             return
+        self._object_size = metadata.session_object_size
         assert not metadata.requests.keys() & metadata.finished_requests, (
             "auxiliary output request cannot run and finish in one step"
         )
@@ -523,12 +579,26 @@ class AuxOutputWorkerConnector:
             retained_keys = aux_output_keys(hashes, namespace)
             hashes = metadata.released_block_hashes or ()
             release_keys = aux_output_keys(hashes, namespace)
+            carried: list[str] = []
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
                 assert not self._pending_outputs, (
                     "auxiliary output generation changed with output in flight"
                 )
+                carried = [
+                    request_id
+                    for request_id in metadata.finished_requests
+                    if request_id in self._requests
+                ]
+                for request_id in carried:
+                    state = self._requests[request_id]
+                    if request_id in metadata.session_tails:
+                        tail = metadata.session_tails[request_id]
+                        self._take_tail(request_id, state, tail)
+                    state.block_hashes.extend(metadata.block_hashes.get(request_id, ()))
+                self._publish_blocks([(self._requests[r], []) for r in carried])
+                self._teardown(carried)
                 release_keys.extend(
                     key
                     for state in self._requests.values()
@@ -541,6 +611,7 @@ class AuxOutputWorkerConnector:
                 state = self._requests.setdefault(
                     request_id, _WorkerRequestState(emit_cursor=emit_start)
                 )
+                state.session = metadata.sessions.get(request_id, state.session)
                 if state.pending_outputs == 0:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.
@@ -551,16 +622,26 @@ class AuxOutputWorkerConnector:
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
             for request_id, block_hashes in metadata.block_hashes.items():
+                if request_id in carried:
+                    continue
                 state = self._requests[request_id]
-                namespace = self._get_namespace(self._generation)
-                keys = aux_output_keys(block_hashes, namespace)
-                state.aux_output_keys.extend(keys)
-                retained_keys.extend(keys)
+                if state.session is not None:
+                    state.block_hashes.extend(block_hashes)
+                else:
+                    namespace = self._get_namespace(self._generation)
+                    keys = aux_output_keys(block_hashes, namespace)
+                    state.aux_output_keys.extend(keys)
+                    retained_keys.extend(keys)
                 block_batches.append((state, []))
             finished_now: list[str] = []
             for request_id in metadata.finished_requests:
+                if request_id in carried:
+                    continue
                 state = self._requests[request_id]
                 state.finished = True
+                if request_id in metadata.session_tails:
+                    tail = metadata.session_tails[request_id]
+                    self._take_tail(request_id, state, tail)
                 if state.pending_outputs:
                     continue
                 finished_now.append(request_id)
@@ -571,15 +652,20 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
+            writer, self._object_writer = self._object_writer, None
             store, self._store = self._store, None
             try:
-                if store is not None:
-                    store.close()
+                if writer is not None:
+                    writer.close()
             finally:
-                self._buffer = None
-                self._requests.clear()
-                self._step_metadata = None
-                self._close_capture()
+                try:
+                    if store is not None:
+                        store.close()
+                finally:
+                    self._buffer = None
+                    self._requests.clear()
+                    self._step_metadata = None
+                    self._close_capture()
 
 
 def get_aux_output_connector(

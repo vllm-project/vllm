@@ -567,6 +567,8 @@ class ServingTokens(GenerateBaseServing):
                 **indexer_response_fields(output),
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
+                aux_output_keys=output.aux_output_keys,
+                aux_version_segments=output.aux_version_segments,
             )
             if derender_mode:
                 derender_choice_fields.append(choice_fields)
@@ -839,6 +841,8 @@ class ServingTokens(GenerateBaseServing):
                         token_ids=token_ids_out,
                         routed_experts=routed_experts_b64,
                         **indexer_response_fields(output),
+                        aux_output_keys=output.aux_output_keys,
+                        aux_version_segments=output.aux_version_segments,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
                     )

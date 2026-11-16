@@ -157,6 +157,13 @@ pub struct EngineCoreOutput {
     /// engine has a `watermark_config`.
     #[serde(default)]
     pub watermarking: Option<bool>,
+    /// Shared-object keys of a stopped session request's routed experts,
+    /// when `AuxOutputConfig.object_key_prefix` is set.
+    #[serde(default)]
+    pub aux_output_keys: Option<Vec<String>>,
+    /// Version segments of the names of `aux_output_keys`.
+    #[serde(default)]
+    pub aux_version_segments: Option<Vec<(u64, Option<String>)>>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -667,6 +674,8 @@ mod tests {
                             error: None,
                             indexer_topk: None,
                             watermarking: None,
+                            aux_output_keys: None,
+                            aux_version_segments: None,
                         },
                     ],
                     scheduler_stats: None,

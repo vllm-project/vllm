@@ -454,6 +454,40 @@ async def test_stream_reports_engine_stop_reason_on_final_chunk():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
+async def test_serve_tokens_returns_aux_output_keys(stream: bool):
+    engine = _mock_engine()
+    keys = ["run/s/00"]
+    segments = [(0, "v1"), (16, None)]
+
+    async def mock_generate(*args, **kwargs):
+        output = _make_request_output(
+            "req-1", token_ids=[10], finish_reason="length", finished=True
+        )
+        output.outputs[0].aux_output_keys = keys
+        output.outputs[0].aux_version_segments = segments
+        yield output
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1, aux_session="s"),
+        model=MODEL_NAME,
+        stream=stream,
+    )
+
+    response = await serving.serve_tokens(request)
+    if stream:
+        parsed = _parse_sse_chunks([chunk async for chunk in response])
+        choice = parsed[0]["choices"][0]
+    else:
+        choice = response.model_dump()["choices"][0]
+    assert choice["aux_output_keys"] == keys
+    assert list(map(list, choice["aux_version_segments"])) == [[0, "v1"], [16, None]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
 async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
