@@ -358,7 +358,7 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str | None = Field(default=None, repr=False, exclude=True)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
