@@ -38,6 +38,9 @@ class _HfExamplesInfo:
     The method to use for speculative decoding.
     """
 
+    num_speculative_tokens: int = 1
+    """Number of draft tokens to request during initialization."""
+
     min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
@@ -1532,12 +1535,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DSpineDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.8-27B",
         speculative_model="tencent/Qwen3.8-27B-DSpine-b16",
+        num_speculative_tokens=15,
         use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
     ),
     "DFlashDSpineDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.8-27B",
         speculative_model="tencent/Qwen3.8-27B-DSpine-b16",
+        num_speculative_tokens=15,
         use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
     ),
     # LiLiCorr checkpoints are not published yet.
     "LiLiCorrDraftModel": _HfExamplesInfo(

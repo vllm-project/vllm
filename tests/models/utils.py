@@ -525,6 +525,15 @@ def dummy_hf_overrides(
         # multimodal test models may override *some* text-model fields
         text_config.update(text_config_override)
 
+    if model_arch in ("DSpineDraftModel", "DFlashDSpineDraftModel"):
+        # Preserve the draft's layers while shrinking its target for low-VRAM CI.
+        if draft_config := getattr(hf_config, "dflash_config", None):
+            draft_config["target_layer_ids"] = list(range(4))
+        else:
+            use_original_num_layers = False
+            num_hidden_layers = 4
+            text_config.layer_types = text_config.layer_types[:num_hidden_layers]
+
     # Ensure at least 2 expert per group
     # Since `grouped_topk` assumes top-2
     n_group = getattr(text_config, "n_group", None)
