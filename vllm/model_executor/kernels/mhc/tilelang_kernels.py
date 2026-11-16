@@ -1295,7 +1295,7 @@ def hc_head_fuse_tilelang(
 class HcPrenormGemmTileLangKernel(
     VllmTileLangJitKernel["HcPrenormGemmTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1442,7 +1442,7 @@ class HcPrenormGemmTileLangKernel(
 class MhcPreBigFuseTileLangKernel(
     VllmTileLangJitKernel["MhcPreBigFuseTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1760,7 +1760,7 @@ class MhcPreBigFuseTileLangKernel(
 
 
 class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1838,7 +1838,7 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
 class MhcFusedTileLangKernel(
     VllmTileLangJitKernel["MhcFusedTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1979,7 +1979,7 @@ class MhcFusedTileLangKernel(
 class HcHeadFusedTileLangKernel(
     VllmTileLangJitKernel["HcHeadFusedTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int

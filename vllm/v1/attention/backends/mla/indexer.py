@@ -115,7 +115,7 @@ class PrepareUniformDecodeKernel(
 ):
     BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
         block_table_stride: int
@@ -332,7 +332,7 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PCPGlobalChunkPlan:
     """PCP packing for one indexer prefill chunk under PCP + DCP."""
 
@@ -417,7 +417,7 @@ def build_pcp_global_chunk_plan(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerPrefillChunkMetadata:
     block_table: torch.Tensor
     # Under DCP (dcp_world_size > 1) these hold this rank's local row bounds;
@@ -446,7 +446,7 @@ class BuildPrefillChunkMetadataKernel(
 ):
     BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         query_slice_start: int
         query_slice_stop: int
@@ -688,7 +688,7 @@ class BuildPrefillChunkMetadataKernel(
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
@@ -698,7 +698,7 @@ class DeepseekV32IndexerPrefillMetadata:
     shardq_gather_indices: torch.Tensor | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
     # seq_lens: per-token effective context lengths.
