@@ -463,8 +463,8 @@ For `FINAL_BASE_IMAGE`, use the public, multi-arch
 newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
-- `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
-- `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
+- `pytorch/manylinux2_28-builder:cuda13.5` for x86_64 CPUs.
+- `pytorch/manylinuxaarch64-builder:cuda13.5` for ARM64/AArch64 CPUs.
 
 `requirements/rubin-prerelease.txt` pins PyTorch's cu135 nightly. PyTorch does
 not publish cu135 torchvision or torchaudio yet, so they use the cu134
@@ -487,7 +487,7 @@ including the `ptxas` above.
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.5 \
-      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
       --build-arg NCCL_VERSION=2.32.3 \
       .
@@ -508,7 +508,7 @@ including the `ptxas` above.
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.5 \
-      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
       --build-arg NCCL_VERSION=2.32.3 \
       .
