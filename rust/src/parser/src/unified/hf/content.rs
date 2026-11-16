@@ -6,6 +6,7 @@
 //! Port of `content_parsers.py`. Each parser takes a chunk of captured text and
 //! parses it into a single key in the output message dictionary.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use regex::Regex;
@@ -271,6 +272,7 @@ impl XmlInlineArgs {
     /// Parse shallow XML-ish tags into a dict.
     fn parse(&self, text: &str) -> unified::Result<Value> {
         let mut out = Map::new();
+        let mut merged = HashSet::new();
         let tags =
             self.tag_pattern.1.find_iter(text).map_err(|error| parsing_failed!("{error}"))?;
         for tag in tags {
@@ -294,10 +296,11 @@ impl XmlInlineArgs {
             };
             match out.get_mut(key) {
                 Some(existing) if self.merge_duplicates => match existing {
-                    Value::Array(values) => values.push(value),
+                    Value::Array(values) if merged.contains(key) => values.push(value),
                     _ => {
                         let first = existing.take();
                         *existing = Value::Array(vec![first, value]);
+                        merged.insert(key);
                     }
                 },
                 _ => {
