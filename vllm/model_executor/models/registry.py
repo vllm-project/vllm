@@ -769,8 +769,6 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Kolibri1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "LlamaForCausalLM": ("transformers", "TransformersForCausalLM"),
-    # For decapoda-research/llama-*
-    "LLaMAForCausalLM": ("transformers", "TransformersForCausalLM"),
     "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),

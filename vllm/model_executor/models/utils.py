@@ -716,7 +716,7 @@ def init_vllm_registered_model(
         # submodules. `with_hf_config` infers missing architectures from `model_type`
         if (archs := architectures or hf_config.architectures) is not None:
             is_qwen2 = "Qwen2ForCausalLM" in archs
-            is_llama = "LlamaForCausalLM" in archs or "LLaMAForCausalLM" in archs
+            is_llama = "LlamaForCausalLM" in archs
         else:
             is_qwen2 = hf_config.model_type == "qwen2"
             is_llama = hf_config.model_type == "llama"
