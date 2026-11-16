@@ -5,6 +5,7 @@
 import copy
 import gc
 import os
+import sys
 import time
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
@@ -1232,6 +1233,12 @@ class Worker(WorkerBase):
                 assert sample_hidden_states is not None
                 self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
             del sample_hidden_states
+
+        if "amd_kernels" in sys.modules:
+            # its variants compiled during start-up: log any later compile
+            from amd_kernels import compile_watch
+
+            compile_watch.arm(logger.warning)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

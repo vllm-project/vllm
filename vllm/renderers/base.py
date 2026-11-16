@@ -66,6 +66,7 @@ from .inputs import (
 )
 from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
+from .prefix_token_cache import PrefixTokenCache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -122,6 +123,8 @@ class BaseRenderer(ABC, Generic[_T]):
             tokenizer = copy.copy(tokenizer)
             self._prepare_tokenizer(tokenizer)
         self.tokenizer = tokenizer
+        # long multi-turn prompts reuse the previous turn's ids (HfRenderer sets it)
+        self._prefix_token_cache: PrefixTokenCache | None = None
 
         # Background multimodal warmup task (a future returned by
         # _mm_executor) so it overlaps engine-core initialization while
@@ -696,6 +699,23 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
         kwargs = params.get_encode_kwargs()
+        cache = self._prefix_token_cache
+        if (
+            cache is not None
+            and not want_offsets
+            and kwargs.get("add_special_tokens") is False
+            and cache.applies(prompt["prompt"])
+        ):
+            ids = cache.encode(prompt["prompt"])
+            max_length = kwargs.get("max_length")
+            if (
+                kwargs.get("truncation")
+                and max_length is not None
+                and len(ids) > max_length
+            ):
+                right = getattr(tokenizer, "truncation_side", "right") == "right"
+                ids = ids[:max_length] if right else ids[-max_length:]
+            return self._build_tokens_prompt(ids, prompt, offset_mapping=None)
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)

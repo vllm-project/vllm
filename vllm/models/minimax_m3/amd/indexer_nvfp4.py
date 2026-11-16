@@ -14,6 +14,7 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.models.minimax_m3.amd import akr_attn, akr_config
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MSA_INDEX_HEAD_DIM,
     MSA_SCORE_TYPE,
@@ -134,6 +135,11 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
         )
         if reason is not None:
             raise ValueError(f"MiniMax M3 NVFP4 indexer on ROCm {reason}")
+        # the prefill top-16 on amd_kernels (route "indexer") unless it says why not
+        self.akr_prefill = akr_config.on("indexer")
+        if self.akr_prefill and (why := akr_attn.index_prefill_blocker(self)):
+            logger.warning_once("amd_kernels prefill indexer stays stock (%s)", why)
+            self.akr_prefill = False
 
     def _new_score(self, rows: int, max_seq_len: int) -> torch.Tensor:
         """Uninitialized: the scorer writes every block the top-k reads."""
@@ -198,7 +204,13 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
 
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
-        if md.num_decodes > 0:
+        if md.num_decodes > 0 and akr_config.on("indexer"):
+            # run by this layer's sparse decode (akr_attn.decode)
+            akr_attn.index_decode(
+                self, iq[:nd], kv, md.decode, self.init_blocks, self.local_blocks
+            )
+            decode_topk = buf[:, :nd, :]
+        elif md.num_decodes > 0:
             d = md.decode
             assert d is not None
             cp = self._decode_cp(md.num_decodes, d.decode_query_len)
@@ -237,7 +249,14 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
                 query_len=d.decode_query_len,
             )
 
-        if md.num_prefills > 0:
+        if md.num_prefills > 0 and self.akr_prefill:
+            p = md.prefill
+            assert p is not None and md.prefill_num_valid_pages is not None
+            prefill_topk = buf[:, nd:num_tokens, :]
+            akr_attn.index_prefill(
+                self, iq[nd:], kv, p, md.prefill_num_valid_pages, prefill_topk
+            )
+        elif md.num_prefills > 0:
             p = md.prefill
             assert p is not None and md.prefill_num_valid_pages is not None
             score = self._new_score(num_tokens - nd, p.max_seq_len)

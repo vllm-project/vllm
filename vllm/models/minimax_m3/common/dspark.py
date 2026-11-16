@@ -9,6 +9,7 @@ checkpoint ships no token embedding or LM head; both are shared with the target.
 """
 
 from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch import nn
@@ -145,6 +146,8 @@ direct_register_custom_op(
 
 
 class MiniMaxM3DSparkAttention(DFlashQwen3Attention):
+    _akr_query = False  # set by amd/dspark_akr.attach
+
     def __init__(
         self,
         config: MiniMaxM3VLTextConfig,
@@ -197,6 +200,10 @@ class MiniMaxM3DSparkAttention(DFlashQwen3Attention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if self._akr_query:
+            from vllm.models.minimax_m3.amd import dspark_akr
+
+            return dspark_akr.attention_forward(self, qkv, positions)
         # The target's fused per-head Gemma QK-norm + partial NeoX RoPE on q/k,
         # in place: one launch instead of the q-norm, k-norm and RoPE kernels.
         # q_fp8_out additionally stores the normed/roped q as E4M3, which is
@@ -310,6 +317,7 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
     quant_config_mapper = WeightsMapper(
         orig_to_new_prefix={_CHECKPOINT_PREFIX: "model."}
     )
+    _akr_fused: Any = None  # set by amd/dspark_akr.setup
 
     def __init__(
         self,
@@ -344,6 +352,16 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
             if out is not None:
                 return out
         return super().__call__(*args, **kwargs)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self._akr_fused is not None and input_embeds is None:
+            return self._akr_fused.forward(self, input_ids, positions)
+        return super().forward(input_ids, positions, input_embeds)
 
     def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
         return self.hidden_norm(context_states)
@@ -384,6 +402,15 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         """One kernel norms, ropes and stores the context K/V of every layer,
         straight from the projection output."""
         slot_mapping = _shared_slot_mapping(context_slot_mapping)
+        fused = self._akr_fused
+        if (
+            slot_mapping is not None
+            and fused is not None
+            and fused.store_context_kv(
+                self, context_states, context_positions, slot_mapping
+            )
+        ):
+            return
         writer = (
             self._context_kv_writer()
             if slot_mapping is not None
@@ -416,6 +443,13 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
 
 class MiniMaxM3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     model_cls = MiniMaxM3DSparkModel
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if current_platform.is_rocm():
+            from vllm.models.minimax_m3.amd import dspark_akr
+
+            dspark_akr.attach(self)
 
     @staticmethod
     def _rename_checkpoint_weights(

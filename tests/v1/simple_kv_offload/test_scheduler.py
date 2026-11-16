@@ -471,6 +471,7 @@ def make_scheduler(
     lazy: bool = False,
     kv_cache_config: KVCacheConfig | None = None,
     vllm_config: VllmConfig | None = None,
+    cpu_lru_eviction: bool = False,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with small block pools."""
     if kv_cache_config is None:
@@ -487,6 +488,7 @@ def make_scheduler(
         scheduler_block_size=BLOCK_SIZE,
         hash_block_size=BLOCK_SIZE,
         lazy_offload=lazy,
+        cpu_lru_eviction=cpu_lru_eviction,
     )
 
     # Build a real GPU block pool and bind it
@@ -1615,6 +1617,190 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
     assert cpu_cached(req_a) == [True, True]
     assert cpu_cached(req_b) == [False, False]
     assert cpu_cached(req_c) == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# Test 4b: cpu_lru_eviction requeues CPU prefixes by last use, tail first
+# ---------------------------------------------------------------------------
+def _same_prompt(request: Request, request_id: str) -> Request:
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=request.prompt_token_ids,
+        sampling_params=request.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=request._block_hasher,
+    )
+
+
+def _cpu_hit_tokens(sched: SimpleCPUOffloadScheduler, request: Request) -> int:
+    probe = _same_prompt(request, f"{request.request_id}-probe")
+    hit_tokens, _ = sched.get_num_new_matched_tokens(probe, num_computed_tokens=0)
+    sched.request_finished(probe, block_ids=[])  # drop the lookup pin
+    return hit_tokens or 0
+
+
+def _store(fix: SchedulerFixture, request: Request, num_blocks: int) -> KVCacheBlocks:
+    """Store a request's first `num_blocks` blocks in one step."""
+    sched = fix.scheduler
+    kv_blocks = _alloc_and_register(fix, request, num_blocks)
+    sched.update_state_after_alloc(request, kv_blocks, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {request.request_id: num_blocks * BLOCK_SIZE},
+            new_reqs={request.request_id: kv_blocks.get_block_ids()},
+        )
+    )
+    assert len(meta.store_cpu_blocks) == num_blocks
+    simulate_store_completion(sched, meta.store_event)
+    return kv_blocks
+
+
+def _store_and_finish(
+    fix: SchedulerFixture, request: Request, num_blocks: int
+) -> KVCacheBlocks:
+    kv_blocks = _store(fix, request, num_blocks)
+    fix.scheduler.request_finished_all_groups(request, kv_blocks.get_block_ids())
+    return kv_blocks
+
+
+@pytest.mark.parametrize("lru", [True, False])
+def test_chunked_prompt_loses_cpu_tail_first(lru: bool) -> None:
+    """A prompt stored over two chunks keeps a usable prefix under eviction
+    (cpu_lru_eviction; without it, the eviction takes block 0 first)."""
+    # 5 total = 4 usable (null_block takes 1)
+    fix = make_scheduler(
+        num_cpu_blocks=5, num_gpu_blocks=16, lazy=False, cpu_lru_eviction=lru
+    )
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=4)
+    kv_a = _alloc_and_register(fix, req_a, 4, confirmed=False)
+    ids_a = kv_a.get_block_ids()
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    for chunk in range(2):
+        req_a.num_computed_tokens = (chunk + 1) * 2 * BLOCK_SIZE
+        meta = sched.build_connector_meta(
+            make_scheduler_output(
+                {req_a.request_id: 2 * BLOCK_SIZE},
+                new_reqs={req_a.request_id: ids_a} if chunk == 0 else None,
+                cached_req_new_blocks={req_a.request_id: None} if chunk else None,
+            )
+        )
+        assert len(meta.store_cpu_blocks) == 2
+        simulate_store_completion(sched, meta.store_event)
+    sched.request_finished_all_groups(req_a, ids_a)
+
+    _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts 2 of A's 4
+
+    assert _cpu_hit_tokens(sched, req_a) == (2 * BLOCK_SIZE if lru else 0)
+
+
+@pytest.mark.parametrize("lru", [True, False])
+def test_gpu_prefix_hit_refreshes_cpu_copy_at_finish(lru: bool) -> None:
+    """A turn served from the GPU prefix cache makes its CPU copy recent when
+    it finishes (cpu_lru_eviction; without it, the copy keeps its admission
+    time, older than what other requests stored while the turn ran)."""
+    fix = make_scheduler(
+        num_cpu_blocks=5, num_gpu_blocks=16, lazy=False, cpu_lru_eviction=lru
+    )
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=2)
+    kv_a = _store_and_finish(fix, req_a, 2)
+
+    # A's second turn hits A's 2 blocks on GPU; admission refreshes the copy.
+    turn_2 = _same_prompt(req_a, "req-a-turn-2")
+    assert sched.get_num_new_matched_tokens(turn_2, 2 * BLOCK_SIZE) == (0, False)
+    turn_2.num_computed_tokens = 2 * BLOCK_SIZE
+    sched.update_state_after_alloc(turn_2, kv_a, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {turn_2.request_id: 1},
+            new_reqs={turn_2.request_id: kv_a.get_block_ids()},
+        )
+    )
+    assert meta.store_event == -1  # already cached, nothing to copy
+
+    req_b = make_request(num_blocks=2)
+    _store_and_finish(fix, req_b, 2)  # stored and finished while turn 2 runs
+    sched.request_finished_all_groups(turn_2, kv_a.get_block_ids())
+
+    _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts B, not A
+
+    assert _cpu_hit_tokens(sched, req_a) == (2 * BLOCK_SIZE if lru else 0)
+    assert _cpu_hit_tokens(sched, req_b) == (0 if lru else 2 * BLOCK_SIZE)
+
+
+@pytest.mark.parametrize("lru", [True, False])
+def test_cpu_prefix_refresh_waits_for_final_flush(lru: bool) -> None:
+    """The block stored by the finish-time flush is still evicted first
+    (cpu_lru_eviction; without it, the request is released at finish and the
+    eviction takes block 0)."""
+    fix = make_scheduler(
+        num_cpu_blocks=5, num_gpu_blocks=16, lazy=False, cpu_lru_eviction=lru
+    )
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=3)
+    kv_a = _alloc_and_register(fix, req_a, 3, confirmed=False)
+    ids_a = kv_a.get_block_ids()
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    req_a.num_computed_tokens = 2 * BLOCK_SIZE
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_a.request_id: 2 * BLOCK_SIZE}, new_reqs={req_a.request_id: ids_a}
+        )
+    )
+    simulate_store_completion(sched, meta.store_event)
+
+    req_a.num_computed_tokens = 3 * BLOCK_SIZE
+    sched.request_finished_all_groups(req_a, ids_a)
+    assert (req_a.request_id in sched._reqs_to_store) == lru
+    if lru:
+        assert sched._reqs_to_store[req_a.request_id].finished
+    flush = sched.build_connector_meta(make_scheduler_output({}))
+    assert len(flush.store_cpu_blocks) == 1
+    assert (req_a.request_id in sched._reqs_to_store) == lru
+    simulate_store_completion(sched, flush.store_event)
+    assert req_a.request_id not in sched._reqs_to_store
+
+    # Takes the one empty CPU block and A's last block.
+    _store_and_finish(fix, make_request(num_blocks=2), 2)
+
+    assert _cpu_hit_tokens(sched, req_a) == (2 * BLOCK_SIZE if lru else 0)
+
+
+@pytest.mark.parametrize("via", ["load", "lookup"])
+@pytest.mark.parametrize("lru", [True, False])
+def test_cpu_hit_release_requeues_tail_first(lru: bool, via: str) -> None:
+    """CPU blocks pinned by a hit go back to the free queue tail first, when
+    the load lands or when the lookup pin is dropped (cpu_lru_eviction;
+    without it, in prefix order, so the eviction takes block 0 first)."""
+    fix = make_scheduler(
+        num_cpu_blocks=5, num_gpu_blocks=16, lazy=False, cpu_lru_eviction=lru
+    )
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=4)
+    _store(fix, req_a, 4)  # A keeps running: no finish-time refresh
+
+    reader = _same_prompt(req_a, "req-a-reader")
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(reader, 0)
+    assert (hit_tokens, is_async) == (4 * BLOCK_SIZE, True)
+    if via == "load":
+        kv_reader = KVCacheBlocks(blocks=(fix.gpu_block_pool.get_new_blocks(4),))
+        sched.update_state_after_alloc(reader, kv_reader, hit_tokens)
+        meta = sched.build_connector_meta(
+            make_scheduler_output(
+                {reader.request_id: 1},
+                new_reqs={reader.request_id: kv_reader.get_block_ids()},
+            )
+        )
+        assert len(meta.load_cpu_blocks) == 4
+        simulate_load_completion(sched, {reader.request_id})
+    else:
+        sched.request_finished(reader, block_ids=[])
+
+    _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts 2 of A's 4
+
+    assert _cpu_hit_tokens(sched, req_a) == (2 * BLOCK_SIZE if lru else 0)
 
 
 # ---------------------------------------------------------------------------
