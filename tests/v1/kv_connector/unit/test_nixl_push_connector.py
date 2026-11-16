@@ -638,6 +638,35 @@ def test_job_that_raises_fails_only_its_request():
     assert w._chunk_states["req-p"].failed
     assert w.writes == [(([5],), ([200],), True)]
 
+
+@pytest.mark.parametrize(
+    "start, end, expected",
+    [
+        (0, 2, None),  # in D's prefix cache
+        (1, 3, ([12], [200])),  # straddles it
+        (2, 4, ([12, 13], [200, 201])),  # in D's uncached suffix
+    ],
+)
+def test_chunk_maps_onto_the_blocks_d_registered(start, end, expected):
+    # A 4-block prompt whose first 2 blocks D has cached: D registered only
+    # its 2 uncached blocks.
+    job = NixlPushChunkJob(
+        request_id="req-p",
+        block_ids=[10, 11, 12, 13][start:end],
+        start_block=start,
+        end_block=end,
+        total_blocks=4,
+    )
+    d_blocks = [200, 201]
+    ranges = NixlPushConnectorWorker._chunk_block_ranges(job, len(d_blocks))
+    if expected is None:
+        assert ranges is None
+    else:
+        assert ranges is not None
+        local, remote = ranges
+        assert (job.block_ids[local], d_blocks[remote]) == expected
+
+
 def _fail_writes(w: _StubWriterWorker) -> None:
     """Make in-flight WRITEs report failure when polled."""
     w._log_failure = MagicMock()
