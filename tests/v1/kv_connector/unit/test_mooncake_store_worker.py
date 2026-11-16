@@ -3713,6 +3713,26 @@ def test_pp_sizes_lists_a_custom_partition(pp_stage_layouts, monkeypatch):
 
 
 @pytest.mark.cpu_test
+def test_pp_sizes_shares_keys_between_partitions_of_one_pp_size(
+    pp_stage_layouts, monkeypatch
+):
+    """Two PP=2 instances with different stage boundaries share objects when
+    pp_sizes lists both partitions: each cuts at the other's boundary."""
+
+    def keys(rank: int) -> list[str]:
+        return _layout_keys(
+            pp_stage_layouts(2, rank, {"pp_sizes": [2, [3, 5]]}, num_layers=8)[0]
+        )
+
+    default = [keys(rank) for rank in (0, 1)]
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "3,5")
+    custom = [keys(rank) for rank in (0, 1)]
+
+    assert "@layers:3-4@" in default[0][1]
+    assert default[0] + default[1] == custom[0] + custom[1]
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "pp_sizes", ["2", [], [0], [True], [1, [3, 4]], [[8, 0]], [[4, 4.0]]]
 )
