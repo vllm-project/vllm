@@ -3217,6 +3217,18 @@ def test_session_fields_copy_only_small_remainders(start, end, shared):
     assert rest[1] is chunks[1]
 
 
+def test_session_fields_detach_the_rows_left_before_a_withheld_hash():
+    chunk = np.arange(16)[:, None]
+    state = _WorkerRequestState(session="s")
+    state.fields["hidden_states"] = (0, 16, [chunk])
+    for start in range(0, 14, 2):
+        rows = SessionObjectWriter._take_fields(state, start, start + 2)
+        assert rows["hidden_states"].ravel().tolist() == [start, start + 1]
+    _, _, (rest,) = state.fields["hidden_states"]
+    assert rest.ravel().tolist() == [14, 15]
+    assert not np.shares_memory(rest, chunk)
+
+
 def test_session_object_with_incomplete_field_rows_is_rejected():
     writer = SessionObjectWriter(
         fake_store()[1],
