@@ -16,13 +16,13 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.model_executor.layers.quantization.online.nvfp4 as online_nvfp4
-from tests.model_executor.layers.test_fused_shared_expert import _SingleRankGroup
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
     load_model_without_vllm_runner,
     quant_config_args,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
@@ -37,7 +37,6 @@ from vllm.config.quantization import (
     resolve_quantization_config,
 )
 from vllm.config.vllm import VllmConfig
-from vllm.distributed.parallel_state import override_parallel_groups
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels import linear as linear_kernels
 from vllm.model_executor.kernels.linear import LinearKernelOracle
@@ -950,7 +949,7 @@ _rocm_aiter = pytest.mark.skipif(
     ],
 )
 @pytest.mark.skip_global_cleanup
-@override_parallel_groups(_SingleRankGroup())
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_configures_prequantized_moe(
     checkpoint, moe, expected_activation, default_vllm_config, monkeypatch
 ) -> None:
@@ -3418,7 +3417,7 @@ def _enable_aiter_mxfp4_moe(monkeypatch) -> None:
 )
 @_rocm_aiter
 @pytest.mark.skip_global_cleanup
-@override_parallel_groups(_SingleRankGroup())
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
     activation_key, default_vllm_config, monkeypatch
 ) -> None:

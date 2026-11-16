@@ -16,9 +16,9 @@ from torch import nn
 from transformers import MiniMaxM3VLTextConfig, Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
-from vllm.distributed.parallel_state import override_parallel_groups
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
@@ -1328,65 +1328,6 @@ def _build_mtp_for_model(
     return _build_mtp_model(getattr(module, class_name), vllm_config, config, **kwargs)
 
 
-# TODO: move to conftest.py.
-class _SingleRankGroup:
-    """No-op single-rank stand-in for a compiled `GroupCoordinator`."""
-
-    world_size = 1
-    rank_in_group = 0
-    local_rank = 0
-    is_first_rank = True
-    is_last_rank = True
-
-    @property
-    def device_group(self):
-        return self
-
-    @property
-    def cpu_group(self):
-        return self
-
-    @property
-    def device_communicator(self):
-        return self
-
-    def rank(self) -> int:
-        return 0
-
-    def size(self) -> int:
-        return 1
-
-    def all_reduce(self, input_: torch.Tensor, *args: Any, **kwargs: Any):
-        return input_
-
-    def all_gather(self, input_: torch.Tensor, dim: int = 0):
-        return input_
-
-    def all_gatherv(self, inputs: Any, dim: int = 0, sizes: Any = None):
-        return inputs
-
-    def reduce_scatter(self, input_: torch.Tensor, dim: int = 0):
-        return input_
-
-    def reduce_scatterv(self, input_: Any, dim: int = 0, sizes: Any = None):
-        return input_
-
-    def broadcast(self, input_: torch.Tensor, src: int = 0):
-        return input_
-
-    def send(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    def recv(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    def barrier(self) -> None:
-        return None
-
-    def destroy(self) -> None:
-        return None
-
-
 def _load_minimax_m3_weights(
     model: nn.Module, weights: list[tuple[str, torch.Tensor]]
 ) -> set[str]:
@@ -1425,13 +1366,14 @@ def _load_minimax_m3_weights(
     ],
 )
 @pytest.mark.skip_global_cleanup
-@override_parallel_groups(_SingleRankGroup())
+@override_parallel_groups(SingleRankGroup())
 def test_models_fse_init(
     model_type: str,
     shared_expert_precision: str,
     use_fse: bool,
     exclude: list[str],
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
     _print_warning_once.cache_clear()
@@ -1586,6 +1528,16 @@ def test_models_fse_init(
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    def reset_aiter() -> None:
+        rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
+        importlib.reload(envs)
+        rocm_aiter_ops.refresh_env_variables()
+
+    # Also on failure: `skip_global_cleanup` skips the conftest cleanup. Runs after
+    # the environment patches below are undone.
+    request.addfinalizer(reset_aiter)
 
     warning_logger = fused_moe_utils.logger
 
@@ -1601,7 +1553,6 @@ def test_models_fse_init(
         importlib.reload(envs)
         mp.setattr(envs, "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", use_fse)
         rocm_aiter_ops.refresh_env_variables()
-        from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 
         mp.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
         rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
@@ -1848,10 +1799,6 @@ def test_models_fse_init(
                     in (warning.call_args.args[0])
                 )
                 assert "excludes shared experts" in warning.call_args.args[1]
-
-    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
-    importlib.reload(envs)
-    rocm_aiter_ops.refresh_env_variables()
 
 
 def _modelopt_mxfp8_config(exclude_modules=(), moe_quant_algo="NVFP4"):

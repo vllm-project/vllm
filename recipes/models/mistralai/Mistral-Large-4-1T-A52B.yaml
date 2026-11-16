@@ -575,7 +575,7 @@ presets:
     strategy: single_node_tp
     variants: [fp8]
     workload: "1–4 concurrent requests"
-    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise (the experts are checked once the weights are loaded)."
     tp: 4
     args:
       - "--additional-config"
@@ -612,7 +612,7 @@ presets:
     strategy: single_node_tp
     variants: [mxfp4]
     workload: "1–4 concurrent requests"
-    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise (the experts are checked once the weights are loaded)."
     tp: 4
     args:
       - "--additional-config"
@@ -639,7 +639,7 @@ presets:
     strategy: single_node_tp
     variants: [fp8]
     workload: "1–4 concurrent requests"
-    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise (the experts are checked once the weights are loaded)."
     tp: 4
     args:
       - "--additional-config"
@@ -669,7 +669,7 @@ presets:
     strategy: single_node_tp
     variants: [mxfp4]
     workload: "1–4 concurrent requests"
-    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise (the experts are checked once the weights are loaded)."
     tp: 4
     args:
       - "--additional-config"
