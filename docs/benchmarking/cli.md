@@ -1193,24 +1193,24 @@ Start the server:
 
 ```bash
 vllm serve Qwen/Qwen3.5-2B \
---host 127.0.0.1 --port 8000
+  --host 127.0.0.1 --port 8000
 ```
 
 Run the benchmark:
 
 ```bash
-# Download an example trace 
-# curl -L -o conversation_trace.jsonl \
-#https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl 
+# Download an example trace
+curl -fL -o conversation_trace.jsonl \
+  https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl
 
-vllm bench serve --model Qwen/Qwen3.5-2B \  
---dataset-name=timed_trace --num-prompts 100 --host 127.0.0.1 \
---port 8000 --dataset-path ./conversation_trace.jsonl \
---ignore-eos  --self-timed --timed-trace-chunk-hash-size 512 \
---timed-trace-sec-multiplier 0.001 
+vllm bench serve --model Qwen/Qwen3.5-2B \
+  --dataset-name=timed_trace --num-prompts 100 --host 127.0.0.1 \
+  --port 8000 --dataset-path ./conversation_trace.jsonl \
+  --ignore-eos --self-timed --timed-trace-chunk-hash-size 512 \
+  --timed-trace-sec-multiplier 0.001
 ```
 
-This will replay the first 100 lines from the trace file `conversation.jsonl`.  
+This will replay the first 100 lines from the trace file `conversation_trace.jsonl`.
 
 </details>
 
