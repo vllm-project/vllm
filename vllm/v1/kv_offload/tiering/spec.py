@@ -602,6 +602,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Off the head node the mirror moves GPU blocks straight to the head
         # region, so no CPU memory is allocated there.
         if topology is None or topology.on_head:
+            populate_shard: tuple[int, int] | None = None
+            if topology is not None:
+                # Workers off the head node map no region, so the head node's
+                # workers pre-fault all of it between them.
+                head_ranks = sorted(set(range(world_size)) - topology.remote_ranks)
+                populate_shard = (head_ranks.index(topology.rank), len(head_ranks))
+            elif self.replicated_layout:
+                # Every worker maps the same bytes, so each pre-faults only
+                # its share.
+                populate_shard = (worker_index, world_size)
             try:
                 worker_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
@@ -610,11 +620,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
                     num_segments=REGION_SEGMENTS,
-                    # Every worker maps the same bytes in the replicated layout,
-                    # so each pre-faults only its share.
-                    populate_shard=(
-                        (worker_index, world_size) if self.replicated_layout else None
-                    ),
+                    populate_shard=populate_shard,
                 )
                 if self.config.canonical_layout:
                     self._validate_canonical_refs(kv_caches)

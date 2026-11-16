@@ -942,17 +942,34 @@ def test_workers_span_nodes_agrees_across_ranks(tmp_path):
         ([{"type": "example"}], "pcp", True),
     ],
 )
-@pytest.mark.parametrize("on_head", [True, False])
+@pytest.mark.parametrize(
+    ("rank", "remote_ranks", "head_shard"),
+    [
+        # The workers on the head node pre-fault its region between them.
+        (1, {2, 3}, (1, 2)),
+        (0, {1, 2, 3}, (0, 1)),
+        (2, {1, 3}, (1, 2)),
+        # A worker off the head node.
+        (1, {1, 2, 3}, None),
+    ],
+)
 def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
-    monkeypatch, secondary_tiers, spanning_group, mirrored, on_head
+    monkeypatch,
+    secondary_tiers,
+    spanning_group,
+    mirrored,
+    rank,
+    remote_ranks,
+    head_shard,
 ):
     """Secondary tiers on an engine that spans nodes get a region mirror."""
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
+    on_head = rank not in remote_ranks
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
         worker_kv_bytes_per_block=4096,
-        rank=1,
+        rank=rank,
         world_size=4,
         tp_size=2,
         pp_size=2,
@@ -960,7 +977,9 @@ def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
     )
     assert isinstance(spec, TieringOffloadingSpec)
     queried = _fake_node_groups(monkeypatch, spanning_group, world_size=4)
-    topology = MagicMock(rank=1, on_head=on_head)
+    topology = MagicMock(
+        rank=rank, on_head=on_head, remote_ranks=frozenset(remote_ranks)
+    )
     monkeypatch.setattr(tiering_spec_module, "mirror_topology", lambda: topology)
     monkeypatch.setattr(
         tiering_spec_module, "gather_construction_errors", lambda *args: None
@@ -979,6 +998,7 @@ def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
         assert attach.call_args.args[5] is topology
         if on_head:
             assert attach.call_args.args[0] is worker_ctor.return_value
+            assert region_ctor.call_args.kwargs["populate_shard"] == head_shard
         else:
             # Off the head node GPU blocks go straight to the head region.
             assert attach.call_args.args[:2] == (None, None)
