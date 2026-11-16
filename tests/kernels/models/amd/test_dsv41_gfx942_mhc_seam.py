@@ -208,7 +208,7 @@ def test_seam_graph_replay(default_vllm_config):
         )
 
     seam()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = seam()
@@ -216,7 +216,7 @@ def test_seam_graph_replay(default_vllm_config):
     for buf, new in zip(static, _seam_args(num_tokens, False, True), strict=True):
         buf.copy_(new)
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     for got, want in zip(captured, seam(), strict=True):
         torch.testing.assert_close(got, want, atol=0, rtol=0)
 
