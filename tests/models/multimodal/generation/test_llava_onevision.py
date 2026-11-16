@@ -31,8 +31,6 @@ def test_llava_onevision_mixed_frame_count_videos(vllm_runner: type[VllmRunner])
         limit_mm_per_prompt={"image": 0, "video": 2},
         enable_prefix_caching=False,
         mm_processor_cache_gb=0,
-        attention_config={"backend": "TRITON_ATTN"},
-        mm_encoder_attn_backend="TORCH_SDPA",
     ) as model:
         llm = model.get_llm()
         outputs = llm.generate(
