@@ -6,6 +6,9 @@ plugin. `ci_gpu.py` runs once per command, outside pytest workers, when
 `nvidia-smi` is available. It queries up to 16 container-visible NVIDIA devices
 once per second without importing PyTorch or creating a CUDA context.
 Set `CI_INFRA_GPU_SAMPLING=0` in the job environment to disable sampling.
+In a root shell the sampler drops privileges with `setpriv`: to the owner of
+`/workdir` on Docker agents, otherwise (Kubernetes pods) to `nobody`. Without
+`setpriv` it does not run.
 
 Samples contain device UUID, index, name, utilization percent, and used/total
 device memory in bytes. They are `ci.gpu.sample` OTLP events inside
