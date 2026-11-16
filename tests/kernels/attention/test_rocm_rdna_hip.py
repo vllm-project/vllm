@@ -414,14 +414,14 @@ def test_rdna_valid_for_any_batch():
     """Valid whatever max_num_seqs, on Triton's packed HND cache."""
     from vllm.v1.attention.backends import rocm_rdna_attn as rdna
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
     backend = rdna.RocmRdnaAttentionBackend
     reason = backend.supports_combination(
         HEAD_DIM, torch.float16, "auto", 16, False, False, False, False, None
     )
     assert reason is None
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=HKV, head_size=HEAD_DIM, dtype=torch.float16
     )
     assert backend.customize_spec(spec) == TritonAttentionBackend.customize_spec(spec)
