@@ -184,9 +184,10 @@ class GigaChat4GatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             prefix=prefix,
             gqa_interleaved_layout=True,
         )
-        self.norm = GigaChat4GatedDeltaNorm(
-            self.head_v_dim, config.linear_attn_o_norm_eps
+        norm_eps = (
+            getattr(config, "linear_attn_o_norm_eps", None) or config.rms_norm_eps
         )
+        self.norm = GigaChat4GatedDeltaNorm(self.head_v_dim, norm_eps)
         self.gate_scale = config.linear_sigmoid_gate_scale
         self.output_mult = config.linear_attn_output_mult
 

@@ -11,15 +11,15 @@ class GigaChat4Config(PreTrainedConfig):
     def __init__(
         self,
         vocab_size: int = 128256,
-        hidden_size: int = 2560,
-        intermediate_size: int = 8192,
-        moe_intermediate_size: int = 768,
-        num_hidden_layers: int = 32,
-        num_attention_heads: int = 32,
+        hidden_size: int = 7168,
+        intermediate_size: int = 18432,
+        moe_intermediate_size: int = 2048,
+        num_hidden_layers: int = 64,
+        num_attention_heads: int = 64,
         n_shared_experts: int | None = None,
         n_routed_experts: int | None = None,
         num_experts_per_tok: int = 8,
-        first_k_dense_replace: int = 1,
+        first_k_dense_replace: int = 3,
         routed_scaling_factor: float = 2.5,
         norm_topk_prob: bool = True,
         scoring_func: str = "sigmoid",
@@ -49,25 +49,23 @@ class GigaChat4Config(PreTrainedConfig):
         linear_key_head_dim: int = 128,
         linear_value_head_dim: int = 128,
         linear_conv_kernel_dim: int = 4,
-        linear_num_key_heads: int = 16,
-        linear_num_value_heads: int = 32,
+        linear_num_key_heads: int = 32,
+        linear_num_value_heads: int = 64,
         linear_use_short_conv: bool = True,
         linear_gating_type: str = "gated_rmsnorm_sigmoid",
         linear_sigmoid_gate_scale: float = 2.0,
-        linear_attn_o_norm_eps: float | None = None,
-        linear_use_legacy_qkvz_layout: bool = False,
-        swiglu_limit: float | None = 0.0,
+        swiglu_limit: float | None = 10.0,
         branch_multiplier: float = 1.0,
         linear_attn_output_mult: float = 1.0,
-        final_logit_softcapping: float | None = None,
+        final_logit_softcapping: float | None = 30.0,
         index_topk: int | None = None,
-        index_n_heads: int = 64,
-        index_head_dim: int = 128,
+        index_n_heads: int | None = None,
+        index_head_dim: int | None = None,
         indexer_norm_type: str = "LlamaRMSNorm",
         indexer_rotate_activation_enabled: bool | None = None,
         dense_attention_layers: list[int] | None = None,
         use_shared_expert_sigmoid: bool = False,
-        num_nextn_predict_layers: int = 0,
+        num_nextn_predict_layers: int = 1,
         nextn_is_sparse: bool = False,
         nextn_is_linear: bool = False,
         tie_word_embeddings: bool = False,
@@ -84,7 +82,7 @@ class GigaChat4Config(PreTrainedConfig):
         if n_shared_experts is None:
             n_shared_experts = 0 if is_draft else 1
         if n_routed_experts is None:
-            n_routed_experts = 0 if is_draft else 192
+            n_routed_experts = 0 if is_draft else 256
         if is_draft and (n_shared_experts or n_routed_experts):
             raise ValueError("GigaChat4 DFlash2 requires dense draft layers")
         if norm_type != "GatedNorm" or layernorm_type != "pre_post":
@@ -96,7 +94,7 @@ class GigaChat4Config(PreTrainedConfig):
         if (
             linear_attention_type != "Qwen3NextGatedDeltaNet"
             or linear_gating_type != "gated_rmsnorm_sigmoid"
-            or linear_use_legacy_qkvz_layout
+            or kwargs.get("linear_use_legacy_qkvz_layout", False)
             or not linear_use_short_conv
         ):
             raise ValueError("Unsupported GigaChat4 linear attention configuration")
@@ -116,7 +114,8 @@ class GigaChat4Config(PreTrainedConfig):
                 "attention_type and index_topk must select the same MLA variant"
             )
         if index_topk and (
-            index_n_heads <= 0
+            index_n_heads is None
+            or index_n_heads <= 0
             or index_head_dim != 128
             or qk_rope_head_dim != 64
             or indexer_norm_type != "LlamaRMSNorm"
@@ -194,8 +193,6 @@ class GigaChat4Config(PreTrainedConfig):
         self.linear_use_short_conv = linear_use_short_conv
         self.linear_gating_type = linear_gating_type
         self.linear_sigmoid_gate_scale = linear_sigmoid_gate_scale
-        self.linear_attn_o_norm_eps = linear_attn_o_norm_eps or rms_norm_eps
-        self.linear_use_legacy_qkvz_layout = linear_use_legacy_qkvz_layout
         self.swiglu_limit = swiglu_limit
         self.final_logit_softcapping = final_logit_softcapping
         self.index_topk = index_topk
