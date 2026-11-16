@@ -135,7 +135,12 @@ def test_audio_in_video_follows_requested_fps(model_id: str) -> None:
         hf_processor_mm_kwargs=mm_kwargs,
     )
     expected = processor.info.get_hf_processor()(
-        text=[prompt], videos=[video], audio=[audio], return_tensors="pt", **mm_kwargs
+        text=[prompt],
+        videos=[video],
+        audio=[audio],
+        audio_from_video_indices=[0],
+        return_tensors="pt",
+        **mm_kwargs,
     )
     assert processed["prompt_token_ids"] == expected["input_ids"][0].tolist()
 
