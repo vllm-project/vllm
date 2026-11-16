@@ -9,8 +9,9 @@ notifs are forwarded to the engine main thread), sends PUSH_REG via
 issues WRITE transfers via `make_prepped_xfer` / `transfer`.
 
 The engine main thread feeds the writer through queues:
-`_reg_send_inbox` (D-side regs to send), `_finished_blocks_inbox`
-(P-side blocks from metadata) and `_pending_completion_notifs`
+`_reg_send_inbox` (D-side regs to send), `_prefill_inbox` (P-side finished
+requests, chunk jobs and retirements, in the order the engine thread queued
+them) and `_pending_completion_notifs`
 (non-PUSH_REG notifs forwarded back for HB / completion accounting).
 The handshake-completion callback feeds `_deferred_push_inbox` with
 matched pushes whose P→D handshake has finished so the writer can
@@ -101,7 +102,8 @@ class _ChunkRequestState:
 class _ChunkTask:
     job: NixlPushChunkJob
     event: torch.Event
-    state: _ChunkRequestState
+    # Set by the writer when it takes the task from the inbox.
+    state: _ChunkRequestState = field(init=False)
 
 
 @dataclass
@@ -153,7 +155,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
+        # One queue, so that the writer sees a request's chunk jobs before it
+        # finishes and a retirement after the jobs it drops.
+        self._prefill_inbox: queue.Queue[
+            tuple[str, BlockIds] | _ChunkTask | _ChunkRetirement
+        ] = queue.Queue()
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
@@ -176,11 +182,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             extra_config.get("enable_chunked_push", False)
             and self.kv_transfer_config.kv_role == "kv_producer"
         )
-        # The main thread hands jobs and retirements to the writer through
-        # this queue; the chunk state below belongs to the writer.
-        self._chunk_job_inbox: queue.Queue[
-            tuple[NixlPushChunkJob, torch.Event] | _ChunkRetirement
-        ] = queue.Queue()
+        # Chunk state belongs to the writer.
         self._chunk_deferred: list[_ChunkTask] = []
         self._chunk_retirements: list[_ChunkRetirement] = []
         self._chunk_states: dict[ReqId, _ChunkRequestState] = {}
@@ -300,7 +302,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
             for req_id, block_ids in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids))
+                self._prefill_inbox.put((req_id, block_ids))
             self._push_writer_wake.set()
 
         # Batch + lease tracking (same as pull).
@@ -330,7 +332,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         event = torch.Event()
         event.record()
         for job in metadata.push_chunk_jobs:
-            self._chunk_job_inbox.put((job, event))
+            self._prefill_inbox.put(_ChunkTask(job, event))
         self._push_writer_wake.set()
 
     def handle_preemptions(self, metadata: NixlConnectorMetadata) -> None:
@@ -346,7 +348,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         retirement = _ChunkRetirement(
             set(metadata.push_chunk_preemptions), set(metadata.push_chunk_aborts)
         )
-        self._chunk_job_inbox.put(retirement)
+        self._prefill_inbox.put(retirement)
         self._push_writer_wake.set()
         if not retirement.done.wait(self._lease_extension):
             logger.error(
@@ -379,19 +381,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     self._do_start_push_kv(rid, blocks, rd)
 
-                # 3. P-side finished blocks; match against pending regs.
-                while True:
-                    try:
-                        rid, blocks = self._finished_blocks_inbox.get_nowait()
-                    except queue.Empty:
-                        break
-                    if self._chunked_push and self._set_chunk_finished(rid, blocks):
-                        continue
-                    matched = self._pop_matching_registration(rid)
-                    if matched is not None:
-                        self._do_start_push_kv(rid, blocks, matched)
-                    else:
-                        self._push_finished_blocks[rid] = blocks
+                # 3. P-side finished requests, chunk jobs and retirements.
+                self._take_prefill_inbox()
 
                 # 3b. Evict finished blocks for requests that have either
                 # completed (WRITE acknowledged) or whose lease expired
@@ -492,12 +483,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._drop_chunk_request(req_id)
         self._chunk_states[req_id] = _ChunkRequestState(reg_data=reg_data)
 
-    def _take_chunk_inbox(self) -> None:
+    def _take_prefill_inbox(self) -> None:
         while True:
             try:
-                item = self._chunk_job_inbox.get_nowait()
+                item = self._prefill_inbox.get_nowait()
             except queue.Empty:
                 return
+            if isinstance(item, tuple):
+                # A finished request: match it against pending registrations.
+                rid, blocks = item
+                if self._chunked_push and self._set_chunk_finished(rid, blocks):
+                    continue
+                matched = self._pop_matching_registration(rid)
+                if matched is not None:
+                    self._do_start_push_kv(rid, blocks, matched)
+                else:
+                    self._push_finished_blocks[rid] = blocks
+                continue
             if isinstance(item, _ChunkRetirement):
                 for req_id in item.aborted:
                     self._drop_chunk_request(req_id)
@@ -508,16 +510,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._chunk_retirements.append(item)
                 continue
             # Queued in order, so a retirement drops only earlier jobs.
-            job, event = item
-            state = self._chunk_states.setdefault(job.request_id, _ChunkRequestState())
+            req_id = item.job.request_id
+            state = self._chunk_states.setdefault(req_id, _ChunkRequestState())
             if state.notified:
                 # Handed off before a preemption; the recompute is not sent.
                 continue
             state.pending_jobs += 1
-            self._chunk_deferred.append(_ChunkTask(job, event, state))
+            item.state = state
+            self._chunk_deferred.append(item)
 
     def _process_chunk_jobs(self) -> None:
-        self._take_chunk_inbox()
         # Taken out first, so that a failure midway cannot submit a job again;
         # the jobs it drops leave their request to the lease.
         tasks, self._chunk_deferred = self._chunk_deferred, []

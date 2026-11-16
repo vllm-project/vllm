@@ -434,7 +434,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
         w._reg_send_inbox = queue.Queue()
-        w._finished_blocks_inbox = queue.Queue()
+        w._prefill_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
         w._evict_finished_inbox = queue.Queue()
         w._deferred_push_inbox = queue.Queue()
@@ -442,7 +442,6 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
         w._chunked_push = False
-        w._chunk_job_inbox = queue.Queue()
         w._chunk_deferred = []
         w._chunk_states = {}
         w._chunk_transfers = {}
@@ -568,7 +567,8 @@ def _chunk_worker() -> _StubWriterWorker:
 
 
 def _publish(w: _StubWriterWorker, *jobs: NixlPushChunkJob, ready: bool = True):
-    """Publish jobs as `wait_for_save` does; their event reports `ready`."""
+    """Publish jobs as `wait_for_save` does, and have the writer take them;
+    their event reports `ready`."""
     meta = NixlConnectorMetadata()
     meta.push_chunk_jobs = list(jobs)
     with patch(
@@ -576,6 +576,7 @@ def _publish(w: _StubWriterWorker, *jobs: NixlPushChunkJob, ready: bool = True):
     ) as event:
         event.return_value.query.return_value = ready
         w.finish_chunk_step(meta)
+    w._take_prefill_inbox()
 
 
 def _run_writer_until_idle(w: _StubWriterWorker) -> None:
@@ -585,7 +586,7 @@ def _run_writer_until_idle(w: _StubWriterWorker) -> None:
     try:
         deadline = time.perf_counter() + 2.0
         while (
-            w._chunk_deferred or not w._chunk_job_inbox.empty()
+            w._chunk_deferred or not w._prefill_inbox.empty()
         ) and time.perf_counter() < deadline:
             time.sleep(0.01)
     finally:
@@ -671,6 +672,23 @@ def test_finished_request_without_registration_waits_as_whole_push():
     assert w.writes == []
 
 
+def test_request_finishing_with_its_chunk_job_queued_is_not_pushed_whole():
+    # The writer takes the chunk job and the finished request in one pass.
+    w = _chunk_worker()
+    meta = NixlConnectorMetadata()
+    meta.push_chunk_jobs = [_chunk_job(0, 2)]
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker.torch.Event"
+    ) as event:
+        event.return_value.query.return_value = True
+        w.finish_chunk_step(meta)
+    w._prefill_inbox.put(("req-p", ([1, 2],)))  # as start_load_kv does
+
+    w._take_prefill_inbox()
+    assert w.start_push_calls == []
+    assert w._chunk_states["req-p"].finished_blocks == ([1, 2],)
+
+
 def _retire(w: _StubWriterWorker, preempted: bool) -> threading.Event:
     """Hand the writer what handle_preemptions sends for "req-p" when it is
     preempted or aborted; the event is set once its WRITEs have settled."""
@@ -678,7 +696,8 @@ def _retire(w: _StubWriterWorker, preempted: bool) -> threading.Event:
         preempted={"req-p"} if preempted else set(),
         aborted=set() if preempted else {"req-p"},
     )
-    w._chunk_job_inbox.put(retirement)
+    w._prefill_inbox.put(retirement)
+    w._take_prefill_inbox()
     w._process_chunk_jobs()
     w._poll_chunk_transfers()
     return retirement.done
@@ -899,26 +918,16 @@ class TestPushWriterMatching:
 
 
 class TestPushWriterStartLoadKv:
-    def test_finished_blocks_inbox_matches_stashed_registration(self):
+    def test_prefill_inbox_matches_stashed_registration(self):
         """Run the writer-loop's finished-blocks drain against a
         pre-populated _pending_d_registrations entry."""
         w = _StubWriterWorker.fresh()
         w._pending_d_registrations["req-C"] = _registration_data("req-C")
 
         # Simulate start_load_kv enqueuing finished blocks.
-        w._finished_blocks_inbox.put(("req-C", ([10, 11, 12],)))
+        w._prefill_inbox.put(("req-C", ([10, 11, 12],)))
 
-        # Drain like the writer loop does.
-        while True:
-            try:
-                rid, blocks = w._finished_blocks_inbox.get_nowait()
-            except queue.Empty:
-                break
-            matched = w._pop_matching_registration(rid)
-            if matched is not None:
-                w._do_start_push_kv(rid, blocks, matched)
-            else:
-                w._push_finished_blocks[rid] = blocks
+        w._take_prefill_inbox()
 
         assert len(w.start_push_calls) == 1
         assert w.start_push_calls[0][0] == "req-C"
@@ -946,7 +955,7 @@ class TestPushWriterStartLoadKv:
 
         # Things are queued for the writer; nothing fires yet.
         assert w._reg_send_inbox.qsize() == 1
-        assert w._finished_blocks_inbox.qsize() == 1
+        assert w._prefill_inbox.qsize() == 1
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
@@ -964,7 +973,7 @@ class TestPushWriterStartLoadKv:
 
         w.start_load_kv(meta)
 
-        assert w._finished_blocks_inbox.empty() is (not sharded)
+        assert w._prefill_inbox.empty() is (not sharded)
         assert ("req" in w._reqs_to_process) is sharded
         assert ("req" in w._reqs_to_send) is sharded
         assert w._push_writer_wake.is_set() is sharded
@@ -1672,7 +1681,7 @@ class TestPushWriterNegative:
         w.start_load_kv(meta)
 
         assert w._reg_send_inbox.qsize() == 0
-        assert w._finished_blocks_inbox.qsize() == 0
+        assert w._prefill_inbox.qsize() == 0
         # Wake should NOT be set if there was nothing to push.
         assert not w._push_writer_wake.is_set()
 
