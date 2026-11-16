@@ -5,7 +5,7 @@
 import functools
 import json
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import torch
@@ -1584,3 +1584,92 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+
+def dequant_block_fp8_to_bf16(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_size: Sequence[int],
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """`[..., N, K]` fp8 x `[..., ceil(N/bn), ceil(K/bk)]` block scales -> `out_dtype`.
+
+    Leading dimensions (e.g. the expert dimension) are batched.
+    """
+    n, k = weight.shape[-2:]
+    bn, bk = block_size
+    scale = scale_inv.to(torch.float32)
+    scale = scale.repeat_interleave(bn, dim=-2)[..., :n, :]
+    scale = scale.repeat_interleave(bk, dim=-1)[..., :k]
+    return (weight.to(torch.float32) * scale).to(out_dtype)
+
+
+# Bounds the fp32 staging memory of `dequantize_block_fp8_moe_weights`.
+_DEQUANT_CHUNK_BYTES = 1 << 30
+
+
+def dequantize_block_fp8_moe_weights(
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    *,
+    num_w13_shards: int,
+    weight_block_size: Sequence[int] | None,
+    out_dtype: torch.dtype,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize block-scaled FP8 MoE weights for online requantization.
+
+    Args:
+        w13_weight: `[E, num_w13_shards * I, K]` fp8 weights.
+        w13_scale: `[E, num_w13_shards * ceil(I / bn), ceil(K / bk)]` block scales.
+        w2_weight: `[E, K, I]` fp8 weights.
+        w2_scale: `[E, ceil(K / bn), ceil(I / bk)]` block scales.
+        num_w13_shards: 2 for gated (w1, w3), else 1.
+        weight_block_size: The `[bn, bk]` block shape of the scale grids, None
+            for other (non-block) weight schemes, which are not supported.
+        out_dtype: The dequantized dtype.
+
+    Returns:
+        An iterator of `(experts, w13, w2)` over groups of experts, bounding the
+        staging memory.
+
+    """
+    if weight_block_size is None:
+        raise NotImplementedError(
+            "MoE requantization from FP8 is only supported for block-scaled weights."
+        )
+    num_experts = w13_weight.shape[0]
+    # fp32 staging of the scaled weights and of the expanded scales, plus the
+    # `out_dtype` result.
+    expert_bytes = (w13_weight[0].numel() + w2_weight[0].numel()) * (
+        4 + 4 + out_dtype.itemsize
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+
+    def dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        n, k = w.shape[-2:]
+        if (-(-n // weight_block_size[0]), -(-k // weight_block_size[1])) != tuple(
+            scale.shape[-2:]
+        ):
+            raise ValueError(
+                f"FP8 scale grid {tuple(scale.shape[-2:])} does not match block "
+                f"shape {list(weight_block_size)} for a {(n, k)} weight."
+            )
+        return dequant_block_fp8_to_bf16(w, scale, weight_block_size, out_dtype)
+
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        n_exp = experts.stop - experts.start
+        # Each w13 shard (w1, w3) has its own block grid: dequantize them as
+        # separate batch entries.
+        w13, w13_s = w13_weight[experts], w13_scale[experts]
+        w13_out = dequant(
+            w13.reshape(n_exp * num_w13_shards, w13.shape[1] // num_w13_shards, -1),
+            w13_s.reshape(
+                n_exp * num_w13_shards,
+                w13_s.shape[1] // num_w13_shards,
+                w13_s.shape[-1],
+            ),
+        ).reshape(w13.shape)
+        yield experts, w13_out, dequant(w2_weight[experts], w2_scale[experts])
