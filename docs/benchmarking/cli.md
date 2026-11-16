@@ -27,7 +27,11 @@ permuted per layer to avoid systematically assigning hot experts to the lowest
 EP ranks.
 The fixture is seeded by `--seed`, fixed across timing replays, and generated
 outside the timed forward. Sequence-parallel TP ranks use their corresponding
-token rows. Zipf allows EP load imbalance; `--routing balanced` gives equal
+token rows. When replacing expert IDs, both synthetic modes preserve inactive
+`-1` slots and leave routing weights unchanged, so padded rows remain unrouted.
+The expert-ID hook performs this mask selection inside the timed forward; the
+gate-logits hook relies on the model's downstream padding mask.
+Zipf allows EP load imbalance; `--routing balanced` gives equal
 load per EP rank. Neither synthetic mode supports grouped top-k routing;
 Zipf also does not support prefill context parallelism.
 
@@ -36,6 +40,11 @@ otherwise. When the model or parallel layout does not support the synthetic
 fixture, `auto` warns and falls back to real routing. Use `--routing balanced`
 to explicitly request equal EP load. Zipf is a synthetic workload, not a fit
 to a particular model's routing or speculative-token correlations.
+
+The standard forward benchmark captures an exact-shape, one-shot graph with
+the runner's CUDA graph manager disabled. It does not add serving capture-bucket
+padding; model-level padding, such as sequence-parallel alignment, can still
+occur. Use native serving graphs when evaluating capture-bucket padding costs.
 
 ## Attention Kernel Benchmark
 
