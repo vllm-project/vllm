@@ -379,14 +379,6 @@ class MonoDecodeLayer:
         self._weights: MonoLayerWeights | None = None
         self.next_layer: DeepseekV4DecoderLayer | None = None
 
-    @property
-    def unfolded_entry(self) -> bool:
-        """gfx942: when this whole first layer runs vLLM's path, its entry seam
-        projects the expanded residual with the unfolded hc_attn_fn, as K1
-        does, and not the embedding with the folded copy (model.py). The
-        folded form has no AITER kernel on gfx942."""
-        return not self.ffn_only and _on_gfx942()
-
     @staticmethod
     def create(
         layer: "DeepseekV4DecoderLayer", vllm_config
