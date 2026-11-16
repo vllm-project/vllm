@@ -372,7 +372,9 @@ def test_pipeline_parallel_mamba_only_stage_prefix_caching(
         f"Record {i}: the code for item {i} is {i * 7919 % 10007}.\n"
         for i in range(160)
     ]
-    prompts = ["".join(lines[:n]) + "The code for item 3 is" for n in (40, 80, 120, 160)]
+    prompts = [
+        "".join(lines[:n]) + "The code for item 3 is" for n in (40, 80, 120, 160)
+    ]
     sampling_params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=5)
     outputs = {}
     num_cached_tokens = {}
