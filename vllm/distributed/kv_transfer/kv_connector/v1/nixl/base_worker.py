@@ -127,7 +127,7 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
-@dataclass
+@dataclass(slots=True)
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
@@ -155,7 +155,7 @@ class _RegionPairs:
     remote_ple_region: int | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _RemoteStage:
     """The KV regions of one PP stage of a remote engine (of the whole engine
     when it runs PP=1), paired with this worker's regions."""

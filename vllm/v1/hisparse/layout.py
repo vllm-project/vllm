@@ -44,7 +44,7 @@ HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 _INDEXER_PAGE_ALIGNMENT = 16
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HiSparseLayout:
     source_group: KVCacheGroup
     device_groups: list[KVCacheGroup]
