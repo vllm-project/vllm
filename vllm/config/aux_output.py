@@ -4,7 +4,7 @@
 
 from pydantic import Field
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 
 @config
@@ -18,7 +18,7 @@ class AuxOutputConfig:
     """Capture and return sparse-attention index selections."""
 
     max_bytes: int | None = Field(default=None, gt=0)
-    """Initial capacity, or ``None`` to derive it from the KV cache capacity.
+    """Initial capacity, or `None` to derive it from the KV cache capacity.
     Grows when every object is referenced.
     Under pipeline parallelism, this is the total across all stages."""
 
@@ -27,12 +27,11 @@ class AuxOutputConfig:
         """Whether any execution auxiliary output is enabled."""
         return self.enable_return_routed_experts or self.enable_return_indexer_topk
 
-    def compute_hash(self) -> str:
-        """Hash AuxOutput settings that alter the model forward graph."""
-        from vllm.config.utils import hash_factors
-
-        factors: dict[str, object] = {
-            "enable_return_routed_experts": self.enable_return_routed_experts,
-            "enable_return_indexer_topk": self.enable_return_indexer_topk,
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
+        ignored_factors = {
+            "max_bytes",
         }
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)

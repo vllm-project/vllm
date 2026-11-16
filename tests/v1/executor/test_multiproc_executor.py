@@ -131,7 +131,6 @@ def test_collective_rpc_aggregates_pp_leaders_with_other_connectors(use_kv, use_
         outputs.append(
             ModelRunnerOutput(
                 req_ids=["request"],
-                req_id_to_index={"request": 0},
                 sampled_token_ids=[[rank]],
                 aux_output_connector_output=(
                     {"request": AuxRequestOutput(3, logical[:, start:end])}

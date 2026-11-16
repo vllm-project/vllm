@@ -7,9 +7,13 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
+import multiprocessing
 import os
+import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -18,17 +22,32 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import psutil
 import pytest
 import regex as re
 
-from tests.utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+    MooncakeArtifactStore,
+    artifact_key,
+)
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+    FlashInferWarmupCache,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_mooncake
 from vllm.utils.network_utils import get_open_port
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Weight cache IPC sharing requires CUDA or ROCm",
+)
 
 
 class WeightCacheDaemon:
@@ -121,8 +140,32 @@ class WeightCacheDaemon:
                 if time.monotonic() > deadline:
                     raise
                 if self._proc is not None and self._proc.poll() is not None:
-                    raise AssertionError("vllm preload exited before ready") from None
+                    raise AssertionError(
+                        f"vllm preload exited before ready: {self.logs}"
+                    ) from None
                 time.sleep(2)
+
+    def wait_for_log(self, message: str, timeout_s: float = 60) -> None:
+        deadline = time.monotonic() + timeout_s
+        while message not in self.logs:
+            if self._proc is not None and self._proc.poll() is not None:
+                raise AssertionError(
+                    f"vllm preload exited before logging {message!r}: {self.logs}"
+                )
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"Timed out waiting for {message!r} in daemon logs: {self.logs}"
+                )
+            time.sleep(0.1)
+
+    def wait_for_exit(self, timeout_s: float = 300) -> int:
+        assert self._proc is not None
+        try:
+            return self._proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"vllm preload did not exit within {timeout_s}s: {self.logs}"
+            ) from None
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -182,7 +225,7 @@ def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibl
             psutil.wait_procs(children, timeout=10)
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model: str
     prompts: list[str]
@@ -232,6 +275,32 @@ QWEN_CASE = ModelCase(
     ),
 )
 
+# Online FP8 exercises the runtime weight transpose and kernel state that
+# must survive mapping the daemon's processed tensors into a fresh engine.
+FP8_CASE = ModelCase(
+    model="facebook/opt-125m",
+    prompts=["Hello, my name is", "The capital of France is"],
+    llm_kwargs=dict(
+        quantization="fp8_per_tensor",
+        kernel_config={"linear_backend": "cutlass"},
+        attention_config={"backend": "TRITON_ATTN"},
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+    ),
+    daemon_args=[
+        "--quantization",
+        "fp8_per_tensor",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
 # Kimi K3 adds the mxfp4-pack MoE path (post-load kernel setup runs in
 # pre-processed mode) and a vision tower, exercised with an image request.
 K3_CASE = ModelCase(
@@ -277,6 +346,14 @@ QWEN_MTP_CASE = ModelCase(
     ],
 )
 
+# The engine builds the draft as the only pipeline stage on the last PP rank;
+# the warm runs map it only if the draft daemon builds and keys it that way.
+QWEN_MTP_PP2_CASE = replace(
+    QWEN_MTP_CASE,
+    llm_kwargs={**QWEN_MTP_CASE.llm_kwargs, "pipeline_parallel_size": 2},
+    daemon_args=[*QWEN_MTP_CASE.daemon_args, "--pipeline-parallel-size", "2"],
+)
+
 
 DSV2_EP_CASE = ModelCase(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
@@ -285,7 +362,6 @@ DSV2_EP_CASE = ModelCase(
         tensor_parallel_size=2,
         enable_expert_parallel=True,
         dtype="bfloat16",
-        gpu_memory_utilization=0.85,
         enforce_eager=True,
         max_model_len=1024,
     ),
@@ -308,7 +384,7 @@ def test_ipc_cache_cold_start_and_warm_restart(
     really came from the daemon — for the MTP case, both the target's and the
     draft's daemon groups.
 
-    Cases with ``check_flashinfer_cache`` additionally cover in-daemon
+    Cases with `check_flashinfer_cache` additionally cover in-daemon
     autotune (default-on with `--enable-flashinfer-autotune`): each daemon
     tunes before binding its socket and must write the on-disk FlashInfer
     autotune cache, and the restart engine must load tactics from it instead
@@ -317,8 +393,6 @@ def test_ipc_cache_cold_start_and_warm_restart(
     so they never hit the daemon's file by design; reuse is proven against
     the file the earlier in-process engines wrote.
     """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     if case.check_flashinfer_cache:
@@ -333,6 +407,233 @@ def test_ipc_cache_cold_start_and_warm_restart(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Online FP8 CUTLASS weight cache requires SM89+",
+)
+@pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
+def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
+    """Online FP8 weights are shared without requantizing on warm restarts."""
+    _run_online_quantization(
+        vllm_runner, quantization, "cutlass", tmp_path, monkeypatch
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Block FP8/MXFP8 online weight cache requires SM100+",
+)
+@pytest.mark.parametrize(
+    "quantization,linear_backend",
+    [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
+)
+def test_ipc_cache_online_blackwell(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    """Reuse packed block scales with the same backend on each restart."""
+    _run_online_quantization(
+        vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+    )
+
+
+def _run_online_quantization(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    kernel_config = {"linear_backend": linear_backend}
+    daemon_args = list(FP8_CASE.daemon_args)
+    daemon_args[daemon_args.index("--quantization") + 1] = quantization
+    daemon_args[daemon_args.index("--kernel-config") + 1] = json.dumps(kernel_config)
+    case = ModelCase(
+        model=FP8_CASE.model,
+        prompts=FP8_CASE.prompts,
+        llm_kwargs={
+            **FP8_CASE.llm_kwargs,
+            "quantization": quantization,
+            "kernel_config": kernel_config,
+        },
+        daemon_args=daemon_args,
+    )
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
+
+
+MODELOPT_FP8_CASE = ModelCase(
+    model="CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        revision="d9c87375a9b950b1c7965a1110ac6ca455929726",
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "d9c87375a9b950b1c7965a1110ac6ca455929726",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="ModelOpt FP8 CUTLASS weight cache requires SM89+",
+)
+def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
+
+
+COMPRESSED_FP8_CASE = ModelCase(
+    model="neuralmagic/Meta-Llama-3.1-8B-FP8",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Compressed FP8 CUTLASS weight cache requires SM89+",
+)
+def test_ipc_cache_compressed_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_FP8_CASE, tmp_path)
+
+
+COMPRESSED_BLOCK_FP8_CASE = ModelCase(
+    model="RedHatAI/Qwen3-0.6B-FP8-BLOCK",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        revision="5def00c475640c0527e3a7067b1a26b94decefb5",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "5def00c475640c0527e3a7067b1a26b94decefb5",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="Compressed-tensors block FP8 CUTLASS weight cache requires SM90+",
+)
+def test_ipc_cache_compressed_block_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_BLOCK_FP8_CASE, tmp_path)
+
+
+NVFP4_CASE = ModelCase(
+    model="nvidia/Qwen3-30B-A3B-NVFP4",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"moe_backend": "cutlass", "linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"moe_backend": "cutlass", "linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="NVFP4 CUTLASS MoE requires SM100+",
+)
+def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
+    """Repeated IPC attachment must not fuse the shared MoE scales again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
+    """A reachable but incompatible daemon must not reduce the disk-load budget."""
+    model = "Qwen/Qwen3-0.6B"
+    budgets = []
+    outputs = []
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=["--dtype", "bfloat16", "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        for load_format in ("auto", "ipc_cache"):
+            extra = (
+                {"socket_dir": daemon.socket_dir, "fallback": True}
+                if load_format == "ipc_cache"
+                else {}
+            )
+            with vllm_runner(
+                model,
+                dtype="float16",
+                load_format=load_format,
+                model_loader_extra_config=extra,
+                enforce_eager=True,
+                gpu_memory_utilization=0.1,
+                max_model_len=1024,
+                max_num_batched_tokens=1024,
+                max_num_seqs=1,
+                kernel_config={"enable_flashinfer_autotune": False},
+            ) as llm:
+                budgets.append(
+                    llm.collective_rpc(lambda worker: worker.requested_memory)[0]
+                )
+                outputs.append(
+                    llm.generate_greedy(["The capital of France is"], max_tokens=8)
+                )
+
+    assert budgets[1] == budgets[0], "Disk fallback retained the external weight charge"
+    assert outputs[1] == outputs[0]
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
@@ -344,11 +645,16 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_pp2_mtp(vllm_runner, tmp_path):
+    """Same as above at pp=2, with an MTP draft model."""
+    run_cold_start_and_warm_restart(vllm_runner, QWEN_MTP_PP2_CASE, tmp_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
 def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     """A mirror daemon adopts the source's autotune cache over D2D, skips
     re-tuning, and serves outputs identical to the default-loader baseline."""
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     from vllm.utils.flashinfer import has_flashinfer
@@ -421,6 +727,93 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     assert mirror_outputs == baseline_outputs
 
 
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
+    """Autotune tables published to a Mooncake store let a fresh daemon
+    generation skip tuning with no source daemon online."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+    if not (has_flashinfer() and current_platform.has_device_capability(90)):
+        pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
+
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    # tp=2 for the v1 per-rank path; small token budget keeps the sweep short.
+    case = replace(
+        K3_CASE,
+        prompts=K3_CASE.prompts[:2],
+        images=None,
+        llm_kwargs={
+            **K3_CASE.llm_kwargs,
+            "tensor_parallel_size": 2,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 256,
+        },
+        daemon_args=[
+            *K3_CASE.daemon_args,
+            "--max-num-batched-tokens",
+            "256",
+            # Keep the daemon's config hash identical to the engine's.
+            "--max-model-len",
+            "1024",
+            "--enforce-eager",
+            "--max-num-seqs",
+            "1",
+        ],
+    )
+    # The baseline engine tunes from scratch in its own empty cache root.
+    monkeypatch.setenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "engine_baseline")
+    )
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    log_dir = os.environ.get("D2D_E2E_LOG_DIR")
+    log_file = (
+        (lambda name: os.path.join(log_dir, name)) if log_dir else lambda name: None
+    )
+    with MooncakeCluster(tmp_path, monkeypatch):
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[*case.daemon_args, "--warmup-cache-stores", "mooncake"],
+            env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "gen1")},
+            log_file=log_file("mooncake-gen1.log"),
+        ) as gen1:
+            gen1.wait_until_ready()
+            # The store started empty, so the first generation tuned in place.
+            assert "Running FlashInfer autotune" in gen1.logs
+            published = "Published the FlashInfer autotune table"
+            assert gen1.logs.count(published) == 2
+
+        # gen1 is fully stopped: only the Mooncake store can serve the tables.
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[*case.daemon_args, "--warmup-cache-stores", "mooncake"],
+            env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "gen2")},
+            log_file=log_file("mooncake-gen2.log"),
+        ) as gen2:
+            gen2.wait_until_ready()
+            adopted = "Adopted the FlashInfer autotune table from a shared store"
+            assert gen2.logs.count(adopted) == 2
+            assert "Running FlashInfer autotune" not in gen2.logs
+
+            # The engine hits the daemon-written table: same root, same hash.
+            monkeypatch.setenv(
+                "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "gen2")
+            )
+            cache_files = set((tmp_path / "gen2").rglob("*.json"))
+            gen2_outputs = generate(vllm_runner, case, gen2.socket_dir, fallback=False)
+            assert set((tmp_path / "gen2").rglob("*.json")) == cache_files, (
+                "gen2 engine re-tuned instead of hitting the daemon's cache"
+            )
+
+    assert gen2_outputs == baseline_outputs
+
+
 def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd=None):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
@@ -444,8 +837,12 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         d.wait_until_ready()
+        if "speculative_config" in case.llm_kwargs:
+            # Draft daemons serve only the GPUs of the last pipeline stage.
+            num_draft_sockets = len(list(Path(d.socket_dir).glob("*_draft.sock")))
+            assert num_draft_sockets == case.llm_kwargs.get("tensor_parallel_size", 1)
+        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file
             # (their OPENAI_API_SERVER-keyed table) must appear.
@@ -585,7 +982,7 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     from types import SimpleNamespace
 
     from vllm.config import ParallelConfig
-    from vllm.model_executor.model_loader.weight_cache.daemon import (
+    from vllm.model_executor.model_loader.weight_cache.utils import (
         get_engine_dp_placement,
     )
 
@@ -770,6 +1167,7 @@ def test_ipc_rope_matching(
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
     server.cache_key = WeightCacheKey.from_model_config(
         model_config, 1, 0, cache_config=default_vllm_config.cache_config
     )
@@ -840,8 +1238,8 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
 
 
 def _serve_one(handler):
-    """Fake ``IpcModelLoader._connect``: serve each request on a thread and
-    close the accepted connection afterwards, like ``serve_forever``.
+    """Fake `IpcModelLoader._connect`: serve each request on a thread and
+    close the accepted connection afterwards, like `serve_forever`.
 
     Returns the fake and the list of server threads it started.
     """
@@ -873,6 +1271,7 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
 
     server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
     server._watchers = []
     connect, server_threads = _serve_one(server._handle_connection)
     load_config = LoadConfig(
@@ -969,6 +1368,26 @@ def test_daemon_releases_cublas_workspaces():
         "daemon retained BLAS workspaces"
     )
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
+def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
+    """Only the failed role's charge is reported, at most once."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    accounting = ExternalWeightCharges()
+    with accounting.track():
+        record_external_weight_charge("target.sock", False, 8)
+        record_external_weight_charge("draft.sock", True, 4)
+        source = "draft.sock" if is_draft else "target.sock"
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback("uncharged.sock", False)
+    assert accounting.fallback_bytes == fallback_bytes
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -1076,7 +1495,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
         return WeightCacheState(entries={}, aliases={}, attrs={})
 
     monkeypatch.setattr(loader, "_request_state", request_state)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     model = loader.load_model(config, model_config)
@@ -1150,7 +1571,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     requested_keys: list[WeightCacheKey] = []
 
@@ -1186,8 +1609,8 @@ def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
 def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
         FlashInferWarmupCache,
     )
 
@@ -1212,7 +1635,7 @@ def test_warmup_cache_metadata_gate():
     pytest.importorskip("flashinfer")
     from flashinfer.autotuner.autotuner import _collect_metadata
 
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
         FlashInferWarmupCache,
     )
 
@@ -1245,11 +1668,11 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
     )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
         FlashInferWarmupCache,
     )
 
@@ -1291,12 +1714,12 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
     import socket
     import time
 
-    import vllm.model_executor.model_loader.weight_cache.seed as seed_mod
+    import vllm.model_executor.model_loader.weight_cache.transport as seed_mod
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
     )
@@ -1320,18 +1743,644 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
 
 
 def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
-    """Install writes the fetched table to the rank's on-disk cache path."""
+    """Install writes the fetched table to the rank's disk tier."""
     import json
 
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
         FlashInferWarmupCache,
     )
-    from vllm.model_executor.warmup import flashinfer_autotune_cache as fi_cache
 
-    target = tmp_path / "autotune_configs_dp0_rank0.json"
-    monkeypatch.setattr(
-        fi_cache, "resolve_rank_flashinfer_autotune_file", lambda _: target
-    )
+    monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    config_hash = "a" * 64
+    kind = FlashInferWarmupCache()
+    params = {"config_hash": config_hash, "dp_rank": 0, "rank": 0}
+    monkeypatch.setattr(kind, "request_params", lambda _: params)
+
     table = {"records": {"op": {"shape": 1}}}
-    FlashInferWarmupCache().install(None, {"autotune_configs_dp0_rank0.json": table})
+    kind.install(None, {"autotune_configs_dp0_rank0.json": table})
+    target = tmp_path / config_hash / "autotune_configs_dp0_rank0.json"
     assert json.loads(target.read_text()) == table
+
+
+def _wait_for_previous_engines() -> None:
+    import torch
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(torch.accelerator.device_count())),
+        threshold_ratio=0.7,
+        stable_duration_s=2.0,
+        poll_interval_s=1.0,
+    )
+
+
+def _visibility_env(value: str) -> dict[str, str]:
+    env = {current_platform.device_control_env_var: value}
+    if current_platform.is_rocm():
+        env["HIP_VISIBLE_DEVICES"] = value
+    return env
+
+
+def _set_visible_devices(monkeypatch, value: str) -> None:
+    for name, env_value in _visibility_env(value).items():
+        monkeypatch.setenv(name, env_value)
+
+
+def _daemon_socket(daemon: WeightCacheDaemon, *, is_draft: bool = False) -> str:
+    paths = sorted(
+        os.path.join(daemon.socket_dir, name)
+        for name in os.listdir(daemon.socket_dir)
+        if name.endswith(".sock") and name.endswith("_draft.sock") == is_draft
+    )
+    assert len(paths) == 1
+    return paths[0]
+
+
+def _exercise_lease_release(
+    source: WeightCacheDaemon,
+    source_address: str | tuple[str, int],
+    control_socket: str,
+    backend,
+    token: str | None = None,
+    shutdown: bool = False,
+) -> dict:
+    """Hold a real copy lease open while the source handles a real release."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+    from vllm.model_executor.model_loader.weight_cache.transport import (
+        SeedConfig,
+        SeedTransport,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+        get_mover,
+    )
+
+    transport = SeedTransport(
+        seed_config=SeedConfig(source=source_address, token=token)
+    )
+    response = transport.request({"kind": "weights", "seed_backend": backend})
+    assert response is not None and response["status"] == "ok", response
+    payload = response["payload"]
+    manifest = payload["manifest"]
+    assert len(manifest["storages"]) > 1
+
+    if shutdown:
+        assert source._proc is not None
+        source._proc.terminate()
+    else:
+        release_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        release_sock.settimeout(300)
+        release_sock.connect(control_socket)
+        send_msg(release_sock, {"cmd": "release"})
+    source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
+    if shutdown:
+        assert source._proc is not None
+        assert source._proc.poll() is None, "source exited before the copy ack"
+    else:
+        assert not select.select([release_sock], [], [], 0)[0], (
+            "source released before the copy ack"
+        )
+
+    mover = get_mover(backend)
+    device = torch.device(
+        current_platform.device_type, torch.accelerator.current_device_index()
+    )
+    tensors = mover.fill(manifest, payload["seed"], device)
+    assert len(tensors) == len(manifest["tensors"])
+    acknowledge_lease(transport)
+    if shutdown:
+        assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
+    else:
+        release_sock.settimeout(30)
+        assert recv_msg(release_sock)["status"] == "ok"
+        release_sock.close()
+        source.wait_for_log("released cached weights")
+        response = transport.request({"kind": "weights", "seed_backend": backend})
+        assert response is not None and response["status"] == "error", response
+        assert "Weights were released" in response["message"]
+    return payload
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
+    case = QWEN_MTP_CASE
+    """Seed target and draft shards over IPC despite different visible ordinals.
+
+    The source sees only physical GPU 1 as ordinal 0. The mirror and the test
+    process see both GPUs, so UUID resolution must reopen the source on local
+    ordinal 1 while the mirror and engines use physical GPU 0. Graceful source
+    shutdown waits for a second, manually driven mover copy and its Unix-socket
+    ack; identical mirror outputs prove every target and draft storage was copied.
+    """
+    _set_visible_devices(monkeypatch, "0,1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    _wait_for_previous_engines()
+
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    source_env = {**_visibility_env("1"), "VLLM_BATCH_INVARIANT": "0"}
+    mirror_env = {**_visibility_env("0,1"), "VLLM_BATCH_INVARIANT": "0"}
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=1,
+        extra_args=case.daemon_args,
+        env_extra=source_env,
+    ) as source:
+        source.wait_until_ready()
+        source_sock = _daemon_socket(source)
+        _daemon_socket(source, is_draft=True)
+
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=1,
+            extra_args=[
+                *case.daemon_args,
+                "--dtype",
+                "float16",
+                "--weight-cache-seed",
+                source_sock,
+            ],
+            env_extra=mirror_env,
+        ) as rejected:
+            assert rejected.wait_for_exit() != 0
+            assert "'dtype'" in rejected.logs
+            assert "refusing to mirror a different weight shard" in rejected.logs
+            assert "Mirrored " not in rejected.logs
+
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=1,
+            extra_args=[*case.daemon_args, "--weight-cache-seed", source_sock],
+            env_extra=mirror_env,
+        ) as mirror:
+            mirror.wait_until_ready()
+            _daemon_socket(mirror)
+            _daemon_socket(mirror, is_draft=True)
+            expected_copies = 2
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over peer_ipc in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == expected_copies, mirror.logs
+            assert all(int(storages) > 1 for storages, _ in transfers)
+            assert all(float(seconds) < 10.0 for _, seconds in transfers)
+
+            payload = _exercise_lease_release(
+                source, source_sock, source_sock, "peer_ipc", shutdown=True
+            )
+            assert payload["seed"]["source_device_index"] == 0
+            source_uuid = payload["seed"]["source_gpu_uuid"]
+            assert source_uuid == current_platform.get_device_uuid(1)
+            assert source_uuid != current_platform.get_device_uuid(0)
+
+            mirror_outputs = generate(
+                vllm_runner, case, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not has_mooncake(),
+    reason="Cross-host weight seeding requires Mooncake TransferEngine",
+)
+def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
+    """Pull and release remote-copy leases over the JSON control plane.
+
+    Both daemons run on this host, but the exchange uses the token-authenticated
+    TCP listener exactly as a cross-host seed would. The source uses GPU 0 and
+    the mirror and engines use GPU 1. A non-empty per-quant backend tuple must
+    survive the JSON fingerprint round trip. The data plane uses TCP so the
+    test does not require RDMA hardware or GPUDirect support.
+    """
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
+    _wait_for_previous_engines()
+    _set_visible_devices(monkeypatch, "1")
+
+    kernel_config = {"linear_backend_per_quant": {"fp8": "cutlass"}}
+    engine_case = replace(
+        QWEN_CASE,
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "kernel_config": kernel_config},
+    )
+    baseline_outputs = generate(vllm_runner, engine_case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    token = "d2d-rdma-test-token"
+    base_port = get_open_port()
+    kernel_args = ["--kernel-config", json.dumps(kernel_config)]
+    with WeightCacheDaemon(
+        QWEN_CASE.model,
+        tp_size=1,
+        extra_args=[
+            *QWEN_CASE.daemon_args,
+            *kernel_args,
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(base_port),
+            "--seed-token",
+            token,
+        ],
+        env_extra=_visibility_env("0"),
+    ) as source:
+        source.wait_until_ready()
+        source_sock = _daemon_socket(source)
+        with WeightCacheDaemon(
+            QWEN_CASE.model,
+            tp_size=1,
+            extra_args=[
+                *QWEN_CASE.daemon_args,
+                *kernel_args,
+                "--weight-cache-seed",
+                f"127.0.0.1:{base_port}",
+                "--seed-token",
+                token,
+            ],
+            env_extra=_visibility_env("1"),
+        ) as mirror:
+            mirror.wait_until_ready()
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over \w+ in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == 1, mirror.logs
+            assert int(transfers[0][0]) > 1
+            # Remote copies are latency-dominated; bound stalls, not bandwidth.
+            assert float(transfers[0][1]) < 10.0
+
+            _exercise_lease_release(
+                source,
+                ("127.0.0.1", base_port),
+                source_sock,
+                "mooncake",
+                token,
+            )
+            mirror_outputs = generate(
+                vllm_runner, engine_case, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+def test_compile_cache_bundle_round_trip(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+        _bundle,
+        _install,
+        _manifest,
+    )
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "kernel.cubin").write_bytes(b"compiled-kernel")
+    manifest = _manifest({"flashinfer-cubins": source})
+    bundle = _bundle({"flashinfer-cubins": source}, manifest)
+
+    _install(bundle, manifest, {"flashinfer-cubins": target})
+
+    assert (target / "nested" / "kernel.cubin").read_bytes() == b"compiled-kernel"
+
+
+def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+        _manifest,
+    )
+
+    workspace = tmp_path / "workspace"
+    cubins = workspace / "cubins"
+    cubins.mkdir(parents=True)
+    (workspace / "workspace.json").write_bytes(b"workspace")
+    (cubins / "kernel.cubin").write_bytes(b"compiled-kernel")
+
+    manifest = _manifest(
+        {
+            "flashinfer-cubins": cubins,
+            "flashinfer-workspace": workspace,
+        }
+    )
+
+    assert [entry["path"] for entry in manifest["entries"]].count(
+        "cubins/kernel.cubin"
+    ) == 0
+    assert len(manifest["entries"]) == 2
+
+
+def test_compile_cache_manifest_rejects_path_traversal():
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+        _safe_path,
+    )
+
+    with pytest.raises(ValueError, match="unsafe cache path"):
+        _safe_path("../escape")
+
+
+def test_compile_cache_payload_rejects_oversized_bundle():
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+        BUNDLE_LIMIT,
+    )
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+        CompileArtifactWarmupCache,
+    )
+
+    payload = {
+        "manifest": {
+            "version": 1,
+            "total_size": 1,
+            "entries": [
+                {
+                    "root": "flashinfer-cubins",
+                    "path": "kernel.cubin",
+                    "size": 1,
+                    "sha256": "0" * 64,
+                    "mtime_ns": 0,
+                }
+            ],
+        },
+        "key": artifact_key("compile_cache", "0" * 64, "bundle.tar"),
+        "bundle_size": BUNDLE_LIMIT + 1,
+        "sha256": "0" * 64,
+    }
+    cache = CompileArtifactWarmupCache()
+    with pytest.raises(ValueError, match="bundle is too large"):
+        cache.validate_payload(payload)
+
+
+class _MemoryArtifactStore:
+    name = "memory"
+
+    def __init__(self):
+        self.artifacts: dict[str, bytes] = {}
+
+    def get(self, key: str) -> bytes | None:
+        return self.artifacts.get(key)
+
+    def put(self, key: str, data: bytes) -> None:
+        self.artifacts[key] = data
+
+
+def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
+    """A target installs the exact bundle its source published to the store."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        STORE_BACKENDS,
+    )
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+        CompileArtifactWarmupCache,
+    )
+
+    store = _MemoryArtifactStore()
+    monkeypatch.setitem(STORE_BACKENDS, store.name, lambda: store)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    source = CompileArtifactWarmupCache(store_names=[store.name])
+    source.prepare()
+    payload = source.resolve({"version": 1})
+    assert payload is not None
+    assert payload["key"] == artifact_key(
+        "compile_cache", payload["sha256"], "bundle.tar"
+    )
+    assert payload["bundle_size"] == len(store.get(payload["key"]))
+
+    target_dir = tmp_path / "target"
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(target_dir))
+    target = CompileArtifactWarmupCache(store_names=[store.name])
+    target.install(None, target.validate_payload(payload))
+    assert (target_dir / "kernel.cubin").read_bytes() == b"compiled-kernel"
+
+
+def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path, monkeypatch):
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+        CompileArtifactWarmupCache,
+    )
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    source = CompileArtifactWarmupCache()
+    source.prepare()
+    assert source.resolve({"version": 1}) is None
+
+
+@pytest.mark.parametrize("failure", ["miss", "digest"])
+def test_compile_cache_store_failures_propagate(tmp_path, monkeypatch, failure):
+    """Store misses and corrupt bundles must reach the caller for fallback."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        STORE_BACKENDS,
+    )
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+        CompileArtifactWarmupCache,
+    )
+
+    store = _MemoryArtifactStore()
+    monkeypatch.setitem(STORE_BACKENDS, store.name, lambda: store)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    source = CompileArtifactWarmupCache(store_names=[store.name])
+    source.prepare()
+    payload = source.resolve({"version": 1})
+    assert payload is not None
+    if failure == "miss":
+        store.artifacts.clear()
+    else:
+        bundle = bytearray(store.get(payload["key"]))
+        bundle[0] ^= 1
+        store.put(payload["key"], bytes(bundle))
+
+    target_dir = tmp_path / "target"
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(target_dir))
+    target = CompileArtifactWarmupCache(store_names=[store.name])
+    with pytest.raises((RuntimeError, ValueError)):
+        target.install(None, target.validate_payload(payload))
+    assert not (target_dir / "kernel.cubin").exists()
+
+
+def _mooncake_peer(key: str, payload: bytes, mode: str) -> None:
+    """Second-process body: put/get through a real MooncakeArtifactStore."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        MooncakeArtifactStore,
+    )
+
+    store = MooncakeArtifactStore()
+    if mode == "put":
+        store.put(key, payload)
+    assert store.get(key) == payload, f"peer {mode} mismatch"
+
+
+class MooncakeCluster:
+    """A real mooncake master plus a standalone-store segment owner."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        self._tmp_path = tmp_path
+        self._monkeypatch = monkeypatch
+        self._procs: list[subprocess.Popen] = []
+        self._log_chunks: list[str] = []
+
+    def _binary(self, name: str) -> str:
+        path = shutil.which(name)
+        if path is not None:
+            return path
+        try:
+            import mooncake
+        except ImportError:
+            pytest.skip("mooncake is not installed")
+        candidate = Path(mooncake.__file__).parent / name
+        if not candidate.exists():
+            pytest.skip(f"the {name} binary is not available")
+        return str(candidate)
+
+    def __enter__(self) -> "MooncakeCluster":
+        self.master_port = get_open_port()
+        self.master_addr = f"127.0.0.1:{self.master_port}"
+        self._start(
+            [
+                self._binary("mooncake_master"),
+                "-port",
+                str(self.master_port),
+                "-metrics_port",
+                str(get_open_port()),
+            ]
+        )
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", self.master_port), timeout=1)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"mooncake_master did not start:\n{self.logs}"
+                    ) from None
+                time.sleep(0.2)
+
+        config = {
+            "metadata_server": "P2PHANDSHAKE",
+            "master_server_address": self.master_addr,
+            "protocol": "tcp",
+            "mode": "standalone-store",
+            "global_segment_size": 0,
+            "local_buffer_size": "16MB",
+        }
+        config_path = self._tmp_path / "mooncake.json"
+        config_path.write_text(json.dumps(config))
+        self._monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+        self._monkeypatch.setenv(
+            "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(self._tmp_path / "disk_cache")
+        )
+        self._start(
+            [
+                self._binary("mooncake_client"),
+                "-port",
+                str(get_open_port()),
+                "-master_server_address",
+                self.master_addr,
+                "-metadata_server",
+                "P2PHANDSHAKE",
+                "-protocol",
+                "tcp",
+                "-global_segment_size",
+                "256MB",
+            ]
+        )
+
+        # The store round-trips only after the client has mounted its segment.
+        store = MooncakeArtifactStore()
+        deadline = time.monotonic() + 60
+        while True:
+            store.put("vllm-warmup-cache/probe", b"ok")
+            if store.get("vllm-warmup-cache/probe") == b"ok":
+                return self
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"mooncake store is not ready:\n{self.logs}")
+            time.sleep(0.5)
+
+    def __exit__(self, *exc_info) -> None:
+        for proc in reversed(self._procs):
+            proc.terminate()
+        for proc in self._procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    @property
+    def logs(self) -> str:
+        return "".join(self._log_chunks)
+
+    def _start(self, cmd: list[str]) -> None:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        self._procs.append(proc)
+        threading.Thread(target=self._drain, args=(proc,), daemon=True).start()
+
+    def _drain(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self._log_chunks.append(line)
+
+    def run_peer(self, key: str, payload: bytes, mode: str) -> None:
+        """Drive a second MooncakeArtifactStore in a separate process."""
+        proc = multiprocessing.get_context("spawn").Process(
+            target=_mooncake_peer, args=(key, payload, mode)
+        )
+        proc.start()
+        proc.join(timeout=180)
+        if proc.is_alive():
+            proc.kill()
+            raise TimeoutError(f"peer {mode} timed out:\n{self.logs}")
+        assert proc.exitcode == 0, f"peer {mode} failed (see captured stderr)"
+
+
+def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
+    """A real Mooncake cluster shares warmup artifacts across cache instances."""
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+        CompileArtifactWarmupCache,
+    )
+
+    with MooncakeCluster(tmp_path, monkeypatch) as cluster:
+        kind = FlashInferWarmupCache(store_names=["mooncake"])
+        filename = "autotune_configs_dp0_rank0.json"
+        params = {"config_hash": "9" * 64, "dp_rank": 0, "rank": 0}
+        monkeypatch.setattr(kind, "request_params", lambda _: params)
+
+        # This process publishes; a second process reads it from the store.
+        table = {"records": {"op": {"shape": 1}}}
+        table_bytes = json.dumps(table).encode()
+        kind.install(None, {filename: table})
+        kind._publish_autotune_table(None)
+        key = artifact_key("flashinfer_autotune", params["config_hash"], filename)
+        cluster.run_peer(key, table_bytes, "get")
+
+        # A second process publishes; resolve falls through disk to the store.
+        peer_table = {"records": {"op": {"shape": "peer"}}}
+        peer_bytes = json.dumps(peer_table).encode()
+        peer_key = artifact_key("flashinfer_autotune", "8" * 64, filename)
+        cluster.run_peer(peer_key, peer_bytes, "put")
+        assert kind.resolve(_warmup_cache_request("8" * 64)) == {filename: peer_table}
+
+        source_dir = tmp_path / "compiled_source"
+        source_dir.mkdir()
+        (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
+        monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+        source = CompileArtifactWarmupCache(store_names=["mooncake"])
+        source.prepare()
+        payload = source.resolve({"version": 1})
+        assert payload is not None
+
+        target_dir = tmp_path / "compiled_target"
+        monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(target_dir))
+        target = CompileArtifactWarmupCache(store_names=["mooncake"])
+        target.install(None, target.validate_payload(payload))
+        assert (target_dir / "kernel.cubin").read_bytes() == b"compiled-kernel"

@@ -55,6 +55,21 @@ class _CaptureBinding:
         self._set(None)
 
 
+@runtime_checkable
+class RoutedExpertsRowRestorer(Protocol):
+    def restore_routed_experts_rows(
+        self, topk_ids: torch.Tensor, ctx: ForwardContext
+    ) -> torch.Tensor:
+        """Restore local token-ordered logical IDs for all captured MoE layers.
+
+        Binding selects the first provider. Read current metadata from `ctx`;
+        do not depend on the provider's layer-specific state or modify input.
+        Return a 2-D tensor with the input device, dtype and top-k width.
+        Collectives must be rank-consistent and graph-replay safe.
+        """
+        ...
+
+
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
     model_config = vllm_config.model_config
     num_layers = model_config.get_total_num_hidden_layers()
@@ -69,19 +84,31 @@ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
     return num_layers, num_experts, num_experts_per_tok
 
 
+def _routed_experts_dtype_name(num_experts: int) -> str:
+    return "uint8" if num_experts <= 256 else "uint16"
+
+
+def get_routed_experts_bytes_per_token(vllm_config: VllmConfig) -> int:
+    num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
+        vllm_config
+    )
+    itemsize = getattr(torch, _routed_experts_dtype_name(num_experts)).itemsize
+    return num_layers * num_experts_per_tok * itemsize
+
+
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
-    Layer-level hooks call :meth:`capture` inside the forward pass. Routing
+    Layer-level hooks call `capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
     Under pipeline parallelism the buffer only covers this stage's layers.
 
-    The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
+    The device buffer uses `int32`. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
 
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
-          worst-case step (``max_num_batched_tokens`` tokens).
+          worst-case step (`max_num_batched_tokens` tokens).
         - Every routed layer overwrites the current step's token rows.
     """
 
@@ -98,7 +125,7 @@ class RoutedExpertsCapturer:
             num_layers, pp_group.rank_in_group, pp_group.world_size
         )
         self.shape_per_token = (end_layer - self.start_layer, num_experts_per_tok)
-        self.output_dtype_name = "uint8" if num_experts <= 256 else "uint16"
+        self.output_dtype_name = _routed_experts_dtype_name(num_experts)
         self.output_dtype = getattr(torch, self.output_dtype_name)
         logger.info(
             "RoutedExpertsCapturer: allocating buffer with "
@@ -116,11 +143,14 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.restore_rows: Callable[[torch.Tensor, ForwardContext], torch.Tensor] = (
+            self._restore_local_topk_ids
+        )
         self._bindings: list[_CaptureBinding] = []
         self._closed = False
 
     def bind(self, bindings: list[_CaptureBinding]) -> None:
-        """Record the callbacks installed by :func:`bind_routed_experts_capturer`."""
+        """Record the callbacks installed by `bind_routed_experts_capturer`."""
         if self._closed:
             raise ValueError("Cannot bind a closed routed-experts capturer")
         self._bindings = bindings
@@ -145,7 +175,7 @@ class RoutedExpertsCapturer:
             )
 
         ctx = get_forward_context()
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        local_topk_ids = self.restore_rows(topk_ids, ctx)
         offset = dbo_current_ubatch_token_offset()
         self.device_buffer[offset : offset + len(local_topk_ids), local_layer_id] = (
             local_topk_ids
@@ -243,7 +273,13 @@ def _get_routed_experts_bindings(
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
     bindings: list[_CaptureBinding] = []
+    restorer_bound = False
     for module in model.modules():
+        if not isinstance(module, (MoERunner, RoutedExpertsCaptureSource)):
+            continue
+        if not restorer_bound and isinstance(module, RoutedExpertsRowRestorer):
+            capturer.restore_rows = module.restore_routed_experts_rows
+            restorer_bound = True
         if isinstance(module, RoutedExpertsCaptureSource):
             if module.capture_fn is not None:
                 raise ValueError(
@@ -254,8 +290,6 @@ def _get_routed_experts_bindings(
                     module, "capture_fn", partial(capturer.capture, module.layer_id)
                 )
             )
-            continue
-        if not isinstance(module, MoERunner):
             continue
         if module._quant_method.is_monolithic:
             moe_kernel = getattr(module._quant_method, "moe_kernel", None)
