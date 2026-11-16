@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -17,6 +18,7 @@ use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
 };
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_metrics::CustomHistogramBuckets;
@@ -320,6 +322,10 @@ impl FromStr for LoraModulePath {
     }
 }
 
+/// Default LoRA adapter path or Hugging Face repo id per modality, as
+/// Python's `--default-mm-loras` (e.g. `{"audio": "org/speech-lora"}`).
+pub type DefaultMmLoras = IndexMap<MmModality, String>;
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -384,6 +390,10 @@ pub struct Config {
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,
+    /// LoRA adapters loaded at startup after `lora_modules`, each under its
+    /// modality's name, and applied to chat requests that name no adapter
+    /// but carry that modality.
+    pub default_mm_loras: DefaultMmLoras,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the

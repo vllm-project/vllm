@@ -39,9 +39,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
+    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
+    ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -484,6 +484,15 @@ pub struct SharedRuntimeArgs {
     #[arg(long, num_args = 1.., value_name = "MODULE")]
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
+
+    /// Default LoRA adapter per modality, as a JSON object mapping a modality
+    /// to an adapter path or repo id (e.g. `{"audio": "org/speech-lora"}`).
+    /// Each adapter is loaded at startup under its modality's name and serves
+    /// chat requests that name no adapter but carry that modality. Requires
+    /// `--enable-lora`.
+    #[arg(long, value_parser = parse_json::<DefaultMmLoras>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub default_mm_loras: DefaultMmLoras,
 
     /// The format to render message content within a chat template.
     ///
@@ -1044,6 +1053,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1133,6 +1143,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1525,6 +1536,15 @@ impl ServeArgs {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        // The engine checks the adapters against the model at startup, as it
+        // does under the Python frontend.
+        if !self.runtime.default_mm_loras.is_empty() {
+            let default_mm_loras = serde_json::to_string(&self.runtime.default_mm_loras)
+                .expect("default-mm-loras serialization should not fail");
+            managed_engine
+                .python_args
+                .extend(["--default-mm-loras".to_string(), default_mm_loras]);
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),

@@ -1452,6 +1452,26 @@ async fn test_admin_state_with_ready_and_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    test_admin_state_with_backend_and_engine_script(
+        ready,
+        Arc::new(FakeChatBackend::new()),
+        |state| state,
+        script,
+    )
+    .await
+}
+
+/// Like [`test_admin_state_with_ready_and_engine_script`], with the given chat
+/// backend and `configure` applied to the state before it is shared.
+async fn test_admin_state_with_backend_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    backend: Arc<FakeChatBackend>,
+    configure: impl FnOnce(AppState) -> AppState,
+    script: F,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
@@ -1474,12 +1494,12 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        Arc::new(AppState::new(
+        Arc::new(configure(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
-        )),
+        ))),
         engine_task,
     )
 }
@@ -1551,6 +1571,88 @@ async fn static_lora_module_loads_and_lists_with_parent() {
     assert_eq!(json["data"][1]["id"], "alice");
     assert_eq!(json["data"][1]["root"], "/adapters/alice");
     assert_eq!(json["data"][1]["parent"], "base-model");
+}
+
+/// Like Python, a chat request that names no adapter takes the
+/// `--default-mm-loras` adapter of the modality it carries and reports it as
+/// the response `model`; a text-only request stays on the base model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_with_media_uses_default_mm_lora() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_backend_and_engine_script(
+        ready,
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+        |state| state.with_default_mm_lora_modalities(vec![MmModality::Image]),
+        |dealer, push| {
+            boxed_test_future(async move {
+                add_lora_script(true, |lora| assert_eq!(lora[0], Value::from("image")))(
+                    dealer, push,
+                )
+                .await;
+                for expected_lora in [Some("image"), None] {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request = decode_add_request(&add);
+                    let lora = request.lora_request.as_ref().map(|lora| lora.lora_name.as_str());
+                    assert_eq!(lora, expected_lora);
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            default_stream_output_specs(),
+                        ),
+                    )
+                    .await;
+                }
+            })
+        },
+    )
+    .await;
+    let module = LoraModulePath {
+        name: "image".to_string(),
+        path: "org/image-lora".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    state.load_static_lora(&module).await.expect("load default mm lora");
+    let mut app = build_router_with_gates(state, RouteGates::default());
+
+    let image_content = json!([
+        {"type": "text", "text": "describe "},
+        {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}}
+    ]);
+    for (content, expected_model) in [
+        (image_content, "image"),
+        (json!("hello"), "Qwen/Qwen1.5-0.5B-Chat"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": content}],
+                            "max_completion_tokens": 8
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(json["model"], expected_model);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
