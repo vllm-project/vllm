@@ -53,6 +53,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
+    MemoryRegion,
+    RangeRequest,
+    TransferBackend,
+    TransferOp,
+    TransferState,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.te import (
+    TransferEngineBackend,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
     clear_shared_transfer_engine,
     register_shared_transfer_engine,
@@ -1388,7 +1398,6 @@ class MooncakeConnectorWorker:
         self.device_id = torch.accelerator.current_device_index()
         current_platform.set_device(self.device_id)
 
-        self.engine = TransferEngine()
         self.hostname = get_ip()
 
         assert (kv_transfer_config := vllm_config.kv_transfer_config)
@@ -1410,25 +1419,31 @@ class MooncakeConnectorWorker:
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        ret_value = self.engine.initialize(
-            self.hostname, "P2PHANDSHAKE", protocol, device_name
+        self.transfer_backend: TransferBackend = TransferEngineBackend(
+            engine_cls=TransferEngine,
+            hostname=self.hostname,
+            protocol=protocol,
+            device_name=device_name,
         )
-        if ret_value != 0:
-            raise RuntimeError("Mooncake Transfer Engine initialization failed.")
-
-        self.rpc_port = self.engine.get_rpc_port()
+        self.rpc_port = self.transfer_backend.rpc_port
 
         logger.debug(
             "Mooncake Transfer Engine initialized at %s:%d",
             self.hostname,
             self.rpc_port,
         )
-        register_shared_transfer_engine(
-            engine=self.engine,
-            hostname=self.hostname,
-            rpc_port=self.rpc_port,
-            protocol=str(protocol),
+        self._shared_engine = (
+            self.transfer_backend.engine
+            if isinstance(self.transfer_backend, TransferEngineBackend)
+            else None
         )
+        if self._shared_engine is not None:
+            register_shared_transfer_engine(
+                engine=self._shared_engine,
+                hostname=self.hostname,
+                rpc_port=self.rpc_port,
+                protocol=str(protocol),
+            )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
@@ -1597,12 +1612,16 @@ class MooncakeConnectorWorker:
             self.block_size = kernel_block_size
 
     def __del__(self):
-        self.shutdown()
+        # A constructor that raised before the ZeroMQ context existed still
+        # reaches this hook, so only shut down a worker that got that far.
+        if getattr(self, "async_zmq_ctx", None) is not None:
+            self.shutdown()
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
-        if hasattr(self, "engine"):
-            clear_shared_transfer_engine(self.engine)
+        shared_engine = getattr(self, "_shared_engine", None)
+        if shared_engine is not None:
+            clear_shared_transfer_engine(shared_engine)
         self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)
@@ -1616,6 +1635,8 @@ class MooncakeConnectorWorker:
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
+        if hasattr(self, "transfer_backend"):
+            self.transfer_backend.shutdown()
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -1951,7 +1972,7 @@ class MooncakeConnectorWorker:
 
             if src_ptrs:
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-                ret_value = await self.sender_loop.run_in_executor(
+                transfer_err_msg = await self.sender_loop.run_in_executor(
                     self._sender_executor,
                     self._send_blocks,
                     remote_session,
@@ -1959,9 +1980,7 @@ class MooncakeConnectorWorker:
                     dst_ptrs,
                     lengths,
                 )
-
-                if ret_value != 0:
-                    transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
+                if transfer_err_msg is not None:
                     err_msg = (
                         transfer_err_msg
                         if err_msg is None
@@ -2259,30 +2278,52 @@ class MooncakeConnectorWorker:
         src_ptrs: list[int],
         dst_ptrs: list[int],
         lengths: list[int],
-    ) -> int:
+    ) -> str | None:
+        """Moves one submission and returns why it failed, or None on success."""
+        ranges = [
+            RangeRequest(local_addr=src, remote_addr=dst, length=length)
+            for src, dst, length in zip(src_ptrs, dst_ptrs, lengths, strict=True)
+        ]
         start_time = time.perf_counter()
-        ret_value = self.engine.batch_transfer_sync_write(
-            remote_session, src_ptrs, dst_ptrs, lengths
+        events = self.transfer_backend.transfer(
+            remote_session, TransferOp.WRITE, ranges
         )
         duration = time.perf_counter() - start_time
-        if ret_value == 0:
+        if len(events) != len(ranges):
+            raise RuntimeError(
+                f"The transfer backend returned {len(events)} events for "
+                f"{len(ranges)} ranges."
+            )
+        failed_event = next(
+            (event for event in events if event.state is TransferState.FAILED), None
+        )
+        if failed_event is None:
             self.xfer_stats.record_transfer(
                 duration_s=duration,
                 total_bytes=sum(lengths),
                 num_descs=len(src_ptrs),
             )
             logger.debug("Sending to %s done, took %s", remote_session, duration)
-        else:
-            self.xfer_stats.record_failed_transfer()
-            logger.warning(
-                "Sending to %s failed (ret=%s) after %s (%d descriptors, %d bytes)",
-                remote_session,
-                ret_value,
-                duration,
-                len(src_ptrs),
-                sum(lengths),
-            )
-        return ret_value
+            return None
+        self.xfer_stats.record_failed_transfer()
+        logger.warning(
+            "Sending to %s failed (%s) after %s (%d descriptors, %d bytes)",
+            remote_session,
+            failed_event.error,
+            duration,
+            len(src_ptrs),
+            sum(lengths),
+        )
+        return failed_event.error or "Mooncake transfer engine failed"
+
+    @staticmethod
+    def _memory_regions(
+        base_addrs: list[int], lengths: list[int]
+    ) -> list[MemoryRegion]:
+        return [
+            MemoryRegion(base_addr=base_addr, length=length)
+            for base_addr, length in zip(base_addrs, lengths, strict=True)
+        ]
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
@@ -2489,9 +2530,9 @@ class MooncakeConnectorWorker:
                 collapsed_views,
             )
 
-        ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake batch memory registration failed.")
+        self.transfer_backend.register_regions(
+            self._memory_regions(kv_data_ptrs, kv_data_lens)
+        )
 
         self.device_kv_caches = kv_caches
         logger.debug(
@@ -2531,19 +2572,17 @@ class MooncakeConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self.seen_base_addresses:
             return
-        ret_value = self.engine.batch_unregister_memory(self.seen_base_addresses)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake batch memory unregistration failed.")
+        self.transfer_backend.unregister_regions(
+            self._memory_regions(self.seen_base_addresses, self._kv_data_lens)
+        )
         self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
         if not self._kv_unregistered:
             return
-        ret_value = self.engine.batch_register_memory(
-            self.seen_base_addresses, self._kv_data_lens
+        self.transfer_backend.register_regions(
+            self._memory_regions(self.seen_base_addresses, self._kv_data_lens)
         )
-        if ret_value != 0:
-            raise RuntimeError("Mooncake batch memory registration failed.")
         self._kv_unregistered = False
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
