@@ -27,7 +27,7 @@ def _make_input(rank: int, world_size: int, step: int) -> torch.Tensor:
     return t
 
 
-def _worker(rank: int, world_size: int, port: int, stateless_port: int):
+def _worker(rank: int, world_size: int, port: int):
     dist.init_process_group(
         "gloo",
         init_method=f"tcp://127.0.0.1:{port}",
@@ -63,9 +63,13 @@ def _worker(rank: int, world_size: int, port: int, stateless_port: int):
         assert torch.equal(other, t)
 
     # Unregistered (stateless) process group, as used by the engine-core DP
-    # group and elastic EP.
+    # group and elastic EP. Pick its port only now and share it: a port picked
+    # before spawn can be taken by one of the ephemeral sockets gloo opens for
+    # the default group's full mesh (66 pairs at 12 ranks) -> EADDRINUSE.
+    stateless_port = [get_open_port() if rank == 0 else None]
+    dist.broadcast_object_list(stateless_port, src=0)
     stateless_pg = stateless_init_torch_distributed_process_group(
-        "127.0.0.1", stateless_port, rank, world_size, backend="gloo"
+        "127.0.0.1", stateless_port[0], rank, world_size, backend="gloo"
     )
     expected = _make_input(rank, world_size, 0)
     dist.all_reduce(expected)
@@ -81,7 +85,7 @@ def _worker(rank: int, world_size: int, port: int, stateless_port: int):
 def test_cpu_all_reduce(world_size: int):
     mp.spawn(
         _worker,
-        args=(world_size, get_open_port(), get_open_port()),
+        args=(world_size, get_open_port()),
         nprocs=world_size,
         join=True,
     )
