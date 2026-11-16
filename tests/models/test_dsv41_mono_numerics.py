@@ -313,7 +313,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.common.ops import fused_q_kv_rmsnorm
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
-    from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
+    from vllm.models.deepseek_v41.amd.mono.layer import MonoBuild, scratch_layout
     from vllm.models.deepseek_v41.amd.mono.runner import (
         AttnWeights,
         DSV41MonoLayer,
@@ -398,9 +398,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
     runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
-    # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
-    # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
-    # last token tile; their outputs must match the generic builds' bit for bit.
+    # the tuned builds' reference (``MonoBuild.generic``): at TP2 the steps of
+    # every compress ratio take the tuned paths, 12 rows the small-width ones,
+    # 36 a partial last token tile; their outputs must match the generic
+    # builds' bit for bit.
     generic = (
         DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
         if runner.build(1, 2).tuned_front
@@ -419,7 +420,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
     # a down round's rows then overflow its LDS block (``fits`` false in
     # ``moe.down_round_pipe``, which the random routing never reaches)
     for ratio, R, T, hot in (
+        (0, 2, 6, False),
+        (0, 6, 6, False),
         (1, 1, 6, False),
+        (1, 6, 6, False),
         (2, 2, 6, False),
         (2, 6, 6, False),
         (2, 8, 6, False),
@@ -578,7 +582,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         ffn_of = {}
         runs = (
             (generic, runner)
-            if generic is not None and runner.build(M, 0).tuned_seam  # ratio 0
+            if generic is not None and MonoBuild(M, tp, 0, ffn=True).tuned_seam
             else (runner,)
         )
         for r in runs:
