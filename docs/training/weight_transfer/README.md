@@ -112,8 +112,8 @@ on. This is the main rule to internalize:
 | Backend, inference side | `WeightTransferConfig(backend=...)` | A plain string selector — that is all this config holds |
 | Backend, trainer side | `init_info.backend` | A `ClassVar` on each init info; never passed by hand |
 | Wire params (`packed`, buffer sizes) | the backend's `TrainerInitInfo` | The trainer propagates them to the worker during `trainer_init`, so the two sides *cannot* disagree |
-| Weights to send | a [`WeightSource`](base.md#weightsource) | `ModuleSource(model)` covers plain and FSDP-sharded modules |
-| Per-round payload | the backend's update info | Built by the engine (from `source.metadata()`, or from a delta backend's per-round payload); you never construct it |
+| Weights to send | a [`WeightSource`](base.md#weightsource) | Usually written for your framework; `ModuleSource(model)` covers modules every rank holds whole (plain, FSDP, DTensor) |
+| Per-round payload | the backend's update info | Built by the engine (from `source.metadata`, or from a delta backend's per-round payload); you never construct it |
 
 !!! note
     Wire params are deliberately *not* on `WeightTransferConfig` and *not* on the
@@ -126,9 +126,16 @@ on. This is the main rule to internalize:
 For sharded trainers (FSDP, TP/PP/EP), **every trainer rank builds an engine and
 calls `send_weights()`**. Rank 0 is the sender: only it holds a communicator,
 talks to the client, and puts bytes on the wire. Non-sender ranks still iterate
-the `WeightSource`, because materializing a parameter is usually itself a
-collective (an FSDP `full_tensor()` all-gather, a Megatron export) that would
-deadlock if some ranks skipped it.
+the `WeightSource` over the parameters they own, because materializing a
+parameter is usually itself a collective among its owners (an FSDP
+`full_tensor()` all-gather, a Megatron export) that would deadlock if some of
+them skipped it. Which ranks own which parameter is declared in
+[`ParamMeta.owners`](base.md#parammeta-ownership-and-layout).
+Only [sharded RDT](sharded_rdt.md) and [NCCL](nccl.md#broadcasting-ranks)
+accept ranks that own different parameters, such as pipeline stages.
+Pipeline-parallel support for IPC is in progress; until then it, like NCCL M2N,
+needs every parameter owned by rank 0 or by every rank (see each backend's
+Limitations).
 
 Pass each process's own `rank` on the init info. It is explicit rather than read
 from a global process group, which is ambiguous once several groups (FSDP / TP /
@@ -142,6 +149,21 @@ engine = WeightTransferTrainerFactory.trainer_init(
 )
 engine.send_weights()  # called on every rank
 ```
+
+## Verifying a New Model Without a Trainer
+
+To check that weight updates work for a new model before wiring up an RL
+framework, the [checkpoint publisher and weight-update verifier](https://github.com/vllm-project/vllm/tree/vllm-state-transition-verifier/tools/state_transition_verifier) on the
+`vllm-state-transition-verifier` branch pushes a local Hugging Face checkpoint
+into a running `vllm serve` over NCCL, without a trainer, and compares
+fixed-token outputs and GSM8K accuracy before and after the update. Get it with:
+
+```bash
+git fetch origin vllm-state-transition-verifier
+git checkout FETCH_HEAD -- tools/state_transition_verifier
+```
+
+and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 

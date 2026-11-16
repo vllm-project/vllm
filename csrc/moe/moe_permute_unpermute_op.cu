@@ -104,18 +104,17 @@ torch::stable::Tensor moe_sort_routing(
       torch::headeronly::ScalarType::Int, device, "sorted_row_idx");
 
   CubKeyValueSorter sorter{};
-  torch::stable::Tensor topk_ids_for_sort = topk_ids;
 
-  if (expert_map.has_value() || build_inverse) {
-    const int* expert_map_ptr =
-        expert_map.has_value() ? get_ptr<int>(expert_map.value()) : nullptr;
-    topk_ids_for_sort = maybe_allocate_tensor(
-        maybe_topk_ids_for_sort, topk_ids.sizes(),
-        torch::headeronly::ScalarType::Int, device, "topk_ids_for_sort");
-    torch::stable::copy_(topk_ids_for_sort, topk_ids);
-    preprocessTopkIdLauncher(get_ptr<int>(topk_ids_for_sort), n_token * topk,
-                             expert_map_ptr, n_expert, stream);
-  }
+  // Map invalid routes (e.g. -1 for padding tokens) to the n_expert sentinel so
+  // the offset scan sees keys in ascending order.
+  const int* expert_map_ptr =
+      expert_map.has_value() ? get_ptr<int>(expert_map.value()) : nullptr;
+  auto topk_ids_for_sort = maybe_allocate_tensor(
+      maybe_topk_ids_for_sort, topk_ids.sizes(),
+      torch::headeronly::ScalarType::Int, device, "topk_ids_for_sort");
+  torch::stable::copy_(topk_ids_for_sort, topk_ids);
+  preprocessTopkIdLauncher(get_ptr<int>(topk_ids_for_sort), n_token * topk,
+                           expert_map_ptr, n_expert, stream);
 
   sortAndScanExpert(
       get_ptr<const int>(topk_ids_for_sort), get_ptr<int>(token_expert_indices),

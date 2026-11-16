@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.kv_transfer import KVTransferConfig
+from vllm.config.kv_transfer import KVCacheAccess, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -216,6 +216,36 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            connector_cls = KVConnectorFactory.get_connector_class(child_config)
+            if not connector_cls.supports_lookahead_block_hashes(child_config):
+                return False
+        return True
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        access = KVCacheAccess.IN_PROCESS
+        for conn_config in kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        ):
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            access |= KVConnectorFactory.kv_cache_access(child_config)
+        return access
+
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
@@ -228,6 +258,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         ]
         return bool(children) and all(
             KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
+            for c in children
+        )
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).only_restores_canonical_kv(c)
             for c in children
         )
 
@@ -496,6 +537,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
             c.on_new_request(request)
+
+    def may_load_async(self, request: "Request") -> bool:
+        return any(c.may_load_async(request) for c in self._connectors)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
