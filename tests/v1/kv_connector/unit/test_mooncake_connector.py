@@ -349,6 +349,23 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
     assert mismatch_err is not None
 
 
+def test_del_keeps_quiet_when_the_constructor_did_not_finish():
+    """A constructor that raised leaves no state for the hook to tear down."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+    worker.__del__()
+
+
+def test_del_shuts_down_a_worker_that_started():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.shutdown = MagicMock()
+
+    worker.__del__()
+
+    worker.shutdown.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_build_transfer_params_separates_prefill_pp_layers():
     """Each producer PP stage should send only its registered layer shard."""
@@ -535,7 +552,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         identity = b"consumer-layer-align"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
@@ -933,15 +950,14 @@ class _FlakyAsyncClient:
     async def post(self, url, json=None):
         self.calls.append(1)
         if len(self.calls) <= self.failures:
-            raise httpx.ReadTimeout("simulated slow bootstrap server")
+            raise mooncake_connector.httpx.ReadTimeout(
+                "simulated slow bootstrap server"
+            )
         response = MagicMock()
         response.raise_for_status = MagicMock()
         return response
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_retries_on_read_timeout(monkeypatch):
     """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
@@ -950,7 +966,7 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
 
     calls: list[int] = []
     monkeypatch.setattr(
-        httpx,
+        mooncake_connector.httpx,
         "AsyncClient",
         lambda **kwargs: _FlakyAsyncClient(2, calls),
     )
@@ -961,9 +977,6 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
     assert len(calls) == 3
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_raises_after_max_attempts(monkeypatch):
     """Terminal registration failure must raise, not loop forever."""
@@ -972,7 +985,7 @@ async def test_register_worker_raises_after_max_attempts(monkeypatch):
 
     calls: list[int] = []
     monkeypatch.setattr(
-        httpx,
+        mooncake_connector.httpx,
         "AsyncClient",
         lambda **kwargs: _FlakyAsyncClient(99, calls),
     )
@@ -1273,7 +1286,7 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
+            FakeMooncakeWrapper, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
 
@@ -1414,7 +1427,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
             sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
             with (
                 patch.object(worker, "sender_loop", asyncio.get_running_loop()),
-                patch.object(worker, "_send_blocks", return_value=0) as send,
+                patch.object(worker, "_send_blocks", return_value=None) as send,
             ):
                 for pp_rank in range(2):
                     metadata = _xfer_meta(
@@ -1509,7 +1522,7 @@ async def test_kv_producer(monkeypatch):
         identity = b"consumer-id"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
 
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
@@ -1599,7 +1612,9 @@ async def test_kv_producer(monkeypatch):
 
         # Transfer error
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=123
+            prefill_worker,
+            "_send_blocks",
+            return_value="Mooncake transfer engine returned 123",
         ) as mock_send_blocks:
             mock_socket.send_multipart.reset_mock()
             prefill_worker.reqs_need_send[transfer_id] = send_meta
@@ -2201,7 +2216,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
             req_blocks,
         )
         sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
-        with patch.object(producer, "_send_blocks", return_value=0):
+        with patch.object(producer, "_send_blocks", return_value=None):
             await producer.send_kv_to_decode(b"consumer", sock, metadata)
 
         # No placeholder that would wait for a prefill that already ran.
@@ -2244,7 +2259,7 @@ def test_worker_publishes_and_clears_shared_engine():
         worker, _reg = worker_reg
         shared = get_shared_transfer_engine()
         assert shared is not None
-        assert shared.engine is worker.engine
+        assert shared.engine is worker.transfer_backend.engine
         assert shared.hostname == "127.0.0.1"
         assert shared.rpc_port == 12345
         assert shared.protocol == "rdma"
@@ -2874,7 +2889,7 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     worker.is_kv_consumer = True
     # The first register built a producer. Its thread patch is already gone,
     # so stay on the consumer path and return before the sender thread starts.
-    with patch.object(worker.engine, "batch_register_memory", return_value=0):
+    with patch.object(FakeMooncakeWrapper, "batch_register_memory", return_value=0):
         worker.register_kv_caches(kv_caches)
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
@@ -3387,7 +3402,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         }
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             for d_rank in target_d_ranks:
                 remote_block_ids = d_rank_remote_blocks[d_rank]
@@ -3485,7 +3500,7 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.register_kv_caches(dict(zip(layer_names, views)))
         reg.reset_mock()
         with patch.object(
-            worker.engine, "batch_unregister_memory", return_value=0
+            FakeMooncakeWrapper, "batch_unregister_memory", return_value=0
         ) as unreg:
             worker.unregister_kv_caches()
             worker.unregister_kv_caches()
