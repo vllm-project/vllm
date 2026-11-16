@@ -1354,10 +1354,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
     ).lower(),
-    # Deprecated, will be removed in v0.35.0: use
-    # `--quantization-config '{"moe":"mxfp4","ignore":[<first/last layers>]}'`.
-    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
-    # and last layer stay BF16).
+    # Deprecated, will be removed in v0.35.0, refer to #67529.
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
@@ -1371,26 +1368,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
     ),
-    # Deprecated, will be removed in v0.35.0: use
-    # `--quantization-config '{"moe":"mxfp4"}'` (a4w4),
-    # `--quantization-config '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'`
-    # (a8w4) or `--quantization-config '{"moe":{"weight":"mxfp4","activation":null}}'`
-    # (a16w4).
-    # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
-    # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
-    # a8w4 (MXFP8, FlyDSL interleaved kernels; default), a4w4 (MXFP4
-    # activations, FlyDSL separated kernels) or a16w4 (bf16).
+    # Deprecated, will be removed in v0.35.0, refer to #67529.
     "VLLM_FP8_MOE_REQUANT": env_with_choices(
         "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
     ),
+    # Deprecated, will be removed in v0.35.0, refer to #67529.
     "VLLM_FP8_MOE_REQUANT_ACT": env_with_choices(
         "VLLM_FP8_MOE_REQUANT_ACT",
         "a8w4",
         ["a8w4", "a4w4", "a16w4"],
         case_sensitive=False,
     ),
-    # Whether to use aiter moe ops.
-    # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),

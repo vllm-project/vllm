@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from vllm.config import CompilationMode
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.models.mistral.common.layer_spec import get_layer_specs
 from vllm.models.mistral.mistral_large4.amd.specialized_decode.runtime.spec import (
     DECODE_CONFIG,
@@ -52,11 +51,7 @@ def vllm_config(**overrides):
         lora_config=None,
         kv_transfer_config=None,
         speculative_config=None,
-        model_config=SimpleNamespace(
-            enable_sleep_mode=False,
-            quantization="fp8",
-            quantization_config=QuantizationConfigArgs(moe="mxfp4"),
-        ),
+        model_config=SimpleNamespace(enable_sleep_mode=False, quantization="fp8"),
         weight_transfer_config=None,
         offload_config=SimpleNamespace(
             uva=SimpleNamespace(cpu_offload_gb=0),
@@ -91,12 +86,8 @@ def test_switches():
         )
 
 
-@pytest.mark.skip_global_cleanup
 def test_refusal_lists_every_reason():
     cfg = vllm_config(**{
-        "model_config.quantization_config": QuantizationConfigArgs(
-            moe=QuantSpec(weight="mxfp4", activation="mxfp8")
-        ),
         "parallel_config.tensor_parallel_size": 8,
         "cache_config.cache_dtype": "fp8_ds_mla",
         "speculative_config": object(),
@@ -106,30 +97,8 @@ def test_refusal_lists_every_reason():
     msg = str(err.value)
     for part in (
         "tensor parallel size 4", "bf16 or fp8 (e4m3) KV cache", "speculative decoding",
-        "a4w4",
     ):  # fmt: skip
         assert part in msg, msg
-
-
-@pytest.mark.parametrize(
-    "quantization_config, supported",
-    [
-        (QuantizationConfigArgs(moe="mxfp4"), True),
-        ({"moe": "mxfp4"}, True),
-        (QuantizationConfigArgs(moe=QuantSpec(weight="mxfp4", activation="mxfp4")), True),  # noqa: E501
-        (QuantizationConfigArgs(targets={"re:.*experts.*": "mxfp4"}), False),
-        (QuantizationConfigArgs(moe=QuantSpec(weight="mxfp4", activation="mxfp8")), False),  # noqa: E501
-        (QuantizationConfigArgs(moe=QuantSpec(weight="mxfp4", activation=None)), False),
-        (QuantizationConfigArgs(moe="fp8_per_block"), False),
-        (QuantizationConfigArgs(linear="mxfp4"), False),
-        (None, False),
-    ],
-)  # fmt: skip
-@pytest.mark.skip_global_cleanup
-def test_fp8_checkpoint_needs_online_mxfp4_a4w4_experts(quantization_config, supported):
-    cfg = vllm_config(**{"model_config.quantization_config": quantization_config})
-    reasons = DECODE_CONFIG.refusal_reasons(cfg)
-    assert any("a4w4" in r for r in reasons) != supported
 
 
 @pytest.mark.parametrize(

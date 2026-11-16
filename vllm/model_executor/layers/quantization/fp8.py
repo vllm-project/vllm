@@ -556,11 +556,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
                     block_n, block_k = moe_block_shape
 
-        # The block shape of the scale grids, which TP sharding may refine.
-        self.scale_block_shape: list[int] | None = (
-            [block_n, block_k] if self.block_quant else None
-        )
-
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
@@ -719,7 +714,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight,
             layer.w2_weight_scale_inv if self.block_quant else None,
             num_w13_shards=self.moe.w13_num_shards,
-            weight_block_size=self.scale_block_shape,
+            weight_block_size=self.weight_block_size if self.block_quant else None,
             out_dtype=layer.orig_dtype,
         )
 

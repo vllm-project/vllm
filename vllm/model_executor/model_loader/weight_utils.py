@@ -254,15 +254,24 @@ def get_quant_config(
     def maybe_compose_online_quantization(
         checkpoint_config: QuantizationConfig,
     ) -> QuantizationConfig:
-        args = online_args
-        if args is None:
-            args = _deprecated_env_online_args(checkpoint_config)
-        elif envs.is_set("VLLM_FP8_MOE_REQUANT"):
-            logger.warning_once(
-                "VLLM_FP8_MOE_REQUANT is ignored because --quantization-config is set."
+        if online_args is not None and envs.is_set("VLLM_FP8_MOE_REQUANT"):
+            raise ValueError(
+                "VLLM_FP8_MOE_REQUANT (deprecated) and --quantization-config "
+                "cannot be used together. Remove VLLM_FP8_MOE_REQUANT."
             )
-        if args is None:
+        if online_args is None:
+            env_args = _deprecated_env_online_args(checkpoint_config)
+            if env_args is not None:
+                checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
+                    env_args
+                )
             return checkpoint_config
+        assert isinstance(online_args, QuantizationConfigArgs)
+
+        checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
+            online_args
+        )
+        return checkpoint_config
         assert isinstance(args, QuantizationConfigArgs)
 
         checkpoint_config.online_quantization_config = OnlineQuantizationConfig(args)

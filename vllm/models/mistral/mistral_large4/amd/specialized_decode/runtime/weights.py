@@ -181,7 +181,7 @@ def _routed_experts(experts) -> dict[str, torch.Tensor]:
         raise MonoUnsupported(
             f"routed experts on {backend} ({type(experts).__name__}/"
             f"{type(method).__name__}); mono reads AITER a4w4 storage "
-            '(--quantization-config \'{"moe": "mxfp4"}\')'
+            "(--quantization-config.moe mxfp4)"
         )
     out = {}
     for name, key in (

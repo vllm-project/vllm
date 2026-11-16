@@ -131,11 +131,10 @@ variants:
     hardware_overrides:
       amd:
         extra_args:
-          # FP8 → MXFP4 routed experts, re-quantized at load by online
-          # quantization. a8w4 = MXFP8 activations; `{"moe": "mxfp4"}` (MXFP4
-          # activations, a4w4) measured level with it at TP4.
-          - "--quantization-config"
-          - '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'
+          # Routed experts FP8 → MXFP4 re-quantization with `--quantization-config.moe mxfp4`.
+          # `--quantization-config.moe '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'`
+          # uses MXFP8 activation, `--quantization-config.moe mxfp4` measured level with it at TP4.
+          - '--quantization-config.moe={"weight":"mxfp4","activation":"mxfp8"}'
       # The ROCm image carries ML4 kernels and AITER tables a wheel doesn't.
       mi350x:
         install:
@@ -581,8 +580,8 @@ presets:
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
-      - "--quantization-config"
-      - '{"moe":"mxfp4"}'
+      - "--quantization-config.moe"
+      - "mxfp4"
       - "--max-num-seqs"
       - "64"
     runbook: |
@@ -645,8 +644,8 @@ presets:
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
-      - "--quantization-config"
-      - '{"moe":"mxfp4"}'
+      - "--quantization-config.moe"
+      - "mxfp4"
     runbook: |
       Measured on MI355X, a4w4 experts, FP8 KV cache, DSpark: c1 / c4 TPOT p50
       3.56 / 6.14 ms on real prompts (1.05x / 1.02x vs the TP4 preset).
@@ -745,11 +744,11 @@ notes:
     body: |
       ROCm has no NVFP4 kernels. Serve the FP8 checkpoint, whose routed
       experts are re-quantized to OCP MXFP4 at load with online quantization
-      (`--quantization-config '{"moe":"mxfp4"}'`; expert weights drop from ~125
+      (`--quantization-config.moe mxfp4`; expert weights drop from ~125
       to ~69 GiB per GPU at TP8), or the AMD Quark MXFP4 checkpoint. The
-      activation format is picked in the same spec: `{"moe":"mxfp4"}` is `a4w4`
+      activation format is picked in the same spec: `--quantization-config.moe mxfp4` is `a4w4`
       (MXFP4, required by the specialized decode) and
-      `{"moe":{"weight":"mxfp4","activation":"mxfp8"}}` is `a8w4` (MXFP8, the
+      `--quantization-config.moe='{"weight":"mxfp4","activation":"mxfp8"}'` is `a8w4` (MXFP8, the
       default of the AMD FP8 recipe).
       `VLLM_ROCM_USE_AITER=1` runs the MoE, GEMMs, MLA decode, RMSNorm and the
       TP all-reduce on AITER; every AMD number here was measured with it on.
@@ -803,8 +802,7 @@ troubleshooting:
       hardware: [amd]
     body: |
       The specialized decode is default-deny: it starts only at TP4 on
-      gfx950, with MXFP4 a4w4 experts (`--quantization-config
-      '{"moe":"mxfp4"}'`), Model Runner V2, an FP8 (E4M3) or bf16
+      gfx950, with MXFP4 a4w4 experts (`--quantization-config.moe mxfp4`), Model Runner V2, an FP8 (E4M3) or bf16
       latent KV cache and no context, data, pipeline or expert parallelism.
       The error lists every reason; fix them or drop `--additional-config`.
 
@@ -886,7 +884,7 @@ guide: |
   of vLLM (image `vllm/vllm-openai-rocm:mistral-large-4`). The routed experts run as
   OCP MXFP4 on AITER's fused MoE, either from the
   AMD Quark MXFP4 checkpoint or from the FP8 checkpoint re-quantized at load
-  (`--quantization-config '{"moe":"mxfp4"}'`). With
+  (`--quantization-config.moe mxfp4`). With
   MXFP4 experts the model fits four GPUs, so one 8-GPU node serves two TP4 replicas.
   The sparse MLA runs on AITER's MLA decode kernels (`ROCM_AITER_MLA_SPARSE`), the
   DSA indexer on AITER's gfx950 indexer kernels, and the latent KV cache is plain FP8

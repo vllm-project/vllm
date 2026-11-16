@@ -21,7 +21,7 @@ the top-k of layer 4k).
 
 ```bash
 vllm serve <Mistral-Large-4> -tp 4 --dtype bfloat16 \
-  --quantization-config '{"moe": "mxfp4"}' \
+  --quantization-config.moe mxfp4 \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
 
