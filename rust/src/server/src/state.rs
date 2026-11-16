@@ -12,6 +12,7 @@ use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 use vllm_llm::{EngineCoreLlm, Llm};
 
@@ -88,7 +89,7 @@ impl AppState {
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
-            lora_manager: LoraManager::new(),
+            lora_manager: LoraManager::new(Vec::new()),
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
@@ -104,6 +105,13 @@ impl AppState {
     /// Set the `system_fingerprint` of chat and completion responses.
     pub fn with_system_fingerprint(mut self, system_fingerprint: Option<String>) -> Self {
         self.system_fingerprint = system_fingerprint;
+        self
+    }
+
+    /// Set the modalities whose `--default-mm-loras` adapter serves chat
+    /// requests that name no adapter. Call before loading any adapter.
+    pub fn with_default_mm_lora_modalities(mut self, modalities: Vec<MmModality>) -> Self {
+        self.lora_manager = LoraManager::new(modalities);
         self
     }
 
@@ -200,7 +208,20 @@ impl AppState {
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
-        self.lora_manager.resolve_model(self.base_model_names(), model_name).await
+        self.resolve_model_with_default_mm_loras(model_name, []).await
+    }
+
+    /// Like [`Self::resolve_model_with_loras`], but a request that names no
+    /// adapter takes the `--default-mm-loras` adapter of the media modality
+    /// it carries. Python applies these defaults on chat completions only.
+    pub async fn resolve_model_with_default_mm_loras(
+        &self,
+        model_name: Option<&str>,
+        media_modalities: impl IntoIterator<Item = MmModality>,
+    ) -> LoraModelResolution {
+        self.lora_manager
+            .resolve_model(self.base_model_names(), model_name, media_modalities)
+            .await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.

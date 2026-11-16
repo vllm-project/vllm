@@ -34,8 +34,8 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, TlsConfig,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -201,21 +201,39 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
-            .with_profiler(config.profiler.clone()),
+            .with_profiler(config.profiler.clone())
+            .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing
     // startup on any error like Python's `init_static_loras` does.
-    load_static_loras(&state, &config.lora_modules).await?;
+    load_static_loras(&state, &config.lora_modules, "--lora-modules").await?;
+    // Like Python's `process_lora_modules`, each default adapter is served
+    // under its modality's name after the `--lora-modules` adapters.
+    let default_mm_loras = config
+        .default_mm_loras
+        .iter()
+        .map(|(modality, path)| LoraModulePath {
+            name: modality.as_str().to_string(),
+            path: path.clone(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        })
+        .collect::<Vec<_>>();
+    load_static_loras(&state, &default_mm_loras, "--default-mm-loras").await?;
 
     Ok(state)
 }
 
-async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
+async fn load_static_loras(
+    state: &AppState,
+    modules: &[LoraModulePath],
+    source_arg: &str,
+) -> Result<()> {
     for module in modules {
         let request = state.load_static_lora(module).await.with_context(|| {
             format!(
-                "failed to load LoRA adapter `{}` from --lora-modules",
+                "failed to load LoRA adapter `{}` from {source_arg}",
                 module.name
             )
         })?;

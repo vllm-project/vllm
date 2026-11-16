@@ -6,11 +6,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
+use itertools::Itertools as _;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 
 use crate::config::LoraModulePath;
 use crate::model_names::ServedModelNames;
@@ -145,6 +147,9 @@ pub(crate) struct LoraManager {
     id_counter: AtomicU64,
     /// Serialize dynamic LoRA registry updates around engine utility calls.
     update_lock: Mutex<()>,
+    /// Modalities whose `--default-mm-loras` adapter, registered under the
+    /// modality's name, serves chat requests that name no adapter.
+    default_mm_modalities: Vec<MmModality>,
 }
 
 #[derive(Debug, Error)]
@@ -218,11 +223,12 @@ pub(crate) fn check_lora_module(
 }
 
 impl LoraManager {
-    pub fn new() -> Self {
+    pub fn new(default_mm_modalities: Vec<MmModality>) -> Self {
         Self {
             adapters: RwLock::new(IndexMap::new()),
             id_counter: AtomicU64::new(0),
             update_lock: Mutex::new(()),
+            default_mm_modalities,
         }
     }
 
@@ -233,15 +239,36 @@ impl LoraManager {
 
     /// Resolve the requested model against one consistent LoRA registry
     /// snapshot.
+    /// Resolve `model_name` to an adapter; a request that names none falls
+    /// back to the default adapter of the media modality it carries.
+    ///
+    /// Like Python, the fallback applies only when exactly one configured
+    /// modality matches, since a request runs at most one adapter.
     pub async fn resolve_model(
         &self,
         base_model_names: ServedModelNames,
         model_name: Option<&str>,
+        media_modalities: impl IntoIterator<Item = MmModality>,
     ) -> LoraModelResolution {
         let adapters = self.adapters.read().await;
         let model_names = base_model_names.with_names(adapters.keys().cloned());
-        let lora_request =
-            model_name.and_then(|name| adapters.get(name)).map(LoadedLora::to_request);
+        let lora_request = model_name
+            .and_then(|name| adapters.get(name))
+            .or_else(|| {
+                // `media_modalities` may walk the whole request, so leave it
+                // untouched unless a default is configured.
+                if self.default_mm_modalities.is_empty() {
+                    return None;
+                }
+                media_modalities
+                    .into_iter()
+                    .filter(|modality| self.default_mm_modalities.contains(modality))
+                    .unique()
+                    .filter_map(|modality| adapters.get(modality.as_str()))
+                    .exactly_one()
+                    .ok()
+            })
+            .map(LoadedLora::to_request);
 
         LoraModelResolution {
             model_names,
@@ -376,6 +403,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use vllm_engine_core_client::protocol::multimodal::MmModality;
+
     use super::{LoadedLora, LoraManager, LoraPathAccessError, validate_lora_path_access};
     use crate::model_names::ServedModelNames;
 
@@ -394,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_model_selects_adapter_when_any_model_name_is_accepted() {
-        let manager = LoraManager::new();
+        let manager = LoraManager::new(Vec::new());
         manager.adapters.write().await.insert(
             "adapter-a".to_string(),
             LoadedLora {
@@ -407,16 +436,64 @@ mod tests {
         );
         let base = ServedModelNames::new(vec!["base".to_string()]).with_accept_any(true);
 
-        let resolution = manager.resolve_model(base.clone(), Some("adapter-a")).await;
+        let resolution = manager.resolve_model(base.clone(), Some("adapter-a"), []).await;
         assert_eq!(
             resolution.lora_request.expect("adapter selected").lora_name,
             "adapter-a"
         );
 
-        let resolution = manager.resolve_model(base, Some("unknown")).await;
+        let resolution = manager.resolve_model(base, Some("unknown"), []).await;
         assert!(resolution.lora_request.is_none());
         assert!(resolution.model_names.accepts(Some("unknown")));
         assert_eq!(resolution.model_names.primary(), "base");
+    }
+
+    /// A request that names no adapter takes the default adapter of its one
+    /// configured media modality; a named adapter wins, and two matching
+    /// defaults leave the base model.
+    #[tokio::test]
+    async fn resolve_model_falls_back_to_the_one_matching_default_mm_lora() {
+        let manager = LoraManager::new(vec![MmModality::Audio, MmModality::Image]);
+        for (lora_int_id, lora_name) in (1..).zip(["audio", "image", "video", "adapter-a"]) {
+            manager.adapters.write().await.insert(
+                lora_name.to_string(),
+                LoadedLora {
+                    lora_name: lora_name.to_string(),
+                    lora_int_id,
+                    lora_path: format!("org/{lora_name}"),
+                    base_model_name: None,
+                    is_3d_lora_weight: false,
+                },
+            );
+        }
+        let resolve = |model: &'static str, modalities: &'static [MmModality]| {
+            let manager = &manager;
+            async move {
+                let base = ServedModelNames::new(vec!["base".to_string()]);
+                let resolution =
+                    manager.resolve_model(base, Some(model), modalities.iter().copied()).await;
+                resolution.lora_request.map(|request| request.lora_name)
+            }
+        };
+
+        assert_eq!(
+            resolve("base", &[MmModality::Audio]).await.as_deref(),
+            Some("audio")
+        );
+        // `video` is loaded but is not a configured default.
+        assert_eq!(
+            resolve("base", &[MmModality::Image, MmModality::Video]).await.as_deref(),
+            Some("image")
+        );
+        assert_eq!(
+            resolve("base", &[MmModality::Audio, MmModality::Image]).await,
+            None
+        );
+        assert_eq!(resolve("base", &[]).await, None);
+        assert_eq!(
+            resolve("adapter-a", &[MmModality::Audio]).await.as_deref(),
+            Some("adapter-a")
+        );
     }
 
     #[test]
