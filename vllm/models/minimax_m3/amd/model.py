@@ -1254,6 +1254,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         ):
             # the QKV GEMM (its split-K partials where amd_kernels defers the
             # reduce) and the norm / RoPE / NVFP4 inserts in one library call
+            assert self.indexer is not None
             q, index_q = akr_attn.qkv_norm_rope_nvfp4_insert(
                 self,
                 hidden_states,
@@ -1273,8 +1274,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self, q: torch.Tensor, index_q: torch.Tensor
     ) -> torch.Tensor | QuantizedActivation:
         """The NVFP4 attention -> o_proj's input: on pure decode steps the decode's
-        MXFP8 output, from amd_kernels (``akr_attn.oproj_quant``) or, with its
-        attention route off, from the in-tree decode (``_emits_o_proj_mxfp8``)."""
+        MXFP8 output, from amd_kernels (`akr_attn.oproj_quant`) or, with its
+        attention route off, from the in-tree decode (`_emits_o_proj_mxfp8`)."""
         index_arg = None if self.skip_index_topk else index_q
         quant = akr_attn.oproj_quant(self, q.shape[0])
         if (
@@ -1301,7 +1302,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self, positions: torch.Tensor, qkv: torch.Tensor
     ) -> torch.Tensor | QuantizedActivation:
         """The attention of this rank's heads, before o_proj. Returns the output buffer
-        itself: under breakable capture ``_run_attention`` returns a weak view of it."""
+        itself: under breakable capture `_run_attention` returns a weak view of it."""
         # Horizontally-fused per-head Gemma QK-norm + partial NeoX RoPE on the
         # main (q/k) and index (index_q/index_k) branches, all read straight out
         # of the single fused ``qkv`` tensor. Once the paged caches are bound the

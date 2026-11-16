@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which MiniMax-M3.1 routes run amd_kernels (``kernel_config.amd_kernels``): all by
+"""Which MiniMax-M3.1 routes run amd_kernels (`kernel_config.amd_kernels`): all by
 default on ROCm gfx950 with the package installed."""
 
 from typing import get_args
@@ -47,7 +47,7 @@ def routes() -> frozenset[str]:
 
 
 def on(route: str) -> bool:
-    """Whether ``route`` (one of ``ROUTES``) runs amd_kernels."""
+    """Whether `route` (one of `ROUTES`) runs amd_kernels."""
     return route in routes()
 
 

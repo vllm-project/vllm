@@ -66,6 +66,7 @@ from .inputs import (
 )
 from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
+from .prefix_token_cache import PrefixTokenCache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -123,7 +124,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._prepare_tokenizer(tokenizer)
         self.tokenizer = tokenizer
         # long multi-turn prompts reuse the previous turn's ids (HfRenderer sets it)
-        self._prefix_token_cache = None
+        self._prefix_token_cache: PrefixTokenCache | None = None
 
         # Background multimodal warmup task (a future returned by
         # _mm_executor) so it overlaps engine-core initialization while

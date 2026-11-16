@@ -15,18 +15,19 @@ Measured on 600 InferenceX AgentX requests (MiniMax-M3.1, prompts p50 479K
 characters / 157K tokens): encode p50 152 -> 9 ms, p90 525 -> 103 ms, ids equal on
 every request; 98% of the characters are reused at the median.
 
-Used only when every added token matches the raw text (no ``lstrip`` / ``rstrip``
-/ ``single_word`` / ``normalized``), for prompts of at least ``MIN_CHARS`` encoded
-without special tokens and without offsets. The first ``VERIFY_FIRST`` prompts it
+Used only when every added token matches the raw text (no `lstrip` / `rstrip`
+/ `single_word` / `normalized`), for prompts of at least `MIN_CHARS` encoded
+without special tokens and without offsets. The first `VERIFY_FIRST` prompts it
 serves are also encoded whole and compared; a mismatch turns it off for the
 process.
 """
 
 import array
 import hashlib
-import re
 import threading
 from collections import OrderedDict
+
+import regex as re
 
 from vllm.logger import init_logger
 
@@ -83,7 +84,7 @@ class PrefixTokenCache:
         return self.enabled and len(text) >= MIN_CHARS
 
     def encode(self, text: str) -> list[int]:
-        """The ids of ``text`` encoded without special tokens."""
+        """The ids of `text` encoded without special tokens."""
         cuts = [m.end() for m in self._pattern.finditer(text)]
         h = hashlib.blake2b(digest_size=16)
         digests, prev = [], 0

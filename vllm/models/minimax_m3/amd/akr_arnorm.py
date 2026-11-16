@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The MiniMax-M3.1 decoder-layer norms on amd_kernels: the qkv input norm (``gemm``
-route) and the TP4 all-reduce + add + Gemma RMSNorm at both sites (``norm`` route)."""
+"""The MiniMax-M3.1 decoder-layer norms on amd_kernels: the qkv input norm (`gemm`
+route) and the TP4 all-reduce + add + Gemma RMSNorm at both sites (`norm` route)."""
 
 import contextlib
 import dataclasses
@@ -23,8 +23,8 @@ _comms: Any = None  # amd_kernels DecoderArNorm, set by init()
 
 @dataclasses.dataclass
 class DeferredFfn:
-    """A layer's FFN TP partial (amd_kernels' ``FfnPartial``) for the next norm;
-    ``taps`` (the DSpark drafter's aux hidden states) gets the residual it makes."""
+    """A layer's FFN TP partial (amd_kernels' `FfnPartial`) for the next norm;
+    `taps` (the DSpark drafter's aux hidden states) gets the residual it makes."""
 
     ffn: Any
     taps: list | None = None
@@ -51,7 +51,7 @@ def unsupported_reason(vllm_config) -> str | None:
 
 def init(model: torch.nn.Module) -> None:
     """Build and warm up the communicators (a TP collective) once the weights are
-    processed, and enter their ``capture()`` around every TP graph capture."""
+    processed, and enter their `capture()` around every TP graph capture."""
     global _comms
     L = _lib()
     layers = model.layers[model.start_layer : model.end_layer]
@@ -112,8 +112,8 @@ def _active() -> bool:
 
 def layer_tail(layer: torch.nn.Module, hidden_states, residual):
     """all-reduce(o_proj partial) + residual -> post-attention norm -> the FFN of
-    ``layer`` (a ``MiniMaxM3DecoderLayer``), whose TP partial the next norm reduces
-    (a ``DeferredFfn``); None outside the kernels' rows and DBO microbatches."""
+    `layer` (a `MiniMaxM3DecoderLayer`), whose TP partial the next norm reduces
+    (a `DeferredFfn`); None outside the kernels' rows and DBO microbatches."""
     if not _active():
         return None
     norm = layer.post_attention_layernorm
@@ -134,8 +134,8 @@ def layer_tail(layer: torch.nn.Module, hidden_states, residual):
 
 
 def deferred_norm(deferred: DeferredFfn, residual, norm, gemm=None):
-    """The previous FFN's all-reduce + residual -> ``norm``, one launch: (codes for
-    ``gemm``, or bf16 without one, residual)."""
+    """The previous FFN's all-reduce + residual -> `norm`, one launch: (codes for
+    `gemm`, or bf16 without one, residual)."""
     out, residual = _comms.pre_attention(
         deferred.ffn,
         residual,
@@ -152,7 +152,7 @@ def deferred_norm(deferred: DeferredFfn, residual, norm, gemm=None):
 
 def input_norm(x, residual, norm, qkv_proj):
     """The input norm of a layer whose qkv runs amd_kernels gemm, writing that GEMM's
-    codes; ``x`` is the previous FFN's output or its ``DeferredFfn``."""
+    codes; `x` is the previous FFN's output or its `DeferredFfn`."""
     if isinstance(x, DeferredFfn):
         return deferred_norm(x, residual, norm, qkv_proj)
     from amd_kernels.norm.gemma_add_rmsnorm_h6144.add_rmsnorm import (

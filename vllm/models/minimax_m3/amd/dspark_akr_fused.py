@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The rest of the amd_kernels ``draft`` route's DSpark forward at TP4 on the library
-block ``amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4``: the input fc split by N
+"""The rest of the amd_kernels `draft` route's DSpark forward at TP4 on the library
+block `amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4`: the input fc split by N
 (eager), the layer stack around the draft attention and the context K/V chain."""
 
 import time
@@ -64,7 +64,7 @@ class DraftFused:
     def fc_into(
         self, taps: list[torch.Tensor], num_tokens: int, out: torch.Tensor
     ) -> None:
-        """The speculator's ``akr_fc_into`` hook: out[:num_tokens] =
+        """The speculator's `akr_fc_into` hook: out[:num_tokens] =
         fc(cat(taps)[:num_tokens]), the 5 taps read in place (eager, every rank)."""
         self.blk.fc(taps, num_tokens, out)
 
@@ -97,7 +97,7 @@ class DraftFused:
         positions: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> bool:
-        """``precompute_and_store_context_kv`` on the library's norm + GEMM + insert
+        """`precompute_and_store_context_kv` on the library's norm + GEMM + insert
         chain; False where the stock path runs."""
         from amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4 import (
             context_kv_blocker,

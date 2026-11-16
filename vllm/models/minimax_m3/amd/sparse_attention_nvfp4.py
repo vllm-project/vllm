@@ -120,7 +120,7 @@ class MiniMaxM3SparseRocmNvfp4Impl(MiniMaxM3SparseImpl):
         output: torch.Tensor,
         quant_out: tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> torch.Tensor:
-        """``quant_out`` (``akr_attn.oproj_quant``): the decode's MXFP8 output."""
+        """`quant_out` (`akr_attn.oproj_quant`): the decode's MXFP8 output."""
         from vllm.models.minimax_m3.amd.ops.nvfp4_prefill.host import (
             minimax_m3_nvfp4_sparse_prefill,
         )

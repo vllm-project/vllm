@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The attention side of the MiniMax-M3.1 NVFP4 sparse layers on amd_kernels: the
-``qkv`` route (QKV GEMM + norms + RoPE + NVFP4 inserts), the ``attention`` route
+`qkv` route (QKV GEMM + norms + RoPE + NVFP4 inserts), the `attention` route
 (sparse decode / prefill; pure decode steps write o_proj's MXFP8 input) and the
-``indexer`` route (the decode top-16, run inside the same layer's sparse decode, and
+`indexer` route (the decode top-16, run inside the same layer's sparse decode, and
 the prefill top-16). The library owns the kernels, their dtypes and warm-up; this
 module passes tensors."""
 
@@ -110,7 +110,7 @@ def qkv_norm_rope_nvfp4_insert(
 
 
 def oproj_input(quant, rows: int, k: int):
-    """``oproj_quant``'s buffers, written by the attention, as o_proj's input."""
+    """`oproj_quant`'s buffers, written by the attention, as o_proj's input."""
     codes, scales, tile = quant
     data = codes.view(torch.float8_e4m3fn)
     if not tile:
@@ -163,7 +163,7 @@ def index_decode(
     init_blocks: int,
     local_blocks: int,
 ) -> None:
-    """Record the decode rows' top-16 for the same layer's ``decode``."""
+    """Record the decode rows' top-16 for the same layer's `decode`."""
     assert getattr(_pending, "rec", None) is None, "unconsumed index record"
     index_args = (iq, index_cache, d.block_table, d.seq_lens, init_blocks, local_blocks)
     _pending.rec = (indexer, index_args, d.max_seq_len)
@@ -254,7 +254,7 @@ def decode(
 def init_and_warm_up(
     vllm_config, num_heads: int, num_kv_heads: int, num_index_heads: int
 ) -> None:
-    """At model build: the decode indexer (with ``indexer_decode_cp`` a TP
+    """At model build: the decode indexer (with `indexer_decode_cp` a TP
     collective, every rank in order) and every variant the switched paths launch."""
     global _IDX
     if not any(akr_config.on(r) for r in ("qkv", "attention", "indexer")):

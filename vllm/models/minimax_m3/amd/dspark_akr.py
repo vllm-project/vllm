@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels ``draft`` route (gfx950, TP4, the draft not torch.compiled): the
+"""The amd_kernels `draft` route (gfx950, TP4, the draft not torch.compiled): the
 MiniMax-M3.1 DSpark draft's attention, context K/V, MXFP8 linears and shared lm_head;
-``dspark_akr_fused`` runs the rest of its forward, ``sample_akr`` its sampling."""
+`dspark_akr_fused` runs the rest of its forward, `sample_akr` its sampling."""
 
 import time
 from typing import Any
@@ -23,7 +23,7 @@ _V = 200064
 
 
 def attach(model: Any) -> None:
-    """From ``MiniMaxM3DSparkForCausalLM.__init__``, before the weights load."""
+    """From `MiniMaxM3DSparkForCausalLM.__init__`, before the weights load."""
     inner = model.model
     if not akr_config.on("draft"):
         return
@@ -43,7 +43,7 @@ def attach(model: Any) -> None:
 
 
 def setup(spec, model: torch.nn.Module, target_model: torch.nn.Module) -> None:
-    """The speculator's ``akr_setup`` hook (every TP rank, after ``load_model``, before
+    """The speculator's `akr_setup` hook (every TP rank, after `load_model`, before
     any capture): the shared lm_head's layout, the fused forward, the sampling."""
     from vllm.models.minimax_m3.amd import dspark_akr_fused, sample_akr
 
@@ -60,7 +60,7 @@ def setup(spec, model: torch.nn.Module, target_model: torch.nn.Module) -> None:
 # ---------------------------------------------------------------- the query block
 def _query_ok(attn: torch.nn.Module) -> bool:
     """The library's layer shape and RoPE, an fp8 KV cache under TRITON_ATTN (the
-    layout ``[pages, KV heads, page, 256]``)."""
+    layout `[pages, KV heads, page, 256]`)."""
     from amd_kernels.attention.norm_rope_fp8_insert_d128_rot64 import rope_blocker
     from amd_kernels.attention.swa_decode_fp8kv_gqa16_d128 import layer_blocker
 
@@ -89,7 +89,7 @@ def _query_ok(attn: torch.nn.Module) -> bool:
 def attention_forward(
     attn: torch.nn.Module, qkv: torch.Tensor, positions: torch.Tensor
 ) -> torch.Tensor:
-    """``MiniMaxM3DSparkAttention.forward`` after its qkv_proj: q/k-norm + RoPE + fp8
+    """`MiniMaxM3DSparkAttention.forward` after its qkv_proj: q/k-norm + RoPE + fp8
     K/V insert, the sliding-window attention over the fp8 cache, o_proj."""
     from amd_kernels.attention.norm_rope_fp8_insert_d128_rot64.qkv_norm_rope_insert import (  # noqa: E501
         qkv_norm_rope_insert,
@@ -121,7 +121,7 @@ def attention_forward(
 
 def _attention(attn, q: torch.Tensor, attn_metadata, layer, kv_cache):
     """o_proj's input: the library's MXFP8 codes where the fused draft marked the layer
-    (not in a breakable PIECEWISE capture), else bf16 ``[tokens, heads * 128]``. Rows of
+    (not in a breakable PIECEWISE capture), else bf16 `[tokens, heads * 128]`. Rows of
     no request are not written; the profile run (no metadata) gives zeros; metadata past
     the kernel's case goes to the layer's TritonAttentionImpl."""
     from amd_kernels.attention.swa_decode_fp8kv_gqa16_d128 import MAX_QL
@@ -172,8 +172,8 @@ def plain_processor(lp) -> bool:
 
 
 class AkrShuffledLmHeadMethod(UnquantizedEmbeddingMethod):
-    """The lm_head's GEMM on amd_kernels' ``bf16_gemm_n50016_k6144`` over the shard in
-    ``shuffle_weight``'s layout (any row count)."""
+    """The lm_head's GEMM on amd_kernels' `bf16_gemm_n50016_k6144` over the shard in
+    `shuffle_weight`'s layout (any row count)."""
 
     def apply(self, layer, x, bias=None):
         from amd_kernels.gemm.bf16_n50016_k6144 import bf16_gemm_n50016_k6144

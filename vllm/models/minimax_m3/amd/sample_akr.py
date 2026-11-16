@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels ``sampling`` route (gfx950, TP4, with
-``--enable-batch-sharded-sampling``): the target's logits exchange, the sampler-output
+"""The amd_kernels `sampling` route (gfx950, TP4, with
+`--enable-batch-sharded-sampling`): the target's logits exchange, the sampler-output
 gather and the DSpark draft's Markov steps on
-``amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4``. The
-draft-logits cache keeps one row per request slot (``SlotDraftLogitsCache``): upstream's
+`amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4`. The
+draft-logits cache keeps one row per request slot (`SlotDraftLogitsCache`): upstream's
 compact sharded cache hands a skipped request's row to another request. Sampling is
 upstream's (same draws: seed, position, vocab id; bf16 bits exchanged)."""
 
@@ -47,8 +47,8 @@ def _blocker(vllm_config) -> str | None:
 
 
 def configure(vllm_config, model: torch.nn.Module) -> None:
-    """From the target's ``__init__``: the model runner's batch-sharded hooks
-    (``compute_logits_local``, ``gather_sampler_output_owned``)."""
+    """From the target's `__init__`: the model runner's batch-sharded hooks
+    (`compute_logits_local`, `gather_sampler_output_owned`)."""
     if not akr_config.on("sampling"):
         return
     if "blocker" not in _STATE:
@@ -72,7 +72,7 @@ def configure(vllm_config, model: torch.nn.Module) -> None:
 
 # ---- the library block
 def _sampler(device: torch.device):
-    """The library's ``BatchShardedSampling``, built (and warmed up) collectively at
+    """The library's `BatchShardedSampling`, built (and warmed up) collectively at
     first use: the draft's set-up or the target's first batch-sharded step."""
     s = _STATE.get("sampler")
     if s is None:
@@ -96,7 +96,7 @@ def _sampler(device: torch.device):
 # ---- target: logits of the owned rows
 def _target_logits_owned(lm, hidden_states, sorted_logits_indices, md) -> torch.Tensor:
     """[owned logits rows, 200064] bf16 on this rank, bit for bit what upstream's
-    ``compute_logits_local`` + ``all_to_all_vocab_shards`` give."""
+    `compute_logits_local` + `all_to_all_vocab_shards` give."""
     return _sampler(hidden_states.device).target_logits(
         hidden_states,
         lm.lm_head.weight,
@@ -116,7 +116,7 @@ def gather_sampler_output(
     gather_num_nans: bool = False,
     logprobs_dims: tuple[int, int] | None = None,
 ):
-    """``batch_shard.gather_sampler_output`` with the token / count / NaN part in one
+    """`batch_shard.gather_sampler_output` with the token / count / NaN part in one
     library launch; the logprobs keep upstream's gathers. Same tensors, same values."""
     from vllm.v1.worker.gpu.sample import batch_shard
     from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -157,7 +157,7 @@ def _slot_cache(compact, dtype: torch.dtype, fill: float):
 
     class SlotDraftLogitsCache(DraftLogitsCache):
         """Batch-sharded, with the replicated cache's rows: row = request slot (identity
-        ``row_mapping``), written by the rank that drafts and then verifies the request
+        `row_mapping`), written by the rank that drafts and then verifies the request
         (batch position % 4); a request the scheduler skips keeps its row."""
 
         def __init__(self) -> None:  # noqa: D107
@@ -241,7 +241,7 @@ def setup(spec, model: torch.nn.Module, target_model: torch.nn.Module) -> None:
 
 
 def _markov_draft(model, spec, num_reqs: int, head_hidden: torch.Tensor) -> None:
-    """The speculator's ``sample_sequential_sharded`` hook: its Markov loop on the
+    """The speculator's `sample_sequential_sharded` hook: its Markov loop on the
     library chain (same draws, ids and cache rows)."""
     _STATE["sampler"].markov_draft(
         num_reqs,

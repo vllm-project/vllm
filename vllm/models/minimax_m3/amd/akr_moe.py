@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels ``moe`` route: the whole MiniMax-M3.1 MoE block on
-``amd_kernels.moe.mxfp4_h6144_i768_e128_top4``, then the stock TP all-reduce."""
+"""The amd_kernels `moe` route: the whole MiniMax-M3.1 MoE block on
+`amd_kernels.moe.mxfp4_h6144_i768_e128_top4`, then the stock TP all-reduce."""
 
 import torch
 
@@ -19,8 +19,8 @@ def _pkg():
 
 
 def setup(moe: torch.nn.Module, config, prefix: str) -> bool:
-    """Whether ``moe`` (a ``MiniMaxM3MoE``) runs on the package; if so its weights
-    keep the checkpoint layout until ``build_weights``."""
+    """Whether `moe` (a `MiniMaxM3MoE`) runs on the package; if so its weights
+    keep the checkpoint layout until `build_weights`."""
     if not akr_config.on("moe"):
         return False
     reason = unsupported_reason(moe, config)
@@ -72,7 +72,7 @@ def unsupported_reason(moe: torch.nn.Module, config) -> str | None:
 
 
 def build_weights(moe: torch.nn.Module):
-    """The package's ``MoeWeights``; the checkpoint-layout parameters are released."""
+    """The package's `MoeWeights`; the checkpoint-layout parameters are released."""
     P = _pkg()
     # Inside DBO microbatches the shared expert stays on the caller's stream.
     from vllm.v1.worker.ubatching import dbo_enabled

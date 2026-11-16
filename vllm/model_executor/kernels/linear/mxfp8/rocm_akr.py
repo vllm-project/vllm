@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3.1's dense MXFP8 linears on ``amd_kernels.gemm.mxfp8_common`` (the
-``gemm`` route): the layers the model marks, preshuffled and compiled at load."""
+"""MiniMax-M3.1's dense MXFP8 linears on `amd_kernels.gemm.mxfp8_common` (the
+`gemm` route): the layers the model marks, preshuffled and compiled at load."""
 
 import torch
 
@@ -30,14 +30,14 @@ def is_akr_layer(layer: torch.nn.Module) -> bool:
 
 def akr_codes(q: torch.Tensor, s: torch.Tensor, rows: int, k: int):
     """amd_kernels' MXFP8 codes of a [rows, k] bf16 activation, in the layout its
-    consumer GEMM reads (only ``AkrMxfp8LinearKernel`` reads them)."""
+    consumer GEMM reads (only `AkrMxfp8LinearKernel` reads them)."""
     return QuantizedActivation(
         q, s, torch.bfloat16, torch.Size((rows, k)), kMxfp8Dynamic
     )
 
 
 def mark_akr_linear(layer: torch.nn.Module | None) -> bool:
-    """Switch ``layer`` (one of the M3 model's own linears, before the weights load)
+    """Switch `layer` (one of the M3 model's own linears, before the weights load)
     if its kernel is this class; returns whether it switched."""
     if layer is None:
         return False

@@ -33,10 +33,10 @@ AmdKernelsRoute = Literal[
 
 @config
 class AmdKernelsConfig:
-    """MiniMax-M3.1 layers on ``amd_kernels`` (ROCm gfx950, TP4)."""
+    """MiniMax-M3.1 layers on `amd_kernels` (ROCm gfx950, TP4)."""
 
     enabled: bool = True
-    """Use ``amd_kernels`` where it is installed and the shapes fit."""
+    """Use `amd_kernels` where it is installed and the shapes fit."""
 
     disabled_routes: list[AmdKernelsRoute] = Field(default_factory=list)
     """Routes that keep the stock kernels."""
@@ -346,7 +346,7 @@ class KernelConfig:
     deployment that cannot run it is refused at startup."""
 
     amd_kernels: AmdKernelsConfig = Field(default_factory=AmdKernelsConfig)
-    """MiniMax-M3.1 on ``amd_kernels``; see ``AmdKernelsConfig``."""
+    """MiniMax-M3.1 on `amd_kernels`; see `AmdKernelsConfig`."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

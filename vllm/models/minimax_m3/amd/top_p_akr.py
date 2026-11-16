@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels ``top_p`` route: the sampler's split top-p chain (<= 64 rows, top-p
+"""The amd_kernels `top_p` route: the sampler's split top-p chain (<= 64 rows, top-p
 without top-k: seven Triton launches) as one launch of
-``amd_kernels.sampling.top_p_mask_f32_v200064``, bit for bit (same masked logits)."""
+`amd_kernels.sampling.top_p_mask_f32_v200064`, bit for bit (same masked logits)."""
 
 import torch
 
@@ -15,7 +15,7 @@ _STATE: dict[str, str | None] = {}
 
 
 def configure(vllm_config) -> None:
-    """From the target's ``__init__``: check, warm up and set the sampler's hook."""
+    """From the target's `__init__`: check, warm up and set the sampler's hook."""
     if "blocker" in _STATE or not akr_config.on("top_p"):
         return
     from amd_kernels.sampling.top_p_mask_f32_v200064 import (
