@@ -262,7 +262,7 @@ def packed_nccl_broadcast_producer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
-        layout: ``chunk_layout`` of what ``iterator`` yields, for a caller that
+        layout: `chunk_layout` of what `iterator` yields, for a caller that
             sends the same parameters again: its buffers and views are built
             once, so a chunk then costs no per-tensor Python.
 
@@ -342,7 +342,7 @@ _SLOTS: dict[tuple[int, int], list[torch.Tensor]] = {}
 
 
 def slot_buffers(num_buffers: int, nbytes: int) -> list[torch.Tensor]:
-    """This device's reused packed buffers, at least ``nbytes`` each, shared by
+    """This device's reused packed buffers, at least `nbytes` each, shared by
     every transfer on the device. They grow in place, so views of them stay
     valid."""
     key = (torch.accelerator.current_device_index(), num_buffers)
