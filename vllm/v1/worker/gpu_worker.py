@@ -1127,6 +1127,12 @@ class Worker(WorkerBase):
             # nearly all the memory warmup may commit: release them, so the
             # sizing steps run beside only the blocks they address.
             kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
+            if current_platform.is_rocm():
+                # AITER's gfx950 unified attention loads block-table entries
+                # past seq_len, which now may name unmapped blocks.
+                # TODO: drop once https://github.com/ROCm/aiter/issues/8033
+                # is fixed.
+                self.model_runner.block_tables.clear_input_block_tables()
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )

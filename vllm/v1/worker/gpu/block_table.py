@@ -239,6 +239,13 @@ class BlockTables:
         self._num_dirty_rows = num_reqs
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
 
+    def clear_input_block_tables(self) -> None:
+        # gather_block_tables keeps stale ids past each request's last block;
+        # null them once the KV blocks they name are released.
+        for block_table in self.input_block_tables:
+            block_table.zero_()
+        self._num_dirty_rows = 0
+
     def compute_slot_mappings(
         self,
         idx_mapping: torch.Tensor,
