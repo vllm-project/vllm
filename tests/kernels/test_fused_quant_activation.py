@@ -12,7 +12,11 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.activation import (
+    GELU,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -166,6 +170,42 @@ def test_relu2_nvfp4_matches_unfused(native_vllm_config, shape, scale_value):
     )
     actual_scale[:m, : k // 16] = 0
     assert not torch.count_nonzero(actual_scale)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ),
+    reason="GELU NVFP4 fusion is validated on SM12x",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(1, 16), (17, 80), (129, 1344), (256, 4096)])
+@pytest.mark.parametrize("scale_value", [0.0009765625, 17.125])
+@torch.inference_mode()
+def test_gelu_nvfp4_matches_unfused(native_vllm_config, dtype, shape, scale_value):
+    """Match unfused GELU + NVFP4 bitwise and zero every padded scale."""
+    from tests.kernels.quantization.test_nvfp4_quant import recover_swizzled_scales
+
+    x = torch.randn(shape, dtype=dtype, device="cuda")
+    # In all-negative rows GELU is negative, so the block scales come from |x|.
+    x[::2] = -x[::2].abs()
+    scale = torch.tensor(scale_value, dtype=torch.float32, device=x.device)
+    linear = MockLinearNvfp4(scale)
+    act = GELU()
+    compiled_gelu = torch.compile(act.forward_native, fullgraph=True)
+    expected = ops.scaled_fp4_quant(compiled_gelu(x), scale)
+    actual = maybe_fused_act_quant(act, x, linear)
+    assert isinstance(actual, QuantizedActivation)
+    assert torch.equal(actual.data, expected[0])
+    m, k = shape
+    expected_scale = recover_swizzled_scales(expected[1], m, k)
+    actual_scale = recover_swizzled_scales(actual.scale, m, k, include_padding=True)
+    torch.testing.assert_close(
+        actual_scale[:m, : k // 16], expected_scale, rtol=0, atol=0
+    )
+    actual_scale[:m, : k // 16] = 0
+    assert not torch.count_nonzero(actual_scale)
+    opcheck(torch.ops.vllm.act_nvfp4_quant, (x, scale, True))
 
 
 @pytest.mark.skipif(
@@ -398,12 +438,10 @@ def test_relu2_nvfp4_oversized_dispatch_falls_back(
     """Reject unsafe index products with fake inputs, without huge allocations."""
     from torch._subclasses.fake_tensor import FakeTensorMode
 
+    from vllm.model_executor.layers.fusion.act_nvfp4_quant import _act_nvfp4_max_rows
     from vllm.model_executor.layers.fusion.fused_act_quant import (
         _FUSED_ACT_QUANT,
         _relu_squared_nvfp4_quant_supported,
-    )
-    from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
-        _relu_squared_nvfp4_max_rows,
     )
 
     def fail_fused(*args, **kwargs):
@@ -415,7 +453,7 @@ def test_relu2_nvfp4_oversized_dispatch_falls_back(
     act = ReLUSquaredActivation(compile_native=False)
     with FakeTensorMode():
         x = torch.empty(
-            (_relu_squared_nvfp4_max_rows(width) + 1, width),
+            (_act_nvfp4_max_rows(width) + 1, width),
             dtype=torch.bfloat16,
             device="cuda",
         )
@@ -462,4 +500,4 @@ def test_relu2_nvfp4_single_specialization_per_width(
         assert torch.equal(
             actual.scale.view(torch.uint8), expected[1].view(torch.uint8)
         )
-    opcheck(torch.ops.vllm.relu_squared_nvfp4_quant, (x, linear.input_global_scale_inv))
+    opcheck(torch.ops.vllm.act_nvfp4_quant, (x, linear.input_global_scale_inv, False))
