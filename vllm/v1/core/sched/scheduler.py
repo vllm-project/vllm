@@ -81,7 +81,12 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    KVLoadFailureReport,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -173,6 +178,11 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
+        # Requests whose external transfer evidence failed closed at
+        # least once: the connector is not
+        # re-consulted for them -- the retry is a local
+        # recompute, never an unbounded external re-attempt loop.
+        self._untrusted_external_reqs: set[str] = set()
         self.defer_block_free = False
         self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
@@ -1173,6 +1183,15 @@ class Scheduler(SchedulerInterface):
                             )
                         )
                         if request.skip_reading_external_kv:
+                            ext_tokens, load_kv_async = 0, False
+                        if request.request_id in self._untrusted_external_reqs:
+                            # The request's transfer evidence already
+                            # failed closed once: a
+                            # connector that re-offers the same hit
+                            # would start an unbounded external
+                            # re-attempt loop. The external source is
+                            # untrusted for this request's lifetime:
+                            # the retry is a local recompute.
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -2337,6 +2356,17 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
+        if kv_connector_output and kv_connector_output.load_failure_reports:
+            # Structured load-failure reports: consumed fail-safe. The
+            # reporting channel is transport-only until the repair
+            # policy interprets it; under the existing fail/recompute
+            # policies the affected requests join the same failure
+            # union the flat channels feed.
+            failed_kv_load_req_ids.update(
+                self._handle_load_failure_reports(
+                    kv_connector_output.load_failure_reports
+                )
+            )
         if kv_connector_output and kv_connector_output.failed_recving:
             failed_kv_load_req_ids.update(
                 self._handle_failed_recving(kv_connector_output.failed_recving)
@@ -3210,6 +3240,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
+        self._untrusted_external_reqs.discard(request_id)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -3863,6 +3894,198 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
+
+    def _handle_load_failure_reports(
+        self, reports: list[KVLoadFailureReport]
+    ) -> set[str]:
+        """Consume the step's structured load-failure reports.
+
+        The structured reporting channel is transport-only until the
+        repair policy consumes it: under the default fail/recompute
+        policies a report cannot be interpreted as recovery evidence,
+        so every affected request fails closed to the existing policy's
+        conservative treatment and the engine stays alive. A reported
+        failure degrades the request -- never a silent ignore, and
+        never an engine-wide crash (a nonconforming connector is loud
+        but survivable). Reports for unknown or finished requests are
+        dropped loudly.
+        """
+        reports_by_req: dict[str, list[KVLoadFailureReport]] = {}
+        for report in reports:
+            reports_by_req.setdefault(report.request_id, []).append(report)
+        failed: set[str] = set()
+        for req_id in sorted(reports_by_req):
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                logger.error(
+                    "KV connector reported load_failure_reports for req=%s "
+                    "which is unknown or finished; dropping the reports.",
+                    req_id,
+                )
+                continue
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            policy = (
+                kv_transfer_config.kv_load_failure_policy
+                if kv_transfer_config is not None
+                else None
+            )
+            self._reject_uninterpretable_reports(
+                request,
+                reports_by_req[req_id],
+                "structured transfer evidence under "
+                f"kv_load_failure_policy={policy!r} (the fail/recompute "
+                "policies do not interpret reports; the request fails "
+                "closed to the policy's conservative fallback)",
+                mark_external_untrusted=True,
+            )
+            # An async attempt whose evidence failed closed must leave
+            # WAITING_FOR_REMOTE_KS through the promotion's FAILURE arm
+            # (the flat channels' treatment): that arm frees the claim's
+            # blocks and applies the failed-load zeroing bookkeeping,
+            # where the success arm would publish the untrusted claim.
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                self.failed_recving_kv_req_ids.add(req_id)
+            failed.add(req_id)
+        return failed
+
+    def _invalidate_failed_blocks_for_consumers(
+        self, failed_block_ids: set[int]
+    ) -> None:
+        """A-4: rewind every OTHER request that attached a failed external
+        block. When a claim was already published (or its blocks shared)
+        before the attempt's failure report was judged, the refusal's
+        hash eviction cannot touch blocks other requests still reference
+        (ref_cnt > 1): a consumer that matched the published prefix would
+        keep attending over the corrupt region. This runs the flat
+        channel's consumer-invalidation walk over the same population it
+        scans (async waiting + running requests), rewinding each affected
+        consumer below the first failed block and evicting the failed
+        and downstream blocks so no future request matches them.
+        Unpublished-unshared shapes find no consumers -- a no-op."""
+        if not failed_block_ids:
+            return
+        async_load_reqs = [
+            req
+            for req in self.kv_holding_waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
+        self._update_requests_with_invalid_blocks(
+            async_load_reqs,
+            failed_block_ids,
+            {},
+            evict_blocks=False,
+        )
+        # All running requests are scanned (the walk is idempotent for
+        # the reporting request: its computed tokens were already
+        # rewound to the rollback boundary above, and re-walking the
+        # same failed block lands on the same boundary).
+        sync_reqs = list(self.running)
+        sync_failed, _, sync_evict = self._update_requests_with_invalid_blocks(
+            sync_reqs,
+            failed_block_ids,
+            {},
+            evict_blocks=True,
+        )
+        if sync_evict:
+            self.kv_cache_manager.evict_blocks(sync_evict)
+        if sync_failed:
+            logger.warning(
+                "Rewound %d consumer request(s) over failed external "
+                "blocks %s (late failure evidence after publication)",
+                len(sync_failed),
+                sorted(failed_block_ids),
+            )
+
+    def _reject_uninterpretable_reports(
+        self,
+        request: Request,
+        reports: list[KVLoadFailureReport],
+        reason: str,
+        mark_external_untrusted: bool = False,
+    ) -> None:
+        """Request-scoped fail-closed fallback for uninterpretable report
+        evidence (malformed, divergent across ranks, or arriving under a
+        policy that cannot consume it).
+
+        The reporting channel is transport-only until the repair policy
+        interprets it: without the repair policy's certification
+        evidence no prefix of an external claim whose failure was
+        reported can be trusted, so the request truncates to the
+        full-recompute floor (zero), everything from there to the
+        request's last block is evicted so no future request matches
+        untrusted content, and the ordinary rollback-recompute path owns
+        the request from here. The engine stays alive: broken evidence
+        invalidates the request's external claim, never the request
+        itself and never the engine.
+        """
+        # Flatten across KV cache groups: hybrid layouts reach this path
+        # too (the battery refuses them per request, but the refusal
+        # itself must not crash on the single-group unpack).
+        req_block_ids_groups = self.kv_cache_manager.get_block_ids(request.request_id)
+        req_block_ids = [
+            block_id for group in req_block_ids_groups for block_id in group
+        ]
+        blocks_to_evict = set(req_block_ids)
+        self.kv_cache_manager.evict_blocks(blocks_to_evict)
+        request.num_computed_tokens = 0
+        # The failed blocks may already be attached to OTHER requests
+        # (the claim was published, or the blocks shared, before this
+        # evidence was judged). evict_blocks only clears hash entries; a
+        # consumer's reference keeps the corrupt region matchable and
+        # attended-over. Rewind every consumer below the failed blocks
+        # and evict them -- including the blocks a MALFORMED report
+        # names (bounded to the reporting request's own table, so a
+        # fabricated id cannot rewind an unrelated request). The walk
+        # rides the single-group upstream helper, so hybrid layouts skip
+        # it (the flat channel refuses them outright); their hash entries
+        # were already cleared by the direct eviction above.
+        if len(req_block_ids_groups) != 1:
+            logger.warning(
+                "Consumer rewind skipped for req=%s: hybrid (multi-group) KV "
+                "layouts are outside the reporting channel's single-group "
+                "consumer walk (the flat per-block channel refuses them "
+                "outright); the hash entries were cleared by the eviction "
+                "above, but already-matched consumers are not rewound.",
+                request.request_id,
+            )
+        else:
+            table = set(req_block_ids)
+            failed_block_ids = {
+                block_id
+                for report in reports
+                for block_id in report.failed_block_ids
+                if block_id in table
+            }
+            self._invalidate_failed_blocks_for_consumers(failed_block_ids)
+        # The async schedule-ahead may have left placeholder accounting
+        # for in-flight steps whose outputs are now suppressed.
+        request.num_output_placeholders = 0
+        if mark_external_untrusted:
+            # The transfer-evidence contract failed for this request:
+            # the external source is untrusted for its remaining
+            # lifetime (a re-offered hit would loop the re-attempt
+            # cycle).
+            self._untrusted_external_reqs.add(request.request_id)
+        logger.error(
+            "KV load-failure reports refused: %s for req=%s -- failing "
+            "closed to the recompute fallback (rollback=0, evicted=%d). "
+            "Reports: %s",
+            reason,
+            request.request_id,
+            len(blocks_to_evict),
+            [
+                {
+                    "source_rank": r.source_rank,
+                    "token_span": r.token_span,
+                    "rollback_boundary": r.rollback_boundary,
+                    "failed_block_ids": r.failed_block_ids,
+                    "restored_extent": r.restored_extent,
+                    "healthy_above_span": r.healthy_above_span,
+                    "observed_failed_layers": r.observed_failed_layers,
+                }
+                for r in reports
+            ],
+        )
 
     def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
         """Fail closed for layouts whose block IDs are not globally unique."""
