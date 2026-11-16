@@ -486,10 +486,6 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="--tokens-only is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
 async def test_stop_strings_rejected_when_tokens_only(client):
     """--tokens-only forces detokenize=False after request validation, so
@@ -868,10 +864,6 @@ async def test_derender_mode_with_parser_matches_chat_completions(client, messag
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="--tokens-only is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
 async def test_text_mode_rejected_when_tokens_only(client):
     """Without a tokenizer the detokenizer returns "", so the request must
@@ -887,10 +879,6 @@ async def test_text_mode_rejected_when_tokens_only(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /inference/v1/abort_requests",
-)
 @pytest.mark.parametrize("output_mode", ["tokens", "text"])
 async def test_stream_delivers_abort_finish_chunk(
     client, tokenizer, messages, output_mode
@@ -934,10 +922,6 @@ async def test_stream_delivers_abort_finish_chunk(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /inference/v1/abort_requests",
-)
 async def test_abort_requests_is_served_without_tokens_only(client):
     resp = await client.post(
         ABORT_ENDPOINT, json={"request_ids": ["generate-tokens-unknown"]}
