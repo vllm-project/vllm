@@ -132,7 +132,7 @@ variants:
       amd:
         extra_args:
           # Routed experts FP8 → MXFP4 re-quantization with `--quantization-config.moe mxfp4`.
-          # `--quantization-config.moe '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'`
+          # `--quantization-config.moe='{"weight":"mxfp4","activation":"mxfp8"}'`
           # uses MXFP8 activation, `--quantization-config.moe mxfp4` measured level with it at TP4.
           - '--quantization-config.moe={"weight":"mxfp4","activation":"mxfp8"}'
       # The ROCm image carries ML4 kernels and AITER tables a wheel doesn't.

@@ -813,6 +813,29 @@ def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
     assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 
 
+@pytest.mark.parametrize(
+    "backend, expected_bound",
+    [
+        pytest.param(Mxfp4MoeBackend.AITER_MXFP4_BF16, "0", id="aiter_mxfp4_bf16"),
+        pytest.param(Mxfp4MoeBackend.TRITON, "256", id="other_backend"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v4_selection_sets_the_aiter_activation_bound(
+    backend, expected_bound, monkeypatch
+) -> None:
+    """The DeepSeek-V4 selector does not go through `select_mxfp4_moe_backend`: it
+    must set the AITER_MXFP4_BF16 activation bound itself."""
+    monkeypatch.setattr(
+        mxfp4_oracle,
+        "_select_deepseek_v4_mxfp4_moe_backend",
+        lambda config: (backend, None),
+    )
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+    mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(None)
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 @pytest.mark.parametrize("gfx950", [True, False])
 @pytest.mark.parametrize("strict", ["0", "1"])

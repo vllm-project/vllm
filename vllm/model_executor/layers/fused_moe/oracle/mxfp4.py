@@ -844,6 +844,16 @@ def _select_mxfp4_moe_backend(
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+    """Select the MXFP4 MoE backend (see `_select_deepseek_v4_mxfp4_moe_backend`)."""
+    backend, experts_cls = _select_deepseek_v4_mxfp4_moe_backend(config)
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        _set_aiter_bf16_fp8_moe_bound()
+    return backend, experts_cls
+
+
+def _select_deepseek_v4_mxfp4_moe_backend(
+    config: FusedMoEConfig,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """

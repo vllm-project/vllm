@@ -47,6 +47,12 @@ def fp8_moe_requant_args() -> QuantizationConfigArgs | None:
     else:
         config = {"moe": {"weight": "mxfp4", "activation": None}}
         spec = QuantSpec(weight=kMxfp4Static, activation=None)
+        logger.warning_once(
+            "VLLM_FP8_MOE_REQUANT_ACT=a16w4 no longer selects the "
+            "aiter_triton_mxfp4_bf16 backend: `activation: null` runs bf16 "
+            "activations on the backend picked by the oracle. Pass "
+            "--moe-backend aiter_triton_mxfp4_bf16 to keep it."
+        )
     _warn("VLLM_FP8_MOE_REQUANT and VLLM_FP8_MOE_REQUANT_ACT", config)
     return QuantizationConfigArgs(moe=spec)
 

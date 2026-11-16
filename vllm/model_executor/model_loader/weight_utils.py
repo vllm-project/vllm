@@ -254,7 +254,7 @@ def get_quant_config(
     def maybe_compose_online_quantization(
         checkpoint_config: QuantizationConfig,
     ) -> QuantizationConfig:
-        if online_args is not None and envs.is_set("VLLM_FP8_MOE_REQUANT"):
+        if online_args is not None and envs.VLLM_FP8_MOE_REQUANT == "mxfp4":
             raise ValueError(
                 "VLLM_FP8_MOE_REQUANT (deprecated) and --quantization-config "
                 "cannot be used together. Remove VLLM_FP8_MOE_REQUANT."
@@ -271,10 +271,6 @@ def get_quant_config(
         checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
             online_args
         )
-        return checkpoint_config
-        assert isinstance(args, QuantizationConfigArgs)
-
-        checkpoint_config.online_quantization_config = OnlineQuantizationConfig(args)
         return checkpoint_config
 
     def make_checkpoint_config(config: dict[str, Any]) -> QuantizationConfig:
