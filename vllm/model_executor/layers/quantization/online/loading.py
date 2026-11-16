@@ -121,7 +121,10 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     from vllm.model_executor.layers.quantization.utils import quant_utils as qu
     from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
-    is_moe, moe = isinstance(layer, RoutedExperts), getattr(layer, "moe_config", None)
+    is_moe = isinstance(layer, RoutedExperts)
+    moe: Any = getattr(layer, "moe_config", None)
+    method: Any  # the checkpoint method of the matching pre-quantized scheme
+    quantize: Callable[..., Any]
     if spec.activation != default or spec.hadamard_size is not None:
         return None
     if not (is_moe or isinstance(layer, LinearBase)):
