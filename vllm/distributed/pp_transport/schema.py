@@ -129,10 +129,11 @@ class PPTransportSchema:
                 continue
 
             source = received[key]
-            if spec.sequence_parallel and source.shape[0] != num_rows:
+            sharded = spec.sequence_parallel and self.tp_size > 1
+            if sharded and source.shape[0] != num_rows:
                 raise ValueError(f"SP PP stages must use matching padding for {key}")
             copy_tokens = num_tokens
-            if not spec.sequence_parallel and num_received_tokens is not None:
+            if not sharded and num_received_tokens is not None:
                 copy_tokens = num_received_tokens
             copy_rows = spec.num_rows(copy_tokens, self.tp_size)
             source = source[:copy_rows]

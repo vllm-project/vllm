@@ -670,15 +670,7 @@ class Worker(WorkerBase):
         if persistent is not None:
             self._pp_recv_specs = row_specs(persistent.tensors)
 
-        pp_schema = getattr(self.model_runner, "pp_transport_schema", None)
-        sharded_pp = pp_schema is not None and pp_schema.has_sequence_parallel_tensors
-        if sharded_pp and envs.VLLM_PP_TRANSPORT == "copy_engine":
-            raise NotImplementedError("SP-sharded PP tensors require NCCL transport")
-        if (
-            envs.VLLM_PP_TRANSPORT != "nccl"
-            and self._pp_transport is None
-            and not sharded_pp
-        ):
+        if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
             # After init_device, so memory profiling counts its buffers.
             from vllm.distributed.pp_transport import create_pp_transport
 
