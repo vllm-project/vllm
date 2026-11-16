@@ -41,8 +41,15 @@
 #include <cuda_bf16.h>
 
 #include <cstdlib>
+#include <type_traits>
 
 #include "qdq_mxfp4_rdna4.cuh"
+
+// Defined in mxfp4_swmmac_rdna4.cu (same op; SWMMAC path for M <= 8).
+void mxfp4_swmmac_skinny_launch(const uint8_t* aq, const float* ascale,
+                                const uint32_t* b_q, const uint8_t* b_scales,
+                                void* c, bool out_bf16, int M, int N, int K,
+                                void* stream);
 
 #if defined(__gfx1200__) || defined(__gfx1201__)
   #define __HIP__MXFP4_RDNA4__
@@ -483,6 +490,16 @@ inline bool use_lds_kernel(int M) {
   return ov < 0 ? (M <= 32) : (ov != 0);
 }
 
+// VLLM_MXFP4_RDNA4_SKINNY=0 keeps the fp32-activation GEMV for M<=8; unset/1
+// uses the W4A8 SWMMAC kernel in mxfp4_swmmac_rdna4.cu.
+inline bool use_swmmac_skinny() {
+  static const bool v = [] {
+    const char* e = std::getenv("VLLM_MXFP4_RDNA4_SKINNY");
+    return !e || atoi(e) != 0;
+  }();
+  return v;
+}
+
 inline int choose_ksplit(int M, int N, int K, int WM, int WN) {
   (void)M;
   (void)N;
@@ -643,7 +660,13 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
   const auto* bs = reinterpret_cast<const uint8_t*>(b_scales.data_ptr());
 
 #define DISPATCH(T, TT)                                                     \
-  if (M <= kGemvMaxM) {                                                     \
+  if (M <= kGemvMaxM && use_swmmac_skinny()) {                              \
+    mxfp4_swmmac_skinny_launch(                                             \
+        reinterpret_cast<const uint8_t*>(a_fp8.data_ptr()),                 \
+        reinterpret_cast<const float*>(a_scale.data_ptr()), bq, bs,         \
+        c.data_ptr(), std::is_same<TT, __hip_bfloat16>::value, M, N, K,     \
+        reinterpret_cast<void*>(static_cast<cudaStream_t>(stream)));        \
+  } else if (M <= kGemvMaxM) {                                              \
     dim3 blk(32, 4);                                                        \
     dim3 grd((N + 3) / 4);                                                  \
     gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(               \

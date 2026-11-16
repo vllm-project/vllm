@@ -38,6 +38,11 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                                torch::Tensor b_scales_e8m0);
 
+void mxfp4_swmmac_skinny_launch(const uint8_t* aq, const float* ascale,
+                                const uint32_t* b_q, const uint8_t* b_scales,
+                                void* c, bool out_bf16, int M, int N, int K,
+                                void* stream);
+
 torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
                                torch::Tensor const& a_fp8,
                                torch::Tensor const& a_scale,

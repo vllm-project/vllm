@@ -1786,7 +1786,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_ARCHES MATCHES "gfx120[01]")
     set(VLLM_ROCM_HAS_GFX12X ON)
     list(APPEND VLLM_ROCM_EXT_SRC
-      "csrc/rocm/mxfp4_gemm_rdna4.cu")
+      "csrc/rocm/mxfp4_gemm_rdna4.cu"
+      "csrc/rocm/mxfp4_swmmac_rdna4.cu")
   endif()
 
   set(VLLM_ROCM_HAS_GFX115X OFF)
