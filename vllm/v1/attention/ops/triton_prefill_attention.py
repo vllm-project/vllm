@@ -361,6 +361,9 @@ def context_attention_fwd(
     BLOCK_N = min(BLOCK, 32) if _prefer_narrow_kv_tile() else BLOCK
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
+    if current_platform.is_xpu():
+        BLOCK_DMODEL = max(16, BLOCK_DMODEL)
+
     BLOCK_DMODEL_TAIL = 0
     HEAD_STRIDE_ALIGNED_8 = False
 

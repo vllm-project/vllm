@@ -4,11 +4,11 @@
 (their mailbox tags differ), the device step epoch, the health words and the TP
 group's peer memory.
 
-Mailbox tags carry the epoch the model bumps once a forward (``step_begin``,
+Mailbox tags carry the epoch the model bumps once a forward (`step_begin`,
 which a CUDA graph captures), so no buffer is zeroed between steps.
 
-The peer buffer's first ``PEER_HEAD`` bytes hold the output rank's flags, a
-word a rank (``alarm``): a rank whose wait gives up sets its word there before it
+The peer buffer's first `PEER_HEAD` bytes hold the output rank's flags, a
+word a rank (`alarm`): a rank whose wait gives up sets its word there before it
 stores anything else. The kernels see the buffer past the head.
 """
 
@@ -25,8 +25,8 @@ class MonoRunner:
     """Collective: every TP rank builds it at the same point."""
 
     def __init__(self, device: torch.device, dcp: int | None = None, m1: bool = True):
-        """``dcp``: M1's ranks, 1 or the TP group (default: the DCP group's).
-        ``m1``: the MLA layers run M1 (else vLLM's attention ops)."""
+        """`dcp`: M1's ranks, 1 or the TP group (default: the DCP group's).
+        `m1`: the MLA layers run M1 (else vLLM's attention ops)."""
         from vllm.models.kimi_k3.amd.specialized_decode.mono import layer
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
             kda,
@@ -58,6 +58,11 @@ class MonoRunner:
         layer.TAG_READY = True
         self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
         self.health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=device)
+        # K1's num_acc on regular decode: K1 reads state slot num_acc - 1, so it
+        # must stay all ones; allocated once so captured graphs keep its address
+        self.regular_num_accepted = torch.ones(
+            MAX_TOKENS, dtype=torch.int32, device=device
+        )
 
         tp = get_tp_group()
         self.rank = tp.rank_in_group
