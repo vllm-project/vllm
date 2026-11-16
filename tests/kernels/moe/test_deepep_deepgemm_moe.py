@@ -98,7 +98,7 @@ def make_block_quant_fp8_weights(
     return w1q, w2q, w1_scale, w2_scale
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestConfig:
     topk: int
     m: int
@@ -112,7 +112,7 @@ class TestConfig:
     use_fp8_dispatch: bool | None = False
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestTensors:
     rank_tokens: torch.Tensor  # all ranks make this many tokens
     rank_token_scales: torch.Tensor | None

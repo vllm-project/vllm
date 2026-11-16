@@ -15,7 +15,7 @@ import torch
 B12X_BLOCK_CODECS = {"iq2_xs": (256, 74), "iq2_xxs": (256, 66), "q8_0": (32, 34)}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class B12xWarmupUnit:
     name: str
     key: Hashable

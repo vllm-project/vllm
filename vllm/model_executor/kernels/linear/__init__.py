@@ -19,6 +19,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
+    LinearKernelOracle,
     MMLinearKernel,
     MMLinearLayerConfig,
 )
@@ -175,6 +176,14 @@ from vllm.model_executor.kernels.linear.nvfp4.marlin import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.pytorch import (
     TorchNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.requantization_source import (
+    FakeFp8LinearKernel,
+    FakeInt8LinearKernel,
+    FakeMxFp4LinearKernel,
+    FakeMxFp6LinearKernel,
+    FakeMxFp8LinearKernel,
+    FakeNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
@@ -794,6 +803,10 @@ def init_fp8_linear_kernel(
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeFp8LinearKernel()
+
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -899,6 +912,10 @@ def init_int8_linear_kernel(
     module_name: str,
     is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeInt8LinearKernel()
+
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
@@ -953,6 +970,10 @@ def choose_mp_linear_kernel(
         type[MPLinearKernel]: Chosen kernel.
 
     """
+    # NOTE: not skipped for requantization sources (unlike the `init_*` selectors):
+    # this returns a kernel class that callers use (`__name__`) and instantiate, so
+    # a placeholder would be required, while no scheme using it implements
+    # `dequantize_weight` and can be a requantization source yet.
     if compute_capability is None:
         if current_platform is None:
             raise ValueError("Cannot determine compute capability")
@@ -1010,7 +1031,13 @@ def init_mxfp8_linear_kernel(
     activation_quant_key: QuantKey | None = kMxfp8Dynamic,
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and `(N, K)` weight shape."""
+    current platform and `(N, K)` weight shape.
+
+    Returns a placeholder for requantization sources, which have no kernel."""
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeMxFp8LinearKernel()
+
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
@@ -1107,7 +1134,13 @@ def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
-    current platform."""
+    current platform.
+
+    Returns a placeholder for requantization sources, which have no kernel."""
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeMxFp4LinearKernel()
+
     activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
@@ -1166,7 +1199,13 @@ def init_mxfp6_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
-    current platform."""
+    current platform.
+
+    Returns a placeholder for requantization sources, which have no kernel."""
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeMxFp6LinearKernel()
+
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -1227,6 +1266,10 @@ def init_wfp8_a16_linear_kernel(
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel:
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeFp8LinearKernel()
+
     config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -1256,10 +1299,27 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(
+    use_a16: bool = False, act_dtype: torch.dtype | None = None
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform."""
-    config = NvFp4LinearLayerConfig()
+    current platform.
+
+    Args:
+        use_a16: Weight-only (W4A16) instead of W4A4.
+        act_dtype: Activation dtype of a W4A16 layer, so that BF16-only
+            kernels are skipped for FP16 models. None if unknown.
+
+    Returns:
+        The kernel, or a placeholder for requantization sources, which have
+        no kernel.
+
+    """
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeNvFp4LinearKernel()
+
+    config = NvFp4LinearLayerConfig(act_dtype=act_dtype)
     a16_kernels = (
         B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1303,6 +1363,10 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
+        cutedsl_ok = (
+            cutedsl_ok
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.can_implement(config)[0]
+        )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         elif not prefers_humming(compute_capability):
@@ -1312,6 +1376,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         if use_a16 and force_kernel not in a16_kernels:
             raise ValueError(f"{force_kernel.__name__} does not support W4A16")
         is_supported, reason = force_kernel.is_supported()
+        if is_supported:
+            is_supported, reason = force_kernel.can_implement(config)
         if not is_supported:
             raise ValueError(
                 f"Forced NVFP4 kernel {force_kernel.__name__} is not "
