@@ -329,12 +329,17 @@ class SharedOffloadRegion:
     def prefault_ranges(
         self, shard: tuple[int, int] | None = None
     ) -> list[tuple[int, int]]:
-        """Ranges a deferred pre-fault covers: a shard, this rank's slots, or all."""
+        """Ranges a deferred pre-fault covers: this rank's slots, or the whole
+        region, which `shard=(index, count)` walks from that share onwards."""
         if shard is not None:
+            # Workers that share every byte each pin the whole region, so each
+            # maps all of it first: a page pinned before it is mapped is faulted
+            # inside the registration call. Starting on its own share keeps the
+            # workers on different files while the pages are first allocated.
             index, count = shard
             share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
             start = min(index * share, self.total_size_bytes)
-            return [(start, min(share, self.total_size_bytes - start))]
+            return [(start, self.total_size_bytes - start), (0, start)]
         if self.rank is not None:
             return list(self.iter_worker_slot_ranges())
         return [(0, self.total_size_bytes)]

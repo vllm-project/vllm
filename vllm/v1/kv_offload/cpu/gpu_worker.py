@@ -831,7 +831,7 @@ class CPUOffloadingWorker(OffloadingWorker):
     ):
         """defer_host_setup leaves pre-faulting and pinning mmap_region to
         start_deferred_setup(); prefault_shard is then the share this worker
-        pre-faults, and pin_pace paces its pinning (see pin_mmap_region)."""
+        pre-faults first, and pin_pace paces its pinning (see pin_mmap_region)."""
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
