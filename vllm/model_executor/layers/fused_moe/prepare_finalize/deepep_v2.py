@@ -23,8 +23,16 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.worker.ubatching import (
+    dbo_comm_handoff_enabled,
     dbo_current_ubatch_id,
     dbo_enabled,
+    dbo_get_previous_event,
+    dbo_record_stream,
+    dbo_switch_to_comm,
+    dbo_switch_to_compute,
+    dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm,
 )
 
 
@@ -214,6 +222,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
+        handoff = dbo_comm_handoff_enabled()
+        previous_event = None
+        if handoff:
+            # Capture the event on the compute stream before yielding so it
+            # only covers this ubatch's compute work.
+            previous_event = dbo_get_previous_event(self.buffer.capture)
+            # Dispatch blocks the CPU (and syncs it in prefill), so let the
+            # other ubatch enqueue its compute first.
+            dbo_yield_and_switch_from_compute_to_comm()
+            dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
+
         (
             recv_x,
             recv_topk_idx,
@@ -228,11 +247,16 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
+            previous_event=previous_event,
             async_with_compute_stream=False,
+            allocate_on_comm_stream=previous_event is not None,
         )
 
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
+
+        if handoff:
+            dbo_switch_to_compute_sync()
 
         return lambda: self._receiver(
             event,
@@ -497,16 +521,39 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"got {fused_expert_output.dtype}"
             )
 
-        # DBO drives its own hook/receiver schedule; keep the combine
-        # synchronous there (the receiver then only performs the copy).
+        handoff = dbo_comm_handoff_enabled()
+        previous_event = None
+        if handoff:
+            previous_event = dbo_get_previous_event(self.buffer.capture)
+            dbo_yield_and_switch_from_compute_to_comm()
+            dbo_record_stream(fused_expert_output)
+
+        # DBO drives its own handoff schedule; keep the combine synchronous
+        # there (the receiver then only performs the copy).
         combine_async = do_async and not dbo_enabled()
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
+            previous_event=previous_event,
             async_with_compute_stream=combine_async,
-            allocate_on_comm_stream=combine_async,
+            allocate_on_comm_stream=combine_async or previous_event is not None,
         )
+
+        if handoff:
+            dbo_switch_to_compute()
+
+            def _dbo_receiver():
+                if event.event is not None:
+                    event.current_stream_wait()
+                dbo_switch_to_comm()
+                output.copy_(combined_x, non_blocking=True)
+                dbo_yield_and_switch_from_comm_to_compute()
+
+            if do_async:
+                return _dbo_receiver
+            _dbo_receiver()
+            return None
 
         if do_async:
             # The combine ran on DeepEP's comm stream; the modular kernel
