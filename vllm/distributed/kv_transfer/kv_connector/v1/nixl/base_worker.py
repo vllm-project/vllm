@@ -14,7 +14,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -120,7 +120,7 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
-@dataclass
+@dataclass(slots=True)
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
@@ -144,7 +144,7 @@ class _RegionPairs:
     groups_match: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class _LocalDescs:
     """A prepared local desc list and the first desc id of each byte range."""
 
@@ -157,6 +157,31 @@ class _LocalDescs:
     desc_pos: np.ndarray | None = None
 
 
+@dataclass(slots=True)
+class _RemoteStage:
+    """The KV regions of one PP stage of a remote engine (of the whole engine
+    when it runs PP=1), paired with this worker's regions."""
+
+    pp_rank: int
+    pairs: _RegionPairs
+    # The local layers that transfers with the stage cover.
+    layers: list[str]
+    # Number of blocks and cache group of each of the stage's paired regions.
+    region_num_blocks: list[int]
+    region_group_ids: list[int]
+    # Remote TP rank -> prepped descriptor list of that rank's paired regions.
+    xfer_side_handles: dict[int, int] = field(default_factory=dict)
+    # Spec byte ranges of each paired region with each remote TP rank, and the
+    # first local/remote desc id of each range for that rank.
+    byte_ranges: list[dict[int, list[tuple[int, int, int]]]] = field(
+        default_factory=list
+    )
+    desc_starts: dict[int, np.ndarray] = field(default_factory=dict)
+    # Local desc list covering this stage's byte ranges (shared via
+    # `_local_desc_lists` when another stage moves the same ranges).
+    local_descs: _LocalDescs | None = None
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -165,7 +190,8 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Only NixlPushConnector supports PP with HMA or packed KV caches.
+    # Push additionally supports MLA HMA and packed PP; attention-only HMA
+    # pull uses the shared layer pairing without these paths.
     _supports_pp_hma = False
 
     # Declared for methods defined before __init__ (mypy has-type).
@@ -375,6 +401,7 @@ class NixlBaseConnectorWorker:
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         by_region: bool = False,
+        starts: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Local and remote desc ids moving the block ids.
 
@@ -382,7 +409,8 @@ class NixlBaseConnectorWorker:
         blocks (its region's own, for region-mapped transfers), one desc per
         block.
         """
-        starts = self._desc_starts[engine_id][remote_rank]
+        if starts is None:
+            starts = self._desc_starts[engine_id][remote_rank]
         keys = starts[:, 1] if by_region else starts[:, 0]
         local_ids: list[np.ndarray] = []
         remote_ids: list[np.ndarray] = []
@@ -518,7 +546,9 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta.region_members = [layer_names for *_, layer_names in regions]
         nixl_agent_meta.packed_member_layouts = {}
 
-    def _pair_regions(self, nixl_agent_meta: NixlAgentMetadata) -> _RegionPairs:
+    def _pair_regions(
+        self, nixl_agent_meta: NixlAgentMetadata, remote_pp_stage: bool = False
+    ) -> _RegionPairs:
         """Pair a peer's regions with the local ones through the layers both
         hold.
 
@@ -590,7 +620,7 @@ class NixlBaseConnectorWorker:
                     groups_match = False
                 triples[(remote, local, group)] = None
         missing = self._regions_by_layer.keys() - layers
-        if missing:
+        if missing and not remote_pp_stage:
             raise RuntimeError(
                 f"Engine {engine_id} does not hold the KV layers "
                 f"{sorted(missing, key=_region_sort_key)}."
@@ -872,24 +902,33 @@ class NixlBaseConnectorWorker:
         # leave its NIXL registration and DRAM reads to rank 0.
         self._skip_dram_xfer = False
 
-        # PP>1 (push mode): this worker holds a contiguous layer slice and
-        # transfers into the PP=1 remote's regions that hold its layers.
+        # PP>1: this worker holds a contiguous layer slice. Push transfers it
+        # into the PP=1 remote's regions that hold its layers; a PP=1 puller
+        # reads each stage's regions into the local ones holding its layers.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         if self.pp_size > 1:
-            if self._is_hma_required and not self._supports_pp_hma:
+            if (
+                self._is_hma_required
+                and not self._supports_pp_hma
+                and (vllm_config.model_config.use_mla or self._is_csa_linear)
+            ):
                 raise NotImplementedError(
-                    "NixlConnector (pull) does not support pipeline_parallel_size "
-                    "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
-                    "for PP + HMA."
+                    "NixlConnector (pull) supports pipeline_parallel_size > 1 with "
+                    "hybrid KV cache layouts (HMA) only for attention KV without "
+                    "MLA or CSA-linear caches; use NixlPushConnector for those."
                 )
             # Mamba/SSM hybrid PP stages are not validated yet.
             if self._has_mamba:
                 raise NotImplementedError(
-                    "NixlPushConnector does not support pipeline_parallel_size > 1 "
+                    "NIXL connectors do not support pipeline_parallel_size > 1 "
                     "with Mamba/SSM hybrid KV cache layouts yet."
                 )
-            # Decode-side PP is unsupported (completions counted per consumer rank).
-            if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
+            # Decode-side PP is unsupported for push (completions counted per
+            # consumer rank). Pull producers may be PP-sharded.
+            if (
+                self._supports_pp_hma
+                and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+            ):
                 raise NotImplementedError(
                     "NixlPushConnector consumer (decode) does not support "
                     "pipeline_parallel_size > 1."
@@ -920,6 +959,9 @@ class NixlBaseConnectorWorker:
         self.dst_region_group_ids: dict[EngineId, list[int]] = {}
         # Engine -> how its regions pair with ours.
         self._dst_pairs: dict[EngineId, _RegionPairs] = {}
+        # engine_id -> pp_rank -> how that stage's regions pair with ours and its
+        # dst handles. A PP=1 remote is a single stage 0.
+        self._remote_stages: dict[EngineId, dict[int, _RemoteStage]] = {}
         # Engine -> physical blocks per logical block of each of its cache
         # groups, and how many smaller blocks each of its token blocks moves as.
         self._remote_physical_blocks_per_group: dict[EngineId, list[int]] = {}
@@ -1029,6 +1071,16 @@ class NixlBaseConnectorWorker:
         # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
         # block row of a shared allocation.
         self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
+        if (
+            self._TRANSFER_MODE == "pull"
+            and self.pp_size > 1
+            and self._has_packed_cache
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support PP with packed KV cache layout "
+                f"{self.kv_cache_layout}. Use a supported non-packed layout; "
+                "NixlPushConnector has separate packed PP restrictions."
+            )
         # The layers of each region, which pair regions with a peer's.
         self.region_members = []
         self._regions_by_layer = {}
@@ -1041,10 +1093,12 @@ class NixlBaseConnectorWorker:
         )
 
     def _sync_block_size_with_kernel(self) -> None:
-        backends, specs = get_current_attn_backends_and_specs(
+        backends, specs, layer_names = get_current_attn_backends_and_specs(
             self.vllm_config, self.kv_cache_config, self.attn_backends
         )
-        kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        kernel_block_size = select_common_block_size(
+            self.block_size, backends, specs, layer_names
+        )
         check_compressed_kernel_split(
             self.vllm_config, self.kv_cache_config, kernel_block_size
         )
@@ -1244,7 +1298,12 @@ class NixlBaseConnectorWorker:
                     )
                 else:
                     remote_agent_name = self.add_remote_agent(
-                        metadata, remote_rank, remote_tp_size, metadata.dcp_size
+                        metadata,
+                        remote_rank,
+                        remote_tp_size,
+                        metadata.dcp_size,
+                        remote_pp_rank=remote_pp_rank,
+                        remote_pp_size=remote_pp_size,
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
@@ -1964,17 +2023,21 @@ class NixlBaseConnectorWorker:
         remote_tp_rank: int,
         remote_agent_name: str,
         block_size_ratio: int,
+        stage: _RemoteStage | None = None,
     ) -> None:
         """Prepare the local and remote desc lists moving each region pair's
         byte ranges, one strided desc per region, range and block."""
         engine_id = nixl_agent_meta.engine_id
-        pairs = self._dst_pairs[engine_id]
+        pairs = stage.pairs if stage is not None else self._dst_pairs[engine_id]
+        byte_ranges = (
+            stage.byte_ranges if stage is not None else self._byte_ranges[engine_id]
+        )
         remote_split = self._remote_block_splits.get(engine_id, 1)
         # (remote rank, cache group, local region, local and remote byte range)
         # of every range moved; the local list holds every rank's.
         xfers = []
         for remote, local, group, ranges_by_rank in zip(
-            pairs.remote, pairs.local, pairs.group, self._byte_ranges[engine_id]
+            pairs.remote, pairs.local, pairs.group, byte_ranges
         ):
             ssm = _is_ssm_spec(self._group_spec_types[group])
             ratio, split = (1, 1) if ssm else (block_size_ratio, remote_split)
@@ -2027,36 +2090,47 @@ class NixlBaseConnectorWorker:
                     handle, starts, dram_handle, desc_is_dram, desc_pos
                 )
         self._local_descs[engine_id] = local_descs = self._local_desc_lists[key]
+        if stage is not None:
+            stage.local_descs = local_descs
 
         rank_xfers = [xfer for xfer in xfers if xfer[0] == remote_tp_rank]
+        region_num_blocks = (
+            stage.region_num_blocks
+            if stage is not None
+            else self.dst_region_num_blocks[engine_id]
+        )
         regions = list(
             zip(
                 nixl_agent_meta.kv_caches_base_addr,
                 nixl_agent_meta.block_strides,
-                self.dst_region_num_blocks[engine_id],
+                region_num_blocks,
             )
         )
         descs, remote_starts, _ = self._byte_range_descs(
             [xfer[4] for xfer in rank_xfers], regions, nixl_agent_meta.device_id
         )
-        self._desc_starts[engine_id][remote_tp_rank] = np.array(
+        starts = np.array(
             [
                 (group, local, local_descs.starts[local_range], remote_starts[rr])
                 for _, group, local, local_range, rr in rank_xfers
             ],
             dtype=np.int64,
         ).reshape(-1, 4)
+        self._desc_starts[engine_id][remote_tp_rank] = starts
+        if stage is not None:
+            stage.desc_starts[remote_tp_rank] = starts
         remote_mem_types = set(self.dst_region_mem_types[engine_id])
         if len(remote_mem_types) != 1:
             raise NotImplementedError(
                 "NIXL pull does not yet support a mixed-memory producer"
             )
         if len(descs):
-            self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
-                self.nixl_wrapper.prep_xfer_dlist(
-                    remote_agent_name, descs, mem_type=remote_mem_types.pop()
-                )
+            handle = self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, descs, mem_type=remote_mem_types.pop()
             )
+            self.dst_xfer_side_handles[engine_id][remote_tp_rank] = handle
+            if stage is not None:
+                stage.xfer_side_handles[remote_tp_rank] = handle
 
     def _split_remote_blocks(self, meta: NixlAgentMetadata) -> None:
         """View remote blocks as gcd-sized kernel blocks when the local block
@@ -2119,9 +2193,14 @@ class NixlBaseConnectorWorker:
         remote_tp_rank: int = 0,
         remote_tp_size: int = 1,
         remote_dcp_size: int = 1,
+        remote_pp_rank: int = 0,
+        remote_pp_size: int = 1,
     ) -> str:
         """Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
+
+        A PP-sharded remote registers each stage separately: every stage holds a
+        slice of the layers and is read into the local regions holding them.
 
         In particular, handle both homogeneous and heterogeneous TP. The former
         requires local rank_i to read from remote rank_i.
@@ -2164,14 +2243,15 @@ class NixlBaseConnectorWorker:
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if (0, remote_tp_rank) in self._remote_agents.get(engine_id, {}):
+        remote_ranks = (remote_pp_rank, remote_tp_rank)
+        if remote_ranks in self._remote_agents.get(engine_id, {}):
             logger.debug(
                 "Remote agent with engine_id %s and rank"
                 "%s already exchanged metadata, skip handshake.",
                 engine_id,
-                remote_tp_rank,
+                remote_ranks,
             )
-            return self._remote_agents[engine_id][(0, remote_tp_rank)]
+            return self._remote_agents[engine_id][remote_ranks]
 
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
@@ -2189,6 +2269,8 @@ class NixlBaseConnectorWorker:
                     "Attention-HMA push does not support decode TP greater than "
                     "prefill TP yet"
                 )
+        if remote_pp_size > 1:
+            self._check_remote_pp_supported(nixl_agent_meta)
         if (
             self._packed_member_layouts
             and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
@@ -2198,8 +2280,16 @@ class NixlBaseConnectorWorker:
                 "Packed KV block rows differ between P and D. Use the same "
                 "VLLM_KV_CACHE_LAYOUT and block size on both sides."
             )
-        pairs = self._pair_regions(nixl_agent_meta)
-        if self._dst_pairs.setdefault(engine_id, pairs) != pairs:
+        pairs = self._pair_regions(nixl_agent_meta, remote_pp_stage=remote_pp_size > 1)
+        if remote_pp_size > 1 and not pairs.groups_match:
+            raise NotImplementedError(
+                "Pulling KV from a pipeline-parallel producer requires the same "
+                "KV cache groups on both sides."
+            )
+        if (
+            self._dst_pairs.setdefault(engine_id, pairs) != pairs
+            and remote_pp_size == 1
+        ):
             raise RuntimeError(
                 f"The TP ranks of engine {engine_id} lay out their KV regions "
                 "differently."
@@ -2209,6 +2299,9 @@ class NixlBaseConnectorWorker:
         # The push WRITE path is not validated with split remote blocks.
         if self._has_mamba and self.use_mla and self._TRANSFER_MODE == "pull":
             self._split_remote_blocks(nixl_agent_meta)
+        stage = self._add_remote_stage(
+            nixl_agent_meta, pairs, remote_pp_rank, remote_pp_size
+        )
 
         ### Register remote engine in TransferTopology (idempotent).
         transfer_info = EngineTransferInfo(
@@ -2262,8 +2355,8 @@ class NixlBaseConnectorWorker:
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
         block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
-        if engine_id not in self._byte_ranges:
-            self._byte_ranges[engine_id] = byte_ranges = self._tp_byte_ranges(
+        if not stage.byte_ranges:
+            stage.byte_ranges = self._tp_byte_ranges(
                 nixl_agent_meta,
                 list(zip(pairs.local, pairs.group, pairs.remote)),
                 remote_tp_size,
@@ -2271,14 +2364,117 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
                 receiving=self._TRANSFER_MODE == "pull",
             )
-            source_ranks: list[set[int]] = [set() for _ in self._group_spec_types]
-            for group, ranges_by_rank in zip(pairs.group, byte_ranges):
-                source_ranks[group].update(ranges_by_rank)
-            self.source_ranks[engine_id] = [tuple(sorted(r)) for r in source_ranks]
+            # Engine-level maps mirror the PP=1 stage (or the first stage that
+            # handshakes) so existing single-stage callers keep working.
+            if engine_id not in self._byte_ranges:
+                self._byte_ranges[engine_id] = stage.byte_ranges
+                source_ranks: list[set[int]] = [set() for _ in self._group_spec_types]
+                for group, ranges_by_rank in zip(pairs.group, stage.byte_ranges):
+                    source_ranks[group].update(ranges_by_rank)
+                self.source_ranks[engine_id] = [tuple(sorted(r)) for r in source_ranks]
+            else:
+                # Later PP stages contribute their ranks into the union.
+                source_ranks_sets = [set(r) for r in self.source_ranks[engine_id]]
+                while len(source_ranks_sets) < len(self._group_spec_types):
+                    source_ranks_sets.append(set())
+                for group, ranges_by_rank in zip(pairs.group, stage.byte_ranges):
+                    source_ranks_sets[group].update(ranges_by_rank)
+                self.source_ranks[engine_id] = [
+                    tuple(sorted(r)) for r in source_ranks_sets
+                ]
         self._prep_descs(
-            nixl_agent_meta, remote_tp_rank, remote_agent_name, block_size_ratio
+            nixl_agent_meta,
+            remote_tp_rank,
+            remote_agent_name,
+            block_size_ratio,
+            stage=stage,
         )
         return remote_agent_name
+
+    def _add_remote_stage(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        pairs: _RegionPairs,
+        pp_rank: int,
+        pp_size: int,
+    ) -> _RemoteStage:
+        """Register one PP stage of a remote engine (the whole engine when
+        `pp_size` is 1) once for all its TP ranks. `nixl_agent_meta` lists
+        only the paired regions."""
+        engine_id = nixl_agent_meta.engine_id
+        num_regions = len(nixl_agent_meta.kv_caches_base_addr)
+        stage = _RemoteStage(
+            pp_rank=pp_rank,
+            pairs=pairs,
+            layers=sorted(
+                {
+                    name
+                    for members in nixl_agent_meta.region_members
+                    for name in members
+                    if name in self._regions_by_layer
+                }
+            ),
+            region_num_blocks=nixl_agent_meta.region_num_blocks
+            or [nixl_agent_meta.num_blocks] * num_regions,
+            region_group_ids=nixl_agent_meta.region_group_ids
+            or (
+                self.region_group_ids
+                if len(self.region_group_ids) == num_regions
+                else [0] * num_regions
+            ),
+        )
+        stages = self._remote_stages.setdefault(engine_id, {})
+        # Another TP rank of the stage may have registered it already.
+        if stages.setdefault(pp_rank, stage).pairs != pairs:
+            raise RuntimeError(
+                f"The TP ranks of PP stage {pp_rank} of engine {engine_id} lay "
+                "out their KV regions differently."
+            )
+        # Checked whenever every stage is known, so a retried handshake
+        # checks again.
+        if len(stages) == pp_size and sorted(
+            name for s in stages.values() for name in s.layers
+        ) != sorted(self._regions_by_layer):
+            raise RuntimeError(
+                f"The {pp_size} PP stages of engine {engine_id} do not hold "
+                "every local KV layer exactly once."
+            )
+        return stages[pp_rank]
+
+    def _single_remote_stage(self, engine_id: EngineId) -> _RemoteStage:
+        """The only stage of a remote engine that runs PP=1."""
+        (stage,) = self._remote_stages[engine_id].values()
+        return stage
+
+    def _check_remote_pp_supported(self, nixl_agent_meta: NixlAgentMetadata) -> None:
+        """Refuse layouts that per-stage pulls from a pipeline-parallel producer
+        do not support. Under HMA a stage may hold no layer of a cache group (a
+        draft's group on the stages before the last); it then has no pair of
+        that group, so its reads skip the group."""
+        if (
+            self._has_packed_cache
+            or KVCacheLayout[nixl_agent_meta.kv_cache_layout].is_block_outermost
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support PP with packed KV cache layouts "
+                f"(local {self.kv_cache_layout}, "
+                f"remote {nixl_agent_meta.kv_cache_layout}). "
+                "Use supported non-packed layouts on both endpoints; "
+                "NixlPushConnector has separate packed PP restrictions."
+            )
+        if (
+            self.pp_size > 1
+            or self._has_mamba
+            or (self._is_hma_required and (self.use_mla or self._is_csa_linear))
+            or self.dcp_size > 1
+            or nixl_agent_meta.dcp_size > 1
+            or self._mixed_mem_types
+        ):
+            raise NotImplementedError(
+                "Pulling KV from a pipeline-parallel producer requires a PP=1 "
+                "consumer without Mamba, DCP or mixed-memory KV caches, and HMA "
+                "only for attention KV without MLA or CSA-linear caches."
+            )
 
     def _validate_remote_agent_handshake(
         self,
@@ -2497,7 +2693,7 @@ class NixlBaseConnectorWorker:
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[int, list[int], int]],
+        block_ids_list: list[tuple[int, list[int], range]],
         convert: bool = True,
     ):
         """Post process device kv cache after receiving from remote.
@@ -2511,10 +2707,10 @@ class NixlBaseConnectorWorker:
 
         The transfer only covers `covered_sub_blocks` remote-sized
         sub-blocks of each request's local attention blocks; the rest was
-        clipped, either by remote-block pairing (block-size ratio) or by the
-        hetero-ppl front trim in `_apply_prefix_caching`. Those blocks were
+        clipped when pairing local and remote blocks from the last token
+        (`_pair_blocks_by_last_token`). Those blocks were
         excluded from the scheduler's alloc-time KV zeroing (which would race
-        the RDMA write), so everything past the covered range is zeroed here.
+        the RDMA write), so everything outside the covered range is zeroed here.
         Stale bytes would otherwise surface as garbage or NaNs once decode
         grows into the untransferred tail.
         """
@@ -2551,13 +2747,21 @@ class NixlBaseConnectorWorker:
                 self.device_kv_caches[name]
                 for name in self.kv_cache_config.transfer_groups[group].layer_names
             ]
+            # Older call sites pass a covered count; `_pair_blocks_by_last_token`
+            # records a range of remote-sized sub-blocks.
+            if isinstance(covered_sub_blocks, int):
+                covered_sub_blocks = range(covered_sub_blocks)
             # Blocks the transfer didn't write: the token tail of the last
-            # partially covered block, then everything beyond it.
+            # partially covered block, then everything beyond it, and the token
+            # head of the first one, then everything before it.
             covered_blocks, sub_blocks_in_last = divmod(
-                covered_sub_blocks, block_size_ratio
+                covered_sub_blocks.stop, block_size_ratio
             )
             first_stale = covered_blocks + (1 if sub_blocks_in_last else 0)
-            has_stale = first_stale < len(block_ids)
+            head_blocks, sub_blocks_in_head = divmod(
+                covered_sub_blocks.start, block_size_ratio
+            )
+            has_stale = head_blocks > 0 or first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
                 indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
@@ -2581,9 +2785,14 @@ class NixlBaseConnectorWorker:
                     sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
                     cache[last_block_id, :, zero_from:].zero_()
+            if sub_blocks_in_head:
+                for cache in attn_caches:
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
+                    zero_to = sub_blocks_in_head * sub_block_tokens
+                    cache[block_ids[head_blocks], :, :zero_to].zero_()
             if has_stale:
                 assert indices is not None
-                stale_ids = indices[first_stale:]
+                stale_ids = torch.cat((indices[:head_blocks], indices[first_stale:]))
                 for cache in attn_caches:
                     cache.index_fill_(0, stale_ids, 0)
 
@@ -2728,11 +2937,8 @@ class NixlBaseConnectorWorker:
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
-            # transfer clipped. The latter happens either at remote-block
-            # granularity (block_size_ratio > 1) or at kernel-block
-            # granularity, when equal kernel pages meet differing logical
-            # block sizes and _apply_prefix_caching front-trims to the
-            # minimum count (hybrid heterogeneous TP).
+            # transfer clipped. _pair_blocks_by_last_token records the covered
+            # sub-block range per request in meta.covered_sub_blocks.
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
@@ -2745,11 +2951,17 @@ class NixlBaseConnectorWorker:
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
-                    # Number of remote-sized sub-blocks the transfer covered;
-                    # everything past this was clipped and must be zeroed.
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
+                    # Range of remote-sized sub-blocks the transfer covered;
+                    # everything outside it was clipped and must be zeroed.
+                    covered_sub_blocks = (
+                        meta.covered_sub_blocks[g]
+                        if meta.covered_sub_blocks is not None
+                        else range(
+                            min(
+                                len(local_group) * block_size_ratio,
+                                len(meta.remote.block_ids[g]),
+                            )
+                        )
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
@@ -3005,6 +3217,52 @@ class NixlBaseConnectorWorker:
                         engine_id,
                         exc_info=True,
                     )
+
+    def _pair_blocks_by_last_token(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        num_tokens: int,
+        block_size_ratio: int,
+        remote_physical_per_logical: int,
+    ) -> tuple[BlockIds, BlockIds, list[range]]:
+        """Pair kernel blocks holding the same tokens across P/D block sizes.
+
+        Local blocks are split into remote-sized sub-blocks. Each side
+        allocates whole logical blocks up to the last of `num_tokens`, while
+        a local prefix hit or sliding-window clipping can start the lists at
+        different tokens. So drop each side's sub-blocks past that last token
+        and pair the lists from their ends. SSM groups pass through unpaired.
+
+        Returns the paired lists and, per group, the range of local sub-blocks
+        the read covers.
+        """
+        local_per_logical = (
+            self._physical_blocks_per_logical_kv_block * block_size_ratio
+        )
+        paired_local: list[list[int]] = []
+        paired_remote: list[list[int]] = []
+        covered: list[range] = []
+        for g, (local, remote) in enumerate(
+            zip(local_block_ids, remote_block_ids, strict=True)
+        ):
+            if _is_ssm_spec(self._group_spec_types[g]):
+                paired_local.append(list(local))
+                paired_remote.append(list(remote))
+                covered.append(range(len(local)))
+                continue
+            block_size = self.kv_cache_config.transfer_groups[g].block_size
+            num_sub_blocks = cdiv(num_tokens, block_size // local_per_logical)
+            local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
+            local_padding = -num_sub_blocks % local_per_logical
+            remote_padding = -num_sub_blocks % remote_physical_per_logical
+            local = local[: len(local) - local_padding]
+            remote = list(remote)[: len(remote) - remote_padding]
+            num_pairs = min(len(local), len(remote))
+            paired_local.append(local[len(local) - num_pairs :])
+            paired_remote.append(remote[len(remote) - num_pairs :])
+            covered.append(range(len(local) - num_pairs, len(local)))
+        return paired_local, paired_remote, covered
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
@@ -3473,8 +3731,17 @@ class NixlBaseConnectorWorker:
         assert engine_id in self._remote_agents
 
         # Notif-only engines (push-mode D side) have no descriptor state.
-        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
-            self.nixl_wrapper.release_dlist_handle(handle)
+        # Stage handles and dst_xfer_side_handles alias the same prep lists;
+        # release once via stages when present, else via the flat map.
+        stages = self._remote_stages.pop(engine_id, {})
+        if stages:
+            for stage in stages.values():
+                for handle in stage.xfer_side_handles.values():
+                    self.nixl_wrapper.release_dlist_handle(handle)
+            self.dst_xfer_side_handles.pop(engine_id, None)
+        else:
+            for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
+                self.nixl_wrapper.release_dlist_handle(handle)
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)

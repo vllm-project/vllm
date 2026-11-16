@@ -51,22 +51,44 @@ from .utils import (
 def _whole_block_descs(worker, ranks=(0,)) -> None:
     """Move every paired block whole with `ranks`, region `i`'s blocks at
     desc ids `100 * i` onward on both sides."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RemoteStage,
+    )
+
     pairs = worker._dst_pairs["P"]
     block_len = worker.block_len_per_layer[0]
-    worker._byte_ranges = {
-        "P": [{r: [(0, 0, block_len)] for r in ranks}] * len(pairs.local)
+    byte_ranges = [{r: [(0, 0, block_len)] for r in ranks}] * len(pairs.local)
+    desc_starts = {
+        r: np.array(
+            [
+                (group, local, 100 * local, 100 * remote)
+                for remote, local, group in zip(pairs.remote, pairs.local, pairs.group)
+            ]
+        )
+        for r in ranks
     }
-    worker._desc_starts = {
+    worker._byte_ranges = {"P": byte_ranges}
+    worker._desc_starts = {"P": desc_starts}
+    handles = getattr(worker, "dst_xfer_side_handles", {}).get("P") or {
+        r: 1000 + r for r in ranks
+    }
+    worker.dst_xfer_side_handles = {"P": dict(handles)}
+    worker._remote_stages = {
         "P": {
-            r: np.array(
-                [
-                    (group, local, 100 * local, 100 * remote)
-                    for remote, local, group in zip(
-                        pairs.remote, pairs.local, pairs.group
-                    )
-                ]
+            0: _RemoteStage(
+                pp_rank=0,
+                pairs=pairs,
+                layers=[],
+                region_num_blocks=worker.dst_region_num_blocks.get(
+                    "P", [100] * len(pairs.local)
+                ),
+                region_group_ids=worker.dst_region_group_ids.get(
+                    "P", list(pairs.group)
+                ),
+                xfer_side_handles=dict(handles),
+                byte_ranges=byte_ranges,
+                desc_starts=desc_starts,
             )
-            for r in ranks
         }
     }
 
@@ -125,13 +147,13 @@ def region_pull_worker():
         remote_physical_blocks_per_logical=2,
     )
     worker.source_ranks = {"P": [(0,), (0,)]}
-    # The MLA regions move whole blocks.
-    _whole_block_descs(worker)
     worker._mixed_mem_types = True
     worker._local_descs = {"P": _LocalDescs(1, {}, dram_handle=2)}
-    worker.dst_xfer_side_handles = {"P": {0: 3}}
     worker.dst_num_blocks = {"P": 100, "D": 100}
     worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
+    worker.dst_xfer_side_handles = {"P": {0: 3}}
+    # The MLA regions move whole blocks.
+    _whole_block_descs(worker)
     worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
     worker._engine_by_address = {("localhost", 1): "P"}
     worker._read_blocks_mixed = MagicMock()  # type: ignore[method-assign]
@@ -237,9 +259,9 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     remote.remote_physical_blocks_per_logical = 1
     worker._remote_physical_blocks_per_group = {"P": [1]}
     ranks = tuple(range(8))
-    _whole_block_descs(worker, ranks)
     worker.source_ranks["P"] = [ranks, ranks]
     worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    _whole_block_descs(worker, ranks)
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # Two regions with different prefix hits, plus one padding page each.
     local = (
@@ -341,8 +363,8 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
     worker._remote_physical_blocks_per_group = {"P": [1, 1]}
     ranks = tuple(range(4))
     worker.source_ranks["P"] = [ranks, ranks]
-    _whole_block_descs(worker, ranks)
     worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    _whole_block_descs(worker, ranks)
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote
     # blocks each), the draft window keeps the last 3 pages on every rank.
