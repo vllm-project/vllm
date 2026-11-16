@@ -189,21 +189,19 @@ def _canonical_page_ids(
     return flat[skip_count : skip_count + count]
 
 
-def _canonical_block_sizes(
-    layer_refs_per_group: list[list[CanonicalKVCacheRef]], num_tensors: int
-) -> list[int]:
-    """Canonical CPU bytes per GPU block for each tensor, taken from the refs'
-    mappings. Requires every ref to carry a mapping."""
-    canonical_bytes_per_block = [0] * num_tensors
-    for layer_refs in layer_refs_per_group:
-        for ref in layer_refs:
-            assert ref.mapping is not None
-            canonical_bytes_per_block[ref.tensor_idx] = max(
-                canonical_bytes_per_block[ref.tensor_idx],
-                ref.mapping.canonical_page_size_bytes,
-            )
-    assert all(size > 0 for size in canonical_bytes_per_block)
-    return canonical_bytes_per_block
+def _canonical_cpu_view(
+    chunk_rows: torch.Tensor, ref: CanonicalKVCacheRef, blocks_per_chunk: int
+) -> torch.Tensor:
+    """The ref's canonical pages within the CPU chunk rows: blocks_per_chunk
+    pages starting at the ref's offset in every row."""
+    assert ref.mapping is not None
+    start = ref.canonical_offset
+    end = start + ref.mapping.canonical_page_size_bytes * blocks_per_chunk
+    assert end <= chunk_rows.shape[1], (
+        f"canonical pages [{start}, {end}) exceed the {chunk_rows.shape[1]}-byte "
+        "chunk row"
+    )
+    return chunk_rows[:, start:end]
 
 
 # Bound registration size to avoid driver limits on large host allocations.
@@ -314,11 +312,13 @@ class SingleDirectionOffloadingHandler:
         Args:
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
+                For the canonical layout, a single tensor of chunk rows.
             blocks_per_chunk: number of GPU blocks per CPU chunk.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
-                described by the refs' mappings.
+                described by the refs' mappings: each ref's canonical pages
+                sit at its canonical_offset within every chunk row.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
 
@@ -338,15 +338,23 @@ class SingleDirectionOffloadingHandler:
         )
         self.blocks_per_chunk = blocks_per_chunk
 
-        # Per (group, ref) static copy plans for the canonical layout
-        self._canonical_copy_plans: list[list[CopyPlan]] | None = (
-            [
+        # Per (group, ref) static copy plans and CPU views for the canonical
+        # layout
+        self._canonical_copy_plans: list[list[CopyPlan]] | None = None
+        self._canonical_cpu_views: list[list[torch.Tensor]] = []
+        if canonical_layout:
+            assert len(cpu_tensors) == 1
+            self._canonical_copy_plans = [
                 [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
                 for layer_refs in layer_refs_per_group
             ]
-            if canonical_layout
-            else None
-        )
+            self._canonical_cpu_views = [
+                [
+                    _canonical_cpu_view(cpu_tensors[0], ref, blocks_per_chunk)
+                    for ref in layer_refs
+                ]
+                for layer_refs in layer_refs_per_group
+            ]
         self._fill_group_ops = (
             self._fill_canonical_ops if canonical_layout else self._fill_direct_ops
         )
@@ -450,15 +458,15 @@ class SingleDirectionOffloadingHandler:
             self._scratch_bases_cpu = np.empty(group_size, dtype=np.uint64)
 
         num_bytes = 0
-        for d, (plan, data_ref) in enumerate(
+        for d, (plan, data_ref, cpu_view) in enumerate(
             zip(
                 self._canonical_copy_plans[g_idx],
                 self.layer_refs_per_group[g_idx],
+                self._canonical_cpu_views[g_idx],
             )
         ):
             if plan.num_frags == 0:
                 continue
-            t_idx = data_ref.tensor_idx
 
             # 1. Base byte pointer of every block on each side
             ptr_start = dev_ptr_offset + d * group_size
@@ -468,7 +476,7 @@ class SingleDirectionOffloadingHandler:
                 cpu_block_ids,
                 self.blocks_per_chunk,
                 cpu_bases,
-                self.cpu_tensors[t_idx],
+                cpu_view,
                 skip_count=cpu_skip_count,
             )
 
@@ -765,6 +773,7 @@ class SingleDirectionOffloadingHandler:
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
+        self._canonical_cpu_views.clear()
         self.cpu_tensors.clear()
         if sync_error is not None:
             raise sync_error
@@ -799,41 +808,37 @@ class CPUOffloadingWorker(OffloadingWorker):
             mmap_region is None or mmap_region.is_pinned
         )
 
-        canonical_bytes_per_block = (
-            _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
-            if canonical_layout
-            else None
-        )
-
         cpu_tensors: list[torch.Tensor] = []
-        for t_idx, kv_cache_tensor in enumerate(kv_caches.tensors):
-            gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
+        if canonical_layout:
+            # Every ref reads and writes its own slot of the shared chunk rows
+            assert mmap_region is not None
+            cpu_tensors.append(mmap_region.create_canonical_view())
+        else:
+            for kv_cache_tensor in kv_caches.tensors:
+                gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
+                cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
-            if canonical_bytes_per_block is not None:
-                assert mmap_region is not None
-                cpu_tensor = mmap_region.create_next_canonical_view(
-                    canonical_bytes_per_block[t_idx] * blocks_per_chunk
-                )
-            elif mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
-            else:
-                t0 = time.monotonic()
-                cpu_tensor = torch.zeros(
-                    (num_cpu_chunks, cpu_page_size_bytes),
-                    dtype=torch.int8,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
-                logger.debug(
-                    "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
-                    num_cpu_chunks,
-                    cpu_page_size_bytes,
-                    num_cpu_chunks * cpu_page_size_bytes / 1e9,
-                    time.monotonic() - t0,
-                )
+                if mmap_region is not None:
+                    cpu_tensor = mmap_region.create_next_worker_view(
+                        cpu_page_size_bytes
+                    )
+                else:
+                    t0 = time.monotonic()
+                    cpu_tensor = torch.zeros(
+                        (num_cpu_chunks, cpu_page_size_bytes),
+                        dtype=torch.int8,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    )
+                    logger.debug(
+                        "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
+                        num_cpu_chunks,
+                        cpu_page_size_bytes,
+                        num_cpu_chunks * cpu_page_size_bytes / 1e9,
+                        time.monotonic() - t0,
+                    )
 
-            cpu_tensors.append(cpu_tensor)
+                cpu_tensors.append(cpu_tensor)
 
         make_handler = functools.partial(
             SingleDirectionOffloadingHandler,

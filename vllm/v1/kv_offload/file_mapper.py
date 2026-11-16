@@ -111,7 +111,13 @@ class FileMapper:
                 parallel_agnostic
                 and (parallel.is_parallelism_agnostic or config.replicated_layout)
             ),
-            replicated_layout=(parallel_agnostic and config.replicated_layout),
+            # Canonical rows are the same whether or not the workers' KV is
+            # replicated, so only the direct layout records it.
+            replicated_layout=(
+                parallel_agnostic
+                and config.replicated_layout
+                and not config.canonical_layout
+            ),
             canonical_format=canonical_format,
         )
 

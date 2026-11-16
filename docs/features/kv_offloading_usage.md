@@ -129,7 +129,7 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `sync_load_budget_bytes` | no | `0` | both | Per-step budget of KV bytes (per GPU) loaded within the same step, so those requests run immediately instead of waiting a step for an async load. Hits that don't fit the remaining budget, or would leave nothing to compute, stay async. `0` disables. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Recurrent (Mamba / linear-attention) state groups announce state checkpoints, with `kv_cache_spec_kind` `mamba`: an offloaded chunk or partial tail holds one recurrent state, valid at its last hash, so its `BlockStored` carries that single hash, its parent hash and an empty `token_ids`. Consumers align it by hash with the attention group's blocks; a hybrid prefix is reusable only up to a boundary where every group has a residency. Sliding-window and chunked-local attention chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
-| `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
+| `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP and PP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
 
 ## Canonical Layout
 
@@ -139,7 +139,7 @@ With `"canonical_layout": true`, workers instead convert their local pages into 
 
 Having a single, well-defined representation enables several things:
 
-- **Sharing across tensor-parallel sizes.** Engines with different TP sizes, such as a TP=2 prefiller and a TP=4 decoder, read and write the same canonical pages, so secondary tiers (FS, object store, P2P) store them under one shared namespace.
+- **Sharing across tensor- and pipeline-parallel sizes.** Engines with different TP sizes, PP sizes or layer partitions, such as a TP=2 prefiller and a TP=2 PP=2 decoder, read and write the same canonical pages, so secondary tiers (FS, object store, P2P) store them under one shared namespace.
 - **One copy of replicated KV.** For models where ranks hold identical KV bytes (for example MLA, or GQA with fewer KV heads than TP ranks), the ranks take turns storing each block, so the CPU tier holds one copy instead of one per rank.
 - **A well-defined storage format.** The byte layout of an offloaded block is fixed by a format version rather than by the writer's runtime configuration.
 
@@ -163,7 +163,7 @@ Enable it on **every** instance that shares a secondary tier. The canonical form
 Requirements and limitations:
 
 - Supported layers: full and sliding-window attention whose KV heads divide evenly across TP ranks, and MLA attention. Per-token-head KV-cache quantization isn't supported.
-- Tensor parallelism only: pipeline parallelism, prefill context parallelism (PCP), and decode context parallelism (DCP) are not supported, and the offload workers must be exactly the TP group.
+- Tensor and pipeline parallelism: an offloaded chunk holds the canonical pages of every layer on every pipeline stage, in model order, and each stage writes and reads its own layers. A chunk is stored once all stages have written it. Prefill context parallelism (PCP) and decode context parallelism (DCP) are not supported.
 - Packed and cross-layer KV cache layouts are not supported.
 - If a layer can't be mapped to the canonical layout, the engine fails at startup with an error that says to remove `canonical_layout`, rather than silently storing non-portable bytes.
 - Every load and store goes through a scatter/gather copy instead of a straight page copy, which adds some transfer overhead. Leave it off if you need none of the capabilities above.

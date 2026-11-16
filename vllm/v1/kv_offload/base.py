@@ -663,6 +663,8 @@ class CanonicalKVCacheRef:
     page_size_bytes: int
     # How this worker's page maps into a canonical page; None = uncertified
     mapping: CanonicalPageMapping | None = None
+    # Canonical layout: byte offset of the layer's pages within a chunk row
+    canonical_offset: int = 0
 
 
 @dataclass(slots=True)

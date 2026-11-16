@@ -19,7 +19,7 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import (
     SingleDirectionOffloadingHandler,
     _build_copy_plan,
-    _canonical_block_sizes,
+    _canonical_cpu_view,
     _canonical_page_ids,
     pin_mmap_region,
 )
@@ -74,11 +74,20 @@ def test_writer_rotation_matches_is_writer():
     assert mask.tolist() == [mapping.is_writer(int(b)) for b in ids]
 
 
-def test_canonical_block_sizes_take_max_per_tensor():
-    identity = CopyRun(0, 0, 512, 1, 512, 512)
-    small = CanonicalPageMapping(2048, 512, (identity,), 1, 0, False)
-    refs = [[_ref(_nhd_mapping(), 0), _ref(small, 0)], [_ref(small, 1)]]
-    assert _canonical_block_sizes(refs, 2) == [4096, 2048]
+def test_canonical_cpu_view_is_the_ref_slot_of_every_row():
+    chunk_rows = torch.zeros(3, 16384, dtype=torch.int8)
+    ref = CanonicalKVCacheRef(
+        tensor_idx=0,
+        page_size_bytes=1024,
+        mapping=_nhd_mapping(),
+        canonical_offset=8192,
+    )
+    view = _canonical_cpu_view(chunk_rows, ref, blocks_per_chunk=2)
+    assert view.shape == (3, 8192)
+    assert view.stride() == (16384, 1)
+    assert view.data_ptr() == chunk_rows.data_ptr() + 8192
+    with pytest.raises(AssertionError, match="exceed"):
+        _canonical_cpu_view(chunk_rows, ref, blocks_per_chunk=3)
 
 
 def _tp2_rank_mapping(rank: int) -> CanonicalPageMapping:
@@ -254,7 +263,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
         # only legal on pinned memory; production pins via CPUOffloadingWorker
         pin_mmap_region(region)
         assert region.is_pinned
-        return region.create_next_canonical_view(_CANONICAL_PAGE)
+        return region.create_canonical_view()
 
     try:
         for rank in range(writer_tp):
@@ -288,3 +297,88 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
     finally:
         for region in regions:
             region.cleanup()
+
+
+def _slot_ref(
+    mapping: CanonicalPageMapping, slot: int, tensor_idx: int = 0
+) -> CanonicalKVCacheRef:
+    return CanonicalKVCacheRef(
+        tensor_idx=tensor_idx,
+        page_size_bytes=mapping.local_page_size_bytes,
+        mapping=mapping,
+        canonical_offset=slot * _CANONICAL_PAGE,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_pipeline_stages_fill_one_row_for_a_single_stage_reader():
+    """TP2 x PP2 writers fill the slots of their stage's layer in shared chunk
+    rows; a TP1 single-stage reader, which holds every layer, reads each
+    layer's ground truth back."""
+    torch.manual_seed(0)
+    num_blocks, num_layers, tp = 3, 2, 2
+    full_kv = [
+        torch.randint(
+            -128,
+            128,
+            (num_blocks, 2, _BLOCK_TOKENS, _TOTAL_HEADS, _HEAD_BYTES),
+            dtype=torch.int8,
+        )
+        for _ in range(num_layers)
+    ]
+    chunk_rows = torch.zeros(
+        num_blocks, num_layers * _CANONICAL_PAGE, dtype=torch.int8, pin_memory=True
+    )
+
+    # Stage s holds layer s, whose slot is s
+    for stage in range(num_layers):
+        for rank in range(tp):
+            mapping = _nhd_shard_mapping(tp, rank)
+            ref = _slot_ref(mapping, slot=stage)
+            gpu_shard = _head_shard(full_kv[stage], tp, rank).cuda()
+            kv_caches = CanonicalKVCaches(
+                tensors=[
+                    CanonicalKVCacheTensor(
+                        tensor=gpu_shard, page_size_bytes=ref.page_size_bytes
+                    )
+                ],
+                group_data_refs=[[ref]],
+            )
+            store = SingleDirectionOffloadingHandler(
+                cpu_tensors=[chunk_rows],
+                blocks_per_chunk=1,
+                layer_refs_per_group=[[ref]],
+                gpu_to_cpu=True,
+                canonical_layout=True,
+            )
+            _transfer(store, kv_caches, num_blocks)
+    torch.accelerator.synchronize()
+
+    mapping = _nhd_shard_mapping(1, 0)
+    refs = [
+        _slot_ref(mapping, slot=layer, tensor_idx=layer) for layer in range(num_layers)
+    ]
+    gpu_layers = [
+        torch.zeros(num_blocks, _CANONICAL_PAGE, dtype=torch.int8, device="cuda")
+        for _ in range(num_layers)
+    ]
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(tensor=tensor, page_size_bytes=_CANONICAL_PAGE)
+            for tensor in gpu_layers
+        ],
+        group_data_refs=[refs],
+    )
+    load = SingleDirectionOffloadingHandler(
+        cpu_tensors=[chunk_rows],
+        blocks_per_chunk=1,
+        layer_refs_per_group=[refs],
+        gpu_to_cpu=False,
+        canonical_layout=True,
+    )
+    _transfer(load, kv_caches, num_blocks)
+    torch.accelerator.synchronize()
+    for layer, gpu_layer in enumerate(gpu_layers):
+        assert torch.equal(gpu_layer.cpu(), _head_shard(full_kv[layer], 1, 0)), (
+            f"layer {layer} differs from the ground truth of its stage"
+        )

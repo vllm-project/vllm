@@ -3,17 +3,25 @@
 """Derivation of canonical page mappings for KV offloading.
 
 The only place in the offloading stack that reasons about parallelism
-(TP/DCP/PCP); everything downstream consumes byte mappings. The canonical
+(TP/DCP/PCP/PP); everything downstream consumes byte mappings. The canonical
 page of a layer is the full offloaded block without parallelism: all KV
-heads, all block_size * dcp * pcp tokens, in the worker's page encoding.
-Uncertifiable layers get an opaque fallback mapping (fail closed).
+heads, all block_size * dcp * pcp tokens, in the worker's page encoding. A
+certified layer whose physical page layout is not recognized places its pages
+whole by KV head shard; uncertifiable layers get an opaque fallback mapping
+(fail closed). A chunk row holds one KV cache group's canonical pages, layer
+by layer in model order, so each pipeline stage fills the slots of its own
+layers.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.layer_layout import (
+    LayerObjectLayout,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -27,8 +35,9 @@ from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-# Version of the canonical byte format; bump on any layout change
-CANONICAL_FORMAT_VERSION = 1
+# Version of the canonical byte format; bump on any layout change.
+# 2: a chunk row holds one group's layers in model order at fixed offsets.
+CANONICAL_FORMAT_VERSION = 2
 
 
 def canonical_format_id(kv_cache_layout: str) -> str:
@@ -264,41 +273,9 @@ def _attention_byte_regions(
     return None
 
 
-def _layer_mapping(
-    spec: KVCacheSpec,
-    kv_cache: torch.Tensor | list[torch.Tensor] | None,
-    num_blocks: int,
-    ctx: _RankContext,
-) -> CanonicalPageMapping | None:
-    """Certified mapping for one layer at one rank, or None (fail closed)."""
-    if not isinstance(spec, AttentionSpec):
-        return None
-    bs = spec.block_size
-    page = spec.real_page_size_bytes
-    if ctx.cp_size > 1 and (ctx.interleave > bs or bs % ctx.interleave):
-        return None
-
-    if isinstance(spec, MLAAttentionSpec):
-        # TP-replicated latent; CP shards its tokens across the DCP groups
-        if (
-            spec.tokens_per_state != 1
-            or page % bs
-            or ctx.tp_size % ctx.dcp_size
-            or spec.kv_quant_mode.is_per_token_head
-        ):
-            return None
-        row = page // bs
-        return CanonicalPageMapping(
-            canonical_page_size_bytes=ctx.cp_size * page,
-            local_page_size_bytes=page,
-            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], bs, ctx),
-            num_writers=ctx.tp_size // ctx.dcp_size,
-            writer_index=ctx.tp_rank // ctx.dcp_size,
-            parallelism_agnostic=ctx.cp_size == 1,
-        )
-
-    if spec.kv_quant_mode.is_per_token_head or not isinstance(kv_cache, torch.Tensor):
-        return None
+def _head_shards(spec: AttentionSpec, ctx: _RankContext) -> tuple[int, int] | None:
+    """(Number of distinct KV head shards, ranks holding each shard) of a
+    non-MLA attention layer, or None when TP does not split its heads evenly."""
     total, tp = ctx.total_kv_heads, ctx.tp_size
     if spec.num_kv_heads != max(1, total // tp):
         return None
@@ -313,7 +290,66 @@ def _layer_mapping(
     # DCP shards tokens across ranks holding replicated KV
     if replication % ctx.dcp_size:
         return None
+    return num_head_shards, replication
 
+
+def _certified_page_size(spec: KVCacheSpec, ctx: _RankContext) -> int | None:
+    """Canonical page size of a layer whose spec passes certification, or
+    None. The physical layout is checked separately, per worker."""
+    if not isinstance(spec, AttentionSpec):
+        return None
+    bs = spec.block_size
+    page = spec.real_page_size_bytes
+    if ctx.cp_size > 1 and (ctx.interleave > bs or bs % ctx.interleave):
+        return None
+    if isinstance(spec, MLAAttentionSpec):
+        # TP-replicated latent; CP shards its tokens across the DCP groups
+        if (
+            spec.tokens_per_state != 1
+            or page % bs
+            or ctx.tp_size % ctx.dcp_size
+            or spec.kv_quant_mode.is_per_token_head
+        ):
+            return None
+        return ctx.cp_size * page
+    if spec.kv_quant_mode.is_per_token_head:
+        return None
+    shards = _head_shards(spec, ctx)
+    if shards is None:
+        return None
+    return ctx.cp_size * shards[0] * page
+
+
+def _layer_mapping(
+    spec: KVCacheSpec,
+    kv_cache: torch.Tensor | list[torch.Tensor] | None,
+    num_blocks: int,
+    ctx: _RankContext,
+) -> CanonicalPageMapping | None:
+    """Certified mapping for one layer at one rank, or None (fail closed)."""
+    canonical_page = _certified_page_size(spec, ctx)
+    if canonical_page is None:
+        return None
+    assert isinstance(spec, AttentionSpec)
+    bs = spec.block_size
+    page = spec.real_page_size_bytes
+
+    if isinstance(spec, MLAAttentionSpec):
+        row = page // bs
+        return CanonicalPageMapping(
+            canonical_page_size_bytes=canonical_page,
+            local_page_size_bytes=page,
+            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], bs, ctx),
+            num_writers=ctx.tp_size // ctx.dcp_size,
+            writer_index=ctx.tp_rank // ctx.dcp_size,
+            parallelism_agnostic=ctx.cp_size == 1,
+        )
+
+    if not isinstance(kv_cache, torch.Tensor):
+        return None
+    shards = _head_shards(spec, ctx)
+    assert shards is not None
+    num_head_shards, replication = shards
     head_shard = ctx.tp_rank // replication
     regions = _attention_byte_regions(
         kv_cache, spec, num_blocks, head_shard, num_head_shards, ctx.cp_size
@@ -321,12 +357,35 @@ def _layer_mapping(
     if regions is None:
         return None
     return CanonicalPageMapping(
-        canonical_page_size_bytes=ctx.cp_size * num_head_shards * page,
+        canonical_page_size_bytes=canonical_page,
         local_page_size_bytes=page,
         runs=_interleave_cp_tokens(regions, bs, ctx),
         num_writers=replication // ctx.dcp_size,
         writer_index=(ctx.tp_rank % replication) // ctx.dcp_size,
         parallelism_agnostic=ctx.cp_size == 1,
+    )
+
+
+def _head_shard_fallback_mapping(
+    spec: AttentionSpec, ctx: _RankContext
+) -> CanonicalPageMapping:
+    """Fallback for a certified attention layer whose physical page layout is
+    not recognized: place the rank's page whole at the position of its KV head
+    shard and CP rank, so it fills the certified canonical page size. Ranks
+    holding the same heads and tokens take turns writing it."""
+    shards = _head_shards(spec, ctx)
+    assert shards is not None
+    num_head_shards, replication = shards
+    page = spec.real_page_size_bytes
+    position = (ctx.tp_rank // replication) * ctx.cp_size + ctx.total_cp_rank
+    run = CopyRun(0, position * page, page, 1, page, page)
+    return CanonicalPageMapping(
+        canonical_page_size_bytes=ctx.cp_size * num_head_shards * page,
+        local_page_size_bytes=page,
+        runs=(run,),
+        num_writers=replication // ctx.dcp_size,
+        writer_index=(ctx.tp_rank % replication) // ctx.dcp_size,
+        parallelism_agnostic=False,
     )
 
 
@@ -399,6 +458,56 @@ def _unpadded_page_size(spec: KVCacheSpec) -> int | None:
     return None
 
 
+def _rank_context(vllm_config: "VllmConfig", rank: int) -> _RankContext:
+    """Sharding parameters of one rank of a pipeline stage's TP x PCP grid."""
+    parallel_config = vllm_config.parallel_config
+    return _RankContext(
+        tp_size=parallel_config.tensor_parallel_size,
+        dcp_size=parallel_config.decode_context_parallel_size,
+        pcp_size=parallel_config.prefill_context_parallel_size,
+        interleave=parallel_config.cp_kv_cache_interleave_size,
+        total_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
+        rank=rank,
+    )
+
+
+def canonical_page_size(vllm_config: "VllmConfig", spec: KVCacheSpec) -> int | None:
+    """Canonical page size of a layer, from its spec alone: the size of every
+    mapping `derive_canonical_mappings` gives it, certified or fallback. None
+    for a layer without a canonical page."""
+    ctx = _rank_context(vllm_config, rank=0)
+    page = _certified_page_size(spec, ctx)
+    if page is not None:
+        return page
+    unpadded_page = _unpadded_page_size(spec)
+    if unpadded_page is None:
+        return None
+    return ctx.tp_size * ctx.pcp_size * unpadded_page
+
+
+def canonical_row_layouts(
+    vllm_config: "VllmConfig",
+    kv_cache_config: KVCacheConfig,
+    group_ids: Iterable[int],
+    blocks_per_chunk: int,
+) -> dict[int, LayerObjectLayout]:
+    """The layout of a canonical chunk row for each given group.
+
+    A row holds the chunk's canonical pages of one group's layers, on every
+    pipeline stage, back to back in model order, so every worker and the
+    scheduler compute the same layout under any parallel config.
+    """
+    layouts: dict[int, LayerObjectLayout] = {}
+    for group_id in group_ids:
+        layer_sizes: list[tuple[str, int]] = []
+        for layer_name, spec in kv_cache_config.pipeline_layer_specs(group_id).items():
+            page = canonical_page_size(vllm_config, spec)
+            if page is not None:
+                layer_sizes.append((layer_name, page * blocks_per_chunk))
+        layouts[group_id] = LayerObjectLayout.pack(layer_sizes)
+    return layouts
+
+
 def derive_canonical_mappings(
     vllm_config: "VllmConfig",
     kv_cache_config: KVCacheConfig,
@@ -406,27 +515,25 @@ def derive_canonical_mappings(
 ) -> dict[str, CanonicalPageMapping]:
     """Per-layer canonical page mappings for this worker.
 
-    Empty when the worker group is not exactly the TP x PCP grid; layers
+    Empty when the workers are not a TP x PCP grid per pipeline stage; layers
     absent from the result have no canonical representation.
     """
     parallel_config = vllm_config.parallel_config
-    tp_size = parallel_config.tensor_parallel_size
-    pcp_size = parallel_config.prefill_context_parallel_size
-    group_size = tp_size * pcp_size
-    if parallel_config.world_size != group_size:
+    group_size = (
+        parallel_config.tensor_parallel_size
+        * parallel_config.prefill_context_parallel_size
+    )
+    if (
+        parallel_config.world_size
+        != group_size * parallel_config.pipeline_parallel_size
+    ):
         return {}
 
     def ctx(rank: int) -> _RankContext:
-        return _RankContext(
-            tp_size=tp_size,
-            dcp_size=parallel_config.decode_context_parallel_size,
-            pcp_size=pcp_size,
-            interleave=parallel_config.cp_kv_cache_interleave_size,
-            total_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
-            rank=rank,
-        )
+        return _rank_context(vllm_config, rank)
 
-    my_rank = parallel_config.rank
+    # Workers are ordered by PP rank, then by PCP and TP rank.
+    my_rank = parallel_config.rank % group_size
     num_blocks = kv_cache_config.num_blocks
 
     mappings: dict[str, CanonicalPageMapping] = {}
@@ -441,13 +548,22 @@ def derive_canonical_mappings(
                     break
                 per_rank.append(mapping)
             if len(per_rank) != group_size:
-                page = _unpadded_page_size(spec)
-                if page is None:
-                    continue
-                per_rank = [
-                    _opaque_fallback_mapping(page, group_size, rank)
-                    for rank in range(group_size)
-                ]
+                if _certified_page_size(spec, ctx(0)) is not None:
+                    # The spec is certified but the physical page layout is
+                    # not: keep the canonical page size its row slot has.
+                    assert isinstance(spec, AttentionSpec)
+                    per_rank = [
+                        _head_shard_fallback_mapping(spec, ctx(rank))
+                        for rank in range(group_size)
+                    ]
+                else:
+                    page = _unpadded_page_size(spec)
+                    if page is None:
+                        continue
+                    per_rank = [
+                        _opaque_fallback_mapping(page, group_size, rank)
+                        for rank in range(group_size)
+                    ]
             _verify_tiling(layer_name, per_rank)
             mappings[layer_name] = per_rank[my_rank]
     return mappings

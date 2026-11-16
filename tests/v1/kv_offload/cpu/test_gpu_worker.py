@@ -192,6 +192,7 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     handler._stream_pool = [MagicMock()]
     handler._event_pool = [MagicMock()]
     handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
+    handler._canonical_cpu_views = [[MagicMock()]]
     handler.cpu_tensors = [MagicMock()]
 
     with pytest.raises(RuntimeError, match="device lost"):
@@ -203,6 +204,7 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     assert not handler._stream_pool
     assert not handler._event_pool
     assert not handler._buffer_pool
+    assert not handler._canonical_cpu_views
     assert not handler.cpu_tensors
 
 
