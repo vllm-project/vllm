@@ -1539,6 +1539,23 @@ def test_session_request_running_at_a_prefix_cache_reset_resumes(
     assert engine.segments["r"] == [(0, "v1"), (32, None)]
 
 
+def test_reset_writes_the_objects_its_preempted_session_request_completed():
+    engine = _tier_engine(connector=None)
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 40, 12, lookahead=1)
+    engine.scheduler.add_request(request)
+    for _ in range(9):
+        engine.step(engine.schedule(), {"r": [0]})
+    key = f"job/s/{request.block_hashes[2].hex()}"
+    assert engine.scheduler.reset_prefix_cache(reset_running_requests=True)
+    resumed = engine.schedule()
+    rows = read_aux_rows(engine.store, [key], "routed_experts", timeout_s=5)
+    assert rows[:, 0, 0].tolist() == list(range(32, 48))
+    engine.step(resumed, {"r": [0]})
+    engine.run()
+    engine.close()
+
+
 def test_session_key_of_a_block_whose_hash_follows_the_stop_is_a_tail():
     engine = _tier_engine(connector=None)
     _run_turn(engine, 0, "first", 48, lookahead=1)

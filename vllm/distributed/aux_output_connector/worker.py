@@ -689,7 +689,18 @@ class AuxOutputWorkerConnector:
                         tail = metadata.session_tails[request_id]
                         self._take_tail(request_id, state, tail)
                     state.block_hashes.extend(metadata.block_hashes.get(request_id, ()))
-                self._publish_blocks([(self._requests[r], []) for r in carried])
+                flushed = [
+                    request_id
+                    for request_id in metadata.flushed_block_hashes
+                    if request_id in self._requests
+                ]
+                for request_id in flushed:
+                    self._requests[request_id].block_hashes.extend(
+                        metadata.flushed_block_hashes[request_id]
+                    )
+                self._publish_blocks(
+                    [(self._requests[r], []) for r in carried + flushed]
+                )
                 self._teardown(carried)
                 release_keys.extend(
                     key

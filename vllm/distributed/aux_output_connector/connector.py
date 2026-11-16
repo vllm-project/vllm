@@ -84,6 +84,7 @@ class AuxOutputConnectorMetadata:
     sessions: dict[str, str] = field(default_factory=dict)
     session_tails: dict[str, tuple[str, int, int]] = field(default_factory=dict)
     session_object_size: int = 0
+    flushed_block_hashes: dict[str, PackedBlockHashes] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -212,6 +213,7 @@ class AuxOutputSchedulerConnector:
         self._weight_version = "default"
         self._session_requests: dict[str, _SessionRequest] = {}
         self._session_tails: dict[str, tuple[str, int, int]] = {}
+        self._flushed_hashes: dict[str, PackedBlockHashes] = {}
 
     def _session(self, request: Request) -> str | None:
         params = request.sampling_params
@@ -319,7 +321,9 @@ class AuxOutputSchedulerConnector:
             sessions,
             self._session_tails,
             self._block_size,
+            self._flushed_hashes,
         )
+        self._flushed_hashes = {}
         self._retained_hashes, self._released_hashes = [], []
         self._session_tails = {}
         for request_id in scheduler_output.finished_req_ids or ():
@@ -589,12 +593,16 @@ class AuxOutputSchedulerConnector:
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
         self._computed_from.clear()
-        self._finished_requests = {
-            request_id: block_hashes
-            for request_id, block_hashes in self._finished_requests.items()
-            if request_id in self._session_requests
-            and self._session_requests[request_id].request.is_finished()
-        }
+        finished = {}
+        for request_id, block_hashes in self._finished_requests.items():
+            state = self._session_requests.get(request_id)
+            if state is None:
+                continue
+            if state.request.is_finished():
+                finished[request_id] = block_hashes
+            elif block_hashes is not None:
+                self._flushed_hashes[request_id] = block_hashes
+        self._finished_requests = finished
         self._generation += 1
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()
