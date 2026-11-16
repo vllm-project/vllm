@@ -89,7 +89,7 @@ impl AppState {
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
-            lora_manager: LoraManager::new(Vec::new()),
+            lora_manager: LoraManager::new(),
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
@@ -111,7 +111,7 @@ impl AppState {
     /// Set the modalities whose `--default-mm-loras` adapter serves chat
     /// requests that name no adapter. Call before loading any adapter.
     pub fn with_default_mm_lora_modalities(mut self, modalities: Vec<MmModality>) -> Self {
-        self.lora_manager = LoraManager::new(modalities);
+        self.lora_manager = self.lora_manager.with_default_mm_modalities(modalities);
         self
     }
 

@@ -207,44 +207,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 
     // Load operator-configured static LoRA adapters before serving, failing
     // startup on any error like Python's `init_static_loras` does.
-    load_static_loras(&state, &config.lora_modules, "--lora-modules").await?;
-    // Like Python's `process_lora_modules`, each default adapter is served
-    // under its modality's name after the `--lora-modules` adapters.
-    let default_mm_loras = config
-        .default_mm_loras
-        .iter()
-        .map(|(modality, path)| LoraModulePath {
-            name: modality.as_str().to_string(),
-            path: path.clone(),
-            base_model_name: None,
-            is_3d_lora_weight: false,
-        })
-        .collect::<Vec<_>>();
-    load_static_loras(&state, &default_mm_loras, "--default-mm-loras").await?;
+    lora::load_static_loras(&state, &config.lora_modules, &config.default_mm_loras).await?;
 
     Ok(state)
-}
-
-async fn load_static_loras(
-    state: &AppState,
-    modules: &[LoraModulePath],
-    source_arg: &str,
-) -> Result<()> {
-    for module in modules {
-        let request = state.load_static_lora(module).await.with_context(|| {
-            format!(
-                "failed to load LoRA adapter `{}` from {source_arg}",
-                module.name
-            )
-        })?;
-        info!(
-            lora_name = %request.lora_name,
-            lora_int_id = request.lora_int_id,
-            lora_path = %request.lora_path,
-            "loaded static LoRA adapter"
-        );
-    }
-    Ok(())
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is

@@ -5,17 +5,20 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::Context as _;
 use indexmap::IndexMap;
 use itertools::Itertools as _;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
+use tracing::info;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 
-use crate::config::LoraModulePath;
+use crate::config::{DefaultMmLoras, LoraModulePath};
 use crate::model_names::ServedModelNames;
+use crate::state::AppState;
 
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
@@ -222,14 +225,64 @@ pub(crate) fn check_lora_module(
     Ok(())
 }
 
+/// Load the operator-configured static LoRA adapters before serving, failing
+/// startup on any error like Python's `init_static_loras` does. Like Python's
+/// `process_lora_modules`, each `--default-mm-loras` adapter is served under
+/// its modality's name after the `--lora-modules` adapters.
+pub(crate) async fn load_static_loras(
+    state: &AppState,
+    lora_modules: &[LoraModulePath],
+    default_mm_loras: &DefaultMmLoras,
+) -> anyhow::Result<()> {
+    load_lora_modules(state, lora_modules, "--lora-modules").await?;
+    let default_mm_loras = (default_mm_loras.iter())
+        .map(|(modality, path)| LoraModulePath {
+            name: modality.as_str().to_string(),
+            path: path.clone(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        })
+        .collect::<Vec<_>>();
+    load_lora_modules(state, &default_mm_loras, "--default-mm-loras").await
+}
+
+async fn load_lora_modules(
+    state: &AppState,
+    modules: &[LoraModulePath],
+    source_arg: &str,
+) -> anyhow::Result<()> {
+    for module in modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from {source_arg}",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
+    Ok(())
+}
+
 impl LoraManager {
-    pub fn new(default_mm_modalities: Vec<MmModality>) -> Self {
+    pub fn new() -> Self {
         Self {
             adapters: RwLock::new(IndexMap::new()),
             id_counter: AtomicU64::new(0),
             update_lock: Mutex::new(()),
-            default_mm_modalities,
+            default_mm_modalities: Vec::new(),
         }
+    }
+
+    /// Set the modalities whose `--default-mm-loras` adapter serves chat
+    /// requests that name no adapter.
+    pub fn with_default_mm_modalities(mut self, modalities: Vec<MmModality>) -> Self {
+        self.default_mm_modalities = modalities;
+        self
     }
 
     /// Snapshot loaded LoRA adapters in load order.
@@ -237,10 +290,9 @@ impl LoraManager {
         self.adapters.read().await.values().cloned().collect()
     }
 
-    /// Resolve the requested model against one consistent LoRA registry
-    /// snapshot.
-    /// Resolve `model_name` to an adapter; a request that names none falls
-    /// back to the default adapter of the media modality it carries.
+    /// Resolve `model_name` to an adapter against one consistent LoRA registry
+    /// snapshot; a request that names none falls back to the default adapter
+    /// of the media modality it carries.
     ///
     /// Like Python, the fallback applies only when exactly one configured
     /// modality matches, since a request runs at most one adapter.
@@ -423,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_model_selects_adapter_when_any_model_name_is_accepted() {
-        let manager = LoraManager::new(Vec::new());
+        let manager = LoraManager::new();
         manager.adapters.write().await.insert(
             "adapter-a".to_string(),
             LoadedLora {
@@ -453,7 +505,8 @@ mod tests {
     /// defaults leave the base model.
     #[tokio::test]
     async fn resolve_model_falls_back_to_the_one_matching_default_mm_lora() {
-        let manager = LoraManager::new(vec![MmModality::Audio, MmModality::Image]);
+        let manager = LoraManager::new()
+            .with_default_mm_modalities(vec![MmModality::Audio, MmModality::Image]);
         for (lora_int_id, lora_name) in (1..).zip(["audio", "image", "video", "adapter-a"]) {
             manager.adapters.write().await.insert(
                 lora_name.to_string(),
