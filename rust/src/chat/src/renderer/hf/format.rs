@@ -310,7 +310,7 @@ impl ContentCapabilities {
         let mut media = parts
             .iter()
             .filter_map(|part| match part {
-                ChatContentPart::Text { .. } => None,
+                ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => None,
                 ChatContentPart::ImageUrl { .. } => Some(self.typed_image),
                 ChatContentPart::VideoUrl { .. } => Some(self.typed_video),
                 ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {

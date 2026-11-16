@@ -89,8 +89,6 @@ variants:
         extra_args:
           - "--max-model-len"
           - "262144"
-          - "--gpu-memory-utilization"
-          - "0.92"
           - "--load-format"
           - "fastsafetensors"
           - "--attention-backend"
@@ -223,7 +221,6 @@ guide: |
 
   The NVFP4 variant runs on a single RTX Pro 6000 at TP=1. Requires vLLM v0.24.0 or later. A few notes:
 
-  - **Set `--gpu-memory-utilization 0.92`** to avoid an OOM at startup. If you encounter an OOM, try adjusting the value.
   - **Set `VLLM_FLOAT32_MATMUL_PRECISION="high"`** to use high precision for the matmul operations.
   - **Set `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`** to allow the model to use the full context length.
 
@@ -234,7 +231,6 @@ guide: |
   VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
       --max-model-len 262144 \
-      --gpu-memory-utilization 0.92 \
       --max-num-seqs 8 \
       --max-num-batched-tokens 16384 \
       --kv-cache-dtype fp8 \

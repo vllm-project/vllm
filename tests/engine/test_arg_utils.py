@@ -60,8 +60,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
-            '"allow_target_only_watermarking":true}',
+            (
+                '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+                '"allow_target_only_watermarking":true}'
+            ),
         ]
     )
 
@@ -82,8 +84,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"key":42,"deduplicate_contexts":"none",'
-            '"deduplicate_contexts_max_history":32}',
+            (
+                '{"key":42,"deduplicate_contexts":"none",'
+                '"deduplicate_contexts_max_history":32}'
+            ),
         ]
     )
     config = EngineArgs.from_cli_args(args).create_watermark_config()
@@ -492,9 +496,11 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "--compilation-config="
-            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"backend": "inductor"}',
+            (
+                "--compilation-config="
+                '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+                '"backend": "inductor"}'
+            ),
         ]
     )
     assert (
@@ -574,11 +580,13 @@ def test_attention_config():
     # set to string form of a dict with all fields
     args = parser.parse_args(
         [
-            "--attention-config="
-            '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_trtllm_attention": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            (
+                "--attention-config="
+                '{"backend": "FLASHINFER", "flash_attn_version": 2, '
+                '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+                '"use_trtllm_attention": false, '
+                '"disable_flashinfer_q_quantization": false}'
+            ),
         ]
     )
     assert args is not None
@@ -603,6 +611,20 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+
+    # test --attention-backend auto keeps automatic selection
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "auto",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.attention_config.backend is None
 
     # test --attention-config.backend flows into VllmConfig.attention_config
     args = parser.parse_args(
@@ -635,15 +657,39 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
-def test_multi_node_world_size_includes_pcp(monkeypatch):
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("from_cli", [False, True], ids=["python", "cli"])
+def test_attention_backend_rejects_torch_sdpa(from_cli):
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if from_cli:
+        parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+        args = parser.parse_args(
+            [
+                "--model",
+                "facebook/opt-125m",
+                "--attention-backend",
+                "TORCH_SDPA",
+            ]
+        )
+        engine_args = EngineArgs.from_cli_args(args)
+    else:
+        engine_args = EngineArgs(
+            model="facebook/opt-125m",
+            attention_backend=AttentionBackendEnum.TORCH_SDPA,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="only supported for multi-modal encoder attention",
+    ):
+        engine_args.create_engine_config()
+
+
+def test_multi_node_world_size_includes_pcp():
     """PCP expands the process world size, so the --nnodes divisibility check
     must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
     size of 1 and the launch is rejected before the engine starts."""
-    import vllm.config.vllm
-
-    # PCP requires the V2 model runner, which is gated on Triton.
-    monkeypatch.setattr(vllm.config.vllm, "HAS_TRITON", True)
-
     engine_args = EngineArgs(
         model="facebook/opt-125m",
         tensor_parallel_size=1,

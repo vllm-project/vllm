@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernel + tuned constants for the ``swap_blocks_batch`` fast path."""
+"""Triton kernel + tuned constants for the `swap_blocks_batch` fast path."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def swap_blocks_batch(
     *,
     bytes_per_chunk: int,
 ) -> None:
-    """Triton implementation of ``swap_blocks_batch`` for small CPU->GPU batches."""
+    """Triton implementation of `swap_blocks_batch` for small CPU->GPU batches."""
     n = src_addrs.numel()
     # Too few descriptors to amortize Triton's launch cost.
     if n < MIN_N:

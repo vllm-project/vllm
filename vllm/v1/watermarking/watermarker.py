@@ -11,7 +11,7 @@ from vllm.config.watermarking import WatermarkContextScope
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WatermarkSample:
     token_ids: torch.Tensor
     logits: torch.Tensor
@@ -45,7 +45,7 @@ class RandomSampler:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class DraftContextState:
     contexts: torch.Tensor
     enabled: torch.Tensor

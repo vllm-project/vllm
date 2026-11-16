@@ -23,8 +23,6 @@ model:
     - "--trust-remote-code"
     - "--dtype"
     - "bfloat16"
-    - "--gpu-memory-utilization"
-    - "0.9"
     - "--enable-chunked-prefill"
     - "--compilation-config"
     - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
@@ -105,7 +103,6 @@ guide: |
     --trust-remote-code \
     --dtype bfloat16 \
     --tensor-parallel-size 4 \
-    --gpu-memory-utilization 0.9 \
     --enable-chunked-prefill \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
     --enable-prefix-caching \

@@ -4,7 +4,7 @@
 launch: the QKV + o-gate projection (split-K BF16 GEMM, mma.sync, FP32
 accumulate), then the per-head weightless RMS norm, interleaved RoPE, the y
 store and the paged K/V insert. It writes what the projection GEMM followed by
-``fused_muse_spark_qknorm_rope_kv_insert`` writes for a BF16 KV cache, up to the
+`fused_muse_spark_qknorm_rope_kv_insert` writes for a BF16 KV cache, up to the
 GEMM's summation order.
 
 Structure: a thread-block cluster computes one head (64 output columns), its S
@@ -108,7 +108,7 @@ def k_split(n: int) -> int:
 
 
 def ring_stages(n: int, split: int) -> int:
-    """The ring depth at K split ``split``; it does not change the result."""
+    """The ring depth at K split `split`; it does not change the result."""
     return (
         DEEP_STAGES if (n // HEAD_DIM) * split <= SPLIT_SMS and split == 4 else STAGES
     )
@@ -125,21 +125,21 @@ def fixed_rows(m: int) -> int:
 
 
 def _k_tile(i: int, rank: Int32, splits: int) -> Int32:
-    """First k of the i-th k-tile cluster rank ``rank`` reduces."""
+    """First k of the i-th k-tile cluster rank `rank` reduces."""
     return (
         Int32((i // KSTRIPE) * splits * KSTRIPE + i % KSTRIPE) + rank * KSTRIPE
     ) * KT
 
 
 def _swizzled(row, chunk: int):
-    """Byte offset of 16-byte chunk ``chunk`` of ``row`` in a 128B-swizzled
+    """Byte offset of 16-byte chunk `chunk` of `row` in a 128B-swizzled
     box (1 KiB aligned)."""
     return row * 128 + ((chunk ^ (row & 7)) << 4)
 
 
 class QkvFrontKernel:
-    """One variant: ``tiles`` 8-token column tiles, a ``stages``-deep ring, K
-    split ``splits`` (the cluster size) and ``fixed_m`` (8: M == 8, 0: any M of
+    """One variant: `tiles` 8-token column tiles, a `stages`-deep ring, K
+    split `splits` (the cluster size) and `fixed_m` (8: M == 8, 0: any M of
     the tile count)."""
 
     def __init__(self, tiles: int, stages: int, splits: int, fixed_m: int) -> None:
@@ -479,7 +479,7 @@ class QkvFrontKernel:
 
     @cute.jit
     def consume(self, sbase, fb, eb, warp, lane, acc) -> None:
-        """Consumer warp ``warp``: W rows 16 warp .. 16 warp + 15 over all 128 k
+        """Consumer warp `warp`: W rows 16 warp .. 16 warp + 15 over all 128 k
         of every stage. The 32-k block b lives in box b / 2 at 16-byte chunks
         2 t + (b & 1); A and B take the same k permutation. One accumulator set
         per k block."""
@@ -601,10 +601,10 @@ class QkvFrontKernel:
         kv_cache,
         lane,
     ) -> None:
-        """Epilogue of local token ``u`` (head columns 2 lane, 2 lane + 1): the
+        """Epilogue of local token `u` (head columns 2 lane, 2 lane + 1): the
         splits partials summed in rank order and rounded to BF16, then for q and
-        k heads the RMS norm and RoPE (``cv``, ``sn``: this lane's cos and
-        sin), the y store and, for k and v heads, the cache row of ``slot``."""
+        k heads the RMS norm and RoPE (`cv`, `sn`: this lane's cos and
+        sin), the y store and, for k and v heads, the cache row of `slot`."""
         group_k, group_v, group_g = hq, hq + hkv, hq + 2 * hkv
         vx = Float32(0.0)
         vy = Float32(0.0)
@@ -651,13 +651,13 @@ class QkvFrontKernel:
 
 
 def _k_tile_dynamic(i: Int32, rank: Int32, splits: int) -> Int32:
-    """``_k_tile`` of a dynamic tile index."""
+    """`_k_tile` of a dynamic tile index."""
     return ((i // KSTRIPE) * (splits * KSTRIPE) + rank * KSTRIPE + i % KSTRIPE) * KT
 
 
 def _cache_row(kv_cache: Int64, slot: Int64, hkv: Int32, kv_head: Int32) -> Int64:
-    """Byte address of the [pages, hkv, 16, 128] BF16 cache row of ``slot``
-    for KV head ``kv_head`` (64-bit: cache offsets exceed 2^31)."""
+    """Byte address of the [pages, hkv, 16, 128] BF16 cache row of `slot`
+    for KV head `kv_head` (64-bit: cache offsets exceed 2^31)."""
     page = slot >> 4
     row = (page * Int64(hkv) + Int64(kv_head)) * BLOCK_SIZE + (slot & 15)
     return kv_cache + row * (2 * HEAD_DIM * 2)
@@ -683,7 +683,7 @@ def compile_qkv_front(
     tiles: int, stages: int, splits: int, fixed_m: int, options: str = ""
 ):
     """The compiled variant, shared by every layer and shape it serves, with
-    these extra compile ``options``; called (TVM FFI) as fn(w, x, positions,
+    these extra compile `options`; called (TVM FFI) as fn(w, x, positions,
     cos_sin, slots, kv_cache, y, m, n, hq, hkv, rope, eps, stream) with byte
     addresses and the stream handle as ints."""
     assert_not_capturing("the QKV front")
@@ -710,7 +710,7 @@ def prepare(n: int, rows: Iterable[int] = range(1, MAX_TOKENS + 1)) -> None:
 
 
 def hidden_rows_ok(t: torch.Tensor) -> bool:
-    """Whether ``t`` is a contiguous, 16-byte aligned bf16 [rows, 8192]
+    """Whether `t` is a contiguous, 16-byte aligned bf16 [rows, 8192]
     matrix, as x and the weight must be."""
     return (
         t.dim() == 2
@@ -723,7 +723,7 @@ def hidden_rows_ok(t: torch.Tensor) -> bool:
 
 def kv_cache_layout_ok(kv_cache: torch.Tensor, num_kv_heads: int) -> bool:
     """Whether a KV cache has the layout the QKV front and attn2 read: bf16
-    ``[pages, num_kv_heads, 16, 128]`` (K | V per slot), dense pages of dense
+    `[pages, num_kv_heads, 16, 128]` (K | V per slot), dense pages of dense
     heads, 16-byte aligned."""
     row = 2 * HEAD_DIM
     if (
@@ -757,7 +757,7 @@ def unsupported(
     kv_cache: torch.Tensor,
     out: torch.Tensor | None = None,
 ) -> str | None:
-    """Why the kernel cannot take this call (with ``out``, also its output),
+    """Why the kernel cannot take this call (with `out`, also its output),
     or None."""
     if not x.is_cuda:
         return "x must be a CUDA tensor"
@@ -822,8 +822,8 @@ def launch(
     out: torch.Tensor,
     eps: float,
 ) -> None:
-    """``qkv_front`` without its checks: for a call ``unsupported`` took with
-    this ``out``."""
+    """`qkv_front` without its checks: for a call `unsupported` took with
+    this `out`."""
     m, n = x.shape[0], weight.shape[0]
     hkv = kv_cache.shape[1]
     device = x.get_device()
@@ -850,7 +850,7 @@ def launch(
 
 
 def _compile_and_call(device: int, n: int, m: int, *args) -> None:
-    """The (N, M) variant called on the current stream of ``device``, which is
+    """The (N, M) variant called on the current stream of `device`, which is
     current: a first compile targets the inputs' device too."""
     compile_qkv_front(*variant(n, m))(*args, torch._C._cuda_getCurrentRawStream(device))
 
@@ -866,12 +866,12 @@ def qkv_front(
     eps: float,
 ) -> None:
     """Out [M, N] = x [M, 8192] @ weight [N, 8192]^T with the q and k heads
-    RMS-normalized (and rotated when ``cos_sin_cache`` is given), and the
+    RMS-normalized (and rotated when `cos_sin_cache` is given), and the
     normalized k and raw v heads written to the kv_cache rows of
-    ``slot_mapping`` (-1: none). N = (2 HQ + 2 HKV) * 64, HKV =
+    `slot_mapping` (-1: none). N = (2 HQ + 2 HKV) * 64, HKV =
     kv_cache.size(1). Launched with PDL on the current stream of x's device;
-    raises ValueError for a call outside the kernel (``unsupported``).
-    Graph-capturable once ``prepare`` has compiled the variant."""
+    raises ValueError for a call outside the kernel (`unsupported`).
+    Graph-capturable once `prepare` has compiled the variant."""
     reason = unsupported(
         x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out
     )

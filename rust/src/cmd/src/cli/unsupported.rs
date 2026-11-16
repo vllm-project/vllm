@@ -202,12 +202,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
 
-    /// The token to use as HTTP bearer authorization for remote files. If
-    /// `True`, will use the token generated when running `hf auth login`
-    /// (stored in `~/.cache/huggingface/token`).
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub hf_token: Option<Unsupported>,
-
     /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     /// used with `--generation-config auto`, the override parameters will be
     /// merged with the default config from the model. If used with
@@ -249,16 +243,6 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_elastic_ep: Option<Unsupported>,
-
-    /// This feature is work in progress and no prefill optimization takes place
-    /// with this flag enabled currently.
-    #[arg(
-        long,
-        visible_alias = "no-kv-sharing-fast-prefill",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub kv_sharing_fast_prefill: Option<Unsupported>,
 
     /// If `True`, LoRA support for the tower (vision encoder) and connector
     /// of multimodal models will be enabled. This is an experimental feature
@@ -309,10 +293,6 @@ pub struct EngineUnsupportedArgs {
     /// hardware video decoding.
     #[arg(long)]
     pub mm_ipc_gpu_memory_gb: Option<Unsupported>,
-
-    /// Dictionary mapping specific modalities to LoRA model paths.
-    #[arg(long)]
-    pub default_mm_loras: Option<Unsupported>,
 
     /// Target URL to which OpenTelemetry traces will be sent.
     #[arg(long)]
@@ -406,25 +386,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_server_load_tracking: Option<Noop>,
-
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        visible_alias = "no-enable-force-include-usage",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, only enable the Tokens In<>Out endpoint.
-    /// This is intended for use in a Disaggregated Everything setup.
-    #[arg(
-        long,
-        visible_alias = "no-tokens-only",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub tokens_only: Option<Unsupported>,
 
     /// Log level for uvicorn.
     #[arg(long)]
