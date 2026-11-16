@@ -512,12 +512,12 @@ class TestRenderEndpoint:
         assert body["reasoning_parser_kwargs"] == {
             "chat_template_kwargs": {"safety_mode": "strict"}
         }
-        assert "citation_sources" not in body["parse_context"]
+        assert "parser_state" not in body["parse_context"]
         assert render_handler.seen_kwargs_filter is not None
         assert render_handler.seen_kwargs_filter(kwargs) == {"safety_mode": "strict"}
 
     def test_grounded_render_fills_citation_sources(self):
-        """Grounded Cohere render sends a JSON-safe citation_sources list."""
+        """Grounded Cohere render puts citation_sources in parser_state."""
         render_handler = _RenderHandler(_generate_request())
         app = _build_render_app(_RenderChatHandler(), render_handler)
         body = {
@@ -528,7 +528,7 @@ class TestRenderEndpoint:
             r = client.post("/cohere/v2/chat/render", json=body)
         assert r.status_code == HTTPStatus.OK
         parse_context = r.json()["parse_context"]
-        assert parse_context["citation_sources"] == [
+        assert parse_context["parser_state"]["citation_sources"] == [
             {
                 "bucket": 0,
                 "idx": 0,
@@ -546,7 +546,7 @@ class TestRenderEndpoint:
         assert GenerateRequest.model_validate(r.json()).parse_context is not None
 
     def test_grounded_streaming_render_omits_citation_sources(self):
-        """Streaming derender does not install sources yet; skip the field."""
+        """Streaming derender does not install sources yet; skip parser_state."""
         render_handler = _RenderHandler(_generate_request())
         app = _build_render_app(_RenderChatHandler(), render_handler)
         body = {
@@ -557,7 +557,7 @@ class TestRenderEndpoint:
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=body)
         assert r.status_code == HTTPStatus.OK
-        assert "citation_sources" not in r.json()["parse_context"]
+        assert "parser_state" not in r.json()["parse_context"]
 
     def test_grounded_render_sanitizes_nonfinite_tool_json(self):
         """Tool text with NaN must not 500 JSONResponse(allow_nan=False)."""
@@ -589,7 +589,7 @@ class TestRenderEndpoint:
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=body)
         assert r.status_code == HTTPStatus.OK
-        sources = r.json()["parse_context"]["citation_sources"]
+        sources = r.json()["parse_context"]["parser_state"]["citation_sources"]
         assert sources
         json.dumps(sources, allow_nan=False)
         tool_outputs = [

@@ -180,24 +180,20 @@ class TestSetCitationSources:
     )
 
     def test_set_citation_sources_resolves_unary_parse(self, tokenizer, request_obj):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            CitationSourceEntry,
-        )
-
         parser = make_parser(tokenizer, "cohere_command3")
         assert getattr(parser, "_position_to_source", "missing") is None
 
         parser.set_citation_sources(
             [
-                CitationSourceEntry(
-                    bucket=0,
-                    idx=1,
-                    source={
+                {
+                    "bucket": 0,
+                    "idx": 1,
+                    "source": {
                         "type": "document",
                         "id": "doc-paris",
                         "document": {"id": "doc-paris", "title": "France"},
                     },
-                )
+                }
             ]
         )
         reasoning, content, tool_calls = parser.parse(self._MODEL_OUTPUT, request_obj)

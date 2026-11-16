@@ -55,27 +55,6 @@ logger = init_logger(__name__)
 OutputMode: TypeAlias = Literal["tokens", "text", "derender"]
 
 
-class CitationSourceEntry(BaseModel):
-    """JSON-safe citation source for derender parsing.
-
-    Carries one ``(bucket, idx) -> source`` entry from Cohere render. Tuple
-    keys cannot cross JSON, so `/render` sends this list on
-    :attr:`ParseContext.citation_sources` instead of
-    ``chat_template_kwargs["_position_to_source"]``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    bucket: NonNegativeInt
-    """Melody tool-call / document bucket index."""
-    idx: NonNegativeInt
-    """Result index inside the bucket."""
-    source: dict[str, JsonValue]
-    """Wire-shape source payload (``type`` / ``id`` / ``document`` or
-    ``tool_output``). Validated into a citation source by the Cohere
-    parser."""
-
-
 class ParseContext(BaseModel):
     """Chat request context the generate server needs to parse output.
 
@@ -100,13 +79,15 @@ class ParseContext(BaseModel):
     without the API server only entries a handler keeps out of the engine."""
     history_tool_call_cnt: int = Field(default=0, ge=0)
     """Tool calls already in the rendered conversation, for sequential IDs."""
-    citation_sources: list[CitationSourceEntry] | None = Field(
+    parser_state: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda v: not v
     )
-    """JSON-safe citation source map for grounded Cohere requests.
+    """Opaque JSON-only parser/vendor private state for derender.
 
-    Omitted when unset so older generate nodes only reject grounded Cohere
-    derender requests (unknown-field 400), not every derender request.
+    Omitted when unset so older generate nodes only reject requests that
+    actually carry it (unknown-field 400), not every derender request.
+    Example: grounded Cohere non-streaming render puts
+    `{"citation_sources": [{"bucket", "idx", "source"}, ...]}` here.
     """
 
     def to_chat_request(self) -> ChatCompletionRequest:

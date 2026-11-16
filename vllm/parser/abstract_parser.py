@@ -217,8 +217,8 @@ class Parser:
         """Install a JSON-safe citation source map before parsing.
 
         Default is a no-op. Parsers that resolve grounding citations from
-        numeric addresses (e.g. Cohere) override this. Each entry must
-        expose ``bucket``, ``idx`` and ``source`` attributes.
+        numeric addresses (e.g. Cohere) override this. Each entry is a
+        mapping (or object) with `bucket`, `idx`, and `source`.
         """
         return
 

@@ -213,31 +213,35 @@ def test_parse_context_rejects_non_json_template_kwargs():
         ParseContext(chat_template_kwargs={"_position_to_source": {(0, 0): "x"}})
 
 
-def test_parse_context_omits_unset_citation_sources():
-    """Older generate nodes must not see citation_sources: null on every request."""
+def test_parse_context_omits_unset_parser_state():
+    """Older generate nodes must not see parser_state: null on every request."""
     dumped = ParseContext().model_dump()
-    assert "citation_sources" not in dumped
-    assert "citation_sources" not in json.loads(ParseContext().model_dump_json())
-    empty = ParseContext(citation_sources=[])
-    assert "citation_sources" not in empty.model_dump()
-    assert "citation_sources" not in json.loads(empty.model_dump_json())
+    assert "parser_state" not in dumped
+    assert "parser_state" not in json.loads(ParseContext().model_dump_json())
+    empty = ParseContext(parser_state={})
+    assert "parser_state" not in empty.model_dump()
+    assert "parser_state" not in json.loads(empty.model_dump_json())
 
 
-def test_parse_context_citation_sources_round_trip():
+def test_parse_context_parser_state_citation_sources_round_trip():
     parse_context = ParseContext.model_validate(
         {
-            "citation_sources": [
-                {
-                    "bucket": 0,
-                    "idx": 1,
-                    "source": {"type": "document", "id": "doc-1"},
-                }
-            ]
+            "parser_state": {
+                "citation_sources": [
+                    {
+                        "bucket": 0,
+                        "idx": 1,
+                        "source": {"type": "document", "id": "doc-1"},
+                    }
+                ]
+            }
         }
     )
-    assert parse_context.citation_sources is not None
-    assert parse_context.citation_sources[0].bucket == 0
-    assert parse_context.citation_sources[0].source["id"] == "doc-1"
+    assert parse_context.parser_state is not None
+    sources = parse_context.parser_state["citation_sources"]
+    assert isinstance(sources, list)
+    assert sources[0]["bucket"] == 0
+    assert sources[0]["source"]["id"] == "doc-1"
     request = GenerateRequest.model_validate(
         {
             **_base_payload(),
@@ -246,8 +250,8 @@ def test_parse_context_citation_sources_round_trip():
         }
     )
     assert request.parse_context is not None
-    assert request.parse_context.citation_sources is not None
-    assert request.parse_context.citation_sources[0].idx == 1
+    assert request.parse_context.parser_state is not None
+    assert request.parse_context.parser_state["citation_sources"][0]["idx"] == 1
 
 
 @pytest.mark.parametrize("tools", [None, []])

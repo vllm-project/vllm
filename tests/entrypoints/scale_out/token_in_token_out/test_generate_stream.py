@@ -22,7 +22,6 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     encode_mm_kwargs_item,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-    CitationSourceEntry,
     GenerateDerenderStreamResponse,
     GenerateRequest,
     GenerateTextResponse,
@@ -1621,7 +1620,7 @@ def _derender_request(parse_context=None, n=1, **kwargs):
 
 @pytest.mark.asyncio
 async def test_unary_derender_forwards_citation_sources():
-    """ServingTokens must pass parse_context.citation_sources into derender."""
+    """ServingTokens must pass parser_state.citation_sources into derender."""
     # Build the engine without renderer_from_config so this test does not
     # need a HuggingFace download (the wiring under test is pure serving).
     engine = MagicMock(spec=AsyncLLM)
@@ -1661,11 +1660,11 @@ async def test_unary_derender_forwards_citation_sources():
     )
     serving.online_derenderer.parser = MagicMock()
     sources = [
-        CitationSourceEntry(
-            bucket=0,
-            idx=0,
-            source={"type": "document", "id": "doc-1"},
-        )
+        {
+            "bucket": 0,
+            "idx": 0,
+            "source": {"type": "document", "id": "doc-1"},
+        }
     ]
     serving.online_derenderer.derender_text_choices = AsyncMock(
         return_value=[(ChatMessage(role="assistant", content="Paris"), "stop")]
@@ -1678,7 +1677,7 @@ async def test_unary_derender_forwards_citation_sources():
             model=MODEL_NAME,
             stream=False,
             output_mode="derender",
-            parse_context=ParseContext(citation_sources=sources),
+            parse_context=ParseContext(parser_state={"citation_sources": sources}),
         )
     )
 

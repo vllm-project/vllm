@@ -583,11 +583,14 @@ class ServingTokens(GenerateBaseServing):
                 if request.parse_context is not None
                 else 0
             )
-            citation_sources = (
-                request.parse_context.citation_sources
-                if request.parse_context is not None
-                else None
-            )
+            citation_sources = None
+            if (
+                request.parse_context is not None
+                and request.parse_context.parser_state is not None
+            ):
+                raw_sources = request.parse_context.parser_state.get("citation_sources")
+                if isinstance(raw_sources, list) and raw_sources:
+                    citation_sources = raw_sources
             try:
                 parsed = await self.online_derenderer.derender_text_choices(
                     final_res.outputs,

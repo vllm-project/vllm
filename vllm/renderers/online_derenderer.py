@@ -443,7 +443,7 @@ class OnlineDerenderer:
             history_tool_call_cnt: Tool calls already in the conversation.
             prompt_token_ids: Prompt token IDs, if known.
             citation_sources: JSON-safe citation source map from
-                `parse_context`, installed on the parser before parse.
+                `parse_context.parser_state`, installed before parse.
 
         Returns:
             One message and chat `finish_reason` per output in order.

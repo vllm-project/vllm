@@ -271,7 +271,7 @@ def tokenizer():
 
 
 def _stub_renderer(tokenizer, *, max_workers: int = 1) -> MagicMock:
-    """MagicMock renderer that keeps ``finalize_message`` a no-op passthrough."""
+    """MagicMock renderer that keeps `finalize_message` a no-op passthrough."""
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
     renderer._executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -552,9 +552,6 @@ def test_derender_text_choices_installs_citation_sources_and_finalizes(monkeypat
         CitationSource,
         CohereChatMessage,
     )
-    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-        CitationSourceEntry,
-    )
     from vllm.renderers.cohere import CohereRenderer
 
     derenderer = _derenderer_without_hf_tokenizer()
@@ -574,11 +571,11 @@ def test_derender_text_choices_installs_citation_sources_and_finalizes(monkeypat
         CohereRenderer.finalize_message(derenderer.renderer, p, message)
     )
     sources = [
-        CitationSourceEntry(
-            bucket=0,
-            idx=1,
-            source={"type": "document", "id": "doc-paris"},
-        )
+        {
+            "bucket": 0,
+            "idx": 1,
+            "source": {"type": "document", "id": "doc-paris"},
+        }
     ]
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
