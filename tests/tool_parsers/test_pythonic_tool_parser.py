@@ -12,6 +12,7 @@ from tests.tool_parsers.utils import (
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.tool_parsers.utils import make_valid_python
 
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#model-response-format-1
 SIMPLE_FUNCTION_OUTPUT = "get_weather(city='San Francisco', metric='celsius')"
@@ -231,3 +232,53 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+def test_make_valid_python_streaming_argument_recovery():
+    """Test make_valid_python accurately detects complete vs
+    incomplete streaming parameters.
+    """
+    # Incomplete function calls or incomplete parameter names should return None
+    assert make_valid_python("[get_weather(") is None
+    assert make_valid_python("[get_weather(city") is None
+    assert make_valid_python("[get_weather(city=") is None
+
+    # Completed first parameter should successfully close and parse
+    completed_first = make_valid_python("[get_weather(city='San Francisco'")
+    assert completed_first is not None
+    candidate, suffix = completed_first
+    assert candidate == "[get_weather(city='San Francisco')]"
+    assert suffix == ")]"
+
+    # Trailing comma after complete parameter should remain valid
+    trailing_comma = make_valid_python("[get_weather(city='San Francisco',")
+    assert trailing_comma is not None
+
+    # Incomplete second parameter name should be withheld
+    assert make_valid_python("[get_weather(city='San Francisco', metric") is None
+    assert make_valid_python("[get_weather(city='San Francisco', metric=") is None
+
+    # Completed second parameter should successfully close and parse
+    completed_second = make_valid_python(
+        "[get_weather(city='San Francisco', metric='celsius'"
+    )
+    assert completed_second is not None
+    assert (
+        completed_second[0] == "[get_weather(city='San Francisco', metric='celsius')]"
+    )
+
+    # Nested dictionaries and structures with internal commas
+    assert make_valid_python("[register(data={'key'") is None
+    assert make_valid_python("[register(data={'key':") is None
+    nested_dict = make_valid_python("[register(data={'key': 'value'")
+    assert nested_dict is not None
+    assert nested_dict[0] == "[register(data={'key': 'value'})]"
+
+    # Parameters following a nested structure with commas
+    nested_with_next = make_valid_python(
+        "[register(data={'k1': 1, 'k2': 2}, username='alice'"
+    )
+    assert nested_with_next is not None
+    assert (
+        nested_with_next[0] == "[register(data={'k1': 1, 'k2': 2}, username='alice')]"
+    )

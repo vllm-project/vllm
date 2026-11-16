@@ -979,6 +979,44 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
+def _get_active_bracket_item(text: str, open_bracket: str) -> str:
+    """Get the active parameter or property text inside the unclosed bracket.
+
+    Scans backwards at the current bracket nesting level until encountering a
+    top-level comma or the opening bracket itself.
+    """
+    depth = 0
+    in_quote = None
+    i = len(text) - 1
+    closing_to_opening = {")": "(", "]": "[", "}": "{"}
+    opening_to_closing = {"(": ")", "[": "]", "{": "}"}
+
+    while i >= 0:
+        char = text[i]
+        if in_quote:
+            if char == in_quote and not _is_escaped(text, i):
+                in_quote = None
+            i -= 1
+            continue
+
+        if char in {"'", '"'}:
+            in_quote = char
+            i -= 1
+            continue
+
+        if char in closing_to_opening:
+            depth += 1
+        elif char in opening_to_closing:
+            if depth > 0:
+                depth -= 1
+            elif char == open_bracket:
+                return text[i + 1 :].strip()
+        elif char == "," and depth == 0:
+            return text[i + 1 :].strip()
+        i -= 1
+    return ""
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -1022,20 +1060,16 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
         return None
-    if bracket_stack and bracket_stack[-1] == "{":
-        trailing_dict_text = text[: text.rfind("{")]
-        num_keys = trailing_dict_text.count(":")
-        num_values = trailing_dict_text.count(",")
-        if num_keys <= num_values:
-            return None
-    if bracket_stack and bracket_stack[-1] == "(":
-        trailing_params_text = text[: text.rfind("(")]
-        num_full_param_names = trailing_params_text.count("=")
-        num_full_param_values = trailing_params_text.count(",")
-        if num_full_param_names <= num_full_param_values:
-            return None
     if text.endswith(","):
-        text = text[:-1]
+        text = text[:-1].rstrip()
+    if bracket_stack and bracket_stack[-1] == "{":
+        active_prop = _get_active_bracket_item(text, "{")
+        if ":" not in active_prop:
+            return None  # Incomplete property name within parameter value
+    if bracket_stack and bracket_stack[-1] == "(":
+        active_param = _get_active_bracket_item(text, "(")
+        if "=" not in active_param:
+            return None  # Incomplete parameter name
     if (
         bracket_stack
         and bracket_stack[-1] == "["
