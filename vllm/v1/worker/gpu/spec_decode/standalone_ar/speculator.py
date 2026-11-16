@@ -12,10 +12,10 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import BlockTables, make_slot_mappings
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 
@@ -65,7 +64,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 2,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 2
+            ),
             varlen_decode=self.enable_adaptive_verification,
         )
         super().init_cudagraph_manager(cudagraph_mode)
@@ -83,6 +84,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         super().set_attn(
             model_state,
@@ -90,12 +92,12 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            kernel_block_sizes,
         )
-        self.expanded_slot_mappings = torch.empty(
+        self.expanded_slot_mappings = make_slot_mappings(
             block_tables.num_kv_cache_groups,
             self.max_num_tokens + self.max_num_reqs,
-            dtype=torch.int64,
-            device=self.device,
+            self.device,
         )
 
     def _prefill_capture_slot_mappings(self) -> torch.Tensor:
@@ -125,9 +127,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             return get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
-                load_config=get_pp_safe_draft_load_config(
-                    get_draft_load_config(draft_vllm_config)
-                ),
+                load_config=get_draft_load_config(draft_vllm_config),
             )
 
     @torch.inference_mode()
@@ -249,7 +249,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         # Every draft logits write goes through sample_draft.
         return True
 
-    def _generate_draft(
+    def _decode(
         self,
         num_reqs: int,
         num_tokens_padded: int,
@@ -284,14 +284,15 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             draft_tokens.unsqueeze(1),
         )
         self.input_buffers.input_ids[:num_reqs].copy_(draft_tokens.int())
+        # Device-side limit: graph replays see an auto-fit reduction, no host sync.
         torch.clamp(
             self.input_buffers.positions[:num_reqs] + 1,
-            max=self.max_model_len - 1,
+            max=self.max_model_len_gpu - 1,
             out=self.input_buffers.positions[:num_reqs],
         )
         torch.clamp(
             self.input_buffers.seq_lens[:num_reqs] + 1,
-            max=self.max_model_len,
+            max=self.max_model_len_gpu,
             out=self.input_buffers.seq_lens[:num_reqs],
         )
 
@@ -436,7 +437,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 return self.draft_tokens[:num_reqs]
             return self.draft_tokens[:num_reqs, :1]
 
-        self._decode(
+        self._run_multi_step_decode(
             input_batch,
             num_rejected,
             num_reqs,

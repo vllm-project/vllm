@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TP2: ``Qwen3_5RMSNorm.forward_fused`` vs the unfused chain it replaces,
+"""TP2: `Qwen3_5RMSNorm.forward_fused` vs the unfused chain it replaces,
 (all-reduce +) Gemma norm, then scaled_fp8_quant / scaled_fp4_quant, for real
 ModelOpt static FP8 and NVFP4 consumers.
 

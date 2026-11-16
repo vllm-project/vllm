@@ -12,7 +12,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    masked_amax_scale,
+    moe_kernel_quantize_input,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
@@ -157,7 +160,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     def max_num_tokens_per_rank(self) -> int | None:
         return None
@@ -352,11 +355,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         elif not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
+                # Decode dispatches into a worst-case buffer and leaves the tail
+                # past `num_recv` uninitialized. Row-local scales tolerate that;
+                # a per-tensor scale must not reduce over those rows.
+                scale = a1_scale
+                if not recv_expert_num_tokens and quant_config.act_scale_is_tensor_wide(
+                    a1_scale
+                ):
+                    scale = masked_amax_scale(
+                        expert_x,
+                        quant_config.quant_dtype,
+                        num_valid=psum_recv_per_rank[-1:],
+                    )
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
-                    a1_scale,
+                    scale,
                     quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
+                    per_act_token_quant=quant_config.per_act_token_quant,
                     block_shape=quant_config.block_shape,
                     is_scale_swizzled=quant_config.is_scale_swizzled,
                 )

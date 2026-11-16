@@ -84,7 +84,7 @@ def fused_gdn_gated_rms_norm(
     activation: str,
     scale: torch.Tensor | None = None,
 ) -> None:
-    """Gated RMS norm ``out = rms_norm(x) * act(z)`` for Qwen3.5 GDN.
+    """Gated RMS norm `out = rms_norm(x) * act(z)` for Qwen3.5 GDN.
 
     Args:
         x: (num_tokens, num_v_heads * head_v_dim), contiguous. May alias out.
