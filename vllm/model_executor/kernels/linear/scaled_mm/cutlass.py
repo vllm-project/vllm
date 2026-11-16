@@ -179,8 +179,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def _pad_to_alignment(
         x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
     ) -> torch.Tensor:
-        """Pad tensor ``x`` along ``dim`` to the next multiple of
-        ``alignment``."""
+        """Pad tensor `x` along `dim` to the next multiple of
+        `alignment`."""
         remainder = x.shape[dim] % alignment
         if remainder == 0:
             return x

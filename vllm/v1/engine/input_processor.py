@@ -107,9 +107,9 @@ class InputProcessor:
     def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
         """Return whether watermarking will be applied to this request.
 
-        ``None`` and ``True`` request watermarking, while ``False`` opts out.
+        `None` and `True` request watermarking, while `False` opts out.
         If watermarking is unavailable or incompatible with the request, emit
-        a warning and return ``False``.
+        a warning and return `False`.
         """
         return self.vllm_config._check_supports_watermarking(params)
 
@@ -312,7 +312,7 @@ class InputProcessor:
         accurately and avoids redundant processing on subsequent requests
         with the same images.
 
-        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        Uses `get_and_update_item()` with an empty prompt_updates list,
         since token expansion has already been handled externally.
         """
         cache = self.renderer.mm_processor_cache

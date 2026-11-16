@@ -110,6 +110,10 @@ class LLM(
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors. Defaults to 1.0 with the extensible KV cache
             (which sizes the cache from measured memory) and to 0.92 otherwise.
+            With the extensible KV cache (the default on CUDA and ROCm), leave
+            it unset unless the GPU is shared with other processes or
+            something else needs memory that vLLM does not measure; see the
+            "GPU Memory Utilization" section of the optimization guide.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -381,8 +385,7 @@ class LLM(
 
         PoolingOfflineMixin.__init__(self)
 
-        # Cache for __repr__ to avoid repeated collective_rpc calls
-        self._cached_repr: str | None = None
+        self._cached_model_inspection: str | None = None
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
@@ -868,8 +871,8 @@ class LLM(
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
             reset_connector: Also reset the KV connector's cache, such as
-                blocks offloaded to CPU. Set ``False`` only if the weights do
-                not change before ``wake_up``. Ignored at level 0.
+                blocks offloaded to CPU. Set `False` only if the weights do
+                not change before `wake_up`. Ignored at level 0.
 
         """
         self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
@@ -877,8 +880,8 @@ class LLM(
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed ``sleep(level=0)`` and resident executor memory.
-        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        Requires a completed `sleep(level=0)` and resident executor memory.
+        Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
 
         Args:
             reset_connector: Also reset the KV connector's cache; see
@@ -918,15 +921,13 @@ class LLM(
         """
         return self.llm_engine.get_metrics()
 
-    def __repr__(self) -> str:
-        """Return a transformers-style hierarchical view of the model."""
-        # Cache the result to avoid repeated collective_rpc calls
-        if self._cached_repr is None:
+    def get_model_inspection(self) -> str:
+        """Return a cached transformers-style hierarchical view of the model."""
+        if self._cached_model_inspection is None:
             results = self.llm_engine.collective_rpc("get_model_inspection")
-            # In distributed settings, we get results from all workers
-            # Just return the first one (they should all be the same)
-            if results:
-                self._cached_repr = results[0]
-            else:
-                self._cached_repr = f"LLM(model={self.model_config.model!r})"
-        return self._cached_repr
+            self._cached_model_inspection = results[0] if results else repr(self)
+        return self._cached_model_inspection
+
+    def __repr__(self) -> str:
+        """Return a local model summary without querying workers."""
+        return f"LLM(model={self.model_config.model!r})"

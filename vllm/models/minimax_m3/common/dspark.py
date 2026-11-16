@@ -4,7 +4,7 @@
 
 The Qwen3 DSpark block drafter (context-KV precompute, non-causal query block,
 Markov and confidence heads) built from MiniMax-M3 layers: Gemma RMSNorm
-(``x * (1 + w)``) everywhere, partial RoPE, and a dense SwiGLU-OAI MLP. The
+(`x * (1 + w)`) everywhere, partial RoPE, and a dense SwiGLU-OAI MLP. The
 checkpoint ships no token embedding or LM head; both are shared with the target.
 """
 
@@ -68,7 +68,7 @@ def _shared_slot_mapping(
 def _gemma_rms_norm(hidden_size: int, eps: float) -> nn.Module:
     """The target's Gemma RMSNorm (fused FlashInfer kernels on CUDA).
 
-    vLLM's GemmaRMSNorm hands the IR op an fp32 ``1 + w`` weight, which the
+    vLLM's GemmaRMSNorm hands the IR op an fp32 `1 + w` weight, which the
     vllm_c kernel rejects for bf16 inputs, so every call ran the unfused native
     path (about ten kernels).
     """
@@ -92,7 +92,7 @@ def dspark_qknorm_rope_kv_insert(
     q_fp8_out: torch.Tensor | None,
     layer_name: LayerNameType,
 ) -> None:
-    """The fused QK-norm/RoPE on ``qkv``, also storing the draft tokens' k/v.
+    """The fused QK-norm/RoPE on `qkv`, also storing the draft tokens' k/v.
 
     A custom op so the slot mapping is read when it runs: read in the compiled
     forward, it is fixed at trace time, when the draft layers have none.
@@ -352,6 +352,10 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         return torch.stack(
             [layer.self_attn.k_norm(k) for layer, k in zip(self.layers, all_k)]
         )
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        k_norms = [layer.self_attn.k_norm for layer in self.layers]
+        return [*super().context_kv_modules(), *k_norms]
 
     def _context_kv_writer(self) -> DSparkContextKVWriter | None:
         """The fused context K/V writer, or None where the base path runs."""

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUTLASS batch-invariance tests.
 
-The NVFP4 CUTLASS tests in this file must run with ``VLLM_BATCH_INVARIANT=1``
+The NVFP4 CUTLASS tests in this file must run with `VLLM_BATCH_INVARIANT=1`
 before the first relevant native kernel call. Do not run them in the same pytest
 process after tests that intentionally exercise non-batch-invariant NVFP4
 scaled-mm kernels.

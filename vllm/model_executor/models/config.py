@@ -4,6 +4,7 @@ import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -118,6 +119,47 @@ class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
             )
 
 
+class MistralLarge4ForCausalLM(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # KV-sharing layers have no latent KV of their own for the new tokens,
+        # so they cannot use the dense MHA prefill path; run all tokens through
+        # sparse MQA.
+        vllm_config.attention_config.sparse_mla_force_mqa = True
+
+        # The direct A2A combine beats all-gather + reduce-scatter; PCP+DCP
+        # only supports the latter.
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size == 1:
+            parallel_config.set_dcp_defaults(comm_backend="a2a")
+
+        # The checkpoint declares the latent KV cache precision; an explicit
+        # `--kv-cache-dtype bfloat16` opts out of FP8.
+        cache_config = vllm_config.cache_config
+        text_config = vllm_config.model_config.hf_text_config
+        if cache_config.cache_dtype == "auto" and getattr(
+            text_config, "fp8_kv_cache", False
+        ):
+            if current_platform.is_rocm():
+                # ROCm sparse MLA has no fp8_ds_mla layout; honor the flag
+                # with the plain e4m3 latent cache of the AITER sparse kernel.
+                cache_config.cache_dtype = "fp8"
+                logger.info("Using fp8 kv-cache for Mistral Large 4 on ROCm")
+            else:
+                cache_config.cache_dtype = "fp8_ds_mla"
+                logger.info("Using fp8_ds_mla kv-cache for Mistral Large 4")
+        elif cache_config.cache_dtype == "bfloat16":
+            cache_config.cache_dtype = "auto"
+
+
+class PixtralForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        text_config = vllm_config.model_config.hf_text_config
+        if getattr(text_config, "model_type", None) == "mistral_large_4":
+            MistralLarge4ForCausalLM.verify_and_update_config(vllm_config)
+
+
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -156,13 +198,6 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
 
         cache_config.cache_dtype = "fp8"
         logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
-        spec_config = vllm_config.speculative_config
-        if (
-            spec_config is not None
-            and spec_config.method not in ("mtp", "dspark")
-            and spec_config.kv_cache_dtype is None
-        ):
-            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -219,22 +254,22 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure Unlimited-OCR attention backends for R-SWA and vision.
 
-        Backend selection — controlled by the standard ``--attention-config``
+        Backend selection — controlled by the standard `--attention-config`
         CLI argument (priority order):
 
-          1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
+          1. `--attention-config '{"backend": "FLASH_ATTN"}'`
              → FA4 + rswa_mask_mod.  Exact token-level R-SWA.
-               ``flash_attn_version`` is forced to 4 if not already set (R-SWA
+               `flash_attn_version` is forced to 4 if not already set (R-SWA
                mask_mod requires FA4; FA3 cannot express it).  Raises if FA4 is
                not available on this device.
 
-          2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
+          2. `--attention-config '{"backend": "FLEX_ATTENTION"}'`
              → FlexAttention R-SWA via Triton block mask.
 
-          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+          3. `--attention-config '{"backend": "TRITON_ATTN"}'`
              → Triton unified attention with an R-SWA decode mask.
 
-          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+          4. `--attention-config '{"backend": "auto"}'` (or omitted)
              → Auto-detect: FA4 if available (H20/H100 SM90), else TritonAttention.
 
         Regardless of backend, prefix caching is disabled for this model: R-SWA
@@ -501,7 +536,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         requests to this per-layer FA3/FA4 selection. For other configurations,
         force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
-        When FA4 is not available, fall back to Triton.
+        When FA4 is not available, fall back to Triton, or to FlashInfer for a
+        plain Gemma4 with an NVFP4 KV cache, which Triton cannot read.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -549,11 +585,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 head_dims,
             )
         elif vllm_config.attention_config.backend is None:
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            backend = AttentionBackendEnum.TRITON_ATTN
+            if (
+                vllm_config.cache_config.cache_dtype == "nvfp4"
+                and MODELS_CONFIG_MAP.get(model_config.architecture) is Gemma4Config
+            ):
+                backend = AttentionBackendEnum.FLASHINFER
+            vllm_config.attention_config.backend = backend
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "%s. FA4 not available, forcing TRITON_ATTN backend.",
+                "%s. FA4 not available, forcing %s backend.",
                 head_dims,
+                backend.name,
             )
 
 
@@ -599,7 +642,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         """Set up the diffusion config and defaults for DiffusionGemma.
 
         Auto-creates DiffusionConfig from the HF config when the user
-        didn't pass ``--diffusion-config``. Diffusion sampling params are
+        didn't pass `--diffusion-config`. Diffusion sampling params are
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
@@ -745,15 +788,15 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
 
     Kimi-K3 ships its routed experts as compressed-tensors
-    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
-    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
-    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
-    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    `mxfp4-pack-quantized` (`quant_method="compressed-tensors"`), which
+    lands them on `CompressedTensorsW4A4Mxfp4MoEMethod` and its narrow kernel
+    selection. Rewriting `quant_method` to `"mxfp4"` selects `Mxfp4Config`
+    (hence `Mxfp4MoEMethod`) with its full backend set, while any non-MXFP4
     checkpoint is left untouched. Covers both the main model and the MTP draft.
 
-    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
-    ``ModelConfig.__init__`` before this hook runs, and it is what
-    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    `model_arch_config.quantization_config` is a separate dict, snapshotted in
+    `ModelConfig.__init__` before this hook runs, and it is what
+    `_verify_quantization` reads when resolving the quant method. Patch it
     alongside the hf configs so the rewrite lands before resolution; otherwise
     the main model still resolves to compressed-tensors.
     """
@@ -772,6 +815,52 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 and quant_config.get("format") == "mxfp4-pack-quantized"
             ):
                 quant_config["quant_method"] = "mxfp4"
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Default the kv-cache dtype when the text backbone carries DSA:
+        per-tensor fp8 for FLASHINFER_MLA_SPARSE, the default on SM10x, and
+        "fp8_ds_mla" otherwise."""
+        hf_config = vllm_config.model_config.hf_config
+        # Multimodal composite configs carry dsa_config on text_config;
+        # text-only models have it at the top level.
+        hf_text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(hf_text_config, "dsa_config", None) is None:
+            return
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        cache_config = vllm_config.cache_config
+        backend = vllm_config.attention_config.backend
+        if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE or (
+            backend is None
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            # FlashInfer reads per-tensor fp8 MLA rows, not the ds_mla formats.
+            if cache_config.cache_dtype == "auto":
+                cache_config.cache_dtype = "fp8_e4m3"
+        elif cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
+            "fp8"
+        ):
+            cache_config.cache_dtype = "fp8_ds_mla"
+        if vllm_config.speculative_config is not None:
+            from vllm.models.kimi_k3.nvidia.dense_draft import configure_dense_draft
+
+            configure_dense_draft(vllm_config.speculative_config, hf_text_config)
+
+
+class HrmTextForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # The prompt attends bidirectionally during prefill, so its KV is not a
+        # causal function of the prefix.
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            logger.info("HRM-Text: disabling chunked prefill (non-causal prefill).")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+        if vllm_config.cache_config.enable_prefix_caching:
+            logger.info("HRM-Text: disabling prefix caching (non-causal prefill).")
+            vllm_config.cache_config.enable_prefix_caching = False
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1519,6 +1608,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
@@ -1529,6 +1619,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
+    "KimiK31ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "Lfm3VlForConditionalGeneration": Lfm3VlForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
@@ -1540,6 +1631,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
+    "MistralLarge4ForCausalLM": MistralLarge4ForCausalLM,
     "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
     "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
@@ -1552,6 +1644,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
         Nemotron3_5TranscribeForConditionalGenerationConfig
     ),
     "NomicBertModel": NomicBertModelConfig,
+    "PixtralForConditionalGeneration": PixtralForConditionalGenerationConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
