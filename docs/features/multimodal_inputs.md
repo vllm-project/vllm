@@ -13,6 +13,23 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## GLM-5.3-Flash
+
+`zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the
+Rust frontend for image and video inputs. Its Python multimodal preprocessor
+has been removed. Enable the Rust frontend explicitly:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash
+```
+
+You can also use `vllm-rs serve zai-org/GLM-5.3-Flash`. Selecting
+`--tokenizer-mode glm5_next` alone does not enable the Rust frontend.
+Python `LLM` and the Python API server reject multimodal initialization for
+this checkpoint. For Python text-only inference, set
+`limit_mm_per_prompt={"image": 0, "video": 0}` in `LLM`, or pass
+`--limit-mm-per-prompt '{"image": 0, "video": 0}'` to `vllm serve`.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
