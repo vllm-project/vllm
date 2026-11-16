@@ -3428,6 +3428,16 @@ class _RequestsTornDownWhileIterated(dict):
         yield from items
 
 
+class _SessionsTornDownWhenRead(set):
+    def __init__(self, teardown):
+        super().__init__()
+        self._teardown = teardown
+
+    def __contains__(self, request_id):
+        self._teardown()
+        return super().__contains__(request_id)
+
+
 def test_step_preparation_survives_a_concurrent_teardown():
     worker = _make_worker(2)
     first = _prepare_output(
@@ -3447,12 +3457,15 @@ def test_step_preparation_survives_a_concurrent_teardown():
     torn_down = threading.Event()
 
     def teardown():
+        if torn_down.is_set():
+            return
         thread = threading.Thread(target=worker.process_output, args=(first,))
         thread.start()
         thread.join()
         torn_down.set()
 
     worker._requests = _RequestsTornDownWhileIterated(worker._requests, teardown)
+    worker._session_request_ids = _SessionsTornDownWhenRead(teardown)
     second = _prepare_output(
         worker,
         _metadata(0, [_request_metadata("running", 2, 1, 0, [])], {"finished": []}),
@@ -3460,8 +3473,7 @@ def test_step_preparation_survives_a_concurrent_teardown():
         ["running"],
         np.array([0]),
     )
-    if not torn_down.is_set():
-        worker.process_output(first)
+    assert torn_down.is_set()
     worker.process_output(second)
     assert list(worker._requests) == ["running"]
     worker.close()
