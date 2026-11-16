@@ -41,7 +41,7 @@ def _b12x_nvfp4_w4a16_linear(
 ) -> torch.Tensor:
     """BF16 [M, K] x NVFP4 [N, K] -> BF16 [M, N].
 
-    Calls with more than ``a16_max_tokens`` rows quantize ``x`` to NVFP4 with a
+    Calls with more than `a16_max_tokens` rows quantize `x` to NVFP4 with a
     per-call global scale. The row count is only known at execution time, so
     the choice lives in this op rather than in traced code.
     """

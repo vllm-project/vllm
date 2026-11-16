@@ -1082,7 +1082,7 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_first_call(
 
 
 def _nvfp4_activation_reference(x, decoded):
-    """Reference output for NVFP4 activations scaled by amax(x), times ``decoded``."""
+    """Reference output for NVFP4 activations scaled by amax(x), times `decoded`."""
     from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
         ref_nvfp4_quant,
     )
@@ -1100,7 +1100,7 @@ def _nvfp4_activation_reference(x, decoded):
 def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
     default_vllm_config, magnitude
 ) -> None:
-    """Passes above ``b12x_nvfp4_w4a16_a16_max_tokens`` rows use NVFP4 activations
+    """Passes above `b12x_nvfp4_w4a16_a16_max_tokens` rows use NVFP4 activations
     and smaller passes keep BF16 ones, decided at execution time under
     torch.compile: a branch in traced code would be fixed for every size."""
     supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
