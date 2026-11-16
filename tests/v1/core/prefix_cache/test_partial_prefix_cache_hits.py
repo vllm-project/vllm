@@ -913,6 +913,95 @@ def test_hash_aligned_query_end_uses_regular_partial_tail():
     assert cached[0].block_hash_num_tokens == 14
 
 
+@pytest.mark.parametrize("case", ["local", "local_junction", "external"])
+def test_mid_block_resume_running_past_block_end_does_not_cache_it(case):
+    """A prefill chunk that resumes inside a Mamba block and runs past its end
+    leaves that block at the resume state, so it must not get the full-block
+    hash (nor be offered to a connector as the block-end state)."""
+    hash_block_size, mamba_block_size, mamba_group = 16, 64, 1
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=128,
+        num_prefill_checkpoint_blocks=1,
+    )
+    # "local_junction": default sparse retention, where block 1 is retained
+    # because 128 is the shared-prefix junction left by a sibling.
+    manager.coordinator.retention_interval = 0 if case == "local_junction" else None
+    scheduler = SimpleNamespace(
+        block_size=mamba_block_size,
+        cache_config=SimpleNamespace(block_size=mamba_block_size),
+        hash_block_size=hash_block_size,
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
+        mamba_partial_cache_hit=True,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=True,
+        mamba_prefill_checkpoint_alignment=16,
+    )
+    tokens = list(range(1000, 1300))
+
+    def prefill(request_id, prompt, num_external=0):
+        request = make_request(request_id, prompt, hash_block_size, sha256)
+        computed, num_hit, junction = manager.get_computed_blocks(request)
+        request.shared_prefix_boundary = junction
+        start = num_hit + num_external
+        num_new = Scheduler._mamba_block_aligned_split(
+            scheduler, request, len(prompt) - start, num_hit, num_external
+        )
+        chunks = [(start, num_new)]
+        assert (
+            manager.allocate_slots(
+                request,
+                num_new,
+                num_hit,
+                computed,
+                num_external_computed_tokens=num_external,
+            )
+            is not None
+        )
+        request.num_computed_tokens = start + num_new
+        while request.num_computed_tokens < len(prompt):
+            manager.new_step_starts()
+            start = request.num_computed_tokens
+            num_new = Scheduler._mamba_block_aligned_split(
+                scheduler, request, len(prompt) - start
+            )
+            chunks.append((start, num_new))
+            assert manager.allocate_slots(request, num_new) is not None
+            request.num_computed_tokens = start + num_new
+        manager.new_step_starts()
+        return request, num_hit, chunks
+
+    if case == "local_junction":
+        manager.free(prefill("sibling", tokens[:130] + [7] * 40)[0])
+    if case != "external":
+        manager.free(prefill("owner", tokens[:100])[0])  # caches state@96
+    drain_boundary_state_offloads(manager)
+
+    # Resume at 96, inside block 1 = [64, 128). With an internal checkpoint
+    # column past the resume block, the split runs [96, 230) in one step.
+    resume, num_hit, chunks = prefill(
+        "resume", tokens[:230], num_external=96 if case == "external" else 0
+    )
+    assert num_hit == (0 if case == "external" else 96)
+    assert chunks == [(96, 134)]
+    resumed_block = manager.get_blocks("resume").blocks[mamba_group][1]
+    offloads = drain_boundary_state_offloads(manager).get("resume", [])
+    manager.free(resume)
+    manager.new_step_starts()
+
+    assert resumed_block.block_hash_num_tokens != 128
+    assert (mamba_group, resumed_block.block_id, 128) not in offloads
+    probe = make_request("probe", tokens[:128] + [9] * 16, hash_block_size, sha256)
+    _, num_hit, _ = manager.get_computed_blocks(probe)
+    assert num_hit == (0 if case == "external" else 96)
+
+
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
     first continuation does not need another Mamba block."""
