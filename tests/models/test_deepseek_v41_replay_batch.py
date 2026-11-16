@@ -73,6 +73,8 @@ def state(monkeypatch, request):
     cfg.parallel_config.enable_expert_parallel = False
     cfg.parallel_config.prefill_context_parallel_size = getattr(request, "param", 1)
     cfg.aux_output_config.enable_return_routed_experts = False
+    cfg.aux_output_config.enable_return_hidden_states = False
+    cfg.aux_output_config.return_topk_logprobs = 0
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = DecoderReplayLayers(WINDOW, MagicMock(), MagicMock(), set(), "swa_first")
@@ -384,6 +386,39 @@ def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
         assert replay is None
     else:
         torch.testing.assert_close(replay.rows, torch.arange(401, device=DEVICE))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("enable_return_hidden_states", True), ("return_topk_logprobs", 2)],
+    ids=["hidden-states", "topk-logprobs"],
+)
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_aux_session_requests_keep_every_output_row(state, cg_mode, field, value):
+    """Per-row outputs of a session request cover all its prefill rows, while
+    requests without a session still trim."""
+    setattr(state.vllm_config.aux_output_config, field, value)
+    layers = state.decoder_replay_layers
+    layers.trim_threshold = WINDOW + 1
+    layers.run_layers = lambda hidden: (hidden + 1,)
+    for index, session in enumerate((None, None, "s")):
+        state.add_request(
+            index,
+            SimpleNamespace(
+                replay_start=0,
+                sampling_params=SamplingParams(aux_session=session),
+            ),
+        )
+    batch = _input_batch([1, 300, 300], [500, 300, 300], PREFILLING)
+    replay, _ = _prepare(state, batch, cg_mode)
+    assert replay is not None
+    rows = [0, *range(301 - WINDOW, 301), *range(301, 601)]
+    assert replay.rows.tolist() == rows
+    hidden = torch.arange(1, batch.num_tokens * 2 + 1, device=DEVICE).reshape(-1, 2)
+    (actual,) = layers._run(hidden)
+    expected = torch.zeros_like(hidden)
+    expected[rows] = hidden[rows] + 1
+    torch.testing.assert_close(actual, expected)
 
 
 def test_replay_batch_keeps_adaptive_verification_query_bound(state):
