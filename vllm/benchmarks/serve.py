@@ -30,7 +30,6 @@ import random
 import shutil
 import ssl
 import time
-import urllib.parse
 import urllib.request
 import uuid
 import warnings
@@ -815,42 +814,24 @@ def calculate_metrics(
     return metrics, actual_output_lens
 
 
-def env_proxy_applies(api_url: str) -> bool:
-    """Whether a proxy from the environment applies to `api_url`.
+def env_configured() -> bool:
+    """Whether the environment sets a proxy or has netrc credentials.
 
-    The benchmark session trusts the environment only in that case, or when
-    `env_netrc_applies` finds credentials for the host. With `trust_env=True`,
-    aiohttp looks up the netrc file and the proxy in worker threads for every
-    request, which delays each request by tens of milliseconds at a few
-    hundred concurrent requests and inflates the measured TTFT.
-
-    Runs that go through a proxy, or that use netrc credentials, keep
-    `trust_env=True`. They still do these lookups for every request, so their
-    TTFT still includes this delay.
+    With `trust_env=True`, aiohttp looks up netrc and the proxy in worker
+    threads for every request, which inflates TTFT at high concurrency.
+    Any proxy or netrc entry keeps it on, because a redirect can reach a
+    host that needs them, so those runs still include this delay. The netrc
+    path follows aiohttp: `$NETRC`, else `~/.netrc` (`~/_netrc` on Windows).
     """
-    url = urllib.parse.urlsplit(api_url)
     proxies = urllib.request.getproxies()
-    return url.scheme in proxies and not urllib.request.proxy_bypass(url.hostname or "")
-
-
-def env_netrc_applies(api_url: str) -> bool:
-    """Whether the netrc file has credentials for `api_url`'s host.
-
-    The file is the one that aiohttp reads: `$NETRC`, or `~/.netrc` (`~/_netrc`
-    on Windows).
-
-    aiohttp only reads netrc with `trust_env=True`, so keep it on in that case
-    to not drop auth for endpoints that rely on it.
-    """
-    host = urllib.parse.urlsplit(api_url).hostname
-    if not host:
-        return False
+    if any(scheme in proxies for scheme in ("http", "https", "ws", "wss")):
+        return True
     path = os.environ.get("NETRC")
     if path is None:
         name = "_netrc" if os.name == "nt" else ".netrc"
         path = os.path.join(os.path.expanduser("~"), name)
     try:
-        return netrc.netrc(path).authenticators(host) is not None
+        return bool(netrc.netrc(path).hosts)
     except (OSError, netrc.NetrcParseError):
         return False
 
@@ -909,7 +890,7 @@ async def benchmark(
         )
         return aiohttp.ClientSession(
             connector=connector,
-            trust_env=env_proxy_applies(api_url) or env_netrc_applies(api_url),
+            trust_env=env_configured(),
             timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
         )
 
