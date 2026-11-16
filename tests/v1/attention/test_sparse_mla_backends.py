@@ -5633,10 +5633,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     assert calls == [(source, plan, resident_cache)]
 
 
-@pytest.mark.parametrize("all_context_pages_resident", [False, True])
-def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(
-    monkeypatch, all_context_pages_resident
-):
+def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     compute_stream = object()
     prefill_stream = MagicMock()
     gather = MagicMock()
@@ -5647,14 +5644,12 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(
 
     resident_cache = torch.empty((2, 4, 656), dtype=torch.uint8)
     ready = MagicMock()
-    resident_block_table = torch.tensor([[0, 0], [2, 3]], dtype=torch.int32)
     cache = _StubHiSparseCacheHandle(
         view=SimpleNamespace(cache=resident_cache, block_size=4),
-        block_table=resident_block_table,
+        block_table=torch.tensor([[2, 3]], dtype=torch.int32),
         runtime=SimpleNamespace(
-            request_state_indices=torch.tensor([0, 1], dtype=torch.int32),
+            request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
-        all_context_pages_resident=all_context_pages_resident,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -5671,12 +5666,8 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(
         ensure_gpu_sources=MagicMock(),
     )
     metadata = SimpleNamespace(
-        prefill=(
-            SimpleNamespace()
-            if all_context_pages_resident
-            else SimpleNamespace(host_staging_plan=plan)
-        ),
-        num_decodes=1,
+        prefill=SimpleNamespace(host_staging_plan=plan),
+        num_decodes=0,
     )
 
     result = index_group.gather_fp8_prefill(
@@ -5697,16 +5688,69 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(
     args = gather.call_args
     assert args.args[0] is resident_cache
     assert args.args[1] is dst
+    torch.testing.assert_close(args.args[2], plan.block_table)
     assert args.args[3] is workspace_starts
     assert args.args[4] == 1
-    if all_context_pages_resident:
-        torch.testing.assert_close(args.args[2], resident_block_table[1:])
-        assert not args.kwargs
-        return
-    torch.testing.assert_close(args.args[2], plan.block_table)
     assert args.kwargs["host_cache"].data_ptr() == source.data_ptr()
     assert args.kwargs["host_row_ids"] is plan.row_ids
     assert args.kwargs["device_row_ids"] is plan.gpu_row_ids
+
+
+def test_hisparse_fp8_prefill_gather_reads_resident_pages_like_the_plan():
+    """Reading resident pages directly must gather what the staging plan does."""
+    block_size, row_width = 64, 656
+    seq_lens = [100, 150]
+    source_block_table = torch.tensor(
+        [[5, 6, 0], [7, 8, 9]], dtype=torch.int32, device="cuda"
+    )
+    # Request state rows are [decode, prefill 0, prefill 1].
+    state_indices = torch.tensor([1, 2, 0], dtype=torch.int32, device="cuda")
+    resident_block_table = torch.zeros((3, 3), dtype=torch.int32, device="cuda")
+    resident_block_table[2, :2] = torch.tensor([3, 1])
+    resident_block_table[0] = torch.tensor([4, 2, 6])
+    torch.manual_seed(0)
+    host_cache = torch.randint(
+        0, 256, (12, block_size, row_width), dtype=torch.uint8, device="cuda"
+    )
+    resident_cache = torch.zeros((8, block_size, row_width), dtype=torch.uint8)
+    resident_cache = resident_cache.cuda()
+    resident_cache[[3, 1, 4, 2, 6]] = host_cache[[5, 6, 7, 8, 9]]
+    plan = build_hisparse_prefill_staging_plan(
+        source_block_table,
+        torch.tensor(seq_lens, dtype=torch.int32, device="cuda"),
+        block_size,
+        5,
+    )
+    workspace_starts = torch.tensor([0, seq_lens[0]], dtype=torch.int32).cuda()
+
+    def gather(all_context_pages_resident: bool) -> torch.Tensor:
+        index_group = object.__new__(HiSparseMLAIndexGroup)
+        index_group.caches = [
+            _StubHiSparseCacheHandle(
+                view=SimpleNamespace(cache=resident_cache, block_size=block_size),
+                block_table=resident_block_table,
+                runtime=SimpleNamespace(request_state_indices=state_indices),
+                all_context_pages_resident=all_context_pages_resident,
+            )
+        ]
+        index_group.prefill_stream = torch.cuda.Stream()
+        index_group.prefill_ready_events = [torch.cuda.Event()]
+        dst = torch.zeros((sum(seq_lens), 576), dtype=torch.bfloat16, device="cuda")
+        prefill = (
+            SimpleNamespace()
+            if all_context_pages_resident
+            else SimpleNamespace(host_staging_plan=plan)
+        )
+        metadata = SimpleNamespace(prefill=prefill, num_decodes=1)
+        index_group.gather_fp8_prefill(
+            0, host_cache, dst, source_block_table, workspace_starts, 2, metadata, 0
+        )
+        torch.accelerator.synchronize()
+        return dst
+
+    torch.testing.assert_close(
+        gather(True), gather(False), rtol=0, atol=0, equal_nan=True
+    )
 
 
 def test_sparse_impl_observes_repointed_indexer_buffer():
