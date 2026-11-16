@@ -282,14 +282,9 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel, DualActivationKernel):
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
         if mode is not None and mode != kNvfp4DynamicTensor:
             raise ValueError(f"b12x NVFP4 W4A16 does not support activations {mode}")
-        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        # Rows beyond the planned capacity (e.g. an encoder batch) run in
-        # capacity-sized chunks; an unplanned call would prepare on first use.
-        capacity = layer.b12x_nvfp4_plans.capacity
-        if x_2d.shape[0] <= capacity:
-            output = self._mm(layer, x_2d, mode)
-        else:
-            output = torch.cat([self._mm(layer, c, mode) for c in x_2d.split(capacity)])
+        # The plans cover every row count the scheduler can send; b12x rejects
+        # a larger call instead of preparing a new plan on first use.
+        output = self._mm(layer, x.reshape(-1, x.shape[-1]).contiguous(), mode)
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], layer.weight.shape[0])

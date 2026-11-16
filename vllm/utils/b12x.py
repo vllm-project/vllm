@@ -189,8 +189,8 @@ def plan_b12x_linear(
             )
             decode = prefill = None
         if cutoff is not None and cutoff >= capacity and decode is None:
-            # Every planned call is a decode call; larger ones run in
-            # capacity-sized chunks, so prefill never quantizes.
+            # Every call is a decode call: the plan covers every row count
+            # the scheduler can send, so prefill never quantizes.
             if prefill is not None:
                 logger.info_once(
                     "max_decode_tokens=%d covers every step of at most %d "

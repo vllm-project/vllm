@@ -236,14 +236,9 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
                 "quantization_config.linear.phase on b12x MXFP8 requires BF16 "
                 f"activations (--dtype bfloat16), got {x.dtype}"
             )
-        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        # Rows beyond the planned capacity (e.g. an encoder batch) run in
-        # capacity-sized chunks; an unplanned call would prepare on first use.
-        capacity = layer.b12x_mxfp8_plans.capacity
-        if x_2d.shape[0] <= capacity:
-            output = self._mm(layer, x_2d, mode)
-        else:
-            output = torch.cat([self._mm(layer, c, mode) for c in x_2d.split(capacity)])
+        # The plans cover every row count the scheduler can send; b12x rejects
+        # a larger call instead of preparing a new plan on first use.
+        output = self._mm(layer, x.reshape(-1, x.shape[-1]).contiguous(), mode)
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], output.shape[-1])
