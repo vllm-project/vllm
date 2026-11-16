@@ -526,6 +526,7 @@ def test_rank_with_nothing_to_write_does_not_wait_for_a_handshake():
         ({}, list(range(20000, 20004))),
         # TP2 x DP2 prefill: DP rank 1 listens at offsets 2 and 3.
         ({"remote_dp_rank": 1, "remote_tp_size": 2}, [20002, 20003]),
+        ({"remote_dp_rank": 1, "tp_size": 2}, [20002, 20003]),
     ],
 )
 def test_release_reaches_every_prefill_rank_and_no_other(params, expected_ports):
@@ -741,7 +742,7 @@ def test_hybrid_write_requires_exactly_one_running_state_slot(local_state):
 
 
 def test_notify_ports_are_unique_across_tp_and_dp_ranks(monkeypatch):
-    """TP2 x DP2 ranks (dp0, tp1) and (dp1, tp0) must not share a notify port."""
+    """TP2 x DP2 workers must bind distinct notify and handshake ports."""
     kv_config = KVTransferConfig(
         kv_connector="MoRIIOConnector",
         kv_role="kv_producer",
@@ -756,6 +757,7 @@ def test_notify_ports_are_unique_across_tp_and_dp_ranks(monkeypatch):
         moriio_common, "get_tensor_model_parallel_world_size", lambda: 2
     )
     ports = []
+    handshake_ports = []
     for dp_rank in range(2):
         for tp_rank in range(2):
             monkeypatch.setattr(
@@ -769,6 +771,9 @@ def test_notify_ports_are_unique_across_tp_and_dp_ranks(monkeypatch):
                     data_parallel_size_local=2,
                 ),
             )
-            ports.append(MoRIIOConfig.from_vllm_config(vllm_config).notify_port)
+            config = MoRIIOConfig.from_vllm_config(vllm_config)
+            ports.append(config.notify_port)
+            handshake_ports.append(config.handshake_port + config.port_offset)
 
     assert ports == [61005, 61006, 61007, 61008]
+    assert handshake_ports == [6301, 6302, 6303, 6304]
