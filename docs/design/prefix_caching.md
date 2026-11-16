@@ -199,7 +199,7 @@ When a request is finished, we free all its blocks if no other requests are usin
 
 ![Free queue after a request is freed](../assets/design/prefix_caching/free.png)
 
-This order applies to cached blocks, i.e., blocks with a hash. A freed block without a hash, typically the last block of a request, which is not full, can never be hit by another request. It is added to the head of the free queue instead, so that it is reused before any cached block is evicted.
+This order applies to cached blocks, i.e., blocks with a hash. A freed block without a hash, typically the last block of a request, which is not full, can never be hit by another request. It is added to the head of the free queue instead, so that it is reused before any cached block is evicted. A cached block is also added to the head when `free_blocks` is called with `evict_first=True`, which is for blocks whose contents another tier already holds.
 
 ### Eviction (LRU)
 
