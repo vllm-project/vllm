@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
-@dataclass
+@dataclass(slots=True)
 class GraphCaptureContext:
     stream: torch.cuda.Stream
 
@@ -753,7 +753,22 @@ class GroupCoordinator:
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
-        return self.device_communicator.all_reduce(input_)
+        if self is not _TP:
+            return self.device_communicator.all_reduce(input_)
+        # all-reduce-overlap: each TP all-reduce is a hand-off and runs on the comm
+        # stream while the other microbatch computes. Under the vllm.all_reduce
+        # custom op, so compiled graphs reach it too; no-ops outside a microbatch.
+        from vllm.v1.worker.ubatching import (
+            dbo_switch_to_comm_sync,
+            dbo_yield_and_switch_from_comm_to_compute,
+        )
+
+        # Launch before yielding: the comm stream then waits on a compute event
+        # recorded after every read of whichever freed block the output reuses.
+        dbo_switch_to_comm_sync("all-reduce-overlap")
+        out = self.device_communicator.all_reduce(input_)
+        dbo_yield_and_switch_from_comm_to_compute("all-reduce-overlap")
+        return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size

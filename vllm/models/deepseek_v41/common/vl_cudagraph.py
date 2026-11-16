@@ -118,14 +118,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "cudagraph_mm_encoder."
             )
 
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Zero-length padding (same as Qwen): tail slots repeat the last
-            # real offset, so FlashAttn schedules no work for padding rows.
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            if n < dst.shape[0]:
-                dst[n:] = src[-1] if n else 0
-
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=[
@@ -138,7 +130,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "merge_mask",
             ],
             out_hidden_size=self.config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -280,8 +271,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         if patches.dtype != patch_dtype:
             patches = patches.to(patch_dtype)
 
-        # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
-        # pad_cu_seqlens pads the tail with zero-length sequences.
+        # Unpadded: the manager zero-pads patches/cos/sin/merge buffers and
+        # pads the cu_seqlens tail with zero-length sequences.
         metadata = build_packed_vit_metadata(
             vit_grid,
             rope_dim=self.vision.rope_dim,
