@@ -23,6 +23,7 @@ use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::lora::check_lora_module;
 use crate::model_names::ServedModelNames;
+use crate::state::AppState;
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
     HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
@@ -119,6 +120,43 @@ impl RenderState {
     pub(crate) fn model_names(&self) -> ServedModelNames {
         (self.served_model_names.clone())
             .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
+    }
+}
+
+/// Chat and text processors shared by the engine-backed and render-only servers.
+pub(crate) trait RenderContext: Send + Sync + 'static {
+    fn chat_processor(&self) -> &ChatRequestProcessor;
+    fn text_processor(&self) -> &TextRequestProcessor;
+    /// Whether `model` names a served model or LoRA adapter.
+    fn is_served_model(&self, model: &str) -> impl Future<Output = bool> + Send;
+}
+
+impl RenderContext for AppState {
+    fn chat_processor(&self) -> &ChatRequestProcessor {
+        self.chat.request_processor()
+    }
+
+    fn text_processor(&self) -> &TextRequestProcessor {
+        self.chat.text().request_processor()
+    }
+
+    async fn is_served_model(&self, model: &str) -> bool {
+        let resolution = self.resolve_model_with_loras(Some(model)).await;
+        resolution.model_names.accepts(Some(model))
+    }
+}
+
+impl RenderContext for RenderState {
+    fn chat_processor(&self) -> &ChatRequestProcessor {
+        &self.chat
+    }
+
+    fn text_processor(&self) -> &TextRequestProcessor {
+        &self.text
+    }
+
+    async fn is_served_model(&self, model: &str) -> bool {
+        self.model_names().accepts(Some(model))
     }
 }
 
