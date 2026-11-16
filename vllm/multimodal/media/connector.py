@@ -5,7 +5,9 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
+import ipaddress
 import os
+import socket
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +57,97 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
     "image": ImageMediaIO,
     "video": VideoMediaIO,
 }
+
+# IP ranges that are considered private/non-public and must be blocked
+# by default as an SSRF mitigation. These cover loopback, private (RFC 1918),
+# link-local, multicast, carrier-grade NAT, unspecified, and IPv6 ULA/loopback.
+_PRIVATE_IPV4_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),        # "this" network
+    ipaddress.ip_network("10.0.0.0/8"),       # RFC 1918 private
+    ipaddress.ip_network("100.64.0.0/10"),    # Carrier-grade NAT
+    ipaddress.ip_network("127.0.0.0/8"),      # Loopback
+    ipaddress.ip_network("169.254.0.0/16"),   # Link-local (cloud metadata)
+    ipaddress.ip_network("172.16.0.0/12"),   # RFC 1918 private
+    ipaddress.ip_network("192.0.0.0/24"),     # IETF Protocol Assignments
+    ipaddress.ip_network("192.0.2.0/24"),     # TEST-NET-1
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC 1918 private
+    ipaddress.ip_network("198.18.0.0/15"),   # Benchmarking inter-network
+    ipaddress.ip_network("198.51.100.0/24"), # TEST-NET-2
+    ipaddress.ip_network("203.0.113.0/24"),  # TEST-NET-3
+    ipaddress.ip_network("224.0.0.0/4"),     # Multicast
+    ipaddress.ip_network("240.0.0.0/4"),     # Reserved
+]
+
+_PRIVATE_IPV6_NETWORKS = [
+    ipaddress.ip_network("::1/128"),         # Loopback
+    ipaddress.ip_network("::/128"),          # Unspecified
+    ipaddress.ip_network("fc00::/7"),        # Unique Local Addresses (ULA)
+    ipaddress.ip_network("fe80::/10"),       # Link-local
+    ipaddress.ip_network("ff00::/8"),        # Multicast
+    ipaddress.ip_network("fe00::/7"),        # Site-local (deprecated)
+]
+
+_PRIVATE_IP_NETWORKS = _PRIVATE_IPV4_NETWORKS + _PRIVATE_IPV6_NETWORKS
+
+
+def _is_private_or_reserved_ip(ip_str: str) -> bool:
+    """Return True if the given IP string belongs to a private/reserved range.
+
+    This covers loopback, RFC 1918 private, link-local (including
+    169.254.169.254 cloud metadata), multicast, carrier-grade NAT,
+    unspecified, and IPv6 ULA/loopback.
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    for network in _PRIVATE_IP_NETWORKS:
+        if ip in network:
+            return True
+    return False
+
+
+def _host_resolves_to_private_ip(hostname: str) -> bool:
+    """Resolve *hostname* via DNS and check whether any returned address is
+    private, link-local, or reserved. Returns True if at least one resolved
+    address is blocked, so that DNS-rebinding style bypasses are caught.
+
+    Errors during resolution are propagated so callers can decide how to
+    treat them (typically: fail closed).
+    """
+    # socket.getaddrinfo returns a list of (family, type, proto, canonname, sockaddr).
+    # sockaddr is (ip, port) for IPv4 and (ip, port, flowinfo, scope_id) for IPv6.
+    addrinfos = socket.getaddrinfo(hostname, None)
+    for family, _type, _proto, _canonname, sockaddr in addrinfos:
+        ip_str = sockaddr[0]
+        if _is_private_or_reserved_ip(ip_str):
+            logger.warning(
+                "SSRF mitigation: blocking fetch of %r because DNS resolved "
+                "to private/reserved address %s",
+                hostname,
+                ip_str,
+            )
+            return True
+    return False
+
+
+def _assert_host_not_private(hostname: str) -> None:
+    """Raise ValueError if *hostname* resolves to a private/reserved IP.
+
+    Callers that need to allow private-range fetches (air-gapped setups,
+    trusted internal media stores) can set the environment variable
+    ``VLLM_MEDIA_ALLOW_PRIVATE_IPS=1`` to opt out.
+    """
+    if envs.VLLM_MEDIA_ALLOW_PRIVATE_IPS:
+        return
+    if _host_resolves_to_private_ip(hostname):
+        raise ValueError(
+            f"Blocked fetch of URL with hostname {hostname!r}: "
+            "DNS resolved to a private, link-local, or reserved IP address. "
+            "This is an SSRF protection. Set VLLM_MEDIA_ALLOW_PRIVATE_IPS=1 "
+            "to allow private-range fetches if your deployment serves media "
+            "from internal hosts."
+        )
 
 
 def _wrap_media_fetch_error(
@@ -368,15 +461,21 @@ class MediaConnector:
         return media_io.load_file(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
-        if (
-            self.allowed_media_domains
-            and url_spec.hostname not in self.allowed_media_domains
-        ):
-            raise ValueError(
-                f"The URL must be from one of the allowed domains: "
-                f"{self.allowed_media_domains}. Input URL domain: "
-                f"{url_spec.hostname}"
-            )
+        hostname = url_spec.hostname
+        if hostname is not None:
+            # 1. Optional allowlist check (opt-in, so default is no-op).
+            if (
+                self.allowed_media_domains
+                and hostname not in self.allowed_media_domains
+            ):
+                raise ValueError(
+                    f"The URL must be from one of the allowed domains: "
+                    f"{self.allowed_media_domains}. Input URL domain: "
+                    f"{hostname}"
+                )
+            # 2. SSRF mitigation (default-on): block private/link-local/
+            #    reserved IPs after DNS resolution.
+            _assert_host_not_private(hostname)
 
     def load_from_url(
         self,

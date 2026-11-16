@@ -3,6 +3,9 @@
 
 import asyncio
 import functools
+import ipaddress
+import logging
+import socket
 import threading
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
@@ -23,6 +26,121 @@ logger = init_logger(__name__)
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+
+# ---------------------------------------------------------------------------
+# SSRF mitigation helpers (default-on; opt out with VLLM_MEDIA_ALLOW_PRIVATE_IPS)
+# ---------------------------------------------------------------------------
+_PRIVATE_IPV4_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("240.0.0.0/4"),
+]
+
+_PRIVATE_IPV6_NETWORKS = [
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("ff00::/8"),
+    ipaddress.ip_network("fe00::/7"),
+]
+
+_PRIVATE_IP_NETWORKS = _PRIVATE_IPV4_NETWORKS + _PRIVATE_IPV6_NETWORKS
+
+
+def _is_private_or_reserved_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    for network in _PRIVATE_IP_NETWORKS:
+        if ip in network:
+            return True
+    return False
+
+
+def _host_resolves_to_private_ip(hostname: str) -> bool:
+    addrinfos = socket.getaddrinfo(hostname, None)
+    for _family, _type, _proto, _canonname, sockaddr in addrinfos:
+        ip_str = sockaddr[0]
+        if _is_private_or_reserved_ip(ip_str):
+            logger.warning(
+                "SSRF mitigation: blocking fetch of %r because DNS resolved "
+                "to private/reserved address %s",
+                hostname,
+                ip_str,
+            )
+            return True
+    return False
+
+
+def _assert_url_not_private(url: str) -> None:
+    """Raise ValueError if the hostname of *url* resolves to a
+    private/link-local/reserved IP, unless the operator has opted out
+    via VLLM_MEDIA_ALLOW_PRIVATE_IPS=1.
+
+    Used both for the original request URL and for every redirect target
+    so that an attacker cannot hide a private destination behind a chain
+    of public redirects.
+    """
+    if envs.VLLM_MEDIA_ALLOW_PRIVATE_IPS:
+        return
+    parsed = parse_url(url)
+    hostname = parsed.hostname
+    if hostname is None:
+        return
+    if _host_resolves_to_private_ip(hostname):
+        raise ValueError(
+            f"Blocked fetch of URL with hostname {hostname!r}: "
+            "DNS resolved to a private, link-local, or reserved IP address. "
+            "This is an SSRF protection. Set VLLM_MEDIA_ALLOW_PRIVATE_IPS=1 "
+            "to allow private-range fetches if your deployment serves media "
+            "from internal hosts."
+        )
+
+
+def _resolve_redirect_url(
+    response: "requests.Response",
+    request_url: str,
+) -> str | None:
+    """Compute the next redirect target from *response* and *request_url*,
+    or return None if no redirect should be followed.
+
+    Mirrors the subset of requests' ``resolve_redirects`` behaviour that
+    matters to us: 3xx status codes with a Location header, relative URL
+    resolution against the original request URL, and a trivial scheme-
+    host check. The caller is responsible for actually issuing the next
+    request (and in particular for calling ``_assert_url_not_private`` on
+    the resolved target before following it).
+    """
+    status = response.status_code
+    if status not in (
+        301, 302, 303, 307, 308,
+    ):
+        return None
+    location = response.headers.get("Location")
+    if not location:
+        return None
+    # requests uses urljoin-style absolute URL resolution; we rely on
+    # urllib3's already-bundled parsing.
+    from urllib.parse import urljoin
+
+    target = urljoin(request_url, location)
+    # Strip fragment for redirect purposes (matching requests).
+    target = target.split("#", 1)[0]
+    return target
+
 
 # Multiplier applied to timeout and sleep on each retry attempt.
 # Attempt N uses: base_timeout * (_RETRY_BACKOFF_FACTOR ** N) for the
@@ -419,18 +537,47 @@ class HTTPConnection:
         timeout: float | None = None,
         extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
-    ):
+    ) -> "requests.Response":
         self._validate_http_url(url)
 
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
 
+        if not allow_redirects:
+            # Fast path: no redirect handling required.
+            _assert_url_not_private(url)
+            return client.get(
+                url,
+                headers=self._headers(**extra_headers),
+                stream=stream,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+
+        # Manual redirect handling so we can SSRF-check every hop.
+        max_redirects = 30
+        current_url = url
+        for _ in range(max_redirects):
+            _assert_url_not_private(current_url)
+            response = client.get(
+                current_url,
+                headers=self._headers(**extra_headers),
+                stream=stream,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            target = _resolve_redirect_url(response, current_url)
+            if target is None:
+                return response
+            current_url = target
+        # Exhausted redirect budget; let requests raise as it would.
+        _assert_url_not_private(current_url)
         return client.get(
-            url,
+            current_url,
             headers=self._headers(**extra_headers),
             stream=stream,
             timeout=timeout,
-            allow_redirects=allow_redirects,
+            allow_redirects=True,
         )
 
     async def get_async_response(
@@ -440,17 +587,44 @@ class HTTPConnection:
         timeout: float | None = None,
         extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
-    ):
+    ) -> "aiohttp.ClientResponse":
         self._validate_http_url(url)
 
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
 
-        return client.get(
-            url,
+        if not allow_redirects:
+            _assert_url_not_private(url)
+            return await client.get(
+                url,
+                headers=self._headers(**extra_headers),
+                timeout=timeout,
+                allow_redirects=False,
+            )
+
+        max_redirects = 30
+        current_url = url
+        for _ in range(max_redirects):
+            _assert_url_not_private(current_url)
+            response = await client.get(
+                current_url,
+                headers=self._headers(**extra_headers),
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            target = _resolve_redirect_url(response, current_url)
+            if target is None:
+                return response
+            # aiohttp requires us to read the body before following if
+            # it's not consumed; close it.
+            response.close()
+            current_url = target
+        _assert_url_not_private(current_url)
+        return await client.get(
+            current_url,
             headers=self._headers(**extra_headers),
             timeout=timeout,
-            allow_redirects=allow_redirects,
+            allow_redirects=True,
         )
 
     @_sync_retry
