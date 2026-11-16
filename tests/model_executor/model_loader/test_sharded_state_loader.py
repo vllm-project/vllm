@@ -11,7 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from vllm import LLM, SamplingParams
 from vllm.config import LoadConfig
@@ -403,6 +403,44 @@ def test_save_model_rejects_bad_pattern_before_overwrite(monkeypatch, tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
+def test_save_sharded_state_path_saves_before_weight_processing(monkeypatch, tmp_path):
+    """The load-time save must keep the checkpoint layout that a
+    `sharded_state` reload builds, not the post-processed one."""
+    import vllm.model_executor.model_loader.base_loader as base_loader
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+
+    _mock_pp_group(monkeypatch, 1)
+
+    class _Loader(BaseModelLoader):
+        def download_model(self, model_config):
+            pass
+
+        def load_weights(self, model, model_config):
+            model.weight.data.copy_(torch.arange(6.0).reshape(2, 3))
+
+    def _repack(model, model_config, target_device):
+        model.weight = torch.nn.Parameter(model.weight.data.t().contiguous())
+
+    model = torch.nn.Linear(3, 2, bias=False)
+    monkeypatch.setattr(base_loader, "initialize_model", lambda **kwargs: model)
+    monkeypatch.setattr(base_loader, "process_weights_after_loading", _repack)
+    load_config = LoadConfig(save_sharded_state_path=str(tmp_path))
+    vllm_config = SimpleNamespace(
+        device_config=SimpleNamespace(device="cpu"),
+        load_config=load_config,
+        quant_config=None,
+    )
+    model_config = SimpleNamespace(
+        dtype=torch.float32, word_embeddings_untied_by_checkpoint=False
+    )
+
+    loaded = _Loader(load_config).load_model(vllm_config, model_config)
+
+    saved = load_file(tmp_path / "model-rank-0-part-0.safetensors")
+    assert saved["weight"].shape == (2, 3)
+    assert loaded.weight.shape == (3, 2)
+
+
 @pytest.fixture(scope="module")
 def llama_3p2_1b_files():
     input_dir = hf_api().snapshot_download(
@@ -412,11 +450,16 @@ def llama_3p2_1b_files():
     yield input_dir
 
 
-def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
-    llm_sharded_writer = LLM(model=input_dir, **kwargs)
+def _run_writer(
+    input_dir, output_dir, weights_patterns, save_during_load=False, **kwargs
+):
+    if save_during_load:
+        LLM(model=input_dir, save_sharded_state_path=output_dir, **kwargs)
+    else:
+        llm_sharded_writer = LLM(model=input_dir, **kwargs)
 
-    # Dump worker states to output directory
-    llm_sharded_writer.llm_engine.engine_core.save_sharded_state(path=output_dir)
+        # Dump worker states to output directory
+        llm_sharded_writer.llm_engine.engine_core.save_sharded_state(path=output_dir)
 
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
@@ -525,6 +568,7 @@ def _run_sharded_state_round_trip(
     tp_size: int,
     pp_size: int,
     num_gpus_available: int,
+    save_during_load: bool = False,
 ) -> None:
     """Save a TP/PP sharded checkpoint, reload it, and compare outputs.
 
@@ -533,6 +577,8 @@ def _run_sharded_state_round_trip(
         tp_size: tensor parallel size used for both save and load.
         pp_size: pipeline parallel size used for both save and load.
         num_gpus_available: number of GPUs on the current machine.
+        save_during_load: save with `save_sharded_state_path` instead of
+            `save_sharded_state()` on the loaded engine.
 
     """
     if num_gpus_available < tp_size * pp_size:
@@ -554,7 +600,7 @@ def _run_sharded_state_round_trip(
     with TemporaryDirectory() as output_dir:
         p = ctx.Process(
             target=_run_writer,
-            args=(input_dir, output_dir, weights_patterns),
+            args=(input_dir, output_dir, weights_patterns, save_during_load),
             kwargs=dict(
                 **parallel_args,
                 gpu_memory_utilization=gpu_memory_utilization,
@@ -641,4 +687,18 @@ def test_sharded_state_loader_pp_tp(num_gpus_available, llama_3p2_1b_files):
         tp_size=2,
         pp_size=2,
         num_gpus_available=num_gpus_available,
+    )
+
+
+def test_sharded_state_loader_save_during_load(num_gpus_available):
+    """Round-trip a checkpoint saved with `save_sharded_state_path` for an FP8
+    model with tied word embeddings, whose post-processing can repack weights
+    (e.g. Marlin on GPUs without native FP8)."""
+    input_dir = hf_api().snapshot_download("Qwen/Qwen3-0.6B-FP8")
+    _run_sharded_state_round_trip(
+        input_dir,
+        tp_size=1,
+        pp_size=1,
+        num_gpus_available=num_gpus_available,
+        save_during_load=True,
     )
