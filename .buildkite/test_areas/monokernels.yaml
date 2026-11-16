@@ -101,6 +101,9 @@ steps:
   source_file_dependencies:
   - vllm/models/deepseek_v41/amd/
   - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/model_executor/layers/mhc.py
+  - vllm/model_executor/kernels/mhc/
+  - vllm/_aiter_ops.py
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - tests/kernels/models/amd/test_dsv41_gfx942_topk.py

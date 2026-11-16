@@ -1708,6 +1708,7 @@ def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_attn_fn_packed = layer.hc_ffn_fn_packed = None
+    layer.mhc_seam = None
     layer.mhc_overlap = MHCOverlapStream()
     with set_default_torch_dtype(torch.bfloat16):
         layer.process_weights_after_loading()
@@ -1857,6 +1858,7 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     decoder.fuse_seam_norm = True
     decoder.use_mega_mhc = seam_kernel == "mega"
     decoder.hc_attn_fn_packed = decoder.hc_ffn_fn_packed = None
+    decoder.mhc_seam = None
     decoder.hidden_size = hidden_size
     decoder.hc_mult = 4
     decoder.hc_sinkhorn_iters = 20
@@ -2061,6 +2063,7 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
     decoder.use_sequence_parallel = False
     decoder.fuse_seam_norm = False
     decoder.hc_attn_fn_packed = decoder.hc_ffn_fn_packed = None
+    decoder.mhc_seam = None
     decoder.hc_mult = 4
     decoder.hc_sinkhorn_iters = 20
     decoder.hc_eps = 1e-6

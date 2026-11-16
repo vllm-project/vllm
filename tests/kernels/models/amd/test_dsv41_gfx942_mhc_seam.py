@@ -156,6 +156,7 @@ def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
         mhc_seam=partial(amd_mhc.mhc_pre_delayed_seam, MHCPreDelayedOp()),
         mhc_pre_delayed=None,
         hc_attn_fn=fn,
+        hc_attn_fn_packed=None,
         hc_attn_scale=scale,
         hc_attn_base=base,
         rms_norm_eps=1e-2,
@@ -177,10 +178,50 @@ def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
     torch.testing.assert_close(written["x"], expected[3])
 
 
-def test_no_post_seam_keeps_pre_delayed(monkeypatch):
-    """A seam without a post block (Engram) never calls the AITER seam,
-    whatever the token count."""
+@requires_cdna3
+def test_seam_graph_replay(default_vllm_config):
+    """After the warmup, the seam captures in a CUDA graph and its replay on
+    new inputs matches the eager call."""
+    set_random_seed(0)
+    num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
+    static = _seam_args(num_tokens, False, True)
+    residual, fn, scale, base, x, post, comb, pre_mix = static
+    pre_delayed = MHCPreDelayedOp()
+    amd_mhc.warmup_mhc_seam(HIDDEN, HC, residual.device)
 
+    def seam():
+        return amd_mhc.mhc_pre_delayed_seam(
+            pre_delayed,
+            residual,
+            fn,
+            scale,
+            base,
+            1e-2,
+            1e-3,
+            1e-4,
+            2.0,
+            20,
+            pre_mix=pre_mix,
+            sublayer_out=x,
+            post_layer_mix=post,
+            comb_res_mix=comb,
+        )
+
+    seam()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = seam()
+
+    for buf, new in zip(static, _seam_args(num_tokens, False, True), strict=True):
+        buf.copy_(new)
+    graph.replay()
+    torch.cuda.synchronize()
+    for got, want in zip(captured, seam(), strict=True):
+        torch.testing.assert_close(got, want, atol=0, rtol=0)
+
+
+def _pre_delayed_spy(monkeypatch):
     def no_seam(*args, **kwargs):
         raise AssertionError("AITER seam called")
 
@@ -193,6 +234,13 @@ def test_no_post_seam_keeps_pre_delayed(monkeypatch):
         seen.update(kwargs)
         return "pre_delayed"
 
+    return pre_delayed, seen
+
+
+def test_no_post_seam_keeps_pre_delayed(monkeypatch):
+    """A seam without a post block (Engram) never calls the AITER seam,
+    whatever the token count."""
+    pre_delayed, seen = _pre_delayed_spy(monkeypatch)
     n = 4 * amd_mhc.MHC_SEAM_MIN_TOKENS
     residual = torch.empty(n, HC, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
     t = torch.empty(1, device=DEVICE)
@@ -201,3 +249,30 @@ def test_no_post_seam_keeps_pre_delayed(monkeypatch):
     )
     assert out == "pre_delayed"
     assert seen["pre_mix"] is t and seen["sublayer_out"] is None
+
+
+def test_packed_fn_keeps_pre_delayed(monkeypatch):
+    """A seam with a packed `fn` (Mega-MHC) keeps `pre_delayed` and gets it."""
+    pre_delayed, seen = _pre_delayed_spy(monkeypatch)
+    n = 4 * amd_mhc.MHC_SEAM_MIN_TOKENS
+    residual = torch.empty(n, HC, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
+    t = torch.empty(1, device=DEVICE)
+    out = amd_mhc.mhc_pre_delayed_seam(
+        pre_delayed,
+        residual,
+        t,
+        t,
+        t,
+        1e-6,
+        1e-6,
+        1e-6,
+        2.0,
+        20,
+        pre_mix=t,
+        sublayer_out=t,
+        post_layer_mix=t,
+        comb_res_mix=t,
+        fn_packed=t,
+    )
+    assert out == "pre_delayed"
+    assert seen["fn_packed"] is t

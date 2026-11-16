@@ -372,12 +372,14 @@ def mhc_pre_delayed_seam(
     sublayer_out: torch.Tensor | None = None,
     post_layer_mix: torch.Tensor | None = None,
     comb_res_mix: torch.Tensor | None = None,
+    fn_packed: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """`pre_delayed` with the seam run as one AITER call where it applies.
 
     Same arguments and returns as `MHCPreDelayedOp`. Layer 0 (`x`), seams
-    without a post block (Engram) and seams with a fused norm keep
-    `pre_delayed`. The caller checks `supports_mhc_seam` once.
+    without a post block (Engram), and seams with a fused norm or a packed
+    `fn` (Mega-MHC) keep `pre_delayed`. The caller checks `supports_mhc_seam`
+    once.
     """
     if (
         sublayer_out is None
@@ -385,6 +387,7 @@ def mhc_pre_delayed_seam(
         or comb_res_mix is None
         or x is not None
         or norm_weight is not None
+        or fn_packed is not None
         or residual.shape[0] < MHC_SEAM_MIN_TOKENS
     ):
         return pre_delayed(
@@ -404,6 +407,7 @@ def mhc_pre_delayed_seam(
             sublayer_out=sublayer_out,
             post_layer_mix=post_layer_mix,
             comb_res_mix=comb_res_mix,
+            fn_packed=fn_packed,
         )
     return torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter(
         residual,
