@@ -930,6 +930,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
                 enable_expert_parallel=False,
                 expert_placement_strategy="linear",
                 enable_hc_sp_replicated_moe=False,
+                hc_sp_replicated_moe_decode_layout=None,
                 rank=0,
             ),
             model_config=SimpleNamespace(is_moe=False),
@@ -1499,6 +1500,8 @@ def test_ipc_cache_key_tracks_kernel_backends(
 
 
 _REPLICATED_MOE = {"enable_hc_sp_replicated_moe": True}
+# The key does not read --monokernel; the config sets the layout only with it.
+_COPY = {**_REPLICATED_MOE, "hc_sp_replicated_moe_decode_layout": "copy"}
 
 
 @pytest.mark.parametrize(
@@ -1506,13 +1509,16 @@ _REPLICATED_MOE = {"enable_hc_sp_replicated_moe": True}
     [
         (_REPLICATED_MOE, _REPLICATED_MOE, []),
         ({}, _REPLICATED_MOE, ["enable_hc_sp_replicated_moe"]),
+        (_COPY, _COPY, []),
+        (_REPLICATED_MOE, _COPY, ["hc_sp_replicated_moe_decode_layout"]),
     ],
 )
 def test_ipc_cache_key_tracks_replicated_moe(
     tmp_path, monkeypatch, daemon_parallel, engine_parallel, mismatched_fields
 ):
     """--enable-hc-sp-replicated-moe keeps whole experts on every TP rank
-    instead of TP shards, so an engine and a daemon that differ in it must not
+    instead of TP shards, and the "copy" decode layout keeps the TP shards
+    beside them, so an engine and a daemon that differ in either must not
     share weights."""
     from types import SimpleNamespace
 

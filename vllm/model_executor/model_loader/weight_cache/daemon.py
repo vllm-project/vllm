@@ -300,6 +300,9 @@ class WeightCacheDaemon:
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
             enable_hc_sp_replicated_moe=parallel_config.enable_hc_sp_replicated_moe,
+            hc_sp_replicated_moe_decode_layout=(
+                parallel_config.hc_sp_replicated_moe_decode_layout
+            ),
             kernel_config=vllm_config.kernel_config,
         )
 
