@@ -156,7 +156,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
 
     let (llm, engine_core) = match llm {
         LlmSource::EngineCore(engine_core) => {
-            let connected = connect_engine_core(
+            let (llm, server_info) = connect_engine_core(
                 config,
                 &engine_core,
                 text_backend.is_moe(),
@@ -164,16 +164,13 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
             )
             .await?;
             (
-                Box::new(connected.llm) as Box<dyn Llm>,
-                Some((
-                    engine_core,
-                    connected.server_info,
-                    connected.system_fingerprint,
-                )),
+                Box::new(llm) as Box<dyn Llm>,
+                Some((engine_core, server_info)),
             )
         }
         LlmSource::Provided(llm) => (llm, None),
     };
+    let system_fingerprint = config.fingerprint_mode.fingerprint(&llm.info().fingerprint);
     let text = TextLlm::from_boxed(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
@@ -197,20 +194,18 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_api_server_options(config.api_server_options)
         .with_api_keys(config.api_keys.clone())
         .with_cors(config.cors.clone())
-        .with_access_log(config.access_log.clone());
-    state = match &engine_core {
-        Some((engine_core, server_info, system_fingerprint)) => state
-            .with_system_fingerprint(system_fingerprint.clone())
-            .with_server_info(server_info.clone())
+        .with_access_log(config.access_log.clone())
+        .with_system_fingerprint(system_fingerprint);
+    if let Some((engine_core, server_info)) = &engine_core {
+        state = (state.with_server_info(server_info.clone()))
             .with_profiler(engine_core.profiler.clone())
             .with_default_mm_lora_modalities(
                 engine_core.default_mm_loras.keys().copied().collect(),
-            ),
-        None => state.with_system_fingerprint(config.fingerprint_mode.without_engine()),
-    };
+            );
+    }
     let state = Arc::new(state);
 
-    if let Some((engine_core, ..)) = &engine_core {
+    if let Some((engine_core, _)) = &engine_core {
         // Load operator-configured static LoRA adapters before serving, failing
         // startup on any error like Python's `init_static_loras` does.
         lora::load_static_loras(
@@ -224,13 +219,6 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
     Ok(state)
 }
 
-/// An [`EngineCoreLlm`] with what the server reports from the engines' handshake.
-struct ConnectedEngineCore {
-    llm: EngineCoreLlm,
-    server_info: ServerInfoSnapshot,
-    system_fingerprint: Option<String>,
-}
-
 /// Connect to engine-core as `engine_core` describes and drive it through an
 /// [`EngineCoreLlm`].
 async fn connect_engine_core(
@@ -238,7 +226,7 @@ async fn connect_engine_core(
     engine_core: &EngineCoreConfig,
     model_is_moe: bool,
     metrics_model_name: String,
-) -> Result<ConnectedEngineCore> {
+) -> Result<(EngineCoreLlm, ServerInfoSnapshot)> {
     let coordinator_mode = engine_core.effective_coordinator_mode(model_is_moe);
     info!(
         engine_count = engine_core.engine_count(),
@@ -257,20 +245,13 @@ async fn connect_engine_core(
     .await
     .context("failed to connect to engine core")?;
     let server_info = ServerInfoSnapshot::new(config, engine_core, &client);
-    let system_fingerprint = config
-        .fingerprint_mode
-        .fingerprint(&client.ready_responses(), client.data_parallel_size());
 
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(engine_core.log_stats_interval.filter(|_| !engine_core.disable_log_stats))
         .with_request_id_randomization(!engine_core.disable_request_id_randomization)
         .with_stream_interval(engine_core.stream_interval)
         .with_admission_limits(engine_core.admission_limits);
-    Ok(ConnectedEngineCore {
-        llm,
-        server_info,
-        system_fingerprint,
-    })
+    Ok((llm, server_info))
 }
 
 /// Extra routes merged into the finalized vLLM router.

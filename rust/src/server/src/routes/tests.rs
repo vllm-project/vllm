@@ -52,7 +52,9 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::{BoxGenerateOutputStream, EngineCoreLlm, GenerateRequest, Llm, LlmInfo};
+use vllm_llm::{
+    BoxGenerateOutputStream, EngineCoreLlm, GenerateRequest, Llm, LlmFingerprint, LlmInfo,
+};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -12354,6 +12356,14 @@ impl UnavailableLlm {
                 supports_lora: true,
                 allow_missing_mm_embeddings: false,
                 vllm_version: "test".to_string(),
+                fingerprint: LlmFingerprint {
+                    vllm_version: "test".to_string(),
+                    config_hash: None,
+                    tensor_parallel_size: 1,
+                    pipeline_parallel_size: 1,
+                    data_parallel_size: 1,
+                    enable_expert_parallel: false,
+                },
             },
             health: tokio::sync::watch::channel(true).0,
             readiness: tokio::sync::watch::channel(false).0,
