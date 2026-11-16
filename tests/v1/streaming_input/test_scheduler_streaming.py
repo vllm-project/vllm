@@ -33,7 +33,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.request import (
+    KEEP_LAST_OUTPUT_TOKEN,
+    Request,
+    RequestStatus,
+    StreamingUpdate,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
@@ -56,12 +61,17 @@ class DummyRequest(Request):
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         max_tokens: int | None = 16,
+        keep_last_output_token: bool = False,
     ):
         super().__init__(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [],
             sampling_params=SamplingParams(
-                stop_token_ids=[STOP_TOKEN], max_tokens=max_tokens
+                stop_token_ids=[STOP_TOKEN],
+                max_tokens=max_tokens,
+                extra_args={KEEP_LAST_OUTPUT_TOKEN: True}
+                if keep_last_output_token
+                else None,
             ),
             pooling_params=None,
             mm_features=mm_features,
@@ -780,3 +790,101 @@ def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
     assert request not in scheduler.kv_holding_waiting
     assert request not in scheduler.deferred_waiting
     assert "req" not in scheduler.schedule().num_scheduled_tokens
+
+
+def _audio_feature(offset: int, identifier: str = "") -> MultiModalFeatureSpec:
+    return MultiModalFeatureSpec(
+        data=MultiModalKwargsItem.dummy(),
+        modality="audio",
+        identifier=identifier,
+        mm_position=PlaceholderRange(offset=offset, length=1),
+    )
+
+
+@pytest.mark.parametrize("new_tokens", [[], [4, 5]])
+def test_update_request_as_session_keeps_last_output_token(new_tokens):
+    """An opted-in update keeps the last sampled token. A chunk without
+    tokens places its features at that token."""
+    scheduler = create_scheduler()
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3])
+    session.append_output_token_ids(10)
+    session.num_computed_tokens = 3
+
+    update = StreamingUpdate.from_request(
+        DummyRequest(
+            "session",
+            prompt_token_ids=new_tokens,
+            mm_features=[_audio_feature(offset=0)],
+            keep_last_output_token=True,
+        )
+    )
+    scheduler._update_request_as_session(session, update)
+
+    assert session.prompt_token_ids == [1, 2, 3, 10, *new_tokens]
+    first_input = 3 if not new_tokens else 4
+    assert session.mm_features[0].mm_position.offset == first_input
+    assert session.num_tokens - session.num_computed_tokens == 1 + len(new_tokens)
+
+
+def test_keep_last_output_token_rehashes_block_of_kept_token():
+    """A feature added at the kept token changes the hash of the block that
+    holds it."""
+    init_none_hash(sha256)
+    scheduler = create_scheduler()
+    hash_block_size = scheduler.hash_block_size
+    block_hasher = get_request_block_hasher(hash_block_size, sha256)
+
+    # The sampled token completes hash block 0.
+    prompt = list(range(1, hash_block_size))
+    session = Request(
+        request_id="session",
+        prompt_token_ids=list(prompt),
+        sampling_params=SamplingParams(max_tokens=16),
+        pooling_params=None,
+        block_hasher=block_hasher,
+        resumable=True,
+    )
+    session.append_output_token_ids(999)
+    session.num_computed_tokens = len(prompt)
+    assert len(session.block_hashes) == 1
+
+    update = StreamingUpdate.from_request(
+        DummyRequest(
+            "session",
+            mm_features=[_audio_feature(offset=0, identifier="audio")],
+            keep_last_output_token=True,
+        )
+    )
+    scheduler._update_request_as_session(session, update)
+
+    expected = Request(
+        request_id="expected",
+        prompt_token_ids=prompt + [999],
+        sampling_params=SamplingParams(max_tokens=16),
+        pooling_params=None,
+        mm_features=[_audio_feature(offset=len(prompt), identifier="audio")],
+        block_hasher=block_hasher,
+    )
+    assert session.block_hashes == expected.block_hashes
+
+
+def test_keep_last_output_token_lifecycle():
+    """Each one-token chunk decodes from the previous chunk's sample."""
+    scheduler = create_scheduler()
+    session = DummyRequest(
+        "session", prompt_token_ids=[1, 2, 3], max_tokens=1, keep_last_output_token=True
+    )
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    for sampled in (11, 12):
+        scheduler.add_request(
+            DummyRequest("session", max_tokens=1, keep_last_output_token=True)
+        )
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens["session"] == 1
+        scheduler.update_from_output(output, _model_output("session", [sampled]))
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    assert list(session.all_token_ids) == [1, 2, 3, 10, 11, 12]

@@ -33,6 +33,7 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.request import keeps_last_output_token
 
 logger = init_logger(__name__)
 
@@ -418,7 +419,13 @@ class InputProcessor:
         current_platform.validate_request(engine_input, params)
 
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
-        self._validate_model_inputs(encoder_input, decoder_input)
+        self._validate_model_inputs(
+            encoder_input,
+            decoder_input,
+            # A streaming input chunk continuing from the last sampled token
+            # may add only multimodal data at that token's position.
+            allow_empty_decoder_prompt=resumable and keeps_last_output_token(params),
+        )
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":
@@ -553,11 +560,13 @@ class InputProcessor:
         self,
         prompt_len: int,
         prompt_type: Literal["encoder", "decoder"],
+        *,
+        allow_empty: bool = False,
     ):
         if self.skip_prompt_length_check and prompt_type == "encoder":
             return
 
-        if prompt_len == 0 and prompt_type == "decoder":
+        if prompt_len == 0 and prompt_type == "decoder" and not allow_empty:
             raise VLLMValidationError(f"The {prompt_type} prompt cannot be empty")
 
         model_config = self.model_config
@@ -600,6 +609,8 @@ class InputProcessor:
         self,
         prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
+        *,
+        allow_empty: bool = False,
     ) -> None:
         prompt_ids = (
             None
@@ -611,7 +622,7 @@ class InputProcessor:
         )
 
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
-        self._validate_prompt_len(prompt_len, prompt_type)
+        self._validate_prompt_len(prompt_len, prompt_type, allow_empty=allow_empty)
 
         if prompt_input["type"] == "embeds":
             is_token_ids = prompt_input.get("is_token_ids")
@@ -645,8 +656,12 @@ class InputProcessor:
         self,
         encoder_input: SingletonInput | None,
         decoder_input: SingletonInput,
+        *,
+        allow_empty_decoder_prompt: bool = False,
     ):
         if encoder_input is not None:
             self._validate_model_input(encoder_input, prompt_type="encoder")
 
-        self._validate_model_input(decoder_input, prompt_type="decoder")
+        self._validate_model_input(
+            decoder_input, prompt_type="decoder", allow_empty=allow_empty_decoder_prompt
+        )

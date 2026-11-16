@@ -76,7 +76,12 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.request import (
+    Request,
+    RequestStatus,
+    StreamingUpdate,
+    keeps_last_output_token,
+)
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1896,13 +1901,19 @@ class Scheduler(SchedulerInterface):
     ) -> None:
         """Updates the waiting session with the next streaming update.
 
-        Discards the last sampled output token from the prior input chunk.
+        Discards the last sampled output token from the prior input chunk,
+        unless the update keeps it (see `KEEP_LAST_OUTPUT_TOKEN`).
         """
-        # Keep all output tokens but the final sampled one.
-        keep_end = session.num_tokens - 1
-        assert keep_end >= session.num_computed_tokens
+        # Keep all output tokens, but the final sampled one only if the update
+        # opts in.
+        keep_last = keeps_last_output_token(update.sampling_params)
+        keep_end = session.num_tokens if keep_last else session.num_tokens - 1
+        # Position of the update's first input. Without new tokens, a kept
+        # sample is the input its multimodal features are added to.
+        start = keep_end - 1 if keep_last and not update.prompt_token_ids else keep_end
+        assert start >= session.num_computed_tokens
         del session._all_token_ids[keep_end:]
-        del session.block_hashes[keep_end // self.hash_block_size :]
+        del session.block_hashes[start // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -1914,10 +1925,9 @@ class Scheduler(SchedulerInterface):
         )
 
         if update.mm_features:
-            base = session.num_tokens
             for mm_feature in update.mm_features:
                 mm_feature.mm_position = replace(
-                    mm_feature.mm_position, offset=mm_feature.mm_position.offset + base
+                    mm_feature.mm_position, offset=mm_feature.mm_position.offset + start
                 )
             session.mm_features.extend(update.mm_features)
 
