@@ -91,6 +91,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -260,7 +261,7 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         if loader_frames < 0:
             return groups * temporal_patch_size
         max_frames = max(int(video_processor.num_frames), loader_frames)
-        max_groups = max(1, max_frames // temporal_patch_size)
+        max_groups = max(1, cdiv(max_frames, temporal_patch_size))
         return min(groups, max_groups) * temporal_patch_size
 
 

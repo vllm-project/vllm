@@ -101,7 +101,7 @@ def test_dummy_image_follows_size_hint(
 
 @pytest.mark.parametrize(
     ("loader_frames", "num_frames"),
-    [(None, 96), (128, 128), (-1, 200)],
+    [(None, 96), (97, 97), (128, 128), (129, 129), (-1, 200)],
 )
 def test_video_budget_covers_loader_frames(loader_frames: int | None, num_frames: int):
     ctx = build_model_context(
