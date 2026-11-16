@@ -425,6 +425,42 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
+### DeepSeek-V3.2 Models (`deepseek_v32`)
+
+Supported models:
+
+* `deepseek-ai/DeepSeek-V3.2`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser deepseek_v32`
+
+vLLM selects `--tokenizer-mode deepseek_v32` automatically for `DeepseekV32ForCausalLM`.
+DeepSeek-V3.2 emits DSML tool calls inside `<｜DSML｜function_calls>` blocks (`structural_tag_model = "deepseek_v3_2"`).
+To enable thinking mode alongside tool calling, also pass `--reasoning-parser deepseek_v3` and set `thinking=True` or `enable_thinking=True` in `chat_template_kwargs`.
+
+### DeepSeek-V4 Models (`deepseek_v4`)
+
+Supported models:
+
+* `deepseek-ai/DeepSeek-V4-Flash`
+* `deepseek-ai/DeepSeek-V4-Pro`
+* `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser deepseek_v4 --reasoning-parser deepseek_v4`
+
+vLLM selects `--tokenizer-mode deepseek_v4` automatically for `DeepseekV4ForCausalLM` and `DeepseekV4ForConditionalGeneration`.
+The parser handles `<think>...</think>` reasoning (enabled by default unless `thinking=False`, `enable_thinking=False`, or `reasoning_effort="none"`) and DSML `<｜DSML｜tool_calls>` blocks (`structural_tag_model = "deepseek_v4"`).
+
+### DeepSeek-V4.1 Models (`deepseek_v41`)
+
+Supported models:
+
+* `deepseek-ai/DeepSeek-V4.1-Flash`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser deepseek_v41 --reasoning-parser deepseek_v41`
+
+vLLM selects `--tokenizer-mode deepseek_v41` automatically for `DeepseekV41ForCausalLM`.
+The parser handles `<think>...</think>` reasoning and spaced DSML `<｜DSML｜ calls>` blocks (`structural_tag_model = "deepseek_v4_1"`).
+
 ### OpenAI OSS Models (`openai`)
 
 Supported models:
@@ -441,6 +477,20 @@ Supported models:
 * `moonshotai/Kimi-K2-Instruct`
 
 Flags: `--tool-call-parser kimi_k2`
+
+### Kimi-K3 Models (`kimi_k3`)
+
+Supported models:
+
+* `moonshotai/Kimi-K3`
+* `moonshotai/Kimi-K3.1`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser kimi_k3`
+
+vLLM selects `--tokenizer-mode kimi_k3` automatically for `KimiK3ForConditionalGeneration` and `KimiK31ForConditionalGeneration`.
+Kimi-K3 emits XTML channels (`<|open|>think<|sep|>`, `<|open|>response<|sep|>`, and `<|open|>tools<|sep|>`) and uses `structural_tag_model = "kimi_k3"`.
+Required and named `tool_choice` require strict-tool structural-tag enforcement (enabled by default via `VLLM_ENFORCE_STRICT_TOOL_CALLING=true`) and are rejected when it is disabled.
+Thinking is enabled by default and can be disabled with `chat_template_kwargs={"thinking": False}` or `{"enable_thinking": False}`.
 
 ### Kolibri 1 Models (`hf`)
 
@@ -528,14 +578,34 @@ Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_temp
     The base model provides general function calling capabilities, but best results
     are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
-### Qwen3-Coder Models (`qwen3_xml`)
+### Gemma 4 Models (`gemma4`)
+
+Supported models:
+
+* `google/gemma-4-E2B-it`
+* `google/gemma-4-E4B-it`
+* `google/gemma-4-12B-it`
+* `google/gemma-4-26B-A4B-it`
+* `google/gemma-4-31B-it`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4`
+
+Use the checkpoint's chat template, or `--chat-template examples/tool_chat_template_gemma4.jinja` ([examples/tool_chat_template_gemma4.jinja](../../examples/tool_chat_template_gemma4.jinja)).
+Gemma 4 emits `<|channel>thought\n...<channel|>` reasoning and native `<|tool_call>call:func_name{...}<tool_call|>` tool calls (`supports_required_and_named = False`; `required` and named `tool_choice` skip forced JSON guided decoding and keep `skip_special_tokens=False` so the model emits native syntax).
+Reasoning is disabled by default; enable it with `chat_template_kwargs={"enable_thinking": True}` or by setting `reasoning_effort`.
+
+### Qwen3-Coder Models (`qwen3_coder` / `qwen3_xml`)
 
 Supported models:
 
 * `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
+* `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8`
+* `Qwen/Qwen3.6-27B`
 
-Flags: `--tool-call-parser qwen3_xml`
+Flags: `--enable-auto-tool-choice --tool-call-parser qwen3_coder` (for thinking-enabled checkpoints such as `Qwen/Qwen3.6-27B`, add `--reasoning-parser qwen3`; use `--chat-template examples/tool_chat_template_qwen3coder.jinja` ([examples/tool_chat_template_qwen3coder.jinja](../../examples/tool_chat_template_qwen3coder.jinja)) if the checkpoint lacks a tool-calling template)
+
+`qwen3_coder` and `qwen3_xml` resolve to the same `Qwen3EngineToolParser` implementation for `<tool_call><function=...><parameter=...>...</parameter></function></tool_call>` XML output (`structural_tag_model = "qwen_3_coder"`).
 
 ### MiMo-V2.6 Models (`mimo`)
 
@@ -640,6 +710,63 @@ Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
 optional `<think>` block. Pair it with `--reasoning-parser ripple`.
 
 Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
+
+### MiniMax-M2 Models (`minimax_m2`)
+
+Supported models:
+
+* `MiniMaxAI/MiniMax-M2`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser minimax_m2 --reasoning-parser minimax_m2`
+
+MiniMax-M2 emits `<think>...</think>` reasoning (without an opening `<think>` token when prefixed by the template) and `<minimax:tool_call><invoke name="..."><parameter name="...">...</parameter></invoke></minimax:tool_call>` XML tool calls (`structural_tag_model = "minimax"`).
+See [Interleaved Thinking](interleaved_thinking.md) for multi-turn tool-call usage with `minimax_m2`.
+
+### MiniMax-M3 Models (`minimax_m3`)
+
+Supported models:
+
+* `MiniMaxAI/MiniMax-M3`
+* `MiniMaxAI/MiniMax-M3-MXFP8`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser minimax_m3 --reasoning-parser minimax_m3`
+
+MiniMax-M3 prefixes tool-call XML elements with `]<]minimax[>[` (`]<]minimax[>[<tool_call>...`), supports schema-guided nested objects and arrays (`<item>`), and emits each call's arguments once its `<invoke>` completes.
+`supports_required_and_named = False` (required and named `tool_choice` parse native M3 syntax rather than forcing JSON). Reasoning uses `<mm:think>...</mm:think>`.
+
+### Phi-4-mini Models (`phi4_mini_json`)
+
+Supported models:
+
+* `microsoft/Phi-4-mini-instruct`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser phi4_mini_json --chat-template examples/tool_chat_template_phi4_mini.jinja`
+
+Uses [examples/tool_chat_template_phi4_mini.jinja](../../examples/tool_chat_template_phi4_mini.jinja) and parses `functools[{"name": ..., "arguments": ...}]` JSON lists.
+Note: `phi4_mini_json` only implements non-streaming extraction (`extract_tool_calls_streaming` returns `None`), and sets `content` to `None` when tool calls are extracted.
+
+### Seed-OSS Models (`seed_oss`)
+
+Supported models:
+
+* `ByteDance-Seed/Seed-OSS-36B-Instruct`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser seed_oss --reasoning-parser seed_oss`
+
+Uses the Qwen3 `<function=...><parameter=...>` XML grammar wrapped in `<seed:tool_call>`/`</seed:tool_call>` alongside `<seed:think>`/`</seed:think>` reasoning (`structural_tag_model = None`).
+
+### LiquidAI LFM2 and LFM2.5 Models (`lfm2`)
+
+Supported models:
+
+* `LiquidAI/LFM2-1.2B`
+* `LiquidAI/LFM2-2.6B`
+* `LiquidAI/LFM2.5-1.2B-Instruct`
+* `LiquidAI/LFM2-8B-A1B-preview`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser lfm2`
+
+Parses pythonic tool calls wrapped in `<|tool_call_start|>[...]<|tool_call_end|>` and requires both special tokens in the tokenizer vocabulary.
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

@@ -14,23 +14,39 @@ vLLM currently supports the following reasoning models:
 
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
 | ------------ | ----------- | ---------------- | ----------- |
+| [Beam checkpoints](tool_calling.md#beam-models-beam) | `beam` | `json`, `regex` | ✅ |
 | [Cohere Command A Reasoning](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025) | `cohere_command3` | `json`, `regex` | ✅ |
 | [Cohere Command A Plus](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) | `cohere_command4` | `json`, `regex` | ✅ |
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
 | [Gemma 4 series](https://huggingface.co/google/gemma-4-26B-A4B-it) | `gemma4` | `json`, `regex` | ✅ |
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
+| [DeepSeek-V4 series](tool_calling.md#deepseek-v4-models-deepseek_v4) | `deepseek_v4` | `json`, `regex` | ✅ |
+| [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | `deepseek_v41` | `json`, `regex` | ✅ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
 | [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
+| [GLM-4.7 series](tool_calling.md#glm-47-models-glm47) | `glm47` | `json`, `regex` | ✅ |
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
 | [IBM Granite 4.2 language models](https://huggingface.co/ibm-granite/granite-4.2-30b) | `granite_thinking_parser` | `json`, `regex` | ✅ |
+| Kimi-K2-Thinking | `kimi_k2` | `json`, `regex` | ✅ |
+| [Kimi-K3 / Kimi-K3.1](tool_calling.md#kimi-k3-models-kimi_k3) | `kimi_k3` | `json`, `regex` | ✅ |
 | [Kolibri 1](https://huggingface.co/Aleph-Alpha/Kolibri-1) | `hf` | `json`, `regex` | ✅ |
+| [MiMo-V2.6 series](tool_calling.md#mimo-v26-models-mimo) | `mimo` | `json`, `regex` | ✅ |
+| [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2` | `json`, `regex` | ✅ |
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
+| [MiniMax-M3](tool_calling.md#minimax-m3-models-minimax_m3) | `minimax_m3` | `json`, `regex` | ✅ |
+| Mistral Magistral series | `mistral` | `json`, `regex` | ✅ |
+| [Muse Spark Open](tool_calling.md#muse-models-muse) | `muse` | ❌ | ✅ |
+| [Muse Glimmer](tool_calling.md#muse-models-muse) | `muse_glimmer` | ❌ | ✅ |
+| [Nemotron 3 series](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) | `nemotron_v3` | `json`, `regex` | ✅ |
+| [Olmo 3 series](tool_calling.md#olmo-3-models-olmo3) | `olmo3` | `json`, `regex` | ✅ |
+| [OpenAI OSS models](tool_calling.md#openai-oss-models-openai) | `openai_gptoss` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
 | [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) | `ripple` | `json`, `regex` | ✅ |
+| [Seed-OSS](tool_calling.md#seed-oss-models-seed_oss) | `seed_oss` | `json`, `regex` | ✅ |
 | [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
 | [ZAYA1 series](https://huggingface.co/Zyphra/ZAYA1-8B) | `zaya` | `json`, `regex` | ✅ |
 
@@ -38,6 +54,7 @@ vLLM currently supports the following reasoning models:
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
     IBM Granite 4.2 reasoning is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
+    DeepSeek-V4, DeepSeek-V4.1, and Kimi-K3 reasoning is enabled by default. To disable it, pass `thinking=False` or `enable_thinking=False` in your `chat_template_kwargs` (or `reasoning_effort="none"` for DeepSeek-V4 / V4.1).
     Gemma 4 reasoning is disabled by default; to enable it, pass `enable_thinking=True` in your `chat_template_kwargs` or set `reasoning_effort` (which enables it automatically).
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
