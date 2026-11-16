@@ -7,7 +7,7 @@ use std::num::NonZeroU32;
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 
-use crate::protocol::structured_outputs::StructuredOutputsParams;
+use crate::protocol::structured_outputs::EngineCoreStructuredOutputsParams;
 use crate::protocol::tensor::WireNdArray;
 
 fn default_top_p() -> f32 {
@@ -145,7 +145,7 @@ pub struct EngineCoreSamplingParams {
     #[serde(rename = "_bad_words_token_ids")]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Parameters for configuring structured outputs (guided decoding).
-    pub structured_outputs: Option<StructuredOutputsParams>,
+    pub structured_outputs: Option<EngineCoreStructuredOutputsParams>,
     /// Specific token IDs for which log probabilities should be returned at
     /// each position.
     ///
@@ -227,10 +227,11 @@ mod tests {
         ]);
         let request = Value::Array(vec![
             Value::from("req-omit-defaults"),
+            // Prompt token ids as a uint32 ndarray tuple with raw-view data.
             Value::Array(vec![
-                Value::from(1u32),
-                Value::from(2u32),
-                Value::from(3u32),
+                Value::from("=u4"),
+                Value::Array(vec![Value::from(3)]),
+                Value::Ext(3, bytemuck::cast_slice::<u32, u8>(&[1, 2, 3]).to_vec()),
             ]),
             Value::Nil,
             sampling_params,

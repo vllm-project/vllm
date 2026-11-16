@@ -10,6 +10,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -487,6 +488,7 @@ def _topk(
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
         and current_platform.has_device_capability(90)
+        and not current_platform.is_device_capability_family(110)
         and not current_platform.is_device_capability_family(120)
     )
     topk_op = (
@@ -517,11 +519,11 @@ def qsa_select_paged_decode(
     """Score and select compressed blocks for a request-major decode batch.
 
     Args:
-        q: Query tensor shaped ``[num_requests * decode_query_len, heads,
-            head_dim]``.
-        k_cache: Compressed key cache shaped ``[blocks, page_size, 1,
-            head_dim]``.
-        page_table: Request block table shaped ``[num_requests, max_pages]``.
+        q: Query tensor shaped `[num_requests * decode_query_len, heads,
+            head_dim]`.
+        k_cache: Compressed key cache shaped `[blocks, page_size, 1,
+            head_dim]`.
+        page_table: Request block table shaped `[num_requests, max_pages]`.
         visible_blocks: Number of visible compressed blocks per query.
         token_topk: Number of logical tokens selected per query.
         compress_ratio: Number of logical tokens represented by a cache row.
@@ -590,10 +592,10 @@ def qsa_select_paged_prefill(
     """Score and select compressed prefill blocks in bounded chunks.
 
     Args:
-        q: Packed prefill query tensor shaped ``[num_tokens, heads, head_dim]``.
-        k_cache: Compressed key cache shaped ``[blocks, page_size, 1,
-            head_dim]``.
-        page_table: Block table shaped ``[num_requests, max_pages]``.
+        q: Packed prefill query tensor shaped `[num_tokens, heads, head_dim]`.
+        k_cache: Compressed key cache shaped `[blocks, page_size, 1,
+            head_dim]`.
+        page_table: Block table shaped `[num_requests, max_pages]`.
         query_start_loc: Packed prefill query offsets with a terminal offset.
             Offsets may share the base of a larger backing tensor.
         visible_blocks: Number of visible compressed blocks per query.
@@ -611,7 +613,7 @@ def qsa_select_paged_prefill(
     # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
     # columns. Round up to 64 to keep the logits row stride
     # cooperative_topk-compatible.
-    logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
+    logits_width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB

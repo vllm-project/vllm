@@ -27,10 +27,10 @@ class BackpressurePolicy(ABC):
 class DropAccountingPolicy(BackpressurePolicy):
     """Base policy that tracks dropped store/block counters.
 
-    Subclasses implement ``should_store``; the shared drop accounting
-    (``on_store_skipped``/``pop_stores_dropped``/``reset``) lives here so
+    Subclasses implement `should_store`; the shared drop accounting
+    (`on_store_skipped`/`pop_stores_dropped`/`reset`) lives here so
     every policy reports these counters identically. Subclasses that add
-    their own state override ``reset`` and call ``super().reset()``.
+    their own state override `reset` and call `super().reset()`.
     """
 
     def __init__(self):
@@ -68,19 +68,25 @@ class ThrottledDropPolicy(DropAccountingPolicy):
         overshoot = (ema - high_water) / high_water
         drop_rate = min(1.0, overshoot / ramp_factor)
 
-    With the default ``ramp_factor=2.0``, stores ramp from 0% drop at
+    With the default `ramp_factor=2.0`, stores ramp from 0% drop at
     the high watermark to 100% drop at 3x the high watermark.  This
     keeps secondary tiers populated under moderate pressure, reducing
     cache misses (and therefore recomputation / ITL regression) while
     still protecting TTFT under severe congestion.
+
+    Accumulate `drop_rate` across store decisions. When the accumulator
+    reaches one, drop the store and subtract one from the accumulator,
+    carrying the remaining fraction into the next decision.
     """
 
     def __init__(self, ramp_factor: float = 2.0):
+        """Initialize the drop accumulator and severity ramp."""
         super().__init__()
-        self._call_count: int = 0
+        self._drop_accumulator: float = 0.0
         self._ramp_factor = ramp_factor
 
     def should_store(self, detector: BackpressureDetector) -> bool:
+        """Return whether to allow the store."""
         # Proportional throttling needs the EMA and high watermark, which
         # only the EMA detector exposes.
         assert isinstance(detector, EMABackpressureDetector), (
@@ -98,13 +104,16 @@ class ThrottledDropPolicy(DropAccountingPolicy):
             return True
         if drop_rate >= 1.0:
             return False
-        self._call_count += 1
-        period = max(2, round(1.0 / drop_rate))
-        return (self._call_count % period) != 0
+        self._drop_accumulator += drop_rate
+        if self._drop_accumulator >= 1.0:
+            self._drop_accumulator -= 1.0
+            return False
+        return True
 
     def reset(self) -> None:
+        """Clear the drop accumulator and dropped store and block counts."""
         super().reset()
-        self._call_count = 0
+        self._drop_accumulator = 0.0
 
 
 class BackpressureDetector(ABC):
@@ -123,6 +132,13 @@ class BackpressureDetector(ABC):
     @abstractmethod
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None: ...
 
+    def on_store_failed(self) -> None:
+        """Observe a store job that completed with `success=False`.
+
+        Ignored by default; detectors may treat failures as pressure.
+        """
+        return
+
     @abstractmethod
     def is_under_pressure(self) -> bool: ...
 
@@ -133,7 +149,7 @@ class BackpressureDetector(ABC):
         """Update pressure state from a completed store job.
 
         Args:
-            submit_time: ``time.monotonic()`` when the job was submitted.
+            submit_time: `time.monotonic()` when the job was submitted.
             num_bytes: Total bytes written (num_blocks * block_size_bytes).
 
         """
@@ -153,14 +169,14 @@ class BackpressureDetector(ABC):
     def default_config(
         cls, tier_type: str, *, locality: str | None = None
     ) -> dict | None:
-        """Return default constructor kwargs for ``tier_type``, or None.
+        """Return default constructor kwargs for `tier_type`, or None.
 
         Args:
-            tier_type: The tier type string (e.g. ``"fs"``, ``"obj"``).
+            tier_type: The tier type string (e.g. `"fs"`, `"obj"`).
             locality: Optional locality hint from the tier config
-                (``"LOCAL"`` or ``"REMOTE"``). When ``"REMOTE"``, tiers
+                (`"LOCAL"` or `"REMOTE"`). When `"REMOTE"`, tiers
                 that would normally get local-storage watermarks (e.g.
-                ``"fs"``) receive network watermarks instead.
+                `"fs"`) receive network watermarks instead.
 
         """
         return None
@@ -184,13 +200,13 @@ class EMABackpressureDetector(BackpressureDetector):
         high=0.005 s/MiB (~200 MB/s) catches severe congestion;
         low=0.001 s/MiB (~1 GB/s) requires meaningful recovery.
 
-      NETWORK (CephFS, object store, ``obj``tiers, or any tier
-        with ``"locality": "REMOTE"``): CephFS sustains ~1.5 GB/s.
+      NETWORK (CephFS, object store, `obj`tiers, or any tier
+        with `"locality": "REMOTE"`): CephFS sustains ~1.5 GB/s.
         high=0.020 s/MiB (~50 MB/s); low=0.005 s/MiB (~200 MB/s).
 
-    ``obj`` tiers get NETWORK defaults automatically. An
-    ``fs`` tier defaults to LOCAL (appropriate for NVMe/SSD); set
-    ``"locality": "REMOTE"`` in the tier config for network-backed
+    `obj` tiers get NETWORK defaults automatically. An
+    `fs` tier defaults to LOCAL (appropriate for NVMe/SSD); set
+    `"locality": "REMOTE"` in the tier config for network-backed
     filesystems like CephFS.
     """
 
@@ -220,6 +236,16 @@ class EMABackpressureDetector(BackpressureDetector):
     # detector enters a "healthy" fast-path that bypasses policy checks.
     _HEALTHY_THRESHOLD = 10
 
+    # Consecutive failed stores that put a storage tier under pressure
+    # (e.g. ENOSPC/EDQUOT on a full filesystem). Not applied to tiers such
+    # as p2p, whose store failures are per-request rather than tier health.
+    DEFAULT_FAILURE_THRESHOLD = 3
+
+    # Failure-induced pressure raises the EMA to this multiple of the high
+    # water mark, enough for ThrottledDropPolicy (ramp_factor=2.0) to drop
+    # every store until idle decay lets a probe store through.
+    _FAILURE_EMA_FACTOR = 4.0
+
     LOCAL_HIGH_WATER_S = 0.010
     LOCAL_LOW_WATER_S = 0.002
 
@@ -227,21 +253,24 @@ class EMABackpressureDetector(BackpressureDetector):
     NETWORK_LOW_WATER_S = 0.010
 
     _NETWORK_TIER_TYPES = frozenset({"obj"})
+    _STORAGE_TIER_TYPES = frozenset({"fs", "obj"})
 
     @classmethod
-    def default_config(
-        cls, tier_type: str, *, locality: str | None = None
-    ) -> dict | None:
+    def default_config(cls, tier_type: str, *, locality: str | None = None) -> dict:
         is_remote = locality is not None and locality.upper() == "REMOTE"
         if is_remote or tier_type in cls._NETWORK_TIER_TYPES:
-            return {
+            config: dict = {
                 "high_water_s": cls.NETWORK_HIGH_WATER_S,
                 "low_water_s": cls.NETWORK_LOW_WATER_S,
             }
-        return {
-            "high_water_s": cls.LOCAL_HIGH_WATER_S,
-            "low_water_s": cls.LOCAL_LOW_WATER_S,
-        }
+        else:
+            config = {
+                "high_water_s": cls.LOCAL_HIGH_WATER_S,
+                "low_water_s": cls.LOCAL_LOW_WATER_S,
+            }
+        if tier_type in cls._STORAGE_TIER_TYPES:
+            config["failure_threshold"] = cls.DEFAULT_FAILURE_THRESHOLD
+        return config
 
     def __init__(
         self,
@@ -251,6 +280,7 @@ class EMABackpressureDetector(BackpressureDetector):
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
         decay_half_life_s: float = DEFAULT_DECAY_HALF_LIFE_S,
         cooldown_s: float = DEFAULT_COOLDOWN_S,
+        failure_threshold: int | None = None,
         policy: BackpressurePolicy | None = None,
     ):
         super().__init__(policy=policy)
@@ -260,6 +290,8 @@ class EMABackpressureDetector(BackpressureDetector):
             raise ValueError(
                 f"low_water_s ({low_water_s}) must be <= high_water_s ({high_water_s})"
             )
+        if failure_threshold is not None and failure_threshold < 1:
+            raise ValueError(f"failure_threshold must be >= 1, got {failure_threshold}")
 
         self._alpha = alpha
         self._high = high_water_s
@@ -282,12 +314,19 @@ class EMABackpressureDetector(BackpressureDetector):
         # Monotonic timestamp when pressure was last cleared (for cooldown).
         self._pressure_cleared_at: float = 0.0
         self._cooldown_count: int = 0
+        # Consecutive failed stores that trigger pressure; None ignores
+        # failures.
+        self._failure_threshold = failure_threshold
+        self._consecutive_failures: int = 0
+        # Failure-induced pressure can start before warmup completes, so it
+        # must be allowed to decay during warmup.
+        self._failure_tripped: bool = False
 
     def _apply_idle_decay(self) -> None:
         """Decay the EMA toward zero based on elapsed idle time.
 
-        Uses the formula ``ema * 0.5^(dt / half_life)`` so the EMA
-        halves every ``decay_half_life_s`` seconds of silence.  This
+        Uses the formula `ema * 0.5^(dt / half_life)` so the EMA
+        halves every `decay_half_life_s` seconds of silence.  This
         lets the detector recover from pressure when no stores are
         attempted (and therefore no completions arrive to update the
         EMA organically).
@@ -302,6 +341,7 @@ class EMABackpressureDetector(BackpressureDetector):
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None:
         now = time.monotonic()
         s_per_mib = elapsed_s / (num_bytes / self._MIB)
+        self._consecutive_failures = 0
         self._completions += 1
         if self._completions <= self._warmup_completions:
             self._warmup_samples.append(s_per_mib)
@@ -320,15 +360,37 @@ class EMABackpressureDetector(BackpressureDetector):
                 self._pressure_cleared_at = now
                 self._cooldown_count = 0
             self._under_pressure = False
+            self._failure_tripped = False
             self._healthy_streak += 1
         else:
             self._healthy_streak = 0
 
+    def on_store_failed(self) -> None:
+        """Enter pressure after `failure_threshold` consecutive failures.
+
+        Idle decay then lets probe stores through: a failed probe re-enters
+        pressure at once, and a successful one resets the failure streak.
+        """
+        if self._failure_threshold is None:
+            return
+        self._consecutive_failures += 1
+        self._healthy_streak = 0
+        if self._consecutive_failures < self._failure_threshold:
+            return
+        self._ema = max(self._ema, self._high * self._FAILURE_EMA_FACTOR)
+        self._last_update = time.monotonic()
+        self._under_pressure = True
+        self._failure_tripped = True
+        self._pressure_cleared_at = 0.0
+
     def is_under_pressure(self) -> bool:
-        if self._under_pressure and self._completions >= self._warmup_completions:
+        if self._under_pressure and (
+            self._completions >= self._warmup_completions or self._failure_tripped
+        ):
             self._apply_idle_decay()
             if self._ema < self._low:
                 self._under_pressure = False
+                self._failure_tripped = False
                 self._pressure_cleared_at = time.monotonic()
                 self._cooldown_count = 0
         return self._under_pressure
@@ -336,10 +398,10 @@ class EMABackpressureDetector(BackpressureDetector):
     def is_healthy(self) -> bool:
         """True when the tier has been consistently fast.
 
-        After ``_HEALTHY_THRESHOLD`` consecutive store completions with
+        After `_HEALTHY_THRESHOLD` consecutive store completions with
         EMA below the low watermark (and no active pressure), the
-        detector enters a healthy fast-path: ``should_store()`` returns
-        ``True`` immediately, skipping the policy check entirely.
+        detector enters a healthy fast-path: `should_store()` returns
+        `True` immediately, skipping the policy check entirely.
         """
         return (
             not self._under_pressure and self._healthy_streak >= self._HEALTHY_THRESHOLD
@@ -369,6 +431,8 @@ class EMABackpressureDetector(BackpressureDetector):
         self._healthy_streak = 0
         self._pressure_cleared_at = 0.0
         self._cooldown_count = 0
+        self._consecutive_failures = 0
+        self._failure_tripped = False
         self._policy.reset()
 
     @property
@@ -381,4 +445,7 @@ class EMABackpressureDetector(BackpressureDetector):
 
     @property
     def stats(self) -> dict[str, float]:
-        return {"store_latency_ema": self._ema}
+        return {
+            "store_latency_ema": self._ema,
+            "consecutive_store_failures": self._consecutive_failures,
+        }

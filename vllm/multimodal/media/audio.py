@@ -20,6 +20,7 @@ from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
+    check_torch_archive_size,
     safe_to_dense,
 )
 
@@ -39,8 +40,10 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
-    # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
+except (ImportError, RuntimeError, OSError) as exc:
+    # torchcodec may fail to import when it is not installed (ImportError),
+    # the system ffmpeg is missing (RuntimeError), or its native library
+    # cannot be loaded (OSError).
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:
@@ -78,6 +81,32 @@ _DURATION_GUARD_MARGIN_S = 1.0
 # Largest Vorbis block size in native-rate samples
 _VORBIS_MAX_BLOCK_SAMPLES = 8192
 
+_CORRUPT_AUDIO_MSG = (
+    "Invalid or corrupted audio data. Ensure the input is a valid "
+    "audio or video file (e.g. a complete WAV, MP3, or MP4)."
+)
+
+
+class _CorruptAudioError(ValueError):
+    """torchcodec could not open or decode the input.
+
+    Kept distinct from the duration/memory guard ValueErrors so that
+    `load_audio(backend="auto")` can retry with soundfile, whose decoders
+    (e.g. mpg123 for MP3) resync past bad frames that FFmpeg aborts on.
+    """
+
+
+def _normalize_decode_limits(
+    max_duration_s: float | None,
+    max_decode_bytes: int | None,
+) -> tuple[float | None, int | None]:
+    """Treat documented zero-valued audio decode limits as disabled."""
+    if max_duration_s == 0:
+        max_duration_s = None
+    if max_decode_bytes == 0:
+        max_decode_bytes = None
+    return max_duration_s, max_decode_bytes
+
 
 def load_audio_pyav(
     path: BytesIO | Path | str,
@@ -91,11 +120,11 @@ def load_audio_pyav(
 
     Decodes the audio stream at its native sample rate. Channel reduction to
     mono is performed by averaging across channels.  Resampling to a
-    model-specific rate is left to the downstream :class:`AudioResampler`.
+    model-specific rate is left to the downstream `AudioResampler`.
 
     Args:
-        path: A :class:`~io.BytesIO` buffer, a filesystem
-            :class:`~pathlib.Path`, or a string path.
+        path: A `BytesIO` buffer, a filesystem
+            `Path`, or a string path.
         sr: Target sample rate, or None to keep the native rate.
         mono: Whether to average the channels down to mono.
         max_decode_bytes: If set, abort decoding once this many bytes have
@@ -106,10 +135,14 @@ def load_audio_pyav(
             expands into gigabytes of PCM.
 
     Returns:
-        ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
+        `(waveform, sample_rate)` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
 
     """
+    max_duration_s, max_decode_bytes = _normalize_decode_limits(
+        max_duration_s, max_decode_bytes
+    )
+
     try:
         container = av.open(path)
     except av.error.FFmpegError as e:
@@ -219,6 +252,10 @@ def load_audio_soundfile(
     max_decode_bytes: int | None = None,
 ) -> tuple[np.ndarray, int]:
     """Load audio via soundfile."""
+    max_duration_s, max_decode_bytes = _normalize_decode_limits(
+        max_duration_s, max_decode_bytes
+    )
+
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
         if max_duration_s is not None:
@@ -262,15 +299,15 @@ def load_audio_torchcodec(
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using torchcodec, returning a float32 waveform.
 
-    Unlike :func:`load_audio_pyav`, which drives FFmpeg through a per-frame
+    Unlike `load_audio_pyav`, which drives FFmpeg through a per-frame
     Python generator, torchcodec decodes inside a single call that releases
-    the GIL. Resampling also happens in C++ (``sample_rate=sr``), so this
+    the GIL. Resampling also happens in C++ (`sample_rate=sr`), so this
     backend never falls back to PyAV or libsndfile.
 
     Args:
-        path: A :class:`~io.BytesIO` buffer, a filesystem
-            :class:`~pathlib.Path`, or a string path.
-        sr: Output sample rate; ``None`` keeps the native rate. Must be an
+        path: A `BytesIO` buffer, a filesystem
+            `Path`, or a string path.
+        sr: Output sample rate; `None` keeps the native rate. Must be an
             integer when set.
         mono: Average channels down to a single channel.
         max_duration_s: Reject audio longer than this many seconds.
@@ -280,11 +317,15 @@ def load_audio_torchcodec(
             bytes.
 
     Returns:
-        ``(waveform, sample_rate)`` where *waveform* is a float32 NumPy
-        array (1-D when ``mono=True``) and *sample_rate* is the output
+        `(waveform, sample_rate)` where *waveform* is a float32 NumPy
+        array (1-D when `mono=True`) and *sample_rate* is the output
         sample rate in Hz.
 
     """
+    max_duration_s, max_decode_bytes = _normalize_decode_limits(
+        max_duration_s, max_decode_bytes
+    )
+
     if AudioDecoder is None:
         # Unify "torchcodec not installed" and "system ffmpeg missing" into
         # ImportError so `load_audio(backend="auto")` falls back cleanly.
@@ -304,10 +345,7 @@ def load_audio_torchcodec(
         # than at import. Treat that as backend-unavailable, not bad input.
         if "Could not load libtorchcodec" in str(e):
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
-        raise ValueError(
-            "Invalid or corrupted audio data. Ensure the input is a valid "
-            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
-        ) from e
+        raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
 
     # Pre-check the memory budget from container metadata so an obviously
     # oversized stream is rejected before allocating the PCM buffer. Metadata
@@ -363,10 +401,7 @@ def load_audio_torchcodec(
                 0.0, max_duration_s + _DURATION_GUARD_MARGIN_S
             )
     except RuntimeError as e:
-        raise ValueError(
-            "Invalid or corrupted audio data. Ensure the input is a valid "
-            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
-        ) from e
+        raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
 
     # FFmpeg < 5.0 misses Ogg end_trimming, leaving up to one Vorbis block of
     # padding at the tail; we need to trim for valid audio length.
@@ -438,9 +473,10 @@ def load_audio(
         max_duration_s: Reject audio longer than this many seconds.
         max_decode_bytes: Reject audio that would decode to more than this
             many bytes.
-        backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
-            ``"auto"``, which tries torchcodec, then falls back to the
-            soundfile → PyAV chain; the other values select a single
+        backend: One of `AUDIO_BACKENDS`. `None` (default) selects
+            `"auto"`, which tries torchcodec, then falls back to the
+            soundfile → PyAV chain (only to soundfile if torchcodec fails
+            to decode the input); the other values select a single
             backend with no fallback.
 
     """
@@ -461,10 +497,12 @@ def load_audio(
         )
 
     # "auto": torchcodec → soundfile → PyAV, each called by its bare name so
-    # monkeypatched tests take effect. Only ImportError (or, for soundfile, an
-    # unsupported-format error) defers to the next backend; anything else raises.
+    # monkeypatched tests take effect. ImportError (or, for soundfile, an
+    # unsupported-format error) defers to the next backend, and a torchcodec
+    # decode failure defers to soundfile only; anything else raises.
     if isinstance(path, BytesIO):
         path.seek(0)
+    torchcodec_error: _CorruptAudioError | None = None
     try:
         return load_audio_torchcodec(
             path,
@@ -474,10 +512,13 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
     except ImportError as exc:
-        # Decode errors don't defer: FFmpeg-based PyAV would fail the same way.
         logger.warning(
             "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
         )
+    except _CorruptAudioError as exc:
+        # libsndfile does not use FFmpeg, so it may still decode this input;
+        # FFmpeg-based PyAV would fail the same way and is skipped below.
+        torchcodec_error = exc
 
     if isinstance(path, BytesIO):
         path.seek(0)
@@ -494,8 +535,12 @@ def load_audio(
         # ImportError — i.e. soundfile is a real module — so evaluating
         # ``soundfile.LibsndfileError`` here is safe even when soundfile is a
         # PlaceholderModule (which would make that attribute access raise).
+        if torchcodec_error is not None:
+            raise torchcodec_error from torchcodec_error.__cause__
         logger.error("Failed to load audio via soundfile: %r", exc)
     except soundfile.LibsndfileError as exc:
+        if torchcodec_error is not None:
+            raise torchcodec_error from torchcodec_error.__cause__
         # libsndfile covers fewer containers than FFmpeg, so defer only on a
         # format-detection failure; re-raise anything else (e.g. corrupt but
         # recognised) since PyAV would hit the same corruption.
@@ -580,7 +625,27 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                 backend=self.audio_backend,
             )
 
-        max_decode_bytes = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        max_audio_decode_bytes: int | None = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        if max_audio_decode_bytes == 0:
+            max_audio_decode_bytes = None
+
+        max_decode_bytes = max_audio_decode_bytes
+        if max_decode_bytes is None:
+            request_decode_limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+            if request_decode_limit > 0:
+                # With the per-audio cap disabled, keep the request-level
+                # budget as the decoder's bound.
+                max_decode_bytes = request_decode_limit
+
+        if max_decode_bytes is None:
+            return load_audio(
+                source,
+                sr=None,
+                max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                max_decode_bytes=None,
+                backend=self.audio_backend,
+            )
+
         reserved = budget.reserve(max_decode_bytes)
         decoded_bytes = 0
         try:
@@ -593,9 +658,9 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                     backend=self.audio_backend,
                 )
             except ValueError as exc:
-                if reserved < max_decode_bytes and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(
-                    exc
-                ):
+                if (
+                    max_audio_decode_bytes is None or reserved < max_audio_decode_bytes
+                ) and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(exc):
                     raise ValueError(
                         "Request decoded media exceeds "
                         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
@@ -649,6 +714,7 @@ class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def load_bytes(self, data: bytes) -> torch.Tensor:
+        check_torch_archive_size(data, parameter="audio_embeds")
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)

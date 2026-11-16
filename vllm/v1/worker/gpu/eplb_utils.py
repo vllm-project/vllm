@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from functools import wraps
 from typing import TYPE_CHECKING, Any
@@ -16,7 +16,7 @@ from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     get_mixture_of_experts_model,
 )
-from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
+from vllm.v1.worker.gpu.spec_decode.dspark.config import dspark_draft_supports_eplb
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -38,6 +38,8 @@ def draft_model_supports_eplb(
         return False
     if speculative_config is None or speculative_config.draft_model_config is None:
         return False
+    if not getattr(speculative_config, "draft_enable_eplb", True):
+        return False
     if getattr(speculative_config, "method", None) == "dspark":
         return dspark_draft_supports_eplb(speculative_config.draft_model_config)
     return True
@@ -49,10 +51,12 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(self: Any, *args, **kwargs) -> Any:
-            result = fn(self, *args, **kwargs)
             if kwargs.get("skip_eplb", False):
-                return result
+                # The router kernel records load before step() is reached.
+                with self.eplb.suppress():
+                    return fn(self, *args, **kwargs)
 
+            result = fn(self, *args, **kwargs)
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
             self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
             return result
@@ -63,7 +67,7 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
 
 
 @contextmanager
-def preserve_serving_state(model_runner: "GPUModelRunner") -> Iterator[None]:
+def preserve_serving_state(model_runner: "GPUModelRunner") -> Generator[None]:
     """Keep the elastic EP warmup out of the request pool and the KV cache."""
     # After the drain only parked streaming sessions still hold a slot, and
     # those are re-added from NewRequestData on their next chunk.
@@ -90,6 +94,24 @@ class EPLBController:
         self.state: EplbState | None = None
         self.suppressed = False
         self._has_registered_models = False
+
+    @contextmanager
+    def suppress(self) -> Generator[None]:
+        """Keep warmup forwards from stepping EPLB or recording expert load."""
+        should_record = (
+            self.state.should_record_tensor if self.state is not None else None
+        )
+        was_suppressed = self.suppressed
+        was_recording = should_record.clone() if should_record is not None else None
+        self.suppressed = True
+        if should_record is not None:
+            should_record.fill_(False)
+        try:
+            yield
+        finally:
+            if should_record is not None and was_recording is not None:
+                should_record.copy_(was_recording)
+            self.suppressed = was_suppressed
 
     def prepare_load(self) -> None:
         self.state = None

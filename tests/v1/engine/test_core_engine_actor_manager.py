@@ -15,7 +15,7 @@ import ray
 import zmq
 from torch.distributed import TCPStore
 
-from vllm.utils.network_utils import get_open_port, make_zmq_socket, split_zmq_path
+from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
 from vllm.v1.engine.core import EngineCoreActorMixin
 from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
@@ -60,8 +60,8 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
     def get_addresses(self) -> tuple[list[str], list[str]]:
         """Return the addresses snapshot the actor was constructed with.
 
-        Used by the Ray-DP regression test to assert that no ``tcp://host:0``
-        placeholders were pickled into the actor at ``.remote()`` time.
+        Used by the Ray-DP regression test to assert that no `tcp://host:0`
+        placeholders were pickled into the actor at `.remote()` time.
         """
         return list(self.addresses.inputs), list(self.addresses.outputs)
 
@@ -141,7 +141,7 @@ def _make_addresses() -> EngineZmqAddresses:
             False,
         ),
         ({"data_parallel_backend": "mp", "data_parallel_rank_local": 0}, False),
-        ({"data_parallel_backend": "mp", "enable_elastic_ep": True}, False),
+        ({"data_parallel_backend": "mp", "enable_elastic_ep": True}, True),
         ({"data_parallel_backend": "mp", "data_parallel_size": 1}, False),
     ],
     ids=["mp", "ray", "non-master-node", "offline", "elastic-ep", "single-engine"],
@@ -150,8 +150,9 @@ def test_coordination_store_held_only_by_the_online_dp_master(
     monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], expect_store: bool
 ) -> None:
     """The DP master node holds a coordination store for both engine backends,
-    so engines there pick world-group ports at bind time. Every other
-    deployment keeps the pre-allocated ports and must not hold one."""
+    so engines there pick world-group ports at bind time. Elastic EP also
+    creates its coordination store before startup. The remaining cases
+    below keep the pre-allocated ports and must not hold a store."""
 
     class FakeManager:
         def __init__(self, **kwargs) -> None:
@@ -161,8 +162,9 @@ def test_coordination_store_held_only_by_the_online_dp_master(
     parallel_config = vllm_config.parallel_config
     for name, value in overrides.items():
         setattr(parallel_config, name, value)
-    # A fresh port per case so a lingering handshake socket cannot fail the next.
-    parallel_config.data_parallel_rpc_port = get_open_port()
+    # Port 0 makes the handshake socket take a free port at bind time; a port
+    # reserved up front can be handed to the coordination store meanwhile.
+    parallel_config.data_parallel_rpc_port = 0
     parallel_config._coord_store_port = 0
     monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineProcManager", FakeManager)
     monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineActorManager", FakeManager)
@@ -283,9 +285,9 @@ def ray_context_dp2():
 
 def _make_vllm_config_ray_dp_multinode() -> SimpleNamespace:
     """Minimal vllm_config that drives the Ray-DP multi-API-server path:
-    ``data_parallel_size != data_parallel_size_local`` forces TCP placeholders
-    (multi-node fan-out), and ``data_parallel_backend="ray"`` routes
-    ``launch_core_engines`` through the Ray branch.
+    `data_parallel_size != data_parallel_size_local` forces TCP placeholders
+    (multi-node fan-out), and `data_parallel_backend="ray"` routes
+    `launch_core_engines` through the Ray branch.
     """
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -316,8 +318,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
 ) -> None:
     """Regression guard for the Ray-DP + multi-API-server hang from PR #42585.
 
-    ``launch_core_engines`` Ray branch pickles ``addresses`` into each engine
-    actor at ``.remote()`` time, and ``EngineCoreActorMixin._perform_handshakes``
+    `launch_core_engines` Ray branch pickles `addresses` into each engine
+    actor at `.remote()` time, and `EngineCoreActorMixin._perform_handshakes`
     is a no-op, so the actor uses that pickled snapshot for the rest of its
     life. The supervisor therefore binds the frontend listeners before actor
     construction and Ray pickles their resolved endpoints. This test asserts
@@ -422,7 +424,7 @@ def ray_2gpu_node(monkeypatch: pytest.MonkeyPatch):
     """Real single-node Ray with 2 virtual GPUs and no dashboard.
 
     Resource maps and placement groups are real. Without the dashboard any
-    ``ray.util.state.list_nodes()`` call fails, the production condition this
+    `ray.util.state.list_nodes()` call fails, the production condition this
     path must survive. Only the platform device key is patched ("" on CPU).
     """
     from ray._private.state import available_resources_per_node
@@ -463,7 +465,7 @@ def _elastic_ep_config(dp_size: int, world_size: int, master_ip: str):
 @pytest.mark.timeout(120)
 def test_add_dp_placement_groups_does_not_require_ray_default(ray_2gpu_node):
     """DP 1 -> 2 on an idle node: one schedulable group pinned to the master,
-    found without the dashboard (``list_nodes`` would fail here)."""
+    found without the dashboard (`list_nodes` would fail here)."""
     ip = ray_2gpu_node.master_ip
 
     pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(

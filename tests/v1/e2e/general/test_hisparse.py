@@ -19,9 +19,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
+from vllm.model_executor.model_loader import dummy_loader
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
@@ -38,6 +41,26 @@ HF_OVERRIDES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch):
+    """Keep dummy FP8 weights within +-1 so greedy outputs are reproducible.
+
+    These tests compare greedy tokens across paths that are not bitwise
+    equivalent (cold vs. restored prefix, batched vs. single, two engines).
+    Full-range random FP8 codes make the dummy model's near-tied logits flip
+    on kernel-level noise, so even the cold path differs between runs.
+    """
+    original = dummy_loader.initialize_single_dummy_weight
+
+    def initialize(param: torch.Tensor, *args, **kwargs) -> None:
+        if param.is_floating_point() and torch.finfo(param.dtype).bits == 8:
+            kwargs.setdefault("low", -1.0)
+            kwargs.setdefault("high", 1.0)
+        original(param, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_loader, "initialize_single_dummy_weight", initialize)
+
+
 def _shrink_config(config):
     overrides = HF_OVERRIDES.copy()
     if any("MTP" in architecture for architecture in config.architectures):
@@ -48,9 +71,10 @@ def _shrink_config(config):
 
 def _num_hisparse_spills(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
-    coordinator = get_hisparse_coordinator(
-        client.engine_core.scheduler.kv_cache_manager
-    )
+    assert isinstance(client, InprocClient)
+    scheduler = client.engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
+    coordinator = get_hisparse_coordinator(scheduler.kv_cache_manager)
     return coordinator.next_spill_id
 
 
@@ -65,7 +89,9 @@ def _offload_load_bytes() -> float:
 
 
 def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
-    engine_core = runner.llm.llm_engine.engine_core.engine_core
+    client = runner.llm.llm_engine.engine_core
+    assert isinstance(client, InprocClient)
+    engine_core = client.engine_core
     model_runner = engine_core.model_executor.driver_worker.worker.model_runner
     connector = model_runner.kv_connector.kv_connector
     if isinstance(connector, MultiConnector):
@@ -83,13 +109,20 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
 @pytest.mark.parametrize(
-    "with_offloading", [False, True], ids=["standalone", "offload"]
+    "with_offloading,attention_backend",
+    [
+        pytest.param(False, None, id="standalone"),
+        pytest.param(True, None, id="offload"),
+        # Offloading does not touch the attention kernels: FA4 runs standalone.
+        pytest.param(False, "FLASH_ATTN_MLA_SPARSE_FA4", id="standalone-fa4"),
+    ],
 )
 @fork_new_process_for_each_test
 def test_hisparse_spill_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
     with_offloading: bool,
+    attention_backend: str | None,
 ):
     """Spilled prefixes restore and FULL-graph decode writes reach host KV.
 
@@ -101,6 +134,8 @@ def test_hisparse_spill_and_prefix_restore(
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
         pytest.skip("Sparse MLA requires Hopper or newer")
+    if attention_backend and not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
@@ -142,6 +177,7 @@ def test_hisparse_spill_and_prefix_restore(
             )
         ),
         kv_transfer_config=kv_transfer_config,
+        attention_backend=attention_backend,
         block_size=64,
         max_model_len=320,
         max_num_batched_tokens=1024,
@@ -158,6 +194,7 @@ def test_hisparse_spill_and_prefix_restore(
     ) as runner:
         worker = _get_hisparse_worker(runner)
         engine_core = runner.llm.llm_engine.engine_core.engine_core
+        assert engine_core.vllm_config.num_hash_lookahead_tokens > 0
         model_runner = engine_core.model_executor.driver_worker.worker.model_runner
         full_graph_calls = 0
         full_replay_pending = False
@@ -249,6 +286,87 @@ def test_hisparse_spill_and_prefix_restore(
         assert actual == expected
         if with_offloading:
             assert _offload_load_bytes() > load_bytes
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+)
+@fork_new_process_for_each_test
+def test_hisparse_extensible_kv_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
+):
+    """An extensible KV cache serves HiSparse like a fixed one of its size.
+
+    Warmup must commit the hot blocks the FlashInfer decode autotune reads (a
+    top-k of 2048 reaches past the blocks backed at allocation) and keep the
+    hot group within its fixed-size block-table rows. The host pool stays in
+    host memory, and the caches passed to connectors match the fixed path's.
+    """
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 9:
+        pytest.skip("Sparse MLA requires Hopper or newer")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
+
+    def shrink_config(config):
+        config = _shrink_config(config)
+        config.update({"index_topk": 2048})
+        return config
+
+    def run(**kwargs) -> tuple[int, dict, list]:
+        with vllm_runner(
+            MODEL,
+            load_format="dummy",
+            hf_overrides=shrink_config,
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(device_buffer_size=2048)
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="HiSparseConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"host_pool_gib": 1},
+            ),
+            block_size=64,
+            max_model_len=4096,
+            max_num_batched_tokens=4096,
+            max_num_seqs=4,
+            # Leaves room for the second engine while the first one's memory
+            # is still being released.
+            gpu_memory_utilization=0.4,
+            compilation_config={
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                "cudagraph_capture_sizes": [1, 4],
+            },
+            **kwargs,
+        ) as runner:
+            worker = _get_hisparse_worker(runner)
+            assert worker.host_caches
+            assert not any(cache.is_cuda for cache in worker.host_caches)
+            engine_core = runner.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+            caches = {
+                name: (
+                    cache.dtype,
+                    cache.device.type,
+                    tuple(cache.shape),
+                    cache.untyped_storage().nbytes(),
+                )
+                for name, cache in model_runner.kv_caches_by_layer.items()
+            }
+            outputs = [
+                runner.generate_greedy([prompt], max_tokens=16)[0] for prompt in prompts
+            ]
+            return model_runner.kv_cache_config.num_blocks, caches, outputs
+
+    prompts = [[1000 + i % 64 for i in range(2500)], [7, 8, 9]]
+    num_blocks, extensible_caches, extensible = run(enable_extensible_kv_cache=True)
+    _, fixed_caches, fixed = run(
+        enable_extensible_kv_cache=False, num_gpu_blocks_override=num_blocks
+    )
+
+    assert extensible_caches == fixed_caches
+    assert extensible == fixed
 
 
 @pytest.mark.skipif(

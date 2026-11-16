@@ -13,9 +13,10 @@ from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
+    check_torch_archive_size,
     safe_to_dense,
 )
 
@@ -48,6 +49,8 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             # Decoder GPU memory is reserved from the startup value.
             runtime_kwargs = dict(runtime_kwargs)
             runtime_kwargs.pop("hw_decoders", None)
+            runtime_kwargs.pop("max_width", None)
+            runtime_kwargs.pop("max_height", None)
             runtime_kwargs.pop("pool_size", None)
             # The decode device determines which device the decoded frames
             # (and thus the processor pipeline) live on; startup-only.
@@ -242,6 +245,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
+        check_torch_archive_size(data, parameter="video_embeds")
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
@@ -249,7 +253,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
-            return torch.from_numpy(np.load(buffer))
+            return numpy2tensor(np.load(buffer))
 
     def load_bytes(self, data: bytes) -> torch.Tensor:
         if data[:6] == MAGIC_NUMPY_PREFIX:
@@ -262,7 +266,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def load_file(self, filepath: Path) -> torch.Tensor:
         if filepath.suffix == ".npy":
-            return torch.from_numpy(np.load(filepath))
+            return numpy2tensor(np.load(filepath))
 
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)

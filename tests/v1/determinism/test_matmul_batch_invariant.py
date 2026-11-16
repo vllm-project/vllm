@@ -12,6 +12,7 @@ from utils import skip_unsupported
 
 from vllm.model_executor.determinism.batch_invariant import (
     matmul_batch_invariant,
+    matmul_persistent,
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,

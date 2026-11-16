@@ -23,7 +23,7 @@ Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
 The request-level `watermarking` option has two effective states:
 
 - Omitted (`None` in Python) or `true` requests watermarking.
-- `false` explicitly opts out.
+- `false` explicitly opts out unless `enforce` is enabled.
 
 When a request asks for watermarking but the engine or generation mode cannot
 apply it, vLLM emits a server-side warning once and runs the request without a
@@ -42,13 +42,17 @@ same optional `watermarking` request field. The Rust token API accepts it in
 `sampling_params`, and the Rust gRPC `GenerateRequest` accepts it directly.
 Omitting the field requests watermarking by default.
 
-Deployments that require watermarking must restrict explicit opt-out to trusted
-callers, or strip and validate the field at the ingress boundary.
+Deployments that require watermarking can enable `enforce` in `--watermark-config`
+to override request-level opt-outs. Enforcement is disabled by default.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
 contexts. Values above 16 are allowed but emit a warning.
+
+Watermark contexts use generated tokens only. The first `context_width` tokens
+use ordinary sampling, independently of context deduplication. Prompt tokens
+are not needed for detection.
 
 `allow_target_only_watermarking` defaults to false and only has an effect when
 speculative decoding is enabled. It permits speculative decoding with a
@@ -61,14 +65,15 @@ weaker detectability. See
 When `watermark_config` is set, the Prometheus counter
 `vllm:watermark_requests_total` counts finished requests by `status`:
 
-- `watermarked`: the request was sampled with the watermark switched on.
+- `watermarked`: watermarking was enabled for the request, including when
+  enforcement overrides an opt-out.
 - `skipped`: the request asked for the watermark (omitted or `true`) but could
   not use it, such as `temperature=0` and trace replay requests. A beam search
   request that asks for the watermark runs without it and logs a warning. Its
-  beam steps count as `not_watermarked`, not `skipped`.
+  beam steps count as `not_watermarked`, not `skipped`, when enforcement is off.
 - `not_watermarked`: all other finished requests. This includes explicit
   opt-outs, pooling requests, and the internal requests of beam search (one
-  per beam step), generative scoring and language detection.
+  per beam step), generative scoring and language detection, unless enforced.
 
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
@@ -105,6 +110,7 @@ generation.
   transcription, translation, and realtime transcription, which default to
   greedy decoding. Transcription and translation can use a nonzero temperature
   to apply the configured watermark.
+- `top_k=1` cannot embed a watermark, even with enforcement and nonzero temperature.
 - Beam search cannot apply a watermark. The first watermarked beam request emits
   a server-side warning and runs without watermarking.
 - Trace replay replaces the sampled token and therefore cannot apply a
@@ -116,17 +122,19 @@ generation.
   Restrictive constraints can reduce the statistical evidence available to a
   detector.
 - Automatic language detection and generative scoring use unwatermarked
-  auxiliary generations. Language-detection tokens are not part of the returned
-  transcription, and generative scoring returns scores rather than generated
-  text.
+  auxiliary generations unless enforced. Language-detection tokens are not part
+  of the returned transcription, and generative scoring returns scores rather
+  than generated text.
 - Speculative decoding has additional requirements and partial-watermarking
   modes described in [Speculative decoding](#speculative-decoding).
 
 ## Speculative decoding
 
 Watermarking requires speculative decoding to use probabilistic draft sampling,
-standard rejection sampling, and an autoregressive model-based method (`dspark`,
-`eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dspark`.
+standard rejection sampling, and a model-based method (`dflash`, `dspark`,
+`eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dflash`
+and `dspark`. DFlash drafters with a candidate head (`DFlash2DraftModel`,
+`LiLiCorrDraftModel`) are not supported.
 
 A watermarking algorithm without native speculative-decoding support is
 rejected before model loading. Set
@@ -302,9 +310,7 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 ## Limitations
 
-- Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
-- Global custom logits processors are unavailable because Model Runner V2 does
-  not support them.
+- Global custom logits processors are not supported.

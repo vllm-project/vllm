@@ -40,6 +40,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
@@ -248,7 +249,7 @@ class NemotronHMoE(nn.Module):
             routed_input_transform=self.fc1_latent_proj,
             routed_output_transform=self.fc2_latent_proj,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -584,6 +585,8 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
