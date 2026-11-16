@@ -19,7 +19,7 @@ MUSE_SPARK_CONFIG = {
 TP_SIZES = (4, 8, 16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     tp: int
     # Tokens per request in a verify step (1 + draft tokens).
