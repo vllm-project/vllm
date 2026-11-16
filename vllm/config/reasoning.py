@@ -7,26 +7,24 @@ from vllm.config.model import ModelConfig
 from vllm.config.utils import config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.mistral import is_mistral_tokenizer
 
 
 def _resolve_token_ids(tokenizer, marker: str) -> list[int]:
     """Resolve a marker string to token IDs.
 
-    Control tokens (e.g. Mistral's ``[THINK]``) are registered in the
-    vocabulary as single special-token entries but ``tokenizer.encode``
-    treats them as literal text and splits them into multiple sub-word
-    tokens.  ``convert_tokens_to_ids`` returns the correct single ID
-    for these tokens, so we try it first -- but only accept the result
-    when the token is a registered special token, since ordinary
-    vocabulary pieces also have single IDs that differ from their BPE
-    encoding.  Falls back to ``encode`` for multi-token markers like
-    ``<think>`` and for ordinary text.
+    Mistral tokenizers encode control tokens such as ``[THINK]`` as
+    literal text, splitting them into several sub-word tokens, so a
+    marker that is one of their special tokens resolves to its single ID
+    through ``convert_tokens_to_ids``.  Every other marker is encoded,
+    including ordinary vocabulary pieces, whose single IDs differ from
+    their encoding, and strings outside the vocabulary such as
+    ``<think>``, which ``convert_tokens_to_ids`` maps to the unknown
+    token.  Hugging Face tokenizers already encode their special tokens
+    as single IDs.
     """
-    token_id = tokenizer.convert_tokens_to_ids(marker)
-    unk_id = getattr(tokenizer, "unk_token_id", None)
-    special_ids = getattr(tokenizer, "all_special_ids", [])
-    if token_id is not None and token_id != unk_id and token_id in special_ids:
-        return [token_id]
+    if is_mistral_tokenizer(tokenizer) and marker in tokenizer.all_special_tokens:
+        return [tokenizer.convert_tokens_to_ids(marker)]
     return tokenizer.encode(marker, add_special_tokens=False)
 
 
