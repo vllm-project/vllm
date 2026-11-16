@@ -262,8 +262,8 @@ def test_aiter_kernel_is_supported_requires_native_mx_support():
 
 @pytest.mark.parametrize("linear_backend", ["auto", "marlin"])
 def test_batch_invariance_selects_batch_invariant_kernel(monkeypatch, linear_backend):
-    """FlashInfer (SM100 default) and Marlin tile by row count, so
-    VLLM_BATCH_INVARIANT must not select them, even when requested."""
+    """Marlin (the default without FlashInfer or an SM90 device) tiles by row
+    count, so VLLM_BATCH_INVARIANT must not select it, even when requested."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with (
         patch("vllm.model_executor.kernels.linear.current_platform") as platform,
@@ -278,7 +278,7 @@ def test_batch_invariance_selects_batch_invariant_kernel(monkeypatch, linear_bac
             return_value=False,
         ),
         patch.object(
-            FlashInferMxFp4LinearKernel, "is_supported", return_value=(True, None)
+            FlashInferMxFp4LinearKernel, "is_supported", return_value=(False, "")
         ),
         patch.object(
             MarlinMxFp4LinearKernel, "is_supported", return_value=(True, None)
