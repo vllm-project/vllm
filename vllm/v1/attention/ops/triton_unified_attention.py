@@ -590,7 +590,7 @@ def kernel_unified_attention(
             offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
             physical_block_scalar = tl.load(
                 block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
-            ).to(tl.int32)
+            ).to(tl.int64)
             K_load = _load_kv_tile_td(
                 key_cache_ptr,
                 physical_block_scalar,
