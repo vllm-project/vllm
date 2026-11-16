@@ -38,7 +38,7 @@ def test_dynamic_routing_matches_selected_dense_logits(device, backend, dtype):
             head.get_top_tokens(hidden, weight), reference.argmax(-1)
         )
         if device == "cuda":
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 captured = head.get_top_tokens(hidden, weight)
@@ -84,9 +84,11 @@ def test_moe_preparation_preserves_order_and_refills_in_place():
     weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
     with torch.inference_mode():
         head.prepare_weights(weight)
+    assert head.centroid_weight is not None
     address = head.centroid_weight.data_ptr()
     head.token_ordering.copy_(torch.arange(7, -1, -1))
     head.prepare_weights(weight + 1)
+    assert head.centroid_weight is not None
     assert head.centroid_weight.data_ptr() == address
     torch.testing.assert_close(head.centroid_weight.flatten(0, 1), (weight + 1).flip(0))
     assert "centroid_weight" not in head.state_dict()
@@ -115,7 +117,7 @@ def test_moe_large_cluster_count_matches_dense_selected_logits(routing):
     torch.testing.assert_close(
         head.get_top_tokens(hidden, weight), reference.argmax(-1)
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured_logits = head(hidden, weight)
@@ -157,7 +159,7 @@ def test_sorted_assignment_groups_and_pads_original_route_ids(
 
     check(assign())
     if device == "cuda":
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = assign()

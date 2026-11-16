@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     VLLM_NEMOTRON_MTP_LM_HEAD_NUM_CLUSTERS: int = 4096
     VLLM_NEMOTRON_MTP_LM_HEAD_CLUSTER_TOP_K: int = 32
     VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD_PATH: str = ""
-    VLLM_NEMOTRON_MTP_SPARSE_HEAD_BACKEND: str = "compiled"
-    VLLM_NEMOTRON_MTP_MOE_ROUTING: str = "unsorted"
+    VLLM_NEMOTRON_MTP_SPARSE_HEAD_BACKEND: Literal["compiled", "moe"] = "compiled"
+    VLLM_NEMOTRON_MTP_MOE_ROUTING: Literal["auto", "unsorted", "sorted"] = "unsorted"
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()

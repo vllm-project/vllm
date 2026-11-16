@@ -6,9 +6,9 @@ import argparse
 
 import torch
 import torch.nn.functional as F
-from triton.testing import do_bench_cudagraph
 
 from vllm.model_executor.layers.hierarchical_lm_head import HierarchicalLMHead
+from vllm.triton_utils import triton
 
 
 def main():
@@ -65,9 +65,9 @@ def main():
 
             # Compile outside CUDA graph capture, including batch=1 specialization.
             sparse()
-            torch.cuda.synchronize()
-            dense_ms = do_bench_cudagraph(dense)
-            sparse_ms = do_bench_cudagraph(sparse)
+            torch.accelerator.synchronize()
+            dense_ms = triton.testing.do_bench_cudagraph(dense)
+            sparse_ms = triton.testing.do_bench_cudagraph(sparse)
             row = (
                 f"{batch},{dense_ms * 1000:.3f},{sparse_ms * 1000:.3f},"
                 f"{dense_ms / sparse_ms:.3f}"
