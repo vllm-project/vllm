@@ -565,12 +565,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             content_dim,
         ]
 
-        ptr_dtype = torch.uint64 if self._device.type == "xpu" else torch.int64
-        self._kvcache_ptrs = torch.tensor(
-            [cache.data_ptr() for cache in self._kv_caches.values()],
-            dtype=ptr_dtype,
-            device=self._device,
-        )
+        ptrs = [cache.data_ptr() for cache in self._kv_caches.values()]
+        # Store as int64 bit patterns; addresses with the sign bit set go negative.
+        ptrs = [p - (1 << 64) if p >= (1 << 63) else p for p in ptrs]
+        self._kvcache_ptrs = torch.tensor(ptrs, dtype=torch.int64, device=self._device)
 
     def _setup_storage_clients(self):
         os.makedirs(self._storage_path, exist_ok=True)
