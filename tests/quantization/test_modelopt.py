@@ -214,6 +214,7 @@ def test_per_token_nvfp4_moe_backends_match_the_experts_that_implement_it():
     implementing = {
         backend
         for backend in NvFp4MoeBackend
+        if backend != NvFp4MoeBackend.NONE  # placeholder, implements no experts
         for cls in backend_to_kernel_cls(backend)
         if "per_token_activation" in inspect.signature(cls.__init__).parameters
     }
