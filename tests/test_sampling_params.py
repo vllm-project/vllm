@@ -295,3 +295,20 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize("ignore_eos", [False, True])
+@pytest.mark.parametrize("mask", [False, True])
+def test_ignore_eos_mask_forbids_eos_tokens(ignore_eos: bool, mask: bool):
+    """`--ignore-eos-mode mask` forbids every EOS id of an `ignore_eos` request,
+    overriding a user bias on them and keeping the rest of `logit_bias`."""
+    params = SamplingParams(ignore_eos=ignore_eos, logit_bias={5: 1.0, 7: 2.0})
+    params.update_from_generation_config(
+        {"eos_token_id": [7, 8]}, eos_token_id=9, mask_ignored_eos=mask
+    )
+    if ignore_eos and mask:
+        inf = float("-inf")
+        assert params.logit_bias == {5: 1.0, 7: inf, 8: inf, 9: inf}
+    else:
+        assert params.logit_bias == {5: 1.0, 7: 2.0}
+    assert params.eos_token_id == (None if ignore_eos else 9)

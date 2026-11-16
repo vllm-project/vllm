@@ -780,10 +780,21 @@ class SamplingParams(
         self,
         generation_config: dict[str, Any],
         eos_token_id: int | None = None,
+        mask_ignored_eos: bool = False,
     ) -> None:
-        """Update if there are non-default values from generation_config."""
+        """Update if there are non-default values from generation_config.
+
+        Args:
+            generation_config: The model's generation config fields.
+            eos_token_id: The tokenizer's EOS token id.
+            mask_ignored_eos: With `ignore_eos`, forbid the EOS tokens instead of
+                sampling them and continuing past them.
+
+        """
         if not self.ignore_eos:
             self._eos_token_id = eos_token_id
+        elif mask_ignored_eos:
+            self._mask_eos_token_ids(eos_token_id, generation_config)
 
         if eos_token_id is not None:
             # Add the eos token id into the sampling_params to support
@@ -805,6 +816,19 @@ class SamplingParams(
                     assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
+
+    def _mask_eos_token_ids(
+        self, eos_token_id: int | None, generation_config: dict[str, Any]
+    ) -> None:
+        eos_ids = generation_config.get("eos_token_id")
+        eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids or ())
+        if eos_token_id is not None:
+            eos_ids.add(eos_token_id)
+        if eos_ids:
+            self.logit_bias = {
+                **(self.logit_bias or {}),
+                **dict.fromkeys(eos_ids, float("-inf")),
+            }
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:

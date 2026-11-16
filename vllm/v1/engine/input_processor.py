@@ -484,6 +484,7 @@ class InputProcessor:
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
                 self.renderer.get_eos_token_id(),
+                mask_ignored_eos=self.model_config.ignore_eos_mode == "mask",
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)

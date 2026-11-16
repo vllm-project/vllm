@@ -384,6 +384,11 @@ class ModelConfig:
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
+    ignore_eos_mode: Literal["continue", "mask"] = "continue"
+    """How requests with `ignore_eos` treat the model's EOS tokens. `"continue"`
+    samples them and keeps generating past them. `"mask"` forbids them until
+    `max_tokens`, so the model keeps writing its answer instead of free-running
+    past the end of the turn, as llama.cpp does."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""

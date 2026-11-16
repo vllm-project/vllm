@@ -819,6 +819,7 @@ class EngineArgs:
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
+    ignore_eos_mode: Literal["continue", "mask"] = ModelConfig.ignore_eos_mode
     model_impl: str = ModelConfig.model_impl
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
@@ -1057,6 +1058,7 @@ class EngineArgs:
         model_group.add_argument(
             "--override-generation-config", **model_kwargs["override_generation_config"]
         )
+        model_group.add_argument("--ignore-eos-mode", **model_kwargs["ignore_eos_mode"])
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
@@ -2095,6 +2097,7 @@ class EngineArgs:
             pooler_config=self.pooler_config,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
+            ignore_eos_mode=self.ignore_eos_mode,
             enable_sleep_mode=self.enable_sleep_mode,
             sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
