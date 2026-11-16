@@ -78,6 +78,28 @@ The shared layout backs the per-replica logical capacity with one physical pool;
 the private layout allocates one physical pool per rank. Physical pool size
 includes block-stride alignment.
 
+### Transparent huge pages for shared host pools
+
+Large shared host pools can take a long time to register and unregister with
+CUDA in every TP worker. To reduce this cost, configure the deployment's
+`/dev/shm` tmpfs to use transparent huge pages (THP) before starting vLLM.
+For example, with mount permissions inside the container's mount namespace:
+
+```bash
+mount -o remount,size=1100G,huge=always,mpol=interleave /dev/shm
+```
+
+This example leaves tmpfs headroom for a 1024 GiB host pool. Provision enough
+RAM and container memory for the pool, weights, and other engine allocations.
+The existing shared-pool allocator uses this mount directly; no connector
+configuration change or reserved hugetlb pages are needed. Private per-rank
+pools do not use `/dev/shm` and do not benefit from this setting.
+
+The mount policy applies to all files on that `/dev/shm` mount. THP allocation
+is best effort, and a system-wide `shmem_enabled=deny` overrides it. Faster
+unregistration can still exceed the default worker shutdown grace period.
+See Linux's [tmpfs mount policies](https://docs.kernel.org/filesystems/tmpfs.html).
+
 ## Code boundary
 
 ```text
