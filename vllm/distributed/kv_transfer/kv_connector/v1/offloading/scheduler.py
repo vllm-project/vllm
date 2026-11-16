@@ -1395,8 +1395,8 @@ class OffloadingConnectorScheduler:
 
         store_jobs: dict[int, TransferJob] = {}
         if self._offloading_enabled:
-            # Chunks skipped while offloading was off are still offered:
-            # stored indices have not moved.
+            # On-compute chunks skipped while offloading was off are still
+            # offered: stored indices have not moved. Hand-offs are not.
             for handler in self._store_handlers.values():
                 sink = _StoreJobSink(self, handler.trigger)
                 handler.build_store_jobs(scheduler_output, self._req_status, sink)

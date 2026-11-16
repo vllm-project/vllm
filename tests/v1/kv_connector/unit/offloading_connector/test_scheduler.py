@@ -2712,7 +2712,7 @@ def test_async_init_offloads_only_after_workers_are_ready(request_runner):
     )
     ready = False
     runner.offloading_spec.handler.is_ready = lambda: ready
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 

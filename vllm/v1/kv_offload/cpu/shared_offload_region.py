@@ -334,12 +334,13 @@ class SharedOffloadRegion:
         if shard is not None:
             # Workers that share every byte each pin the whole region, so each
             # maps all of it first: a page pinned before it is mapped is faulted
-            # inside the registration call. Starting on its own share keeps the
-            # workers on different files while the pages are first allocated.
+            # inside the registration call. Starting on its own share spreads
+            # the first allocation of the pages across the files.
             index, count = shard
             share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
             start = min(index * share, self.total_size_bytes)
-            return [(start, self.total_size_bytes - start), (0, start)]
+            ranges = [(start, self.total_size_bytes - start), (0, start)]
+            return [r for r in ranges if r[1]]
         if self.rank is not None:
             return list(self.iter_worker_slot_ranges())
         return [(0, self.total_size_bytes)]
