@@ -320,7 +320,7 @@ def _mxfp4_decode_row_lens(
     metadata = attn_metadata.get(indexer_prefix)
     if not isinstance(metadata, RocmMxfp4IndexerMetadata):
         return None
-    return metadata.decode_row_lens
+    return metadata.decode_step_row_lens
 
 
 def compute_global_topk_ragged_indices_and_indptr(

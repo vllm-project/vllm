@@ -220,6 +220,7 @@ def _decode_metadata(case, rows, ratio, query_lens, world=1, rank=0):
     native = native_decode(lens, block_table, query_lens, next_n, context_lens)
     unit = 1 if native is None else native.next_n
     shard = DecodeRowShard.plan(len(rows), unit, world, rank, 2 * len(rows))
+    step_lens = lens
     if shard is not None:
         lens, block_table, native = shard.narrow(lens, block_table, native)
     schedule = torch.empty(
@@ -237,6 +238,7 @@ def _decode_metadata(case, rows, ratio, query_lens, world=1, rank=0):
         num_prefill_tokens=0,
         decode=types.SimpleNamespace(block_table=block_table, seq_lens=lens[:, None]),
         decode_row_lens=lens,
+        decode_step_row_lens=step_lens,
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
         decode_native=native,
         decode_schedule=ops.build_rocm_mxfp4_decode_schedule(
@@ -327,6 +329,27 @@ def test_topk_matches_torch_on_both_kernels(rows, width, k):
         assert int((got == -1).sum()) == k - n
 
 
+def _assert_packs_from_row_lens(out, md, block_table, block_size):
+    """The decode ragged top-k packed in one launch from the step's row bounds
+    equals the counted 4-launch path."""
+    n = md.num_decode_tokens
+    if n == 0:
+        return
+    args = (
+        torch.arange(n, dtype=torch.int32, device=DEVICE),
+        block_table,
+        block_size,
+        torch.ones(n, dtype=torch.bool, device=DEVICE),
+    )
+    row_lens = _mxfp4_decode_row_lens({"indexer": md}, "indexer")
+    got = _pack_topk_ragged_from_lens(out[:n], row_lens, *args)
+    assert got is not None
+    want = _compute_global_topk_ragged_indices_and_indptr_old(out[:n], *args)
+    nnz = int(want[1][-1])
+    assert torch.equal(got[1], want[1]) and torch.equal(got[2], want[2])
+    assert torch.equal(got[0][:nnz], want[0][:nnz])
+
+
 def _run_layers(
     monkeypatch, case, rows, metadata, k=TOPK, pad=0, pool_blocks=POOL_BLOCKS
 ):
@@ -344,22 +367,9 @@ def _run_layers(
         assert bool((out[num_rows + pad :] == 7).all())
 
     def assert_packs_from_row_lens(out, md, ratio):
-        n = md.num_decode_tokens
-        if n == 0:
-            return
-        args = (
-            torch.arange(n, dtype=torch.int32, device=DEVICE),
-            md.decode.block_table,
-            case.cache[ratio].shape[1],
-            torch.ones(n, dtype=torch.bool, device=DEVICE),
+        _assert_packs_from_row_lens(
+            out, md, md.decode.block_table, case.cache[ratio].shape[1]
         )
-        row_lens = _mxfp4_decode_row_lens({"indexer": md}, "indexer")
-        got = _pack_topk_ragged_from_lens(out[:n], row_lens, *args)
-        assert got is not None
-        want = _compute_global_topk_ragged_indices_and_indptr_old(out[:n], *args)
-        nnz = int(want[1][-1])
-        assert torch.equal(got[1], want[1]) and torch.equal(got[2], want[2])
-        assert torch.equal(got[0][:nnz], want[0][:nnz])
 
     dense = metadata(2)
     _forward_context(monkeypatch, dense)
@@ -769,5 +779,11 @@ def test_decode_row_shard_matches_replicated(monkeypatch, world, query_lens):
             outs = layers(world, rank, torch.randint_like(pool, 0, 200))
             assert len(sent[rank]) == (3 if shard else 0)
             if exchange:
-                for got, want in zip(outs, ref):
+                for got, want, ratio in zip(outs, ref, (2, 1, 1)):
                     assert torch.equal(sets(got), sets(want))
+                    _assert_packs_from_row_lens(
+                        got,
+                        _decode_metadata(case, rows, ratio, query_lens, world, rank),
+                        case.block_table[[req for req, _ in rows]],
+                        case.cache[ratio].shape[1],
+                    )
