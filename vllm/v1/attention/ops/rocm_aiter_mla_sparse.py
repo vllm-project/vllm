@@ -102,6 +102,17 @@ def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
     return compress_ratio == 4
 
 
+def indexer_k_cache_is_shuffled(block_size: int) -> bool:
+    """Value layout of the ROCm FP8 indexer-K cache (ratio 1 / 2): 16x16 SHUFFLE
+    tiles when a block holds more than one token, flat rows otherwise.
+
+    The one rule shared by the insert, the prefill gather and the paged-logits
+    readers (and by fused writers, through their cache object), so a writer and
+    its readers cannot disagree on the layout.
+    """
+    return block_size > 1
+
+
 @triton.jit
 def _localize_aiter_prefill_topk_kernel(
     indices_ptr,
@@ -240,7 +251,7 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
     if cache_layout is None:
-        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+        layout = "SHUFFLE" if indexer_k_cache_is_shuffled(block_size) else "NORMAL"
     else:
         layout = cache_layout
     grid = (num_tokens,)
@@ -449,7 +460,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
     if cache_layout is None:
-        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+        layout = "SHUFFLE" if indexer_k_cache_is_shuffled(block_size) else "NORMAL"
     else:
         layout = cache_layout
     kernel_args = (
@@ -486,7 +497,18 @@ def cp_gather_indexer_k_quant_cache_triton(
         )
 
 
+def _unshuffle_indexer_k_values(
+    values: torch.Tensor, block_size: int, dim: int
+) -> torch.Tensor:
+    """`[..., block_size * dim]` FP8 bytes in 16x16 SHUFFLE tile order
+    ([blk/16, dim/16, 16, 16]) -> flat rows ([blk, dim])."""
+    lead = values.shape[:-1]
+    values = values.reshape(*lead, block_size // 16, dim // 16, 16, 16)
+    return values.transpose(-3, -2).reshape(*lead, block_size * dim)
+
+
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
+# ``shuffled``: the cache's value layout (indexer_k_cache_is_shuffled).
 def fp8_paged_mqa_logits_torch(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -494,6 +516,7 @@ def fp8_paged_mqa_logits_torch(
     context_lens: torch.Tensor,
     block_tables: torch.Tensor,
     max_model_len: int,
+    shuffled: bool = False,
 ):
     from vllm.utils.math_utils import cdiv
 
@@ -519,9 +542,10 @@ def fp8_paged_mqa_logits_torch(
             pages = block_tables[i, :num_pages]
             cache = kv_cache_flat[pages]
             scale_offset = block_size * dim
-            cache_value = (
-                cache[..., :scale_offset].view(dtype=FP8_DTYPE).to(torch.float32)
-            )
+            cache_value = cache[..., :scale_offset]
+            if shuffled:
+                cache_value = _unshuffle_indexer_k_values(cache_value, block_size, dim)
+            cache_value = cache_value.view(dtype=FP8_DTYPE).to(torch.float32)
             cache_scale = (
                 cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
             )
@@ -535,11 +559,17 @@ def fp8_paged_mqa_logits_torch(
             logits[i, :seq_len] = score[:seq_len]
         return logits
 
-    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
-    scale = scale.contiguous().view(torch.float)
+    # A block holds its block_size * dim values, then its block_size scales
+    # (not per-token [values | scale] rows).
+    num_block, block_size = kv_cache.shape[:2]
+    kv_cache_flat = kv_cache.reshape(num_block, -1)
+    values = kv_cache_flat[:, : block_size * dim]
+    if shuffled:
+        values = _unshuffle_indexer_k_values(values, block_size, dim)
+    scale = kv_cache_flat[:, block_size * dim :].contiguous().view(torch.float)
     q = q.float()
-    kv_cache = kv_cache.view(FP8_DTYPE).float() * scale
-    num_block, block_size, _, dim = kv_cache.size()
+    kv_cache = values.reshape(num_block, block_size, 1, dim).view(FP8_DTYPE).float()
+    kv_cache = kv_cache * scale.view(num_block, block_size, 1, 1)
     logits = torch.full(
         [batch_size * next_n, max_model_len],
         float("-inf"),
@@ -874,7 +904,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size > 1 and not _ON_RDNA,
+                Preshuffle=indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
@@ -905,7 +935,13 @@ def rocm_fp8_paged_mqa_logits(
             "aiter.ops.triton.attention.pa_mqa_logits is importable."
         )
         return fp8_paged_mqa_logits_torch(
-            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+            q_fp8,
+            kv_cache_fp8,
+            weights,
+            context_lens,
+            block_tables,
+            max_model_len,
+            shuffled=indexer_k_cache_is_shuffled(block_size),
         )
 
 
@@ -2154,6 +2190,30 @@ def _mxfp8_wo_a_bmm_config(num_tokens: int, n_groups: int) -> tuple[int, ...]:
     return 128, 128, 128, 4, 2
 
 
+def _aiter_wo_a_bmm(a, a_scale, weight_preshuffled, weight_scale, n_groups, rank):
+    """wo_a on AITER's tuned batched GEMMs and the preshuffled weight; [T, G * R]."""
+    from aiter.ops.batched_gemm_op_a8w8 import batched_gemm_a8w8_mxscale_bpreshuffle
+
+    # Imported here to avoid an import cycle with the linear kernels package.
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+        FLYDSL_MAX_BYTES,
+    )
+
+    t, k = a.shape[0], a.shape[1] // n_groups
+    w = weight_preshuffled.view(n_groups, rank, k)
+    w_scale = weight_scale.view(n_groups, rank // 32, k // 32)
+    a, a_scale = a.contiguous().view(t, n_groups, k), a_scale.contiguous()
+    a_scale = a_scale.view(t, n_groups, k // 32)
+    rows = FLYDSL_MAX_BYTES // max(n_groups * k, 2 * n_groups * rank)
+    outs = [
+        batched_gemm_a8w8_mxscale_bpreshuffle(
+            a[i : i + rows], w, a_scale[i : i + rows], w_scale, torch.bfloat16
+        ).view(-1, n_groups * rank)
+        for i in range(0, t, rows)
+    ]
+    return outs[0] if len(outs) == 1 else torch.cat(outs)
+
+
 def _rocm_mxfp8_wo_a_bmm_impl(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -2161,9 +2221,14 @@ def _rocm_mxfp8_wo_a_bmm_impl(
     weight_scale: torch.Tensor,
     n_groups: int,
     o_lora_rank: int,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_tokens = a.shape[0]
     group_dim = a.shape[1] // n_groups
+    if num_tokens > 0 and weight_preshuffled is not None:
+        return _aiter_wo_a_bmm(
+            a, a_scale, weight_preshuffled, weight_scale, n_groups, o_lora_rank
+        )
     out = torch.empty(
         (num_tokens, n_groups * o_lora_rank), dtype=torch.bfloat16, device=a.device
     )
@@ -2204,6 +2269,7 @@ def _rocm_mxfp8_wo_a_bmm_fake(
     weight_scale: torch.Tensor,
     n_groups: int,
     o_lora_rank: int,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return a.new_empty((a.shape[0], n_groups * o_lora_rank), dtype=torch.bfloat16)
 
@@ -2230,11 +2296,18 @@ def rocm_mxfp8_wo_a_bmm(
     [T, G * K // 32] E8M0 scales, as the sparse decode reduce writes them.
     The weight is the checkpoint's MXFP8 `wo_a` as loaded, [G * R, K] with
     either [G * R // 32, K // 32] block scales or [G * R, K // 32] per-row
-    scales, so there is no dequantized copy to keep.
+    scales, so there is no dequantized copy to keep. A `weight_preshuffled`
+    the linear kernel set (possibly the weight itself) runs AITER's GEMMs.
     Returns [T, G * R].
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
-        a, a_scale, wo_a.weight, wo_a.weight_scale, n_groups, o_lora_rank
+        a,
+        a_scale,
+        wo_a.weight,
+        wo_a.weight_scale,
+        n_groups,
+        o_lora_rank,
+        getattr(wo_a, "weight_preshuffled", None),
     )
 
 
