@@ -83,7 +83,7 @@ class Inkling2AllReduceWorkspace:
         )
 
         device = torch.accelerator.current_device_index()
-        supported = torch.cuda.get_device_capability(device)[0] == 10
+        supported = torch.cuda.get_device_capability(device)[0] in (9, 10)
         supported = supported and is_multicast_supported(device)
         if not all_ranks_agree(TorchDistBackend(group=group), supported):
             return None

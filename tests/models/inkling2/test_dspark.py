@@ -13,8 +13,11 @@ import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip("Inkling2 requires Blackwell", allow_module_level=True)
+if not (
+    current_platform.is_device_capability_family(100)
+    or current_platform.is_device_capability(90)
+):
+    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
 
 from vllm.models.inkling2.dspark import (  # noqa: E402
     Inkling2MarkovHead,
@@ -269,11 +272,13 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
         CudaCommunicator,
     )
     from vllm.models.inkling2.dspark import _RMSNorm, all_reduce_add_rmsnorm
+    from vllm.models.inkling2.ops import use_sm100_kernels
 
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(world, 1, rank, str(port), rank)
     comm = get_tp_group().device_communicator
     assert isinstance(comm, CudaCommunicator) and comm.fi_ar_comm is not None
+    sm100 = use_sm100_kernels()
     dim = 4608
     norm = _RMSNorm(dim, 1e-6).to(DEVICE, torch.bfloat16)
     failures, stats = [], {}
@@ -296,8 +301,12 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
             ((o.double() - exact).abs() / ulp).mean().item() for o in (out, ref)
         ]
         gathered = tensor_model_parallel_all_gather(out[None], 0)
+        fused = comm.fi_ar_comm.should_use_fi_ar(x)
         checks = {
-            "fused iff it fits": comm.fi_ar_comm.should_use_fi_ar(x) == (rows < 8192),
+            # Hopper's tuned FlashInfer size limits are below Blackwell's.
+            "fused iff it fits": (
+                fused == (rows < 8192) if sm100 else not (fused and rows >= 8192)
+            ),
             "same on all ranks": all(torch.equal(o, out) for o in gathered),
             "residual": torch.equal(fused_res, ref_res),
             # The norm reads the bf16-rounded residual.
