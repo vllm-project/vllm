@@ -72,7 +72,10 @@ FORCE_WEATHER_TOOL = {"type": "function", "function": {"name": "get_weather"}}
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer(MODEL, ARGS) as remote_server:
+    # Independent generations require batch invariance for exact token parity.
+    with RemoteOpenAIServer(
+        MODEL, ARGS, env_dict={"VLLM_BATCH_INVARIANT": "1"}
+    ) as remote_server:
         yield remote_server
 
 
