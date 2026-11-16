@@ -28,7 +28,7 @@ from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 logger = init_logger(__name__)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CUDAGraphStat:
     num_unpadded_tokens: int
     num_padded_tokens: int
@@ -123,7 +123,7 @@ class CUDAGraphLogging:
         self.reset()
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
     cudagraph: torch.cuda.CUDAGraph | None = None
@@ -134,7 +134,7 @@ class CUDAGraphEntry:
     input_addresses: list[int] | None = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class CUDAGraphOptions:
     debug_log_enable: bool = True
     gc_disable: bool = False
