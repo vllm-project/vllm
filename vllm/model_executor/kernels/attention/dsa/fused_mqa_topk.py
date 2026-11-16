@@ -17,9 +17,8 @@ FUSED_MQA_TOPK_HEADS = 32
 FUSED_MQA_TOPK_HEAD_DIM = 128
 FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
 # Most gathered keys (all requests of a chunk) one call accepts: candidates
-# store the key index in 20 bits (kMaxKeys in
-# csrc/attention/dsa/fused_mqa_topk/constants.h). Chunks with more keys take
-# the dense path; the planner never packs past it.
+# store the key index in 20 bits (kMaxKeys in csrc/fused_mqa_topk/constants.h).
+# Chunks with more keys take the dense path; the planner never packs past it.
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 # Rows per fused_mqa_topk call. The kernel has no row limit, but prefill chunks above
 # 16384 rows (--max-num-batched-tokens > 16384) are not validated end to end yet,
@@ -33,8 +32,7 @@ def fused_mqa_topk_min_keys(topk: int) -> int:
     return 1 << 16 if topk > 1024 else 1 << 15
 
 
-# Mirrors csrc/attention/dsa/fused_mqa_topk/constants.h (the op checks the
-# workspace shapes).
+# Mirrors csrc/fused_mqa_topk/constants.h (the op checks the workspace shapes).
 _CANDIDATES_PER_ROW = 16384  # kCandidatesPerRow
 _RETAINED_PER_ROW = 4096  # kRetainedPerRow
 _SLOTS_PER_SM = 2  # candidate slots per persistent CTA

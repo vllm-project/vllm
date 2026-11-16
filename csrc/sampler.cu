@@ -2,6 +2,14 @@
 #include "dispatch_utils.h"
 #include "torch_utils.h"
 
+#include <cstring>
+
+#ifndef USE_ROCM
+  #include <cub/cub.cuh>
+#else
+  #include <hipcub/hipcub.hpp>
+#endif
+
 namespace vllm {
 
 template <typename scalar_t>
