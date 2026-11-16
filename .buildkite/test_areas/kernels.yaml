@@ -610,9 +610,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) Quantization Kernels"
+      label: ":amd: (MI300 DPX) Quantization Kernels"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -693,6 +693,8 @@ steps:
   - vllm/model_executor/layers/mamba/gdn
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
+  - vllm/triton_utils/allocation.py
+  - vllm/triton_utils/tensor_descriptor.py
   - vllm/v1/attention/backends/gdn_attn.py
   commands:
     - pytest -v -s kernels/mamba
