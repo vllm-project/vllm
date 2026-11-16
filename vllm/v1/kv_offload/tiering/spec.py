@@ -335,6 +335,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
+        if self.async_init:
+            logger.warning(
+                "async_init is not supported with TieringOffloadingSpec yet; "
+                "setting the CPU tier up now"
+            )
+            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
