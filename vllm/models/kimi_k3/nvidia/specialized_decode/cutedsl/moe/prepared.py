@@ -118,7 +118,7 @@ class PreparedMoE:
         which also orders the side stream's reads of x before the next layer rewrites
         it, so the tail keeps its single (programmatic) dependency on the experts and
         launches as their CTAs exit; the step joins the urgent stream at its end
-        (``MoEScratch.join``)."""
+        (`MoEScratch.join`)."""
         main = torch.cuda.current_stream(self.state.device)
         ahead = self.ahead.get(b)
         expanded = self.experts.run(latent, ids, weights, ahead)

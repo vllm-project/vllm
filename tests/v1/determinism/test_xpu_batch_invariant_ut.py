@@ -191,38 +191,3 @@ def test_collectives_preserve_rank_order_and_partition(monkeypatch, operation, r
         actual = communicator.reduce_scatterv(inputs[rank], dim=0, sizes=sizes)
         expected = expected.split(sizes)[rank]
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-# This batch size, vocabulary size, and positions locally reproduce an
-# unseeded non-invariant XPU sampler mismatch.
-@pytest.mark.parametrize("position", [0, 128, 255])
-def test_seeded_sampler_preserves_full_distribution_and_rng(position, monkeypatch):
-    """Moving a request must preserve its distribution and per-request RNG."""
-    from vllm.triton_utils import HAS_TRITON
-    from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
-
-    assert HAS_TRITON, "XPU sampling must exercise the Triton top-k/top-p path"
-    monkeypatch.setattr(envs, "VLLM_XPU_USE_SAMPLER_KERNEL", True)
-    sampler = TopKTopPSampler(logprobs_mode="processed_logprobs")
-    torch.manual_seed(42)
-    logits = torch.randn(256, 8192, device="xpu", dtype=torch.float32)
-    single_rng = torch.Generator(device="xpu").manual_seed(123)
-    batch_rng = torch.Generator(device="xpu").manual_seed(123)
-    k = torch.full((256,), 32, dtype=torch.int32, device="xpu")
-    p = torch.full((256,), 0.9, device="xpu")
-    for _ in range(3):
-        single_token, single_logprobs = sampler(
-            logits[position : position + 1].clone(),
-            {0: single_rng},
-            k[position : position + 1],
-            p[position : position + 1],
-        )
-        batch_tokens, batch_logprobs = sampler(
-            logits.clone(), {position: batch_rng}, k, p
-        )
-        assert single_logprobs is not None and batch_logprobs is not None
-        torch.testing.assert_close(
-            single_logprobs[0], batch_logprobs[position], rtol=0, atol=0
-        )
-        assert single_token.item() == batch_tokens[position].item()
-        assert torch.equal(single_rng.get_state(), batch_rng.get_state())

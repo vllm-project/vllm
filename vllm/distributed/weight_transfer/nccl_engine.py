@@ -146,7 +146,7 @@ def _manifest(metadata: Iterable[ParamMeta]) -> Manifest:
 
 
 def _dtype_name(dtype: torch.dtype) -> str:
-    """The wire name of ``dtype`` (``torch.bfloat16`` -> ``"bfloat16"``)."""
+    """The wire name of `dtype` (`torch.bfloat16` -> `"bfloat16"`)."""
     return str(dtype).split(".")[-1]
 
 
@@ -482,9 +482,6 @@ class NCCLWeightTransferEngine(
         else:
             update_info = self._last_update_info.get(key, update_info)
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
         from vllm.model_executor.model_loader.reload import load_planned
 
         plan = self._plan if self.model is self._default_model else None
@@ -504,39 +501,38 @@ class NCCLWeightTransferEngine(
         load_weights = (
             model.load_weights if plan is None else partial(load_planned, model, plan)
         )
-        with disable_mtp_completeness_check():
-            if self.packed and plan is not None:
-                self._receive_planned(update_info, src, plan, group)
-            elif not main:
-                raise RuntimeError("PP-stage groups need a packed load plan")
-            elif self.packed:
-                # Build iterator of (name, (shape, dtype)) from update_info
-                def state_dict_info_iterator():
-                    for name, dtype_name, shape in zip(
-                        update_info.names, update_info.dtype_names, update_info.shapes
-                    ):
-                        dtype = getattr(torch, dtype_name)
-                        yield (name, (shape, dtype))
-
-                packed_nccl_broadcast_consumer(
-                    iterator=state_dict_info_iterator(),
-                    group=group,
-                    src=src,
-                    post_unpack_func=load_weights,
-                    buffer_size_bytes=self.packed_buffer_size_bytes,
-                    num_buffers=self.packed_num_buffers,
-                    device=self.device,
-                )
-            else:
-                # Use simple one-by-one broadcasting
+        if self.packed and plan is not None:
+            self._receive_planned(update_info, src, plan, group)
+        elif not main:
+            raise RuntimeError("PP-stage groups need a packed load plan")
+        elif self.packed:
+            # Build iterator of (name, (shape, dtype)) from update_info
+            def state_dict_info_iterator():
                 for name, dtype_name, shape in zip(
                     update_info.names, update_info.dtype_names, update_info.shapes
                 ):
                     dtype = getattr(torch, dtype_name)
-                    weight = torch.empty(shape, dtype=dtype, device=self.device)
-                    group.broadcast(weight, src=src, stream=torch.cuda.current_stream())
-                    load_weights([(name, weight)])
-                    del weight
+                    yield (name, (shape, dtype))
+
+            packed_nccl_broadcast_consumer(
+                iterator=state_dict_info_iterator(),
+                group=group,
+                src=src,
+                post_unpack_func=load_weights,
+                buffer_size_bytes=self.packed_buffer_size_bytes,
+                num_buffers=self.packed_num_buffers,
+                device=self.device,
+            )
+        else:
+            # Use simple one-by-one broadcasting
+            for name, dtype_name, shape in zip(
+                update_info.names, update_info.dtype_names, update_info.shapes
+            ):
+                dtype = getattr(torch, dtype_name)
+                weight = torch.empty(shape, dtype=dtype, device=self.device)
+                group.broadcast(weight, src=src, stream=torch.cuda.current_stream())
+                load_weights([(name, weight)])
+                del weight
 
     def _setup_stages(self) -> None:
         """Worker side of `_stage_handshake`: needs the plan (built by the

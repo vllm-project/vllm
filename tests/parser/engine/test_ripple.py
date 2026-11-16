@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ripple parser: optional ``<think>`` reasoning and JSON tool calls.
+"""Ripple parser: optional `<think>` reasoning and JSON tool calls.
 
-The generation prompt does not open ``<think>``, so output without it is the
+The generation prompt does not open `<think>`, so output without it is the
 answer. The chat template frames markers with newlines, which must not leak
 into reasoning or content.
 """
