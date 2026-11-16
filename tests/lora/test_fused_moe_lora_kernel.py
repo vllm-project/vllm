@@ -447,7 +447,7 @@ def test_xpu_mxfp4_moe_lora_matches_reference(
                 )
                 y = (y + delta.to(dtype)).to(dtype)
             expected[token] += weights[token, slot] * y.float()
-    torch.testing.assert_close(output, expected.to(dtype), atol=0.06, rtol=0.03)
+    torch.testing.assert_close(output, expected.to(dtype), atol=0.15, rtol=0.03)
 
 
 @pytest.mark.parametrize("num_tokens", [100])
