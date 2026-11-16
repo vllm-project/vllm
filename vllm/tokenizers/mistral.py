@@ -253,8 +253,7 @@ class MistralTokenizer(TokenizerLike):
 
         # Reverse order to ensure that the lowest token id is kept.
         self._vocab_dict = {
-            self.convert_ids_to_tokens([i], skip_special_tokens=False)[0]: i
-            for i in range(self.vocab_size - 1, -1, -1)
+            self.tokenizer.id_to_piece(i): i for i in range(self.vocab_size - 1, -1, -1)
         }
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
