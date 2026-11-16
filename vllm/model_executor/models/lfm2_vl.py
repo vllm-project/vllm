@@ -69,17 +69,6 @@ from .utils import (
 from .vision import is_vit_use_data_parallel
 
 
-def _pad_cumulative_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    n = src.shape[0]
-    dst.zero_()
-    dst[:n].copy_(src)
-    if n < dst.shape[0]:
-        dst[n:] = src[-1]
-
-
 class Lfm2VLImagePixelInputs(TensorSchema):
     """Dimensions:
     - b: Number of images in the prompt
@@ -868,9 +857,6 @@ class Lfm2VLForConditionalGeneration(
                 "gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={
-                "cu_seqlens": _pad_cumulative_seqlens_buffer,
-            },
         )
 
     def get_max_frames_per_video(self) -> int:

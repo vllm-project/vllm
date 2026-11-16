@@ -160,13 +160,17 @@ def test_deepseek_v4_does_not_transition_after_mid_conversation_system():
     [
         (
             False,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
         (
             True,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
     ],
 )
@@ -473,7 +477,7 @@ def test_deepseek_v4_image_blocks_become_placeholders():
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
     """The borrowed sentinel ids must line up with the reserved
-    ``<|place_holder_mm_span_XXXX|>`` tokens in the tokenizer."""
+    `<|place_holder_mm_span_XXXX|>` tokens in the tokenizer."""
     from vllm.models.deepseek_v4.common.mm_preprocess import (
         IMAGE_SENTINEL_BASE_ID,
         IMAGE_SENTINEL_TOKEN_NAMES,

@@ -124,8 +124,11 @@ def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
     of `dataclasses.field`"""
     cls = type(dataclass_instance)
-    dataclass_dict = dataclass_instance.__dict__
-    dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
+    dataclass_dict = {
+        f.name: getattr(dataclass_instance, f.name)
+        for f in fields(cls)
+        if is_init_field(cls, f.name)
+    }
     dataclass_dict.update(kwargs)
     return cls(**dataclass_dict)
 

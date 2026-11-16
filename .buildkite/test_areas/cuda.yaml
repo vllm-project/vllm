@@ -39,7 +39,6 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
   - tests/v1/cudagraph
-  - vllm/v1/cudagraph_dispatcher.py
   - vllm/config/compilation.py
   - vllm/config/vllm.py
   - vllm/compilation
@@ -54,6 +53,7 @@ steps:
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
+    - pytest -v -s v1/cudagraph/test_encoder_only_full_cudagraph.py
   mirror:
     amd:
       automatic_shard: true
@@ -65,7 +65,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/v1/cudagraph
-      - vllm/v1/cudagraph_dispatcher.py
       - vllm/config/compilation.py
       - vllm/compilation
       - vllm/platforms/rocm.py

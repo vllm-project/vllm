@@ -20,8 +20,8 @@ pub enum Error {
         token_count: usize,
         row_count: usize,
     },
-    #[error("routed experts for request `{request_id}` changed dtype or shape")]
-    RoutedExpertsShapeMismatch { request_id: String },
+    #[error("invalid auxiliary output rows")]
+    AuxOutputRows(#[from] vllm_engine_core_client::protocol::tensor::ArrayRowsError),
     /// The request uses a field this implementation does not carry out.
     #[error("`{field}` is not supported")]
     Unsupported { field: &'static str },
