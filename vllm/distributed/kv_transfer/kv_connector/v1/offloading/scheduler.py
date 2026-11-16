@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import Counter
-from collections.abc import Collection, Generator, Iterable, Iterator, Sequence
+from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -66,7 +66,6 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-_Block = TypeVar("_Block")
 
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
@@ -1062,22 +1061,15 @@ class OffloadingConnectorScheduler:
             position = boundary
         return sources
 
-    def _iter_allocation_candidate_blocks(
-        self,
-        groups: Iterable[tuple[int, Sequence[_Block]]],
-        local_prefix_tokens: int,
-    ) -> Iterator[Sequence[_Block]]:
-        """Yield block table suffixes after shared full-attention prefixes."""
-        for group_idx, group_blocks in groups:
-            group_config = self._group_configs_by_id.get(group_idx)
-            if (
-                group_config is None
-                or group_config.sliding_window_size_in_chunks is not None
-            ):
-                start = 0
-            else:
-                start = local_prefix_tokens // group_config.tokens_per_block
-            yield group_blocks[start:]
+    def _num_prefix_blocks(self, group_idx: int, local_prefix_tokens: int) -> int:
+        """Return the number of shared prefix blocks in a full-attention group."""
+        group_config = self._group_configs_by_id.get(group_idx)
+        if (
+            group_config is None
+            or group_config.sliding_window_size_in_chunks is not None
+        ):
+            return 0
+        return local_prefix_tokens // group_config.tokens_per_block
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
@@ -1086,13 +1078,16 @@ class OffloadingConnectorScheduler:
         # Include allocations made by other connectors in a MultiConnector.
         # Full-attention prefix hits were touched, not allocated.
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
-        for group_blocks in self._iter_allocation_candidate_blocks(
-            enumerate(blocks.blocks),
-            num_locally_computed_tokens,
-        ):
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
+        for group_idx, group_blocks in enumerate(blocks.blocks):
+            num_prefix_blocks = self._num_prefix_blocks(
+                group_idx, num_locally_computed_tokens
             )
+            self._current_batch_allocated_block_ids.update(
+                block.block_id
+                for block in group_blocks[num_prefix_blocks:]
+                if block.block_id != 0
+            )
+
         if num_external_tokens == 0:
             return
 
@@ -1231,6 +1226,7 @@ class OffloadingConnectorScheduler:
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.
         new_block_ids_end: dict[str, tuple[int, ...]] = {}
+
         for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
             req_status.update_offload_keys()
@@ -1255,12 +1251,12 @@ class OffloadingConnectorScheduler:
                         local_prefix_tokens = min(
                             local_prefix_tokens, req_status.req.num_computed_tokens
                         )
-                for new_blocks in self._iter_allocation_candidate_blocks(
-                    enumerate(block_id_groups),
-                    local_prefix_tokens,
-                ):
+                for group_idx, group_blocks in enumerate(block_id_groups):
+                    num_prefix_blocks = self._num_prefix_blocks(
+                        group_idx, local_prefix_tokens
+                    )
                     self._current_batch_allocated_block_ids.update(
-                        bid for bid in new_blocks if bid != 0
+                        bid for bid in group_blocks[num_prefix_blocks:] if bid != 0
                     )
 
         for copy in scheduler_output.kv_cache_block_copies or ():
