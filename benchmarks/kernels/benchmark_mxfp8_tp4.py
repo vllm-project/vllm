@@ -10,7 +10,8 @@ Example (record the baseline and candidate SHAs):
     .venv/bin/python benchmarks/kernels/benchmark_mxfp8_tp4.py \
         --baseline /tmp/baseline_rocm_native.py
 
-Add `--shape-set prefill` for the TP1 prefill-chunk shapes of the same linears.
+Add `--shape-set prefill` for the TP1 prefill-chunk shapes of the same linears,
+or `--shape-set short-k-prefill` for large prefill at K <= 1024.
 Reports cold (>400 MiB rotating weights) and warm timings separately. Each timing
 is the median of 30 device-event samples; Python wall time is never ranked.
 """
@@ -50,6 +51,12 @@ SHAPE_SETS = {
         ]
         for m in [2048, 4096, 8192, 16384]
     ],
+    # shared_down at TP4 and TP8, o_proj at TP8, and two narrower N.
+    "short-k-prefill": [
+        (m, n, k)
+        for n, k in [(6144, 768), (6144, 384), (6144, 1024), (3072, 1024), (1536, 1024)]
+        for m in [1025, 2048, 4096, 8192, 16384]
+    ],
 }
 
 
@@ -85,7 +92,20 @@ def launch(module, xq, xs, w, ws, out, config):
     bm, bn, bk, nw, ns = config
     m, k = xq.shape
     n = w.shape[0]
-    return module._mxfp8_linear_kernel[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
+    kernel = module._mxfp8_linear_kernel
+    extra = {}
+    # A baseline from before the short-K prefill tile has no UNMASKED_LOADS.
+    if "UNMASKED_LOADS" in kernel.arg_names:
+        # As in `_launch`: only that tile loads without M/N masks.
+        extra["UNMASKED_LOADS"] = (
+            module._ON_GFX950
+            and m > 1024
+            and n > 1024
+            and k <= 1024
+            and (bm, bn, bk) == (128, 128, 128)
+            and k % bk == 0
+        )
+    return kernel[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
         xq,
         xs,
         w,
@@ -108,6 +128,7 @@ def launch(module, xq, xs, w, ws, out, config):
         TINY=module._TINY,
         num_warps=nw,
         num_stages=ns,
+        **extra,
     )
 
 
