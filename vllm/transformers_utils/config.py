@@ -919,7 +919,8 @@ def _get_hf_yaml_file_to_dict(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
     if file_path is None:
         file_path = huggingface_hub.hf_hub_download(model, file_name, revision=revision)
-    if isinstance(file_path, Path) and file_path.is_file():
+    file_path = Path(file_path)
+    if file_path.is_file():
         with open(file_path) as f:
             return yaml.safe_load(f)
     return None

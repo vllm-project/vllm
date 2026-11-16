@@ -625,6 +625,29 @@ def test_config_loads_quantization_from_recipe_yaml(tmp_path):
     assert config.quantization_config["quant_method"] == "compressed-tensors"
 
 
+def test_config_loads_downloaded_recipe_yaml_string_path(tmp_path, monkeypatch):
+    _write_granite_config(tmp_path)
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(
+        "default_stage:\n"
+        "  default_modifiers:\n"
+        "    QuantizationModifier:\n"
+        "      targets: [Linear]\n"
+        "      ignore: [lm_head]\n"
+        "      scheme: FP8_DYNAMIC\n"
+    )
+    monkeypatch.setattr(config_module, "try_get_local_file", lambda **kwargs: None)
+    monkeypatch.setattr(
+        config_module.huggingface_hub,
+        "hf_hub_download",
+        lambda *args, **kwargs: str(recipe_path),
+    )
+
+    config = config_module.get_config(tmp_path, trust_remote_code=False)
+    assert config.quantization_config is not None
+    assert config.quantization_config["quant_method"] == "compressed-tensors"
+
+
 def test_config_json_quantization_wins_over_recipe_yaml(tmp_path):
     _write_granite_config(tmp_path, quantization_config={"quant_method": "awq"})
     (tmp_path / "recipe.yaml").write_text(
