@@ -80,10 +80,10 @@ class OnComputeStoreHandler(StoreTriggerHandler):
 
     @override
     def first_live_chunk_idx(
-        self, req_status: RequestOffloadState, config_idx: int
+        self, req_status: RequestOffloadState, config_group_idx: int
     ) -> int | None:
         next_idxs = self._next_stored_chunk_idxs.get(req_status.req.request_id)
-        return 0 if next_idxs is None else next_idxs[config_idx]
+        return 0 if next_idxs is None else next_idxs[config_group_idx]
 
     def _next_idxs(self, req_status: RequestOffloadState) -> list[int]:
         """The next chunk to offer in each group, created at 0."""
@@ -102,11 +102,11 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         # index must not move backwards past already-stored chunks.
         apply_eagle_drop = not self._config.num_hash_lookahead_tokens
         next_idxs = self._next_idxs(req_status)
-        for config_idx, (group_config, group_state) in enumerate(
+        for config_group_idx, (group_config, group_state) in enumerate(
             zip(self._config.kv_group_configs, req_status.group_states)
         ):
-            next_idxs[config_idx] = max(
-                next_idxs[config_idx],
+            next_idxs[config_group_idx] = max(
+                next_idxs[config_group_idx],
                 req_status.storable_chunks(
                     group_config,
                     group_state,
@@ -208,8 +208,10 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 block_indices.append(start_gpu_block_idx or 0)
 
             next_idxs = self._next_idxs(req_status)
-            for config_idx, (_, num_chunks) in enumerate(group_store_ranges):
-                next_idxs[config_idx] = max(next_idxs[config_idx], num_chunks)
+            for config_group_idx, (_, num_chunks) in enumerate(group_store_ranges):
+                next_idxs[config_group_idx] = max(
+                    next_idxs[config_group_idx], num_chunks
+                )
 
             # the non-sliding window blocks will be watched only
             # when the request finishes
