@@ -54,11 +54,12 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         layer._already_called_process_weights_after_loading = True
 ```
 
-## Direct Reload with Online Quantization
+## Direct Reload: Weight Updates with Online Quantization
 
-`VLLM_RELOAD_MODE=direct` reloads weights in place, without layerwise buffering:
-cold start records each tensor's checkpoint layout, and a reload writes the new
-checkpoint tensors into the existing storage and reruns post-load processing.
+Setting the `VLLM_RELOAD_MODE` environment variable to `direct` reloads weights
+in place, without layerwise buffering: cold start records each tensor's
+checkpoint layout, and a reload writes the new checkpoint tensors into the
+existing storage and reruns post-load processing.
 [Online quantization](../features/quantization/online.md) works in this mode:
 
 ```bash
