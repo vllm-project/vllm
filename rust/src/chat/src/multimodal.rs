@@ -163,12 +163,6 @@ impl MultimodalModelContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EncoderInputNormalization {
-    Frontend,
-    Device,
-}
-
 /// Static model-specific tensor-layout behavior for one modality.
 #[derive(Clone)]
 struct ResolvedMultimodalSpec {
@@ -180,7 +174,6 @@ struct ResolvedMultimodalSpec {
     /// differs from the per-modality default (e.g. `"patches"` for
     /// DeepSeek-V4.1 images).
     encoder_input_key: Option<String>,
-    encoder_input_normalization: EncoderInputNormalization,
 }
 
 impl ResolvedMultimodalSpec {
@@ -191,7 +184,6 @@ impl ResolvedMultimodalSpec {
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
             encoder_input_key: raw.encoder_input_key_for(modality),
-            encoder_input_normalization: EncoderInputNormalization::Frontend,
         }
     }
 
@@ -303,13 +295,13 @@ struct VisionModalitySupport {
 }
 
 impl VisionModalitySupport {
-    fn with_encoder_input_normalization(
+    fn with_mm_device_do_normalize(
         &self,
         context: &MultimodalModelContext,
-        normalization: EncoderInputNormalization,
+        enabled: bool,
     ) -> Result<Self> {
         let mut config = self.config.clone();
-        if normalization == EncoderInputNormalization::Device {
+        if enabled {
             config.do_normalize = Some(false);
             config.do_rescale = Some(false);
         }
@@ -317,7 +309,7 @@ impl VisionModalitySupport {
         let processor = context
             .resolve_vision_processor(self.spec.raw, &config, modality)?
             .ok_or_else(|| multimodal!("{modality} processor no longer resolves"))?;
-        if normalization == EncoderInputNormalization::Device && !processor.emits_pixel_bytes() {
+        if enabled && !processor.emits_pixel_bytes() {
             bail_multimodal!(
                 "model `{}` does not support device normalization for {modality} inputs: processor does not emit raw pixel bytes",
                 context.model_id
@@ -325,7 +317,6 @@ impl VisionModalitySupport {
         }
 
         let mut updated = self.clone();
-        updated.spec.encoder_input_normalization = normalization;
         updated.processor = processor;
         Ok(updated)
     }
@@ -635,20 +626,15 @@ impl MultimodalModelInfo {
     }
 
     pub fn set_mm_device_do_normalize(&mut self, enabled: bool) -> Result<()> {
-        let normalization = if enabled {
-            EncoderInputNormalization::Device
-        } else {
-            EncoderInputNormalization::Frontend
-        };
         let image = self
             .image
             .as_ref()
-            .map(|support| support.with_encoder_input_normalization(&self.context, normalization))
+            .map(|support| support.with_mm_device_do_normalize(&self.context, enabled))
             .transpose()?;
         let video = self
             .video
             .as_ref()
-            .map(|support| support.with_encoder_input_normalization(&self.context, normalization))
+            .map(|support| support.with_mm_device_do_normalize(&self.context, enabled))
             .transpose()?;
         self.image = image;
         self.video = video;
@@ -1586,6 +1572,7 @@ mod tests {
     #[test]
     fn device_normalization_rejects_float_only_processors() {
         let mut info = llama4_info();
+        let processor = Arc::clone(&info.image.as_ref().unwrap().processor);
         let error = info.set_mm_device_do_normalize(true).unwrap_err();
 
         assert!(matches!(
@@ -1594,10 +1581,10 @@ mod tests {
                 if message.contains("does not support device normalization for image inputs")
                     && message.contains("does not emit raw pixel bytes")
         ));
-        assert_eq!(
-            info.image.as_ref().unwrap().spec.encoder_input_normalization,
-            EncoderInputNormalization::Frontend
-        );
+        assert!(Arc::ptr_eq(
+            &processor,
+            &info.image.as_ref().unwrap().processor
+        ));
     }
 
     // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.

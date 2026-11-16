@@ -151,12 +151,7 @@ fn build_video_item(
     uuid: Option<String>,
     model_dtype: ModelDtype,
 ) -> Result<PreparedItem> {
-    let tensors = tensor::collect_tensors(
-        preprocessed,
-        support.spec.primary_key(),
-        model_dtype,
-        support.spec.encoder_input_normalization,
-    )?;
+    let tensors = tensor::collect_tensors(preprocessed, support.spec.primary_key(), model_dtype)?;
 
     let mut data = MmKwargsItem::new();
     for (key, tensor) in tensors {

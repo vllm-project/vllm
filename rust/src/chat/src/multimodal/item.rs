@@ -29,12 +29,7 @@ pub(super) fn build_batched_items(
             uuids.len()
         );
     }
-    let tensors = tensor::collect_tensors(
-        preprocessed,
-        spec.primary_key(),
-        float_dtype,
-        spec.encoder_input_normalization,
-    )?;
+    let tensors = tensor::collect_tensors(preprocessed, spec.primary_key(), float_dtype)?;
 
     let mut items = Vec::with_capacity(len);
     for (index, (hash, uuid)) in izip!(hashes, uuids).enumerate() {
