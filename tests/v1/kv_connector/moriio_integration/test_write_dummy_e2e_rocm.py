@@ -245,7 +245,7 @@ ARCHS: dict[str, ArchCase] = {
 def _arch_overrides(arch: ArchCase) -> dict[str, Any]:
     from vllm.transformers_utils.config import get_config
 
-    return arch.overrides(get_config(arch.model))
+    return arch.overrides(get_config(arch.model, trust_remote_code=False))
 
 
 def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
