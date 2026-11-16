@@ -1125,7 +1125,7 @@ def _dummy_table(device: torch.device) -> torch.Tensor:
     return _dummy(device, "table", (1, 1), torch.int32)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ExactArgs:
     """Rescue state for one exact merge call (one ubatch of a workspace)."""
 
@@ -1173,7 +1173,7 @@ class DCPTopkRescueKernel(VllmCuTeDSLJitKernel["DCPTopkRescueKernel.CompileKey"]
 
     tb_size = _TB_SIZE
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         topk: int
         local_topk: int
@@ -1453,7 +1453,7 @@ def _num_sms(device: torch.device) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _RowsOutput:
     req_id: torch.Tensor
     block_table: torch.Tensor

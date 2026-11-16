@@ -67,7 +67,7 @@ def plan_flashinfer_checkpoints(
     return every_n_tokens, cu_starts, rows
 
 
-@dataclass
+@dataclass(slots=True)
 class GDNFlashInferCheckpointPlan:
     every_n_tokens: int
     num_checkpoints: int
