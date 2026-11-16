@@ -1115,7 +1115,7 @@ def tokenize_audio_batch(mels, audio_tokenizer_encoder, segment_size=6000, devic
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class MimoAudioEncoderConfig:
     """Config for MimoAudioEncoder.
 
