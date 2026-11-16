@@ -506,7 +506,7 @@ class Glm5NextMLAAttention(nn.Module):
                     self.num_heads * self.qk_head_dim,
                     bias=False,
                     prefix=f"{prefix}.q_b_proj",
-                disable_tp=replicate,
+                    disable_tp=replicate,
                 )
             )
         else:
