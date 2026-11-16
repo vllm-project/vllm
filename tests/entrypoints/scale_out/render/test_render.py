@@ -230,7 +230,7 @@ async def test_hash_endpoint_completion_batch_preserves_prompt_order(hash_server
 def test_hash_endpoint_rejects_invalid_or_ambiguous_input(payload):
     from pydantic import TypeAdapter, ValidationError
 
-    from vllm.entrypoints.scale_out.render.hash_api_router import HashRequest
+    from vllm.entrypoints.scale_out.render.hash_protocol import HashRequest
     from vllm.exceptions import VLLMValidationError
 
     with pytest.raises((ValidationError, VLLMValidationError)):
