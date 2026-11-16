@@ -40,11 +40,13 @@ VLLM_RELOAD_MODE=direct vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_blo
 | - | - | - |
 | `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8` | Supported | Supported |
 | `mxfp4` (`--quantization-config.moe mxfp4`) | Refused | Supported |
-| `nvfp4_per_token` | Not quantized | Supported |
+| `nvfp4_per_token` | Stay BF16 | Supported |
 
 With NVFP4, the w1 and w3 (gate and up) weights of an expert share one global
-scale, so both must arrive in the same update: the first is held until the
-second arrives, and an update that delivers only one of them fails.
+scale, so both must arrive in the same update (between one
+`start_weight_update` and `finish_weight_update`), in either order. The first
+of the two is the only tensor direct reload holds: it waits until the second
+arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
