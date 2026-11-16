@@ -111,7 +111,12 @@ from vllm.v1.attention.backends.mla.index_group import (
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayerConfig,
+    MLAAttentionSpec,
+    SparseCacheRole,
+)
 
 from .interfaces import (
     MixtureOfExperts,
@@ -656,8 +661,8 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         # kv_cache_as_quant_view index a 3-D block-major cache.
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return MLAAttentionSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -665,6 +670,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
         )  # Only has one vector instead of K + V
+        return FullAttentionManager.layer_config(spec)
 
     def forward(self): ...
 
@@ -1296,12 +1302,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % moe_layer_freq == 0
         )
-        # TODO(wentao): enable SP MoE with PP after the PP boundary logic can safely
-        # send/receive sequence-parallel hidden_states across stages.
         self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
         )
         attn_kwargs = (
             {"index_group_builder": index_group_builder}
@@ -1579,6 +1581,14 @@ class DeepseekV2Model(nn.Module):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.layers[self.end_layer - 1].use_sequence_parallel_moe:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                combined_states = torch.cat([hidden_states, residual], dim=-1)
+                combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+                combined_states = combined_states[: positions.shape[0]]
+                hidden_states, residual = combined_states.split(
+                    [self.hidden_size, self.hidden_size], dim=-1
+                )
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )

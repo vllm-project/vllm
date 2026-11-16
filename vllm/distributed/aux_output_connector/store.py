@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BlockObject:
     """One immutable auxiliary output object."""
 

@@ -1068,7 +1068,7 @@ def biased_moe_quant_config(
 FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()
 
 
-@dataclass
+@dataclass(slots=True)
 class FusedMoEParallelConfig:
     tp_size: int
     pcp_size: int
