@@ -70,7 +70,7 @@ class EAGLEConfig(PreTrainedConfig):
                 arch
                 if arch.startswith("DFlash")
                 or arch.endswith("DFlash")
-                or arch in ("LiLiCorrDraftModel", "DSpineDraftModel")
+                or arch == "LiLiCorrDraftModel"
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]

@@ -686,6 +686,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "RicursiveDFlash2ForCausalLM",
     ),
     "DSpineDraftModel": ("qwen3_dspine", "DSpineQwen3ForCausalLM"),
+    "DFlashDSpineDraftModel": ("qwen3_dspine", "DSpineQwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
     # DFlash{arch} unless it already starts or ends with "DFlash" (see
