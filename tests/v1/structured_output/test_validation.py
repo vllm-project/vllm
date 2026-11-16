@@ -15,6 +15,7 @@ from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.sampling_params import (
     MAX_STRUCTURED_OUTPUT_JSON_NESTING,
     STRUCTURAL_TAG_WRAPPER_NESTING,
+    BeamSearchParams,
     SamplingParams,
     StructuredOutputsParams,
 )
@@ -104,6 +105,21 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
             StructuredOutputsConfig(),
             tokenizer=object(),
         )
+
+
+@pytest.mark.parametrize(
+    ("params_cls", "kwargs"),
+    [(SamplingParams, {}), (BeamSearchParams, {"beam_width": 2, "max_tokens": 8})],
+)
+@pytest.mark.parametrize(
+    "structured_outputs", ["json", 42, {"json": {"type": "object"}}, ["json"]]
+)
+def test_structured_outputs_must_be_params(params_cls, kwargs, structured_outputs):
+    with pytest.raises(
+        VLLMValidationError,
+        match="structured_outputs must be a StructuredOutputsParams",
+    ):
+        params_cls(structured_outputs=structured_outputs, **kwargs)
 
 
 @pytest.mark.parametrize(
