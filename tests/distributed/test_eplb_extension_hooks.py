@@ -32,7 +32,11 @@ from vllm.distributed.eplb.eplb_state import (
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.placement import write_placement_snapshot
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
-from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
+from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbLayerResult,
+    rearrange_expert_weights_inplace,
+    transfer_layer,
+)
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -443,19 +447,15 @@ def _placement_export_worker(rank, directory, tp_size, pcp_size):
             model.communicator = TorchDistNcclEplbCommunicator(get_ep_group().cpu_group)
             state.model_states["target"] = model
             target = torch.tensor([[2, 1, 0, 3]])
-            transfer = transfer_layer(
-                model.physical_to_logical_map[0],
-                target[0],
-                model.model.expert_weights[0],
+            rearrange_expert_weights_inplace(
+                model.physical_to_logical_map,
+                target,
+                model.model.expert_weights,
                 model.expert_buffer,
                 get_ep_group().device_group,
                 model.communicator,
             )
-            model.pending_result = AsyncEplbLayerResult(
-                0, target[0], transfer, CpuGpuEvent()
-            )
-            model.rebalanced = True
-            model._move_to_workspace(rank)
+            model._commit_eplb_maps(target)
             expected_weights = torch.arange(16).reshape(4, 2, 2).float()
             torch.testing.assert_close(
                 model.model.weight,
@@ -477,6 +477,7 @@ def _placement_export_worker(rank, directory, tp_size, pcp_size):
             cleanup_dist_env_and_memory()
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("tp_size,pcp_size", [(2, 1), (1, 2), (1, 1)])
 def test_placement_export_uses_one_global_writer(tmp_path, tp_size, pcp_size):
     """Cover TP/PCP EP groups and reject multiple independent EP groups."""
