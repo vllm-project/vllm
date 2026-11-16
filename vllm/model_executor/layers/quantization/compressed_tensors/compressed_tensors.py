@@ -74,6 +74,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -1267,6 +1268,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        if is_weights_pre_processed():
+            super().process_weights_after_loading(layer)
+            return
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
         layer.register_buffer("_k_scale", layer.k_scale.detach())
