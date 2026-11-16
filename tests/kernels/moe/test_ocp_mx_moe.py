@@ -13,7 +13,7 @@ from tests.kernels.moe.utils import (
     check_deferred_moe_finalize,
     make_dummy_moe_config,
 )
-from tests.kernels.utils import torch_experts, torch_moe
+from tests.kernels.utils import torch_moe
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -2244,13 +2244,44 @@ def test_aiter_mxfp4_moe_pad_masks_only_padding(
 ROCM_MXFP8_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
     "AITER_TRITON_MXFP8_MXFP8": {
         "activation": "SILU",
-        "rtol": 0.1,
-        "percent": 0.9,
+        "rtol": 1e-2,
+        "percent": 0.99,
         "requires_aiter": True,
         "requires_gfx950": False,
         "requires_gfx942": True,
     },
 }
+
+
+def _mxfp8_moe_reference(
+    x: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    apply_router_weight_on_input: bool,
+    activation,
+) -> torch.Tensor:
+    """`torch_experts` on dequantized weights, except the intermediate
+    activation is rounded to MXFP8 before the second GEMM, like the kernel."""
+    from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    out = torch.zeros(x.shape[0], w2.shape[1], dtype=torch.float32, device=x.device)
+    for k in range(topk_ids.shape[1]):
+        for e in topk_ids[:, k].unique().tolist():
+            rows = (topk_ids[:, k] == e).nonzero().flatten()
+            gate = topk_weights[rows, k].float().unsqueeze(1)
+            xe = x[rows].float() * gate if apply_router_weight_on_input else x[rows]
+            h = (xe.float() @ w13[e].float().T).to(torch.bfloat16)
+            act = h.new_empty(h.shape[0], h.shape[1] // 2)
+            apply_moe_activation(activation, act, h)
+            act = mxfp8_dequantize(*mxfp8_e4m3_quantize(act)).float()
+            y = act @ w2[e].float().T
+            out[rows] += y if apply_router_weight_on_input else y * gate
+    return out.to(x.dtype)
 
 
 @pytest.mark.parametrize("backend_name", list(ROCM_MXFP8_BACKEND_CONFIGS.keys()))
@@ -2278,8 +2309,8 @@ def test_rocm_mxfp8_moe_oracle(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """MXFP8 counterpart of `test_rocm_mxfp4_moe_oracle`: the oracle picks the
-    backend and the assembled kernel matches `torch_experts` on the dequantized
-    weights, routed by vLLM's top-k functions."""
+    backend and the assembled kernel matches `_mxfp8_moe_reference` on the
+    dequantized weights, routed by vLLM's top-k functions."""
     config = ROCM_MXFP8_BACKEND_CONFIGS[backend_name]
     if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
         pytest.skip(f"Backend {backend_name} requires AITER")
@@ -2407,17 +2438,17 @@ def test_rocm_mxfp8_moe_oracle(
             routing_sink=sink,
             **routing_kwargs,
         )
-        ref = torch_experts(
+        ref = _mxfp8_moe_reference(
             x,
             w13_dq,
             w2_dq,
             topk_weights,
             topk_ids,
-            apply_router_weights_on_input=apply_router_weight_on_input,
-            activation=activation,
+            apply_router_weight_on_input,
+            activation,
         )
 
-    check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+    check_accuracy(ref, out, atol=1e-2, rtol=config["rtol"], percent=config["percent"])
     # Routed-experts capture reports the experts the reference routed to.
     assert len(captured) == 1
     torch.testing.assert_close(
