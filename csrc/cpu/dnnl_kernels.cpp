@@ -514,12 +514,11 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                });
 
 #ifdef VLLM_USE_ACL
-  // TODO(fadara01): this is a hot-fix, remove once problem is addressed in the
-  // AArch64 stack. hybrid kernels in ACL which are the fastest for LM head
-  // layers are only enabled for BF16 x BF16 -> FP32 problem desc as they can't
-  // convert FP32->BF16 internally. In this case do: oneDNN matmul with
-  // bf16:bf16:fp32 then cast output down to bf16.
-  if (b.scalar_type() == at::kBFloat16 && b.size(1) >= 64000) {
+  // ACL's bf16 x bf16 -> bf16 GEMM loses precision as K grows (~1.6% relative
+  // error at K=4096 vs ~0.4% for one bf16 rounding). Its hybrid kernels, the
+  // fastest for LM head layers, also only support an fp32 output. So do the
+  // oneDNN matmul with bf16:bf16:fp32 and cast the output down to bf16.
+  if (b.scalar_type() == at::kBFloat16) {
     args.c_type = dnnl::memory::data_type::f32;
   }
 #endif
