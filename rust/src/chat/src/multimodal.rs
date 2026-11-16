@@ -757,7 +757,11 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     let mime_type = match format {
         Some(format) if format.eq_ignore_ascii_case("wav") => "audio/wav",
         Some(format) if format.eq_ignore_ascii_case("mp3") => "audio/mpeg",
-        Some(format) => bail_multimodal!("unsupported input_audio format `{format}`"),
+        Some(format) => {
+            return Err(Error::UnsupportedInputAudioFormat {
+                format: format.to_owned(),
+            });
+        }
         None => "application/octet-stream",
     };
     Ok(format!("data:{mime_type};base64,{data}"))
@@ -960,8 +964,8 @@ impl MultimodalModelInfo {
         let video = self.video.as_ref()?;
         let config = &video.config;
         Some((
-            video.spec.raw.video_frame_sampling_with(Some(config)),
-            video.spec.raw.default_video_sample_fps_with(Some(config)),
+            video.spec.raw.video_frame_sampling_with(config),
+            video.spec.raw.default_video_sample_fps_with(config),
         ))
     }
 
@@ -1299,8 +1303,8 @@ mod tests {
     #[test]
     fn video_sampling_policy_comes_from_the_video_spec() {
         // GLM-5.3-Flash: the GLM-5 family's own loader rule walks the clip
-        // at the configured rate (`RateWalk`), and the processor resamples
-        // at the video config's `fps` (default 2.0).
+        // at its fixed rate (`RateWalk`); the processor config's `fps` does
+        // not change the loader's sampling rate.
         let info = glm53_flash_info(glm53_flash_video_config());
         assert_eq!(
             info.video_sampling_policy(),
@@ -1309,7 +1313,7 @@ mod tests {
                     max_frames: 2048,
                     temporal_patch_size: 2
                 },
-                Some(1.0)
+                Some(2.0)
             ))
         );
         let info = glm53_flash_info(PreProcessorConfig::default());
@@ -1834,7 +1838,11 @@ mod tests {
             input_audio_data_url("CCCC", None).unwrap(),
             "data:application/octet-stream;base64,CCCC"
         );
-        assert!(input_audio_data_url("AAAA", Some("flac")).is_err());
+        assert!(
+            input_audio_data_url("AAAA", Some("flac"))
+                .unwrap_err()
+                .is_request_validation_error()
+        );
     }
 
     #[test]

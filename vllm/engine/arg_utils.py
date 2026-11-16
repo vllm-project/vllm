@@ -110,6 +110,7 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DBOSchedule,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
@@ -580,6 +581,7 @@ class EngineArgs:
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    dbo_schedule: DBOSchedule | None = ParallelConfig.dbo_schedule
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -716,6 +718,7 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+    encoder_cache_size: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
@@ -1367,6 +1370,7 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument("--dbo-schedule", **parallel_kwargs["dbo_schedule"])
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
@@ -1824,6 +1828,9 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
+        )
+        scheduler_group.add_argument(
+            "--encoder-cache-size", **scheduler_kwargs["encoder_cache_size"]
         )
         scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
@@ -2643,6 +2650,7 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            dbo_schedule=self.dbo_schedule,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
@@ -2721,6 +2729,7 @@ class EngineArgs:
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
+            encoder_cache_size=self.encoder_cache_size,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
