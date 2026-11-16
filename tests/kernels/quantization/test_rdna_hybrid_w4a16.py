@@ -258,9 +258,10 @@ def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypat
     monkeypatch.setattr(ops, "wvSplitK_int4_g", fake("hip"))
     monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake("triton"))
     monkeypatch.setattr(hybrid_module, "rocm_unquantized_gemm_impl", fake("dense"))
-    # gfx115x sends every small batch to HIP regardless of the LDS limit;
-    # pin it off so the past-LDS case is exercised on every target.
+    # gfx115x and gfx12 send every small batch to HIP regardless of the LDS
+    # limit; pin them off so the past-LDS case is exercised on every target.
     monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: False)
+    monkeypatch.setattr(hybrid_module, "_on_gfx12x", lambda: False)
 
     hybrid_module._rdna_hybrid_w4a16_apply_impl(
         x_mk, w_q, scales, None, None, 40, G, w_dequant
@@ -1224,36 +1225,42 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize(
-    "M,K,gfx115x,gfx1151,expected_path",
+    "M,K,gfx115x,gfx1151,gfx12x,expected_path",
     [
-        (4, 8192, False, False, "hip"),
-        (4, 9728, False, False, "hip"),
-        (4, 9856, False, False, "triton"),
-        (4, 9856, True, False, "hip"),
-        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, False, "triton"),
-        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, True, "hip"),
-        (8, 1024, True, True, "hip"),
-        (9, 1024, True, True, "triton"),
+        (4, 8192, False, False, False, "hip"),
+        (4, 9728, False, False, False, "hip"),
+        (4, 9856, False, False, False, "triton"),
+        (4, 9856, True, False, False, "hip"),
+        (4, 9856, False, False, True, "hip"),
+        (5, 14336, False, False, True, "hip"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, False, False, "triton"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, True, False, "hip"),
+        (8, 1024, True, True, False, "hip"),
+        (9, 1024, True, True, False, "triton"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, False, False, True, "triton"),
     ],
     ids=[
         "regular_limit",
         "medium_range",
         "above_medium",
         "above_medium_gfx115x",
+        "above_medium_gfx12x",
+        "deep_k_gfx12x",
         "six_rows_off_gfx1151",
         "six_rows_gfx1151",
         "eight_rows_gfx1151",
         "batch_too_large",
+        "batch_too_large_gfx12x",
     ],
 )
 def test_rdna_hybrid_w4a16_dispatch_boundaries(
-    M, K, gfx115x, gfx1151, expected_path, monkeypatch
+    M, K, gfx115x, gfx1151, gfx12x, expected_path, monkeypatch
 ):
     """Route only supported regular and medium skinny shapes to HIP.
 
-    gfx115x drops the K*M bound, so a shape past the medium limit still goes to
-    HIP there; the batch bound is 5 rows on every target but gfx1151, which
-    takes up to 8.
+    gfx115x and gfx12 drop the K*M bound, so a shape past the medium limit
+    still goes to HIP there; the batch bound is 5 rows on every target but
+    gfx1151, which takes up to 8.
     """
     import vllm._custom_ops as ops
 
@@ -1275,6 +1282,7 @@ def test_rdna_hybrid_w4a16_dispatch_boundaries(
     monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake_triton)
     monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: gfx115x)
     monkeypatch.setattr(hybrid_module, "_on_gfx1151", lambda: gfx1151)
+    monkeypatch.setattr(hybrid_module, "_on_gfx12x", lambda: gfx12x)
 
     output = hybrid_module._rdna_hybrid_w4a16_apply_impl(
         x_mk, w_q, scales, None, None, 40, G
@@ -1297,6 +1305,46 @@ def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
     set_random_seed(0)
     M, K, N, G = 4, 9728, 256, 128
     assert LDS_CAPACITY_ELEMENTS < K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS
+
+    x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    w_q = pack_int4_exllama_shuffle(w_int4_nk).contiguous().view(torch.int8)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    zp = (
+        torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32)
+        if has_zp
+        else None
+    )
+    w_zp = _pack_zp_rows_for_kernel(zp) if zp is not None else None
+
+    output = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        x_mk, w_q, scales, w_zp, None, num_compute_units(), G
+    )
+    reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
+
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("M", [3, MAX_SKINNY_BATCH_SIZE])
+def test_rdna_hybrid_w4a16_deep_k_skinny_matches_reference(dtype, has_zp, M):
+    """K*M past the medium kernel's LDS bound (Llama-3.1-8B down_proj).
+
+    gfx115x and gfx12 serve this with the chunked HIP kernel; other targets
+    fall back to Triton. Either way it must match the float32 reference.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    K, N, G = 14336, 256, 128
+    assert K * M > MEDIUM_SKINNY_LIMIT_ELEMENTS
 
     x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
     w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)

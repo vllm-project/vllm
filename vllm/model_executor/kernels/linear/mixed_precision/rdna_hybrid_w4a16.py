@@ -86,8 +86,8 @@ def _profile_scope(name: str) -> AbstractContextManager:
 # except on gfx1151, which uses MAX_SKINNY_BATCH_SIZE_GFX1151.
 # When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
 # prefix in LDS and reads the remaining activation elements from global memory.
-# On gfx115x the K*M term is dropped entirely: deep-K shapes stage every
-# activation row in LDS one K chunk at a time, and only when N is not a
+# On gfx115x and gfx12 the K*M term is dropped entirely: deep-K shapes stage
+# every activation row in LDS one K chunk at a time, and only when N is not a
 # multiple of the kernel's row tile does the medium kernel fall back to reading
 # the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
@@ -776,7 +776,7 @@ def _rdna_hybrid_w4a16_apply_impl(
     N = w_q.shape[0]
 
     if _max_skinny_batch_size() >= M and (
-        K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()
+        K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x() or _on_gfx12x()
     ):
         with _profile_scope(f"wvsplitk_int4 {M}x{N}x{K}"):
             return ops.wvSplitK_int4_g(w_q, x_2d, w_s, cu_count, group_size, w_zp, bias)
