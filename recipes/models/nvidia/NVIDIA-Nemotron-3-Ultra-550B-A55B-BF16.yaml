@@ -31,8 +31,6 @@ model:
     - "16"
     - "--max-model-len"
     - "262144"
-    - "--gpu-memory-utilization"
-    - "0.90"
     - "--max-num-batched-tokens"
     - "32768"
     - "--enable-flashinfer-autotune"
@@ -113,7 +111,6 @@ guide: |
     --kv-cache-dtype fp8 \
     --max-num-seqs 16 \
     --max-model-len 262144 \
-    --gpu-memory-utilization 0.90 \
     --max-num-batched-tokens 32768 \
     --enable-flashinfer-autotune \
     --async-scheduling \

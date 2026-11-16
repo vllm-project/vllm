@@ -20,6 +20,15 @@ The edges of the build graph represent:
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
 
+Mount only the requirement files a dependency stage reads. Mounting the entire
+`requirements/` directory makes unrelated changes, such as ROCm test pins,
+invalidate CUDA dependency layers and their downstream native builds.
+
+The `hybrid-test-wheels` stage builds the `mamba-ssm` and `causal-conv1d`
+wheels that `test-deps` installs. It branches from `base`, so it rebuilds with
+`base` or when `tools/build_hybrid_test_wheels.sh` changes, in parallel with
+`csrc-build`.
+
 The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 `ca-certificates` package so clients using the system trust store receive
 certificate removals when the image is rebuilt. This complements the Python
