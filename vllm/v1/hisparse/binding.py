@@ -402,7 +402,7 @@ def bind_hisparse_kv_caches(
                     source_cache = token_rows.view(*token_rows.shape[:2], -1)
                 except RuntimeError as error:
                     raise ValueError(
-                        "HiSparse sparse full attention requires unpadded, "
+                        "HiSparse sparse GQA requires unpadded, "
                         "contiguous token rows in the host LBNHC layout."
                     ) from error
             for handle in (cache_handle, *readers):

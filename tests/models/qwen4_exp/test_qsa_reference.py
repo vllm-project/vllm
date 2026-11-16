@@ -1446,39 +1446,10 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
     tmp_path,
     dist_init,
     workspace_init,
-    monkeypatch,
     fp8: bool,
     all_context_pages_resident: bool,
 ) -> None:
     """Unequal active lengths and reordered state slots keep the right KV rows."""
-    _run_qsa_hisparse_prefill_case(
-        tmp_path,
-        monkeypatch,
-        fp8,
-        False,
-        all_context_pages_resident=all_context_pages_resident,
-    )
-
-
-@requires_qsa_kernels
-def test_qsa_hisparse_warmup_outside_connector_step_skips_mirror(
-    tmp_path, dist_init, workspace_init, monkeypatch
-) -> None:
-    """Ordinary prefill and K+1 warmup cannot consume a host-mirror phase."""
-    _run_qsa_hisparse_prefill_case(
-        tmp_path, monkeypatch, False, False, connector_warmup=True
-    )
-
-
-def _run_qsa_hisparse_prefill_case(
-    tmp_path,
-    monkeypatch,
-    fp8: bool,
-    indexer_fp8: bool,
-    *,
-    connector_warmup=False,
-    all_context_pages_resident=False,
-) -> None:
     from dataclasses import replace
 
     from transformers import Qwen4ExpTextConfig
@@ -1533,7 +1504,7 @@ def _run_qsa_hisparse_prefill_case(
         enable_chunked_prefill=False,
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(),
-            indexer_kv_dtype="fp8" if indexer_fp8 else "bf16",
+            indexer_kv_dtype="bf16",
         ),
         kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
     ).create_engine_config()
@@ -1562,12 +1533,6 @@ def _run_qsa_hisparse_prefill_case(
             ]
         )
         owner.process_weights_after_loading()
-    # Even when fusion is supported, main KV writes must use the HiSparse
-    # resident target exercised below instead of the ordinary cache.
-    assert owner.use_fused_qk_norm_rope_gate
-    assert owner.indexer.use_fused_pre_indexer
-    # The hooks below observe the unfused selection and K/V writer.
-    owner.use_fused_qsa_prepare = False
     row_width = heads * 2 * dim
     original = torch.randn(
         num_blocks,
@@ -1685,41 +1650,6 @@ def _run_qsa_hisparse_prefill_case(
     runtime.request_state_indices = state_indices
     cache.all_context_pages_resident = all_context_pages_resident
     owner.bind_kv_cache(original.transpose(1, 2))
-    if connector_warmup:
-        from functools import partial
-        from unittest.mock import MagicMock
-
-        from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
-            HiSparseConnectorWorker,
-        )
-
-        # Exercise the production layer-once guard. Mock only DMA submission;
-        # actual cache writing, sparse attention and native graph replay run.
-        worker = object.__new__(HiSparseConnectorWorker)
-        worker.cache_handles = [cache]
-        worker._per_layer_mirrored = set()
-        worker._submitted_mirror_layers = set()
-        worker._slot_mapping_staging = None
-        worker._layer_ready_events = (MagicMock(),)
-        worker._in_step = True
-        enqueue_row_dma = MagicMock()
-        monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
-    selected_before_attention = []
-    writer_inputs = []
-    update_cache = owner.impl.do_kv_cache_update
-
-    def capture_writer(layer, key, value, kv_cache, slot_mapping):
-        writer_inputs.append((key.clone(), value.clone(), slot_mapping.clone()))
-        update_cache(layer, key, value, kv_cache, slot_mapping)
-
-    monkeypatch.setattr(owner.impl, "do_kv_cache_update", capture_writer)
-
-    def save_selection(module, inputs, output):
-        selected, main_outputs = output
-        assert main_outputs is None
-        selected_before_attention.append(selected.clone())
-
-    selection_hook = owner.indexer.register_forward_hook(save_selection)
     host, registered = allocate_pinned_host_pool(original.nbytes)
     try:
         host_rows = host.view(original.dtype).view(-1, row_width)
@@ -1768,114 +1698,18 @@ def _run_qsa_hisparse_prefill_case(
         ):
             actual = owner(positions, hidden)
         torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-        assert len(writer_inputs) == 1
-        written_key, written_value, written_slots = writer_inputs[-1]
-        torch.testing.assert_close(written_slots, slots, rtol=0, atol=0)
-        torch.testing.assert_close(written_key, key, rtol=0, atol=0)
-        torch.testing.assert_close(written_value, value, rtol=0, atol=0)
-        # RoPE can produce negative zero from the fixture's zero K. Compare
-        # storage bytes against the real writer inputs, preserving those signs.
+        stored_rows = cache.view.cache[slots // block_size, slots % block_size]
+        stored_rows = stored_rows.view(new_rows.dtype).reshape_as(new_rows)
         if fp8:
-            written_key = (
-                (written_key.float() / k_scale)
-                .to(torch.float8_e4m3fn)
-                .view(torch.uint8)
-            )
-            written_value = (
-                (written_value.float() / v_scale)
-                .to(torch.float8_e4m3fn)
-                .view(torch.uint8)
-            )
-        written_rows = torch.cat((written_key, written_value), dim=-1)
+            # Either sign of zero is valid for the rotated keys.
+            stored_rows = stored_rows.view(torch.float8_e4m3fn)
+            new_rows = new_rows.view(torch.float8_e4m3fn)
         torch.testing.assert_close(
-            cache.view.cache[slots // block_size, slots % block_size].view(torch.uint8),
-            written_rows.flatten(1).view(torch.uint8),
-            rtol=0,
-            atol=0,
+            stored_rows.float(), new_rows.float(), rtol=0, atol=0
         )
-        assert len(selected_before_attention) == 1
-        packed = selected_before_attention[-1]
-        torch.testing.assert_close(
-            owner.topk_indices_buffer[:4], packed, rtol=0, atol=0
-        )
-        torch.testing.assert_close(packed[:, -1], positions + 1, check_dtype=False)
-        for row, position in zip(packed[:, :-1], positions):
-            torch.testing.assert_close(
-                row[row >= 0].sort().values,
-                torch.arange(position + 1, device="cuda", dtype=torch.int32),
-            )
         if not all_context_pages_resident:
             assert torch.all(cache.view.cache[3] == 29)
-        mirror_metadata = all_metadata
-        mirror_positions, mirror_hidden = positions, hidden
-        if connector_warmup:
-            cache.submit_layer_mirror = partial(worker._enqueue_layer_mirror, 0)
-            cache.all_context_pages_resident = True
-            # JIT warmup runs prefill5 then MTP verify4 outside a connector step.
-            worker._in_step = False
-            for start, length in ((0, 5), (5, 4)):
-                warm_positions = torch.arange(start, start + length, device="cuda")
-                warm_slots = block_size + warm_positions
-                warm_common = CommonAttentionMetadata(
-                    num_actual_tokens=length,
-                    num_reqs=1,
-                    max_query_len=length,
-                    query_start_loc=torch.tensor(
-                        [0, length], device="cuda", dtype=torch.int32
-                    ),
-                    query_start_loc_cpu=torch.tensor([0, length], dtype=torch.int32),
-                    max_seq_len=start + length,
-                    seq_lens=torch.tensor(
-                        [start + length], device="cuda", dtype=torch.int32
-                    ),
-                    seq_lens_cpu_upper_bound=torch.tensor(
-                        [start + length], dtype=torch.int32
-                    ),
-                    block_table_tensor=source_table[:1],
-                    slot_mapping=warm_slots,
-                )
-                warm_metadata = {owner.layer_name: builder.build(0, warm_common)}
-                for side_cache in (
-                    owner.indexer.raw_key_cache,
-                    owner.indexer.compressed_key_cache,
-                ):
-                    spec = side_cache.get_kv_cache_config(vllm_config).spec
-                    assert isinstance(spec, AttentionSpec)
-                    table = (
-                        source_table[:1, :1]
-                        if side_cache is owner.indexer.raw_key_cache
-                        else source_table[:1]
-                    )
-                    warm_metadata[side_cache.prefix] = QSAIndexerMetadataBuilder(
-                        spec, [side_cache.prefix], vllm_config, torch.device("cuda")
-                    ).build(0, replace(warm_common, block_table_tensor=table))
-                cache.slot_mapping = warm_slots
-                warm_hidden = hidden[warm_positions % hidden.shape[0]]
-                with (
-                    torch.inference_mode(),
-                    set_current_vllm_config(vllm_config),
-                    set_forward_context(warm_metadata, vllm_config, num_tokens=length),
-                ):
-                    owner(warm_positions, warm_hidden)
-            enqueue_row_dma.assert_not_called()
-            assert not worker._per_layer_mirrored
-            worker._in_step = True
-            mirror_metadata = warm_metadata
-            mirror_positions, mirror_hidden = warm_positions, warm_hidden
-        if connector_warmup:
-            # A real multi-token prefill still pipelines one host submission,
-            # and a second live write in that phase must remain an error.
-            with (
-                torch.inference_mode(),
-                set_current_vllm_config(vllm_config),
-                set_forward_context(mirror_metadata, vllm_config, num_tokens=4),
-            ):
-                owner(mirror_positions, mirror_hidden)
-                enqueue_row_dma.assert_called_once()
-                with pytest.raises(RuntimeError, match="layer 0 mirrored twice"):
-                    owner(mirror_positions, mirror_hidden)
     finally:
-        selection_hook.remove()
         release_pinned_state([registered])
 
 

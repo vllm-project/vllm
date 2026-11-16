@@ -373,7 +373,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
                 self.kv_view(cache.view.cache),
                 selected,
                 cache.block_table,
-                state_indices[token_to_req].clamp(min=0),
+                state_indices[token_to_req],
                 use_prefill_config,
                 out,
                 output_gate,
