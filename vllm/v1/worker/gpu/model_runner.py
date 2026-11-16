@@ -920,6 +920,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_tokens
                 - num_reqs * self.speculative_config.max_num_new_slots_for_drafting,
             )
+        # The block tables only fit max_model_len tokens per request, but
+        # max_num_batched_tokens can exceed num_reqs * max_model_len (e.g.
+        # after auto-fit lowers max_model_len).
+        num_tokens = min(num_tokens, num_reqs * self.max_model_len)
 
         assert num_tokens <= self.max_num_tokens, (
             f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
@@ -1112,6 +1116,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
+        self.ec_connector.reset()
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         if self.pooling_runner is not None:
