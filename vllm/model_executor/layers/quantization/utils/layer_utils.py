@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
+import torch
+
+from vllm.model_executor import utils as executor_utils
+
+
+def update_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
+    assert dst.dtype == src.dtype, "Tensors must have the same dtype"
+
+    # update tensor shape and stride
+    dst.as_strided_(src.shape, src.stride())
+
+    # If not the same underlying storage move tensor data
+    if dst.data_ptr() != src.data_ptr():
+        dst.copy_(src)
+        del src
+
+
+# Newly generated tensors need to replace existing tensors that are
+# already registered as parameters by vLLM (and won't be freed)
+def replace_parameter(
+    mod: torch.nn.Module, name: str, new: torch.Tensor | torch.nn.Parameter
+) -> None:
+    old = getattr(mod, name)
+    if (
+        type(old) is type(new)
+        and old.dtype == new.dtype
+        and old.untyped_storage().nbytes() == new.untyped_storage().nbytes()
+    ):
+        # If we can just update in-place to avoid re-registering
+        #   can be faster if the underlying storage is the same
+        update_tensor_inplace(old, new)
+    else:
+        # Keep the registered parameter object (class and loader attributes)
+        executor_utils.replace_parameter(mod, name, new)

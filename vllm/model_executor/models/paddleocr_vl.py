@@ -1,0 +1,1168 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from functools import partial
+from typing import Annotated, Literal
+
+import numpy as np
+import torch
+import torch.nn as nn
+from einops import rearrange
+from transformers import BaseImageProcessor, BatchFeature, PreTrainedConfig
+from transformers.activations import GELUActivation
+from transformers.image_utils import ChannelDimension
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPooling,
+)
+from transformers.utils import torch_int
+
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
+from vllm.config import VllmConfig
+from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.distributed import parallel_state
+from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.attention import (
+    MMEncoderAttention,
+)
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import (
+    ApplyRotaryEmb,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+)
+from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from .ernie45 import Ernie4_5ForCausalLM
+from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
+from .siglip import SiglipMLP
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    WeightsMapper,
+    maybe_prefix,
+)
+from .vision import get_vit_attn_backend
+
+
+def smart_resize(
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 28 * 28 * 130,
+    max_pixels: int = 28 * 28 * 1280,
+):
+    """Rescales the image so that the following conditions are met:
+
+    1. Both dimensions (height and width) are divisible by 'factor'.
+
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+    3. The aspect ratio of the image is maintained as closely as possible.
+
+    """
+    if height < factor:
+        width = round((width * factor) / height)
+        height = factor
+
+    if width < factor:
+        height = round((height * factor) / width)
+        width = factor
+
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than 200, "
+            f"got {max(height, width) / min(height, width)}"
+        )
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = math.floor(height / beta / factor) * factor
+        w_bar = math.floor(width / beta / factor) * factor
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self):
+        return self.ctx.get_hf_config()
+
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(**kwargs)
+
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
+
+    def get_supported_mm_limits(self):
+        return {"image": None}
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
+
+        resized_height, resized_width = smart_resize(
+            height=image_height,
+            width=image_width,
+            factor=patch_size * merge_size,
+            min_pixels=size[min_pixels_key],
+            max_pixels=size[max_pixels_key],
+        )
+        preprocessed_size = ImageSize(width=resized_width, height=resized_height)
+
+        grid_t = 1
+        grid_h = preprocessed_size.height // patch_size
+        grid_w = preprocessed_size.width // patch_size
+
+        num_patches = grid_t * grid_h * grid_w
+        num_image_tokens = num_patches // (merge_size**2)
+
+        return num_image_tokens
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+        image_processor = self.get_image_processor()
+
+        # See `smart_resize` for the calculation of the image size.
+        merge_size = hf_config.vision_config.spatial_merge_size
+        patch_size = hf_config.vision_config.patch_size
+        factor = merge_size * patch_size
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            max_pixels = image_processor.max_pixels
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            max_pixels = image_processor.size.longest_edge
+        max_num_tokens = max_pixels // (factor**2)
+        # Find factors of max_num_tokens close to its square root
+        # to create a dummy image with a reasonable aspect ratio.
+        h_patches = int(math.sqrt(max_num_tokens))
+        max_num_tokens -= max_num_tokens % h_patches
+        w_patches = max_num_tokens // h_patches
+        return ImageSize(height=h_patches * factor, width=w_patches * factor)
+
+
+class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessingInfo]):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> MultiModalDataDict:
+        max_image_size = self.info.get_image_size_with_most_features()
+
+        return {
+            "image": self._get_dummy_images(
+                width=max_image_size.width,
+                height=max_image_size.height,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
+            )
+        }
+
+
+class PaddleOCRVLMultiModalProcessor(
+    BaseMultiModalProcessor[PaddleOCRVLProcessingInfo]
+):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        final_mm_kwargs = dict(hf_kwargs or {})
+        final_mm_kwargs.setdefault("images_kwargs", {})
+        # vLLM use PIL.Image, always set channel_last
+        final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**final_mm_kwargs),
+            hf_data,
+            hf_kwargs,
+        )
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        image_grid_sizes = image_grid_thw.prod(-1)
+
+        return dict(
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_grid_sizes
+            ),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        hf_config = self.info.get_hf_config()
+        image_token_id = hf_config.image_token_id
+
+        def get_replacement(item_idx: int, image_processor):
+            images = mm_items.get_items("image", ImageProcessorItems)
+
+            image_size = images.get_image_size(item_idx)
+            num_image_tokens = self.info.get_num_image_tokens(
+                image_width=image_size.width,
+                image_height=image_size.height,
+                image_processor=image_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
+            )
+
+            return [image_token_id] * num_image_tokens
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=partial(get_replacement, image_processor=image_processor),
+            ),
+        ]
+
+
+class Projector(nn.Module):
+    def __init__(
+        self,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.text_config = text_config
+        self.vision_config = vision_config
+        self.merge_kernel_size = (2, 2)
+
+        self.hidden_size = (
+            self.vision_config.hidden_size
+            * self.merge_kernel_size[0]
+            * self.merge_kernel_size[1]
+        )
+
+        self.pre_norm = torch.nn.LayerNorm(self.vision_config.hidden_size, eps=1e-05)
+        self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        self.act = GELUActivation()
+        self.linear_2 = nn.Linear(
+            self.hidden_size, self.text_config.hidden_size, bias=True
+        )
+
+    def forward(
+        self,
+        image_features: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+    ) -> torch.Tensor:
+        m1, m2 = self.merge_kernel_size
+        if isinstance(image_features, (list, tuple)):
+            # Norm and MLP are per-token, so run them once over all images;
+            # only the 2x2 merge depends on each image's grid.
+            sizes = [image_feature.shape[0] for image_feature in image_features]
+            normed_features = self.pre_norm(torch.cat(image_features)).split(sizes)
+            merged_features = [
+                rearrange(
+                    image_feature,
+                    "(t h p1 w p2) d -> (t h w) (p1 p2 d)",
+                    t=t,
+                    h=h // m1,
+                    p1=m1,
+                    w=w // m2,
+                    p2=m2,
+                )
+                for image_feature, (t, h, w) in zip(normed_features, image_grid_thw)
+            ]
+            hidden_states = self.linear_1(torch.cat(merged_features))
+            hidden_states = self.act(hidden_states)
+            hidden_states = self.linear_2(hidden_states)
+
+            return hidden_states.split([f.shape[0] for f in merged_features])
+
+        dims = image_features.shape[:-1]
+        dim = image_features.shape[-1]
+        image_features = image_features.view(np.prod(dims), dim)
+        hidden_states = self.pre_norm(image_features).view(-1, self.hidden_size)
+        hidden_states = self.linear_1(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.linear_2(hidden_states)
+
+        return hidden_states.view(*dims, -1)
+
+
+class PaddleOCRImagePixelInputs(TensorSchema):
+    type: Literal["pixel_values"]
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", 3, "patch_size", "patch_size"),
+    ]
+    image_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("bn", 3),
+    ]
+
+
+class SiglipVisionEmbeddings(nn.Module):
+    def __init__(self, config: PreTrainedConfig):
+        super().__init__()
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.image_size = config.image_size
+        self.patch_size = config.patch_size
+
+        self.patch_embedding = Conv2dLayer(
+            in_channels=config.num_channels,
+            out_channels=self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            padding="valid",
+        )
+
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.num_positions = self.num_patches
+        self.cache_position_embedding: dict[tuple[int, int], torch.Tensor] = {}
+        self.cache_position_count: dict[tuple[int, int], int] = {}
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+
+        self.register_buffer(
+            "position_ids",
+            torch.arange(self.num_positions).expand((1, -1)),
+            persistent=False,
+        )
+
+    def interpolate_pos_encoding(
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
+        is_after_patchify: bool = False,
+    ) -> torch.Tensor:
+        num_positions = self.position_embedding.weight.shape[0]
+
+        patch_pos_embed = self.position_embedding.weight.unsqueeze(0)
+
+        dim = embeddings.shape[-1]
+
+        if is_after_patchify:
+            new_height = height
+            new_width = width
+        else:
+            new_height = height // self.patch_size
+            new_width = width // self.patch_size
+
+        sqrt_num_positions = torch_int(num_positions**0.5)
+        patch_pos_embed = patch_pos_embed.reshape(
+            1, sqrt_num_positions, sqrt_num_positions, dim
+        )
+        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
+
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed,
+            size=(new_height, new_width),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        return patch_pos_embed
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        position_ids: torch.Tensor | None = None,
+        image_grid_thw: Sequence[tuple[int, int, int]] | None = None,
+        interpolate_pos_encoding=False,
+    ) -> torch.Tensor:
+        if pixel_values.dim() == 4:
+            pixel_values = pixel_values.unsqueeze(0)
+        if pixel_values.dim() == 5:
+            if position_ids is None:
+                raise ValueError(
+                    "position_ids cannot be None when pixel_values.dim() is 5."
+                )
+            (
+                batch_size,
+                sequence_len,
+                channel,
+                height,
+                width,
+            ) = pixel_values.shape
+            target_dtype = self.patch_embedding.weight.dtype
+            pixel_values = rearrange(pixel_values, "b l c h w -> (b l) c h w")
+            patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
+            embeddings = patch_embeds.flatten(-2).squeeze(-1)
+
+            start = 0
+            tmp_embeddings = list()
+            assert image_grid_thw is not None
+            for image_grid in image_grid_thw:
+                t, h, w = image_grid
+                end = start + t * h * w
+                image_embeddings = embeddings[start:end, :]
+                position_embedding = (
+                    self.interpolate_pos_encoding(image_embeddings, h, w, True)
+                    .squeeze(0)
+                    .repeat(t, 1)
+                )
+                image_embeddings = image_embeddings + position_embedding
+                tmp_embeddings.append(image_embeddings)
+                start = end
+            embeddings = torch.concat(tmp_embeddings, dim=0).unsqueeze(0)
+
+            return embeddings
+        else:
+            raise ValueError(
+                "Unsupported pixel_values dimension:"
+                f" {pixel_values.dim()}. Expected 4 or 5."
+            )
+
+
+def all_gather_interleave(local_tensor: torch.Tensor, hidden_size: int, tp_size: int):
+    """All-gather the input tensor interleavely across model parallel group."""
+    import torch.distributed as dist
+
+    gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
+    dist.all_gather(
+        gathered_tensors, local_tensor, group=parallel_state.get_tp_group().device_group
+    )
+
+    gathered_tensors_split = [
+        torch.split(tensor, hidden_size // tp_size, -1) for tensor in gathered_tensors
+    ]
+    ordered_tensors = [
+        tensor for pair in zip(*gathered_tensors_split) for tensor in pair
+    ]
+    result_tensor = torch.cat(ordered_tensors, dim=-1)
+    return result_tensor
+
+
+class SiglipAttention(nn.Module):
+    """SigLIP vision attention adapted from Qwen2.5-VisionAttention."""
+
+    def __init__(
+        self,
+        *,
+        embed_dim: int,
+        num_heads: int,
+        projection_size: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+
+        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.hidden_size_per_attention_head = dist_utils.divide(
+            projection_size, num_heads
+        )
+        self.num_attention_heads_per_partition = dist_utils.divide(
+            num_heads, self.tp_size
+        )
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.out_proj = RowParallelLinear(
+            input_size=projection_size,
+            output_size=embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attention_heads_per_partition,
+            head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
+        )
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
+        )
+
+    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        seq_len, bs, _ = qkv.shape
+        if self.tp_size > 1:
+            qkv = all_gather_interleave(qkv, self.qkv_proj.hidden_size, self.tp_size)
+
+        q, k, v = qkv.chunk(3, dim=2)
+
+        if self.tp_size > 1:
+            splitter = partial(
+                dist_utils.split_tensor_along_last_dim, num_partitions=self.tp_size
+            )
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+            v = splitter(v)[self.tp_rank]
+
+        new_shape = (
+            seq_len,
+            bs,
+            self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head,
+        )
+        q, k, v = (x.view(*new_shape) for x in (q, k, v))
+        return q, k, v
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor | None,
+        max_seqlen: torch.Tensor | None,
+    ) -> torch.Tensor:
+        batch_size, _, _ = hidden_states.shape
+
+        x = rearrange(hidden_states, "b s d -> s b d")
+        x, _ = self.qkv_proj(x)
+        q, k, v = self.split_qkv(x)
+        q, k, v = (rearrange(t, "s b h d -> b s h d") for t in (q, k, v))
+
+        if rotary_pos_emb is not None:
+            qk_concat = torch.cat([q, k], dim=0)
+            qk_rotated = self.apply_rotary_emb(
+                qk_concat,
+                rotary_pos_emb.cos(),
+                rotary_pos_emb.sin(),
+            )
+            q, k = torch.chunk(qk_rotated, 2, dim=0)
+
+        context_layer = self.attn(
+            query=q,
+            key=k,
+            value=v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        context_layer = rearrange(context_layer, "b s h d -> b s (h d)")
+
+        output, _ = self.out_proj(context_layer)
+        return output
+
+
+class SigLIPRotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+        super().__init__()
+        self.dim = dim
+        self.theta = theta
+        self.rope_init()
+
+    def rope_init(self):
+        inv_freq = 1.0 / (
+            self.theta ** (torch.arange(0, self.dim, 2, dtype=torch.float) / self.dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, seqlen: int) -> torch.Tensor:
+        seq = torch.arange(
+            seqlen,
+            device=self.inv_freq.device,
+            dtype=self.inv_freq.dtype,
+        )
+        freqs = torch.outer(seq, self.inv_freq)
+        return freqs
+
+
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 1,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
+class SiglipEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.embed_dim = config.hidden_size
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.self_attn = SiglipAttention(
+            embed_dim=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            projection_size=config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.mlp = SiglipMLP(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor | None,
+        max_seqlen: torch.Tensor | None,
+    ) -> torch.Tensor:
+        residual = hidden_states
+
+        hidden_states = self.layer_norm1(hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb=rotary_pos_emb,
+            max_seqlen=max_seqlen,
+        )
+
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+
+        hidden_states = residual + hidden_states
+
+        return hidden_states
+
+
+class SiglipEncoder(nn.Module):
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = config
+        embed_dim = config.hidden_size
+        num_heads = config.num_attention_heads
+        head_dim = embed_dim // num_heads
+
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+        )
+
+        self.layers = nn.ModuleList(
+            [
+                SiglipEncoderLayer(
+                    config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
+        self.rotary_pos_emb = SigLIPRotaryEmbedding(head_dim // 2)
+
+    @staticmethod
+    def flatten_list(image_grid_thw):
+        tmp_image_grid_thw = list()
+        for image_grid in image_grid_thw:
+            if isinstance(image_grid, list):
+                tmp_image_grid_thw.extend(image_grid)
+            else:
+                tmp_image_grid_thw.append(image_grid)
+        return tmp_image_grid_thw
+
+    def forward(
+        self,
+        inputs_embeds,
+        cu_seqlens: torch.Tensor | None = None,
+        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
+        | None = None,
+        height_position_ids: torch.Tensor | None = None,
+        width_position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        device = inputs_embeds.device
+        hidden_states = inputs_embeds
+
+        flatten_image_grid_thw = self.flatten_list(image_grid_thw)
+
+        if width_position_ids is None or height_position_ids is None:
+            split_hids = list()
+            split_wids = list()
+            for t, h, w in flatten_image_grid_thw:
+                image_pids = torch.arange(t * h * w, device=device) % (h * w)
+                sample_hids = image_pids // w
+                sample_wids = image_pids % w
+                split_hids.append(sample_hids)
+                split_wids.append(sample_wids)
+            width_position_ids = torch.concat(split_wids, dim=0)
+            height_position_ids = torch.concat(split_hids, dim=0)
+
+        pids = torch.stack(
+            [height_position_ids, width_position_ids],
+            dim=-1,
+        )
+        # The ids are built from the grids above, so `h`/`w` bound them
+        # and the table size is known on the host.
+        max_grid_size = max(max(h, w) for _, h, w in flatten_image_grid_thw)
+        rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
+        rotary_pos_emb = rope_emb_max_grid[pids].flatten(1)
+
+        if cu_seqlens is None:
+            raise ValueError("cu_seqlens cannot be None for SiglipEncoder.")
+        if not isinstance(cu_seqlens, torch.Tensor):
+            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32)
+
+        # Computed before the H2D copy: the attention wrappers call `.item()`
+        # on it, which would sync on every layer for a device tensor.
+        max_seqlen = None
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+
+        if cu_seqlens.is_cpu:
+            cu_seqlens = async_tensor_h2d(cu_seqlens, dtype=torch.int32, device=device)
+        else:
+            cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
+
+        hidden_states = inputs_embeds
+        for encoder_layer in self.layers:
+            hidden_states = encoder_layer(
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb=rotary_pos_emb,
+                max_seqlen=max_seqlen,
+            )
+        return hidden_states
+
+
+class SiglipVisionTransformer(nn.Module):
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = config
+        embed_dim = config.hidden_size
+
+        self.embeddings = SiglipVisionEmbeddings(config)
+        self.encoder = SiglipEncoder(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.encoder",
+        )
+        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool | None = False,
+        position_ids: torch.Tensor | None = None,
+        height_position_ids: torch.Tensor | None = None,
+        width_position_ids: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        image_grid_thw: Sequence[tuple[int, int, int]] | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.embeddings(
+            pixel_values,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+            position_ids=position_ids,
+            image_grid_thw=image_grid_thw,
+        )
+
+        last_hidden_state = self.encoder(
+            inputs_embeds=hidden_states,
+            cu_seqlens=cu_seqlens,
+            image_grid_thw=image_grid_thw,
+            height_position_ids=height_position_ids,
+            width_position_ids=width_position_ids,
+        )
+
+        last_hidden_state = self.post_layernorm(last_hidden_state)
+        return last_hidden_state
+
+
+class SiglipVisionModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+        # The SigLIP attention pooling head and packing pos embedding are
+        # present in the checkpoint but absent from this vision tower.
+        orig_to_new_substr={
+            "head.attention": None,
+            "head.layernorm": None,
+            "head.mlp": None,
+            "head.probe": None,
+            "packing_position_embedding": None,
+        },
+    )
+
+    def __init__(
+        self,
+        config,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.vision_model = SiglipVisionTransformer(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_model"),
+        )
+        self.quant_config = quant_config
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.vision_model.embeddings.patch_embedding.weight.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self.vision_model.embeddings.patch_embedding.weight.device
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.vision_model.embeddings.patch_embedding
+
+    def forward(
+        self,
+        pixel_values,
+        interpolate_pos_encoding: bool = False,
+        position_ids: torch.Tensor | None = None,
+        image_grid_thw: Sequence[tuple[int, int, int]] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> BaseModelOutputWithPooling:
+        return self.vision_model(
+            pixel_values=pixel_values,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+            position_ids=position_ids,
+            image_grid_thw=image_grid_thw,
+            cu_seqlens=cu_seqlens,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    PaddleOCRVLMultiModalProcessor,
+    info=PaddleOCRVLProcessingInfo,
+    dummy_inputs=PaddleOCRVLDummyInputsBuilder,
+)
+class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        }
+    )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+
+        raise ValueError("Only image modality is supported")
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        if hasattr(config, "text_config"):
+            text_config = config.text_config.to_dict()
+            unsafe_keys = ["model_type", "architectures", "tie_word_embeddings"]
+            for key in unsafe_keys:
+                text_config.pop(key, None)
+            config.update(text_config)
+
+        quant_config = vllm_config.quant_config
+
+        self.config = config
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.visual = SiglipVisionModel(
+                config=config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mlp_AR = Projector(config, config.vision_config)
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Ernie4_5ForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+            for layer in self.language_model.model.layers:
+                if not isinstance(layer, PPMissingLayer):
+                    layer.self_attn.rotary_emb.is_neox_style = True
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
+
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int, float]]:
+        """Iterate over multimodal features and yield grid information.
+
+        Args:
+            mm_features: List of multimodal feature specifications
+
+        Yields:
+            Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+
+        """
+        spatial_merge_size = self.config.vision_config.spatial_merge_size
+        tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            offset = mm_feature.mm_position.offset
+            feature_data = mm_feature.data
+            assert feature_data is not None
+            if mm_feature.modality == "image":
+                grid_data = feature_data["image_grid_thw"].data
+                assert isinstance(grid_data, torch.Tensor)
+                t, h, w = grid_data.tolist()
+                assert t == 1, f"Image must have 1 frame, got {t}"
+                yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
+            elif mm_feature.modality == "video":
+                grid_data = feature_data["video_grid_thw"].data
+                assert isinstance(grid_data, torch.Tensor)
+                t, h, w = grid_data.tolist()
+                second_per_grid_ts = 1.0
+                second_per_grid_item = feature_data.get("second_per_grid_ts")
+                if second_per_grid_item is not None:
+                    second_per_grid_data = second_per_grid_item.data
+                    assert isinstance(second_per_grid_data, torch.Tensor)
+                    second_per_grid_ts = second_per_grid_data.item()
+                t_factor = second_per_grid_ts * tokens_per_second
+                yield (
+                    offset,
+                    t,
+                    h // spatial_merge_size,
+                    w // spatial_merge_size,
+                    t_factor,
+                )
+            else:
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        llm_pos_ids_list: list = []
+        st = 0
+
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+            t_factor,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+
+            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
+            if t_factor != 1.0:
+                grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+
+            llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
+            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
+
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+
+        return torch.from_numpy(llm_positions), mrope_position_delta
+
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> PaddleOCRImagePixelInputs | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+
+        if pixel_values is None:
+            return None
+
+        return PaddleOCRImagePixelInputs(
+            type="pixel_values",
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        return self.language_model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+
+    def encode_image(
+        self,
+        pixel_values: torch.Tensor,
+        image_grid_thw: list[tuple[int, int, int]],
+    ) -> torch.Tensor:
+        """Encode the flat patches of all images in one vision tower call."""
+        pixel_values = pixel_values.type(self.visual.dtype)
+        seq_lens = [math.prod(grid) for grid in image_grid_thw]
+
+        # Built on the host; concat straight into a pinned buffer so the
+        # H2D copy stays non-blocking.
+        siglip_position_ids = torch.concat(
+            [
+                torch.arange(seq_len) % (h * w)
+                for seq_len, (_, h, w) in zip(seq_lens, image_grid_thw)
+            ],
+            dim=0,
+            out=torch.empty(sum(seq_lens), dtype=torch.int64, pin_memory=PIN_MEMORY),
+        ).to(pixel_values.device, non_blocking=True)
+        # One segment per image so that images never attend to each other.
+        cu_seqlens = torch.from_numpy(np.cumsum([0, *seq_lens], dtype=np.int32))
+
+        return self.visual(
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            position_ids=siglip_position_ids,
+            interpolate_pos_encoding=True,
+            cu_seqlens=cu_seqlens,
+        )
+
+    def _process_image_input(
+        self, image_input: PaddleOCRImagePixelInputs
+    ) -> MultiModalEmbeddings:
+        image_grid_thw = image_input.image_grid_thw
+        grids = [tuple(grid) for grid in image_grid_thw.tolist()]
+        vision_outputs = self.encode_image(image_input.pixel_values, grids).squeeze(0)
+        vision_outputs = vision_outputs.split([math.prod(grid) for grid in grids])
+        return self.mlp_AR(vision_outputs, image_grid_thw)
+
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return ()
+
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        image_embeds = self._process_image_input(image_input)
+        multimodal_embeddings += tuple(image_embeds)
+
+        return multimodal_embeddings
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return autoloaded_weights

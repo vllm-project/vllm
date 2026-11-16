@@ -1,0 +1,412 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
+from collections.abc import Sequence
+
+import regex as re
+
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+
+logger = init_logger(__name__)
+
+_ESCAPE = "<escape>"
+_BARE_LITERALS = {"true": True, "false": False, "null": None, "None": None}
+
+
+class _IncompleteValue(Exception):
+    """The argument text ends before the value does."""
+
+
+class _MalformedValue(Exception):
+    """A delimiter appears where a value or key should start."""
+
+
+def _skip_whitespace(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \n":
+        pos += 1
+    return pos
+
+
+def _decode_escaped(raw: str):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _decode_bare(raw: str):
+    raw = raw.strip()
+    if raw in _BARE_LITERALS:
+        return _BARE_LITERALS[raw]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _parse_value(text: str, pos: int, partial: bool) -> tuple[object, int]:
+    """Parse one value at `pos` and return it with the position after it.
+
+    Raises:
+        _IncompleteValue: `text` ends inside the value. A bare scalar at the
+            end of a `partial` string counts as incomplete, since more digits
+            or letters may still follow.
+        _MalformedValue: a delimiter stands where the value should start.
+
+    """
+    pos = _skip_whitespace(text, pos)
+    if text.startswith(_ESCAPE, pos):
+        start = pos + len(_ESCAPE)
+        end = text.find(_ESCAPE, start)
+        if end < 0:
+            raise _IncompleteValue
+        return _decode_escaped(text[start:end]), end + len(_ESCAPE)
+    if text.startswith("{", pos):
+        return _parse_object(text, pos + 1, partial)
+    if text.startswith("[", pos):
+        return _parse_array(text, pos + 1, partial)
+    end = pos
+    while end < len(text) and text[end] not in ",}]":
+        end += 1
+    if end == pos:
+        raise _MalformedValue
+    if end == len(text) and partial:
+        raise _IncompleteValue
+    return _decode_bare(text[pos:end]), end
+
+
+def _parse_object(text: str, pos: int, partial: bool) -> tuple[dict, int]:
+    obj: dict = {}
+    while True:
+        pos = _skip_whitespace(text, pos)
+        if pos >= len(text):
+            raise _IncompleteValue
+        if text[pos] == "}":
+            return obj, pos + 1
+        if text[pos] == "]":
+            raise _MalformedValue
+        if text[pos] == ",":
+            pos += 1
+            continue
+        colon = text.find(":", pos)
+        if colon < 0:
+            raise _IncompleteValue
+        key = text[pos:colon].strip()
+        value, pos = _parse_value(text, colon + 1, partial)
+        obj[key] = value
+
+
+def _parse_array(text: str, pos: int, partial: bool) -> tuple[list, int]:
+    items: list = []
+    while True:
+        pos = _skip_whitespace(text, pos)
+        if pos >= len(text):
+            raise _IncompleteValue
+        if text[pos] == "]":
+            return items, pos + 1
+        if text[pos] == "}":
+            raise _MalformedValue
+        if text[pos] == ",":
+            pos += 1
+            continue
+        value, pos = _parse_value(text, pos, partial)
+        items.append(value)
+
+
+class FunctionGemmaToolParser(ToolParser):
+    """Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
+
+    Handles the FunctionGemma function call format:
+    <start_function_call>call:func_name{param:<escape>value<escape>}<end_function_call>
+    """
+
+    # FunctionGemma tokens
+    tool_call_start_token: str = "<start_function_call>"
+    tool_call_end_token: str = "<end_function_call>"
+
+    # Regex patterns
+    tool_call_regex: re.Pattern = re.compile(
+        r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
+        r"|<start_function_call>call:(\w+)\{(.*)",
+        re.DOTALL,
+    )
+
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
+
+        # Streaming state
+        self.current_tool_name_sent: bool = False
+        self.prev_tool_call_arr: list[dict] = []
+        self.current_tool_id: int = -1
+        self.streamed_args_for_tool: list[str] = []
+        self.buffered_delta_text = ""
+
+    def _parse_arguments(self, args_str: str, partial: bool = False) -> dict:
+        """Parse a FunctionGemma argument string into a dictionary.
+
+        The chat template writes strings as `<escape>text<escape>` and
+        everything else bare: `true`/`false`, numbers, `[item,...]` and
+        `{key:value,...}` with bare keys. With `partial` the string is a
+        streaming prefix: parsing stops at the first incomplete value and the
+        complete arguments before it are returned.
+        """
+        arguments: dict = {}
+        pos = 0
+        while pos < len(args_str):
+            if args_str[pos] in ", \n":
+                pos += 1
+                continue
+            colon = args_str.find(":", pos)
+            if colon < 0:
+                break
+            key = args_str[pos:colon].strip()
+            if not key:
+                break
+            try:
+                value, pos = _parse_value(args_str, colon + 1, partial)
+            except (_IncompleteValue, _MalformedValue):
+                break
+            arguments[key] = value
+        return arguments
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = super().adjust_request(request)
+        if request.tools and request.tool_choice != "none":
+            request.skip_special_tokens = False
+        return request
+
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
+        if self.tool_call_start_token not in model_output:
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        try:
+            matches = self.tool_call_regex.findall(model_output)
+
+            if not matches:
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
+
+            tool_calls: list[ToolCall] = []
+
+            for match in matches:
+                func_name = match[0] if match[0] else match[2]
+                args_str = match[1] if match[1] else match[3]
+
+                if not func_name:
+                    continue
+
+                arguments = self._parse_arguments(args_str)
+
+                tool_calls.append(
+                    ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=func_name,
+                            arguments=json.dumps(arguments, ensure_ascii=False),
+                        ),
+                    )
+                )
+
+            if tool_calls:
+                content_end = model_output.find(self.tool_call_start_token)
+                content = (
+                    model_output[:content_end].strip() if content_end > 0 else None
+                )
+
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=tool_calls,
+                    content=content if content else None,
+                )
+
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        except Exception:
+            logger.exception("Error extracting tool calls from FunctionGemma response")
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+    def _stream_arguments(self, args: dict, final: bool) -> DeltaMessage | None:
+        """Stream the part of the arguments JSON not sent yet.
+
+        Arguments only grow by appended keys, so their JSON is prefix-stable
+        except for the closing brace, which is held back until `final`.
+        """
+        self.prev_tool_call_arr[self.current_tool_id]["arguments"] = args
+        args_json = json.dumps(args, ensure_ascii=False)
+        if not final:
+            args_json = args_json[:-1]
+        prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
+        if len(args_json) <= len(prev_streamed):
+            return None
+        diff = args_json[len(prev_streamed) :]
+        self.streamed_args_for_tool[self.current_tool_id] = args_json
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=self.current_tool_id,
+                    function=DeltaFunctionCall(arguments=diff).model_dump(
+                        exclude_none=True
+                    ),
+                )
+            ]
+        )
+
+    def _close_tool_call(self, current_text: str) -> DeltaMessage | None:
+        """Stream what is left of the current call, including its closing brace."""
+        if not 0 <= self.current_tool_id < len(self.prev_tool_call_arr):
+            return None
+        all_calls = self.tool_call_regex.findall(current_text)
+        args = {}
+        if self.current_tool_id < len(all_calls):
+            match = all_calls[self.current_tool_id]
+            if match[0]:
+                args = self._parse_arguments(match[1])
+        if args or self.current_tool_name_sent:
+            return self._stream_arguments(args, final=True)
+        return None
+
+    def _buffer_delta_text(self, delta_text: str) -> str:
+        """Buffer incoming delta text to handle multi-token special sequences."""
+        potential_start = "<start_function_call>"
+        potential_end = "<end_function_call>"
+
+        combined = self.buffered_delta_text + delta_text
+
+        if combined.endswith(potential_start) or combined.endswith(potential_end):
+            self.buffered_delta_text = ""
+            return combined
+
+        for tag in [potential_start, potential_end]:
+            for i in range(1, len(tag)):
+                if combined.endswith(tag[:i]):
+                    self.buffered_delta_text = combined[-(i):]
+                    return combined[:-i]
+
+        self.buffered_delta_text = ""
+        return combined
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ) -> DeltaMessage | None:
+        delta_text = self._buffer_delta_text(delta_text)
+        current_text = previous_text + delta_text
+
+        if self.tool_call_start_token not in current_text:
+            if delta_text:
+                return DeltaMessage(content=delta_text)
+            return None
+
+        try:
+            start_count = current_text.count(self.tool_call_start_token)
+            end_count = current_text.count(self.tool_call_end_token)
+            prev_start_count = previous_text.count(self.tool_call_start_token)
+            prev_end_count = previous_text.count(self.tool_call_end_token)
+
+            if self.tool_call_start_token not in current_text:
+                return DeltaMessage(content=delta_text)
+
+            # Starting a new function call
+            if start_count > prev_start_count and start_count > end_count:
+                closing = (
+                    self._close_tool_call(current_text)
+                    if end_count > prev_end_count
+                    else None
+                )
+                self.current_tool_id += 1
+                self.current_tool_name_sent = False
+                self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr.append({})
+                logger.debug("Starting new tool call %d", self.current_tool_id)
+                return closing
+
+            # In the middle of a function call
+            if start_count > end_count:
+                last_start = current_text.rfind(self.tool_call_start_token)
+                partial_call = current_text[
+                    last_start + len(self.tool_call_start_token) :
+                ]
+
+                if partial_call.startswith("call:"):
+                    func_part = partial_call[5:]
+
+                    if "{" in func_part:
+                        func_name = func_part.split("{")[0]
+                        args_part = (
+                            func_part.split("{", 1)[1] if "{" in func_part else ""
+                        )
+
+                        if not self.current_tool_name_sent and func_name:
+                            self.current_tool_name_sent = True
+                            self.prev_tool_call_arr[self.current_tool_id] = {
+                                "name": func_name,
+                                "arguments": {},
+                            }
+                            return DeltaMessage(
+                                tool_calls=[
+                                    DeltaToolCall(
+                                        index=self.current_tool_id,
+                                        type="function",
+                                        id=make_tool_call_id(),
+                                        function=DeltaFunctionCall(
+                                            name=func_name
+                                        ).model_dump(exclude_none=True),
+                                    )
+                                ]
+                            )
+
+                        if self.current_tool_name_sent and args_part:
+                            current_args = self._parse_arguments(
+                                args_part, partial=True
+                            )
+                            if current_args:
+                                return self._stream_arguments(current_args, final=False)
+
+                return None
+
+            # Function call just ended
+            if end_count > prev_end_count:
+                return self._close_tool_call(current_text)
+
+            if delta_text:
+                return DeltaMessage(content=delta_text)
+            return None
+
+        except Exception:
+            logger.exception("Error in streaming tool call extraction")
+            return None

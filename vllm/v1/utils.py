@@ -1,0 +1,835 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import argparse
+import contextlib
+import json
+import multiprocessing
+import threading
+import time
+import weakref
+from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
+from multiprocessing import connection
+from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    TypeVar,
+    Union,
+    overload,
+)
+
+import torch
+import uvloop
+from torch.autograd.profiler import record_function
+
+import vllm.envs as envs
+from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from vllm.v1.engine.coordinator import DPCoordinator
+    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
+
+logger = init_logger(__name__)
+
+T = TypeVar("T")
+
+
+class ConstantList(Generic[T], Sequence):
+    def __init__(self, x: list[T]) -> None:
+        self._x = x
+
+    def append(self, item):
+        raise TypeError("Cannot append to a constant list")
+
+    def extend(self, item):
+        raise TypeError("Cannot extend a constant list")
+
+    def insert(self, item):
+        raise TypeError("Cannot insert into a constant list")
+
+    def pop(self, item):
+        raise TypeError("Cannot pop from a constant list")
+
+    def remove(self, item):
+        raise TypeError("Cannot remove from a constant list")
+
+    def clear(self):
+        raise TypeError("Cannot clear a constant list")
+
+    def index(self, item: T, start: int = 0, stop: int | None = None) -> int:
+        return self._x.index(item, start, stop if stop is not None else len(self._x))
+
+    @overload
+    def __getitem__(self, item: int) -> T: ...
+
+    @overload
+    def __getitem__(self, s: slice, /) -> list[T]: ...
+
+    def __getitem__(self, item: int | slice) -> T | list[T]:
+        return self._x[item]
+
+    @overload
+    def __setitem__(self, item: int, value: T): ...
+
+    @overload
+    def __setitem__(self, s: slice, value: T, /): ...
+
+    def __setitem__(self, item: int | slice, value: T | list[T]):
+        raise TypeError("Cannot set item in a constant list")
+
+    def __delitem__(self, item):
+        raise TypeError("Cannot delete item from a constant list")
+
+    def __iter__(self):
+        return iter(self._x)
+
+    def __contains__(self, item):
+        return item in self._x
+
+    def __len__(self):
+        return len(self._x)
+
+    def __repr__(self):
+        return f"ConstantList({self._x})"
+
+    def copy(self) -> list[T]:
+        return self._x.copy()
+
+
+class CpuGpuBuffer:
+    """Buffer to easily copy tensors between CPU and GPU."""
+
+    def __init__(
+        self,
+        *size: int | torch.SymInt,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool = PIN_MEMORY,
+        with_numpy: bool = True,
+    ) -> None:
+        # these buffers are mutable runtime state, so allocate them as normal
+        with torch.inference_mode(False):
+            self.cpu = torch.zeros(
+                *size, dtype=dtype, device="cpu", pin_memory=pin_memory
+            )
+            self.gpu = torch.zeros_like(self.cpu, device=device)
+        self.np: np.ndarray
+        # To keep type hints simple (avoiding generics and subclasses), we
+        # only conditionally create the numpy array attribute. This can cause
+        # AttributeError if `self.np` is accessed when `with_numpy=False`.
+        if with_numpy:
+            if dtype == torch.bfloat16:
+                raise ValueError(
+                    "Bfloat16 torch tensors cannot be directly cast to a "
+                    "numpy array, so call CpuGpuBuffer with with_numpy=False"
+                )
+            self.np = self.cpu.numpy()
+
+    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
+        cpu, gpu = self.cpu, self.gpu
+        if n is not None:
+            cpu, gpu = cpu[:n], gpu[:n]
+        return gpu.copy_(cpu.pin_memory() if PIN_MEMORY else cpu, non_blocking=True)
+
+    def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
+        """NOTE: Because this method is non-blocking, explicit synchronization
+        is needed to ensure the data is copied to CPU."""
+        if n is None:
+            return self.cpu.copy_(self.gpu, non_blocking=True)
+        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
+
+
+def get_engine_client_zmq_addr(
+    local_only: bool,
+    host: str,
+    port: int = 0,
+) -> str:
+    """Return an IPC path (`local_only=True`) or `tcp://host:port`.
+
+    `port=0` lets the kernel assign the port at `bind()` time; the
+    caller must recover it via `getsockopt(zmq.LAST_ENDPOINT)`."""
+    if local_only:
+        return get_open_zmq_ipc_path()
+    return get_tcp_uri(host, port)
+
+
+class APIServerProcessManager:
+    """Manages a group of API server processes.
+
+    Handles creation, monitoring, and termination of API server worker
+    processes. Also monitors extra processes to check if they are healthy.
+    """
+
+    def __init__(
+        self,
+        listen_address: str,
+        sock: Any,
+        args: argparse.Namespace,
+        num_servers: int,
+        input_listeners: list[ZmqListener],
+        output_listeners: list[ZmqListener],
+        target_server_fn: Callable | None = None,
+        stats_update_address: str | None = None,
+        tensor_queue: Queue | None = None,
+    ):
+        """Initialize and start API server worker processes.
+
+        Args:
+            target_server_fn: Override function to call for each API server process
+            listen_address: Address to listen for client connections
+            sock: Socket for client connections
+            args: Command line arguments
+            num_servers: Number of API server processes to start
+            input_listeners: Input listeners for each API server
+            output_listeners: Output listeners for each API server
+            stats_update_address: Optional stats update address
+            tensor_queue: Optional tensor IPC queue for sharing MM tensors
+
+        """
+        self.listen_address = listen_address
+        self.sock = sock
+        self.args = args
+
+        spawn_context = multiprocessing.get_context("spawn")
+        self.processes: list[BaseProcess] = []
+
+        admission_counters = None
+        if num_servers > 1 and getattr(args, "max_num_queued_reqs", None) is not None:
+            from vllm.v1.engine.admission_control import SharedAdmissionStats
+
+            admission_counters = spawn_context.RawArray(
+                "q",
+                SharedAdmissionStats.num_counters(num_servers),
+            )
+
+        # Open connections per API server, to accept on the least loaded one;
+        # a server that has not started yet is never the least loaded.
+        api_server_loads = (
+            spawn_context.RawArray("i", [2**31 - 1] * num_servers)
+            if num_servers > 1
+            else None
+        )
+
+        listeners = [*input_listeners, *output_listeners]
+        self._listeners = listeners
+        try:
+            listener_pairs = zip(
+                range(num_servers), input_listeners, output_listeners, strict=True
+            )
+            for i, input_listener, output_listener in listener_pairs:
+                client_config: dict[str, Any] = {
+                    "input_address": input_listener.address,
+                    "output_address": output_listener.address,
+                    "input_listener": input_listener.socket,
+                    "output_listener": output_listener.socket,
+                    "client_count": num_servers,
+                    "client_index": i,
+                }
+                if api_server_loads is not None:
+                    client_config["api_server_loads"] = api_server_loads
+                if admission_counters is not None:
+                    client_config["mp_admission_counters"] = admission_counters
+                if stats_update_address is not None:
+                    client_config["stats_update_address"] = stats_update_address
+                if tensor_queue is not None:
+                    client_config["tensor_queue"] = tensor_queue
+
+                proc = spawn_context.Process(
+                    target=target_server_fn or run_api_server_worker_proc,
+                    name=f"ApiServer_{i}",
+                    args=(listen_address, sock, args, client_config),
+                )
+                self.processes.append(proc)
+                proc.start()
+                input_listener.close()
+                output_listener.close()
+        except BaseException:
+            _shutdown_processes_and_cleanup_listeners(self.processes, listeners)
+            raise
+
+        logger.info("Started %d API server processes", len(self.processes))
+
+        # Shutdown only the API server processes on garbage collection
+        # The extra processes are managed by their owners
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_processes_and_cleanup_listeners,
+            self.processes,
+            listeners,
+        )
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown API server processes with configurable timeout"""
+        if self._finalizer.detach() is not None:
+            _shutdown_processes_and_cleanup_listeners(
+                self.processes, self._listeners, timeout=timeout
+            )
+
+
+class RustFrontendProcessManager:
+    """Manages a single Rust frontend subprocess.
+
+    Launches the Rust vllm-rs binary in 'frontend' mode, passing the
+    HTTP and ZMQ listener file descriptors. Provides the same
+    interface as APIServerProcessManager for process monitoring.
+    """
+
+    def __init__(
+        self,
+        binary_path: str,
+        sock: Any,
+        args: argparse.Namespace,
+        input_listener: ZmqListener,
+        output_listener: ZmqListener,
+        engine_start_index: int,
+        engine_count: int,
+        data_parallel_size: int,
+        stats_update_address: str | None = None,
+        grpc_sock: Any | None = None,
+    ):
+        import os
+        import subprocess
+
+        listen_fd = sock.fileno()
+        input_fd = input_listener.socket.fileno()
+        output_fd = output_listener.socket.fileno()
+        inherited_fds = [listen_fd, input_fd, output_fd]
+        for fd in inherited_fds:
+            os.set_inheritable(fd, True)
+
+        cmd = [
+            binary_path,
+            "frontend",
+            "--listen-fd",
+            str(listen_fd),
+            "--input-listener-fd",
+            str(input_fd),
+            "--output-listener-fd",
+            str(output_fd),
+            "--engine-start-index",
+            str(engine_start_index),
+            "--engine-count",
+            str(engine_count),
+            "--data-parallel-size",
+            str(data_parallel_size),
+        ]
+        if grpc_sock is not None:
+            grpc_fd = grpc_sock.fileno()
+            os.set_inheritable(grpc_fd, True)
+            cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
+            inherited_fds.append(grpc_fd)
+        if stats_update_address is not None:
+            cmd.extend(["--coordinator-address", stats_update_address])
+        from vllm.entrypoints.common.startup import jsonify_non_default_args
+
+        args_dict = jsonify_non_default_args(
+            args,
+            exclude={
+                "api_server_count",
+                # Python passes the bootstrapped engine range explicitly.
+                "data_parallel_rank",
+                "data_parallel_external_lb",
+                "data_parallel_hybrid_lb",
+            },
+        )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
+        # The Rust `frontend` subcommand parses --args-json via serde_json,
+        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+        # declarations on SharedRuntimeArgs fields. Forward the env-driven
+        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
+        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
+        # frontends.
+        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+
+        # `--log-level`, `--logging-config` and `--log-config-file` default to
+        # argparse.SUPPRESS, so get_non_default_args() never sees them;
+        # cli/main.py has already merged them into `args.logging_config`.
+        if logging_config := getattr(args, "logging_config", None):
+            args_dict["logging_config"] = {
+                "log_level": logging_config.log_level,
+                "formatter": logging_config.formatter,
+            }
+            if (
+                not logging_config.configure_logging
+                or logging_config.pylogging_config_file
+            ):
+                logger.warning(
+                    "configure_logging and pylogging_config_file apply to "
+                    "Python logging only, not to the Rust frontend's logs."
+                )
+
+        args_json = json.dumps(args_dict, sort_keys=True)
+        cmd.extend(["--args-json", args_json])
+
+        # The subprocess needs the real values, but the log must not carry
+        # credentials such as api_key or hf_token.
+        from vllm.entrypoints.common.startup import redact_sensitive_args
+
+        redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
+        logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
+        self._listeners = [input_listener, output_listener]
+        try:
+            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
+        except BaseException:
+            for listener in self._listeners:
+                listener.cleanup()
+            raise
+        else:
+            input_listener.close()
+            output_listener.close()
+            # Rust owns these now; an open copy here keeps the ports listening
+            # after Rust closes them.
+            sock.close()
+            if grpc_sock is not None:
+                grpc_sock.close()
+
+        # Create a process wrapper with a sentinel fd for monitoring
+        self.processes: list[_SubprocessWrapper] = [
+            _SubprocessWrapper(self._proc, "RustFrontend")
+        ]
+
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_subprocesses_and_cleanup_listeners,
+            self.processes,
+            self._listeners,
+        )
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        if self._finalizer.detach() is not None:
+            _shutdown_subprocesses_and_cleanup_listeners(
+                self.processes, self._listeners, timeout=timeout
+            )
+
+
+class _SubprocessWrapper:
+    """Wraps subprocess.Popen to provide the BaseProcess-like interface
+    needed by wait_for_completion_or_failure."""
+
+    def __init__(self, proc, name: str):
+        self._proc = proc
+        self.name = name
+        self.pid = proc.pid
+        self._sentinel_conn: connection.Connection | None = None
+        self._sentinel_send: connection.Connection | None = None
+
+        # Use a Pipe-based sentinel so subprocess monitoring works uniformly
+        # across platforms with multiprocessing.connection.wait().
+        recv, send = connection.Pipe(duplex=False)
+        self._sentinel_conn = recv
+        self._sentinel_send = send
+
+        def monitor_subprocess() -> None:
+            try:
+                proc.wait()
+            finally:
+                with contextlib.suppress(Exception):
+                    send.close()
+
+        threading.Thread(
+            target=monitor_subprocess, daemon=True, name=f"{name}Monitor"
+        ).start()
+
+    @property
+    def sentinel(self):
+        return self._sentinel_conn
+
+    @property
+    def exitcode(self) -> int | None:
+        return self._proc.returncode if self._proc.poll() is not None else None
+
+    def is_alive(self) -> bool:
+        return self._proc.poll() is None
+
+    def terminate(self):
+        self._proc.terminate()
+
+    def join(self, timeout=None):
+        with contextlib.suppress(Exception):
+            self._proc.wait(timeout=timeout)
+
+    def __del__(self):
+        with contextlib.suppress(Exception):
+            if self._sentinel_conn is not None:
+                self._sentinel_conn.close()
+            if self._sentinel_send is not None:
+                self._sentinel_send.close()
+
+
+def _shutdown_subprocesses(
+    procs: list[_SubprocessWrapper], timeout: float | None = None
+) -> None:
+    """Shutdown subprocess wrappers (mirrors the shutdown() function)."""
+    if timeout is None:
+        timeout = 0.0
+    timeout = max(timeout, 5.0)
+
+    logger.debug(
+        "[shutdown] Subprocess manager: start process_count=%d timeout=%ss",
+        len(procs),
+        timeout,
+    )
+
+    for proc in procs:
+        if proc.is_alive():
+            proc.terminate()
+
+    deadline = time.monotonic() + timeout
+    for proc in procs:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if proc.is_alive():
+            proc.join(remaining)
+
+    remaining_pids = [
+        proc.pid for proc in procs if proc.is_alive() and proc.pid is not None
+    ]
+    if remaining_pids:
+        logger.warning(
+            "[shutdown] Subprocess manager: force killing remaining processes count=%d",
+            len(remaining_pids),
+        )
+    for pid in remaining_pids:
+        kill_process_tree(pid)
+
+    logger.debug_once("[shutdown] Subprocess manager: complete")
+
+
+def _shutdown_subprocesses_and_cleanup_listeners(
+    procs: list[_SubprocessWrapper],
+    listeners: list[ZmqListener],
+    timeout: float | None = None,
+) -> None:
+    try:
+        _shutdown_subprocesses(procs, timeout=timeout)
+    finally:
+        for listener in listeners:
+            listener.cleanup()
+
+
+def run_api_server_worker_proc(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
+    """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
+
+        configure_logging(logging_config)
+
+    from vllm.entrypoints.launchers.api_server.entry import run_server_worker
+
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
+
+    # Set process title and process-specific log metadata.
+    set_process_title("APIServer", str(server_index))
+    decorate_logs()
+
+    uvloop.run(
+        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
+    )
+
+
+def wait_for_completion_or_failure(
+    api_server_manager: "APIServerProcessManager | RustFrontendProcessManager",
+    engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
+    | None = None,
+    coordinator: "DPCoordinator | None" = None,
+) -> None:
+    """Wait for all processes to complete or detect if any fail.
+
+    Raises an exception if any process exits with a non-zero status.
+
+    Args:
+        api_server_manager: The manager for API servers.
+        engine_manager: The manager for engine processes.
+            If CoreEngineProcManager, it manages local engines;
+            if CoreEngineActorManager, it manages all engines.
+        coordinator: The coordinator for data parallel.
+
+    """
+    try:
+        logger.info("Waiting for API servers to complete ...")
+        # Create a mapping of sentinels to their corresponding processes
+        # for efficient lookup
+        sentinel_to_proc: dict[Any, BaseProcess | _SubprocessWrapper | None] = {
+            proc.sentinel: proc for proc in api_server_manager.processes
+        }
+
+        if coordinator:
+            sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
+
+        if engine_manager:
+            core_shutdown_recv, core_shutdown_send = connection.Pipe(duplex=False)
+
+            def monitor_engines():
+                try:
+                    engine_manager.monitor_engine_liveness()
+                finally:
+                    core_shutdown_send.close()
+                    core_shutdown_recv.close()
+
+            # start monitor for engine liveness
+            threading.Thread(target=monitor_engines, daemon=True).start()
+            sentinel_to_proc[core_shutdown_recv] = None  # type: ignore[assignment]
+
+        # Check if any process terminates
+        while sentinel_to_proc:
+            # Wait for any process to terminate (or engine shutdown signal)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
+
+            # Process any terminated processes
+            for sentinel in ready_sentinels:
+                proc = sentinel_to_proc.pop(sentinel)
+
+                # Check if process exited with error
+                if proc is not None and proc.exitcode != 0:
+                    raise RuntimeError(
+                        f"Process {proc.name} (PID: {proc.pid}) "
+                        f"died with exit code {proc.exitcode}"
+                    )
+                if engine_manager and engine_manager.failed_proc_name is not None:
+                    raise RuntimeError(
+                        f"Engine core process {engine_manager.failed_proc_name} "
+                        "died unexpectedly."
+                    )
+
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt, shutting down API servers...")
+    except Exception as e:
+        logger.exception("Exception occurred while running API servers: %s", str(e))
+        raise
+
+
+# Note(rob): shutdown function cannot be a bound method,
+# else the gc cannot collect the object.
+def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+    """Shutdown processes with timeout.
+
+    Args:
+        procs: List of processes to shutdown
+        timeout: Maximum time in seconds to wait for graceful shutdown
+
+    """
+    if timeout is None:
+        # Keep a small grace period for best-effort cleanup paths that do not
+        # have a user-configured shutdown timeout.
+        timeout = 5.0
+
+    logger.debug(
+        "[shutdown] Process manager: start process_count=%d timeout=%ss names=%s",
+        len(procs),
+        timeout,
+        (",").join([proc.name for proc in procs]),
+    )
+
+    # Shutdown the process.
+    for proc in procs:
+        if proc.is_alive():
+            logger.info(
+                "[shutdown] Process manager: send sigterm to process %s", proc.name
+            )
+            proc.terminate()
+
+    # Allow time for remaining procs to terminate.
+    deadline = time.monotonic() + timeout
+    for proc in procs:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if proc.is_alive():
+            proc.join(remaining)
+
+    remaining_procs = [
+        (proc.pid, proc.name)
+        for proc in procs
+        if proc.is_alive() and proc.pid is not None
+    ]
+    if remaining_procs:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining processes count=%d",
+            len(remaining_procs),
+        )
+    for pid, proc_name in remaining_procs:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining process %s pid %d",
+            proc_name,
+            pid,
+        )
+        kill_process_tree(pid)
+
+    logger.debug_once("[shutdown] Process manager: complete")
+
+
+def _shutdown_processes_and_cleanup_listeners(
+    procs: list[BaseProcess],
+    listeners: list[ZmqListener],
+    timeout: float | None = None,
+) -> None:
+    try:
+        shutdown(procs, timeout=timeout)
+    finally:
+        for listener in listeners:
+            listener.cleanup()
+
+
+def report_usage_stats(
+    vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+) -> None:
+    """Report usage statistics if enabled."""
+    if not is_usage_stats_enabled():
+        return
+
+    from vllm.model_executor.model_loader import get_architecture_class_name
+
+    model_config = vllm_config.model_config
+    scheduler_config = vllm_config.scheduler_config
+    parallel_config = vllm_config.parallel_config
+    attention_config = vllm_config.attention_config
+    compilation_config = vllm_config.compilation_config
+    speculative_config = vllm_config.speculative_config
+
+    # Prepare KV connector string if applicable
+    kv_connector = None
+    if vllm_config.kv_transfer_config is not None:
+        kv_connector = vllm_config.kv_transfer_config.kv_connector
+
+    # Attention backend is None when set to "auto" (resolved at runtime per platform).
+    attention_backend = (
+        attention_config.backend.name if attention_config.backend is not None else None
+    )
+
+    # CompilationMode is an IntEnum; report the name for readability in dashboards.
+    compilation_mode = (
+        compilation_config.mode.name if compilation_config.mode is not None else None
+    )
+
+    # Speculative decoding fields default to None when spec decode is disabled.
+    spec_decode_method = (
+        speculative_config.method if speculative_config is not None else None
+    )
+    num_speculative_tokens = (
+        speculative_config.num_speculative_tokens
+        if speculative_config is not None
+        else None
+    )
+
+    if model_config.using_transformers_backend():
+        backend_cls = model_config._model_info.architecture
+        # Show what was wrapped e.g. TransformersForCausalLM(Starcoder2ForCausalLM)
+        architecture = f"{backend_cls}({model_config.architectures[0]})"
+    else:
+        architecture = get_architecture_class_name(model_config)
+
+    usage_message.report_usage(
+        architecture,
+        usage_context,
+        extra_kvs={
+            # Common configuration
+            "dtype": str(model_config.dtype),
+            "block_size": vllm_config.cache_config.block_size,
+            # Reported at worker init: the extensible KV cache default (1.0) is
+            # still shown if the driver probe later falls back to 0.92.
+            "gpu_memory_utilization": (
+                vllm_config.cache_config.resolved_gpu_memory_utilization
+            ),
+            "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
+            # Quantization
+            "quantization": model_config.quantization,
+            "kv_cache_dtype": str(vllm_config.cache_config.cache_dtype),
+            # Feature flags
+            "enable_lora": bool(vllm_config.lora_config),
+            "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
+            "enforce_eager": model_config.enforce_eager,
+            "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
+            # Distributed parallelism settings
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
+            "data_parallel_size": parallel_config.data_parallel_size,
+            "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
+            "enable_expert_parallel": parallel_config.enable_expert_parallel,
+            # All2All backend for MoE expert parallel
+            "all2all_backend": parallel_config.all2all_backend,
+            # KV connector used
+            "kv_connector": kv_connector,
+            # Batching limits — tuning knobs operators commonly override
+            "max_model_len": model_config.max_model_len,
+            "max_num_seqs": scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": scheduler_config.max_num_batched_tokens,
+            # Attention backend (user-requested; None = auto-selected at runtime)
+            "attention_backend": attention_backend,
+            # torch.compile mode (e.g. NONE, STOCK_TORCH_COMPILE, VLLM_COMPILE)
+            "compilation_mode": compilation_mode,
+            # Speculative decoding configuration
+            "spec_decode_method": spec_decode_method,
+            "num_speculative_tokens": num_speculative_tokens,
+            # Wide expert parallel: load balancer + redundant/total expert counts
+            "enable_eplb": parallel_config.enable_eplb,
+            "num_redundant_experts": parallel_config.eplb_config.num_redundant_experts,
+            "num_experts": model_config.get_num_experts(),
+        },
+    )
+
+
+_PROFILER_FUNC = None
+
+
+def record_function_or_nullcontext(name: str) -> AbstractContextManager:
+    global _PROFILER_FUNC
+
+    # fast path assume it is set
+    if _PROFILER_FUNC is not None:
+        return _PROFILER_FUNC(name)
+
+    func = contextlib.nullcontext
+    if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+        func = record_function
+    elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
+        import nvtx
+
+        func = nvtx.annotate
+
+    _PROFILER_FUNC = func
+    return func(name)
+
+
+def tensor_data(tensor: torch.Tensor) -> memoryview:
+    """Get the raw data of a tensor as a uint8 memoryview, useful for
+    serializing and hashing.
+
+    Args:
+        tensor: The input tensor.
+
+    Returns:
+        A memoryview of the tensor data as uint8.
+
+    """
+    if tensor.is_cpu and tensor.is_contiguous():
+        # Avoid several torch ops, each of which releases and re-acquires the GIL.
+        # View dtypes NumPy cannot export as bytes.
+        try:
+            if tensor.dtype not in TORCH_DTYPE_TO_NUMPY_DTYPE:
+                tensor = tensor.view(torch.uint8)
+            return memoryview(tensor.numpy()).cast("B")
+        except (TypeError, RuntimeError):
+            pass
+    return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data

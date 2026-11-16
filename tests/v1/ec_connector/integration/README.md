@@ -1,0 +1,233 @@
+# EPD Correctness Test
+
+This test verifies that EPD (Encoder-Prefill-Decode) disaggregation produces identical outputs to a baseline single instance.
+
+## What It Tests
+
+- **Baseline**: Single vLLM instance serving a multimodal model
+- **EPD (1E+1PD)**: 1 Encoder + 1 Prefill-Decode instance
+- **Baseline (1P+1D)**: 1 Prefill + 1 Decode instance
+- **EPD (1E+1P+1D)**: 1 Encoder + 1 Prefill + 1 Decode instance
+
+The test ensures that disaggregated encoding produces **identical** outputs to the baseline.
+
+Note that currently PD disaggregation set up may give slightly different results from a single instance. Therefore, we need the result from 1P+1D as the baseline for 1E+1P+1D
+
+Please refer to [Disaggregated Encoder Feature](../../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
+
+## Files
+
+- `run_epd_correctness_test.sh` - Main test script (starts all instances and runs tests)
+- `test_epd_correctness.py` - Python test script (compares outputs)
+
+## Usage
+
+### Multimodal Prompts (Default)
+
+```bash
+cd vllm
+./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+```
+
+This runs the test with actual multimodal (image) prompts.
+
+### Text-Only Prompts
+
+```bash
+cd vllm
+USE_MM_PROMPTS=0 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+```
+
+This runs a quick test with text-only prompts to verify the setup works.
+
+### Custom Configuration
+
+```bash
+# Use specific GPUs
+GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+
+# Use specific ports
+ENDPOINT_PORT=10001 bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+
+# Use specific model
+MODEL="Qwen/Qwen2.5-VL-3B-Instruct" bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+
+# Use specific storage path
+EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+```
+
+## How It Works
+
+### NIXL EC failure isolation (1E + 1PD)
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0,1 \
+  .venv/bin/python -m pytest \
+  tests/v1/ec_connector/integration/test_nixl_failure.py -v -s
+```
+
+Requires two CUDA GPUs and NIXL. `MODEL` overrides the default
+`Qwen/Qwen2.5-VL-3B-Instruct`. The test starts real E/PD servers with CUDA
+graphs enabled and uses the proxy's rewrite helper. Only the failing request's
+control endpoint is replaced: a ZMQ peer returns `NACK_MISSING` and verifies
+that the consumer actually requested the encoding.
+
+Metadata-only requests must return a request-level error; requests retaining
+the image must succeed through local fallback. After each case, a fresh
+metadata-only image request must succeed through the real NIXL transfer path.
+No server restart, proxy retry, cache hit, or timeout race can mask the result.
+This is a correctness test, not a throughput benchmark.
+
+### Mooncake EC (1E + 1PD)
+
+```bash
+PYTHON_BIN="$PWD/.venv/bin/python" \
+  bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
+```
+
+Requires two GPUs and Mooncake TransferEngine. TCP is the default transport;
+no RDMA-capable network hardware is required.
+The script sets `MC_FORCE_TCP=1` in TCP mode so Mooncake cannot auto-select RDMA.
+The baseline runs first on GPU 0, followed by E on GPU 0 and PD on GPU 1.
+`MOONCAKE_EC_PROTOCOL=rdma` selects RDMA instead; host-specific transport
+environment variables should be set by the caller.
+
+Three black-box cases check fixed short answers and compare with the baseline:
+
+- One image: read the STOP sign.
+- Two different images (including a local file): identify flowers and birds.
+- The same image twice: read both STOP signs.
+
+By default, all three requests run concurrently for two rounds, exercising
+shared hashes across requests and reuse after completion. Every response is
+compared, not just the final round. Set `CONCURRENCY` and `REPEAT` to override.
+Prefix caching is disabled and CUDA graphs remain enabled. This is a small
+correctness suite, not a performance benchmark or failure-injection suite.
+
+`LOG_PATH` and `BASELINE_FILE` select the log directory and reference output.
+`SKIP_BASELINE=1` reuses a reference generated with the same model and test
+configuration. `USE_MM_PROMPTS=0` only checks text routing, not EC transfer.
+
+Buildkite runs this script as `mooncake-ec-tcp-e2e-2-gpus` on two L4 GPUs.
+The job is defined in `.buildkite/test_areas/disaggregated_mooncake.yaml` and
+selected for changes to EC, multimodal processing, scheduler/model-runner
+integration, the proxy, or these tests (subject to normal PR CI approval).
+It reuses the CI image's Python packages through a system-site-packages venv
+and installs the CUDA-compatible Mooncake wheel. It uses loopback networking
+and TCP only, without RDMA devices or peer-memory setup.
+
+The job fails on startup errors, request errors, or answer mismatches. On
+failure, the script prints the last 100 lines of each server/proxy log to
+the CI job log; full files remain under `LOG_PATH` while the container exists.
+
+### Step 1: Baseline
+
+1. Start single vLLM instance on GPU
+2. Run test prompts (multimodal or text-only)
+3. Save outputs to `.vllm_epd_baseline.txt`
+4. Shutdown instance
+
+### Step 2: EPD (1E + 1PD)
+
+1. Clear encoder cache storage
+2. Start instances and proxy
+3. Run same test prompts
+4. Assert outputs match baseline exactly
+5. Shutdown instances
+
+### Step 3: EPD (1E + 1P + 1D)
+
+1. Clear encoder cache storage
+2. Start instances and proxy
+3. Run same test prompts
+4. Assert outputs match baseline exactly
+5. Shutdown instances
+
+## Test Scenarios
+
+### Multimodal Prompts (--use_mm_prompts)
+
+Tests encoder cache transfer:
+
+- Single image query
+- Multiple images in one request
+- Mixed image and text
+- Image with detailed questions
+
+### Text-Only Prompts (default)
+
+Quick sanity check:
+
+- Simple text queries
+- Text-only explanations
+- Verifies proxy routing works
+
+## Expected Behavior
+
+### ✅ Test Passes When
+
+- All disagg outputs match baseline outputs exactly
+- No errors during instance startup
+- Encoder cache is properly saved and loaded
+- Proxy correctly routes requests
+
+### ❌ Test Fails When
+
+- Outputs differ between baseline and disagg
+- Server startup fails
+- Encoder cache not found (should fall back to local execution)
+- Proxy routing errors
+
+## Notes
+
+- The test uses deterministic generation (`temperature=0.0`, `seed=42`)
+- Encoder cache should enable exact output reproduction
+- Test cleans up all instances and cache files after completion
+- Safe to run multiple times (idempotent)
+- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/disaggregated/disaggregated_encoder/README.md`
+
+## Requirements
+
+- Multiple GPUs (3 for 1E+1P+1D, 2 for 1E+1PD, 1 for baseline)
+    - 1E+1P+1D is runnable with 2 GPU by assign E and P on the same GPU now.
+- Multimodal model (e.g., Qwen2.5-VL-3B-Instruct)
+- Internet access (for accessing vllm test images)
+
+## Debugging
+
+### Check Logs
+
+Logs and baseline output are saved in `/tmp/` by default.
+Can be customized by changing the environment variables.
+
+### Check Encoder Cache
+
+```bash
+# Verify cache files are created
+ls -la $EC_SHARED_STORAGE_PATH/
+
+# Should see directories with mm_hash names
+# Each containing encoder_cache.safetensors
+```
+
+### Manual Testing
+
+Run individual components:
+
+```bash
+# Baseline only
+python test_epd_correctness.py \
+    --service_url http://localhost:8000 \
+    --model_name Qwen/Qwen2.5-VL-3B-Instruct \
+    --mode baseline \
+    --baseline_file test_output.txt \
+    --use_mm_prompts
+
+# Disagg only (requires baseline output file!)
+python test_epd_correctness.py \
+    --service_url http://localhost:8000 \
+    --model_name Qwen/Qwen2.5-VL-3B-Instruct \
+    --mode disagg \
+    --baseline_file test_output.txt \
+    --use_mm_prompts
+```

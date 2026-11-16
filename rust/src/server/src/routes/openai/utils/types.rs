@@ -1,0 +1,925 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::slice;
+
+use indexmap::IndexMap;
+use llm_multimodal::ImageDetail;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+use vllm_chat::ChatTool;
+use vllm_llm::{PromptCacheUsage, TokenUsage};
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// ============================================================================
+// Default value helpers
+// ============================================================================
+
+/// Helper function for serde default value (returns true).
+pub fn default_true() -> bool {
+    true
+}
+
+/// Deserialize an OpenAI request `top_k` while preserving explicit disable.
+///
+/// Null remains `None` so model generation defaults apply. Explicit `-1` and
+/// `0` become `Some(0)` so the request overrides those defaults and disables
+/// top-k sampling. Positive limits are preserved.
+pub fn deserialize_request_top_k<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => vllm_text::normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+/// Effort level for reasoning models.
+///
+/// Fixed OpenAI HTTP request grades. Request conversion maps these names to
+/// the model-independent `vllm_chat::EffortValue` before renderer validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+// ============================================================================
+// String/Array Utilities
+// ============================================================================
+
+/// A type that can be either a single string or an array of strings.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum StringOrArray {
+    String(String),
+    Array(Vec<String>),
+}
+
+impl StringOrArray {
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            StringOrArray::String(s) => slice::from_ref(s),
+            StringOrArray::Array(arr) => arr,
+        }
+    }
+
+    #[allow(unused)]
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            StringOrArray::String(s) => vec![s],
+            StringOrArray::Array(arr) => arr,
+        }
+    }
+}
+
+fn max_stop_strings() -> usize {
+    std::env::var("VLLM_MAX_STOP_STRINGS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4)
+}
+
+/// Validates stop sequences (at most the configured number of non-empty strings).
+pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationError> {
+    let stop = stop.as_slice();
+    let max_stop_strings = max_stop_strings();
+    if stop.len() > max_stop_strings {
+        let mut error = validator::ValidationError::new("too_many_stop_strings");
+        error.code = format!("stop strings must contain at most {max_stop_strings} items").into();
+        return Err(error);
+    }
+    if stop.iter().any(|s| s.is_empty()) {
+        return Err(validator::ValidationError::new(
+            "stop strings cannot be empty",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatMessage, StringOrArray, validate_stop};
+
+    #[test]
+    fn validate_stop_accepts_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
+        );
+
+        validate_stop(&stop).expect("four stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_stop_rejects_more_than_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        let error = validate_stop(&stop).expect_err("five stop strings should be rejected");
+
+        assert_eq!(
+            error.code.as_ref(),
+            "stop strings must contain at most 4 items"
+        );
+    }
+
+    #[test]
+    fn assistant_reasoning_aliases_fold_into_reasoning() {
+        for (fields, expected) in [
+            (
+                r#""reasoning":"canonical","reasoning_content":"legacy","thinking":"thought""#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning_content":"legacy","reasoning":"canonical""#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning":null,"reasoning_content":"legacy""#,
+                Some("legacy"),
+            ),
+            (r#""reasoning":"","reasoning_content":"legacy""#, Some("")),
+            (
+                r#""reasoning":"canonical","reasoning_content":42"#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning_content":"legacy","thinking":"thought""#,
+                Some("legacy"),
+            ),
+            (
+                r#""reasoning_content":null,"thinking":"thought""#,
+                Some("thought"),
+            ),
+            (r#""reasoning_content":null"#, None),
+        ] {
+            let message = serde_json::from_str(&format!(
+                r#"{{"role":"assistant","content":"answer",{fields}}}"#
+            ))
+            .unwrap_or_else(|error| panic!("{fields}: {error}"));
+            let ChatMessage::Assistant { reasoning, .. } = message else {
+                panic!("{fields}: expected an assistant message, got {message:?}");
+            };
+            assert_eq!(reasoning.as_deref(), expected, "{fields}");
+        }
+    }
+}
+
+// ============================================================================
+// Validation helpers
+// ============================================================================
+
+/// Validates top_p: 0.0 < top_p <= 1.0.
+pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError> {
+    if !(top_p > 0.0 && top_p <= 1.0) {
+        return Err(validator::ValidationError::new(
+            "top_p must be in (0, 1] - greater than 0.0 and at most 1.0",
+        ));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Content Parts (for multimodal messages)
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// A refusal the model gave earlier. Valid only in assistant messages,
+    /// where it is replayed as text.
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        image_url: ImageUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "video_url")]
+    VideoUrl {
+        video_url: VideoUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "audio_url")]
+    AudioUrl {
+        audio_url: AudioUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "input_audio")]
+    InputAudio {
+        input_audio: InputAudio,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    /// A vLLM extension naming a tool, as tool search returns it in a tool
+    /// result (Anthropic's `tool_reference` block).
+    #[serde(rename = "tool_reference")]
+    ToolReference { name: String },
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ImageUrl {
+    pub url: String,
+    pub detail: Option<ImageDetail>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct VideoUrl {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AudioUrl {
+    pub url: String,
+}
+
+/// Base64-encoded audio bytes in OpenAI `input_audio` form.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct InputAudio {
+    pub data: String,
+    pub format: Option<String>,
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub(crate) struct StreamResponseEnvelope {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+}
+
+impl StreamResponseEnvelope {
+    pub(crate) fn new(id: String, object: &'static str, created: u64, model: String) -> Self {
+        Self {
+            id,
+            object,
+            created,
+            model,
+        }
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+/// Mirrors the Python vLLM `StreamOptions` class.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StreamOptions {
+    pub include_usage: Option<bool>,
+    pub continuous_usage_stats: Option<bool>,
+}
+
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
+}
+
+// ============================================================================
+// Tools and Function Calling
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Tool {
+    #[serde(rename = "type")]
+    #[serde(default = "default_function_tool_type")]
+    pub tool_type: String,
+    pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
+}
+
+fn default_function_tool_type() -> String {
+    "function".to_string()
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Function {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: Value,
+    /// Whether to enable strict schema adherence (OpenAI structured outputs).
+    pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
+}
+
+impl From<Function> for ChatTool {
+    fn from(function: Function) -> Self {
+        let Function {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        } = function;
+        Self {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: FunctionCallResponse,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FunctionCallResponse {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Option<String>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolCallDelta {
+    pub index: u32,
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub tool_type: Option<String>,
+    pub function: Option<FunctionCallDelta>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FunctionCallDelta {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
+/// Tool choice value for simple string options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoiceValue {
+    Auto,
+    Required,
+    None,
+}
+
+/// Tool choice for the Chat Completion API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    Value(ToolChoiceValue),
+    Function {
+        #[serde(rename = "type")]
+        tool_type: String,
+        function: FunctionChoice,
+    },
+    AllowedTools {
+        #[serde(rename = "type")]
+        tool_type: String,
+        mode: String,
+        tools: Vec<ToolReference>,
+    },
+}
+
+impl Default for ToolChoice {
+    fn default() -> Self {
+        Self::Value(ToolChoiceValue::Auto)
+    }
+}
+
+/// Function choice specification for `ToolChoice::Function`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FunctionChoice {
+    pub name: String,
+}
+
+/// Tool reference for `ToolChoice::AllowedTools`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ToolReference {
+    #[serde(rename = "function")]
+    Function { name: String },
+    #[serde(rename = "mcp")]
+    Mcp {
+        server_label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    #[serde(rename = "file_search")]
+    FileSearch,
+    #[serde(rename = "web_search_preview")]
+    WebSearchPreview,
+    #[serde(rename = "computer_use_preview")]
+    ComputerUsePreview,
+    #[serde(rename = "code_interpreter")]
+    CodeInterpreter,
+    #[serde(rename = "image_generation")]
+    ImageGeneration,
+}
+
+impl ToolReference {
+    /// Get a unique identifier for this tool reference.
+    pub fn identifier(&self) -> String {
+        match self {
+            ToolReference::Function { name } => format!("function:{name}"),
+            ToolReference::Mcp {
+                server_label,
+                name: Some(n),
+            } => format!("mcp:{server_label}:{n}"),
+            ToolReference::Mcp {
+                server_label,
+                name: _,
+            } => format!("mcp:{server_label}"),
+            ToolReference::FileSearch => "file_search".to_string(),
+            ToolReference::WebSearchPreview => "web_search_preview".to_string(),
+            ToolReference::ComputerUsePreview => "computer_use_preview".to_string(),
+            ToolReference::CodeInterpreter => "code_interpreter".to_string(),
+            ToolReference::ImageGeneration => "image_generation".to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// Chat Messages
+// ============================================================================
+
+/// One chat message, tagged by `role`.
+///
+/// The derived serde impls use `remote = "Self"` and cover only the standard
+/// roles; the trait impls below dispatch on the role tag and handle
+/// [`ChatMessage::Custom`] separately. A `#[serde(untagged)]` fallback variant
+/// would also accept malformed standard messages, such as a `tool` message
+/// without `tool_call_id`, and replace their field errors with serde's generic
+/// untagged-enum error.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "role", remote = "Self")]
+pub enum ChatMessage {
+    #[serde(rename = "system")]
+    System {
+        content: MessageContent,
+        name: Option<String>,
+    },
+    #[serde(rename = "user")]
+    User {
+        content: MessageContent,
+        name: Option<String>,
+    },
+    #[serde(rename = "assistant")]
+    Assistant {
+        content: Option<MessageContent>,
+        name: Option<String>,
+        tool_calls: Option<Vec<ToolCall>>,
+        /// Reasoning content for reasoning-capable models. Its aliases are
+        /// folded in by `normalize_reasoning_aliases`.
+        reasoning: Option<String>,
+    },
+    #[serde(rename = "tool")]
+    Tool {
+        content: MessageContent,
+        tool_call_id: String,
+    },
+    #[serde(rename = "function")]
+    Function { content: String, name: String },
+    #[serde(rename = "developer")]
+    Developer {
+        content: MessageContent,
+        tools: Option<Vec<Tool>>,
+        name: Option<String>,
+    },
+    /// Message with a role outside the OpenAI set, such as `root`. Chat
+    /// templates receive the role string unchanged.
+    #[serde(skip)]
+    Custom {
+        role: String,
+        content: MessageContent,
+    },
+}
+
+/// Role tags of the standard [`ChatMessage`] variants.
+const STANDARD_CHAT_ROLES: &[&str] = &[
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function",
+    "developer",
+];
+
+/// Wire shape of [`ChatMessage::Custom`].
+#[derive(Deserialize, Serialize)]
+struct CustomChatMessage<R, C> {
+    role: R,
+    content: C,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Custom { role, content } => {
+                CustomChatMessage { role, content }.serialize(serializer)
+            }
+            _ => Self::serialize(self, serializer),
+        }
+    }
+}
+
+/// Fold the `reasoning_content` and `thinking` aliases of a message into
+/// `reasoning`, so clients replaying history may send several spellings.
+///
+/// Mirrors the Python frontend's `_normalize_messages_before`: aliases are
+/// always removed, and the first non-null one fills `reasoning` only when it is
+/// absent or null. `thinking` is a Rust-only alias with the lowest precedence.
+fn normalize_reasoning_aliases(message: &mut Value) {
+    let Some(message) = message.as_object_mut() else {
+        return;
+    };
+    for alias in ["reasoning_content", "thinking"] {
+        let Some(alias_value) = message.remove(alias) else {
+            continue;
+        };
+        if alias_value.is_null() {
+            continue;
+        }
+        if message.get("reasoning").is_none_or(Value::is_null) {
+            message.insert("reasoning".to_string(), alias_value);
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    /// Normalize the reasoning aliases, then dispatch on the role tag: standard
+    /// roles keep their derived errors, and any other string role becomes
+    /// [`ChatMessage::Custom`].
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        normalize_reasoning_aliases(&mut value);
+        let is_custom = value
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !STANDARD_CHAT_ROLES.contains(&role));
+
+        if is_custom {
+            let CustomChatMessage { role, content } =
+                CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Custom { role, content })
+        } else {
+            Self::deserialize(value).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+// ============================================================================
+// Usage and Logging
+// ============================================================================
+
+/// Mirrors the Python vLLM `UsageInfo` class.
+///
+/// Do not skip serializing `None` fields here, except where Python omits them
+/// (`prompt_tokens_details`): non-streaming response types should serialize
+/// `None` as explicit `null`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Usage {
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+    pub completion_tokens: Option<usize>,
+    /// Omitted rather than `null` when not reported, like Python: the OpenAI
+    /// spec types it as an object, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
+    /// Reasoning-token breakdown. `None` when the frontend cannot count
+    /// reasoning tokens: on chat without a reasoning parser, and always on
+    /// completions and generate.
+    pub completion_tokens_details: Option<CompletionTokenUsageInfo>,
+}
+
+impl Usage {
+    /// Create a Usage with prompt-token cache and reasoning-token details.
+    ///
+    /// The one mapping from token usage onto the wire: every field comes from
+    /// `usage`, and `enable_prompt_tokens_details` only decides whether
+    /// prompt-token details are reported. `usage` is destructured exhaustively,
+    /// so a new usage field fails to compile until it is mapped here.
+    /// `reasoning_tokens` is `None` when the route does not count reasoning
+    /// tokens.
+    pub fn from_token_usage(
+        usage: TokenUsage,
+        enable_prompt_tokens_details: bool,
+        reasoning_tokens: Option<usize>,
+    ) -> Self {
+        let TokenUsage {
+            prompt_token_count: prompt_tokens,
+            output_token_count: completion_tokens,
+            prompt_cache_usage:
+                PromptCacheUsage {
+                    cached_token_count,
+                    cache_creation_token_count,
+                },
+        } = usage;
+        Self {
+            prompt_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens: Some(completion_tokens),
+            prompt_tokens_details: enable_prompt_tokens_details.then_some(PromptTokenUsageInfo {
+                cached_tokens: cached_token_count,
+                created_cache_tokens: cache_creation_token_count,
+            }),
+            completion_tokens_details: reasoning_tokens
+                .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
+        }
+    }
+
+    /// Fold in the usage of another choice of the same request. Like Python
+    /// for `n > 1`, the prompt counts once, while completion and reasoning
+    /// tokens add up over the choices.
+    pub(crate) fn add_choice(&mut self, other: &Usage) {
+        if let (Some(completion_tokens), Some(other)) =
+            (&mut self.completion_tokens, other.completion_tokens)
+        {
+            *completion_tokens += other;
+        }
+        if let (Some(details), Some(other)) = (
+            &mut self.completion_tokens_details,
+            &other.completion_tokens_details,
+        ) {
+            details.reasoning_tokens += other.reasoning_tokens;
+        }
+        self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
+    }
+}
+
+/// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptTokenUsageInfo {
+    pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache. Python reports it on
+    /// chat only; Rust reports it wherever `cached_tokens` is reported.
+    pub created_cache_tokens: usize,
+}
+
+/// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CompletionTokenUsageInfo {
+    pub reasoning_tokens: usize,
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use serde_json::json;
+    use vllm_llm::{PromptCacheUsage, TokenUsage};
+
+    use super::Usage;
+
+    const USAGE: TokenUsage = TokenUsage {
+        prompt_token_count: 5,
+        output_token_count: 2,
+        prompt_cache_usage: PromptCacheUsage {
+            cached_token_count: 3,
+            cache_creation_token_count: 1,
+        },
+    };
+
+    #[test]
+    fn token_usage_hides_prompt_token_details_by_default() {
+        let usage = Usage::from_token_usage(USAGE, false, None);
+
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, Some(2));
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert!(json.get("prompt_tokens_details").is_none(), "{json}");
+    }
+
+    #[test]
+    fn token_usage_includes_prompt_token_details_when_enabled() {
+        let usage = Usage::from_token_usage(USAGE, true, None);
+
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(
+            json["prompt_tokens_details"],
+            json!({"cached_tokens": 3, "created_cache_tokens": 1})
+        );
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 8,
+                output_token_count: 2,
+                prompt_cache_usage: Default::default(),
+            },
+            true,
+            None,
+        );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
+    }
+
+    /// Like Python's `UsageInfo`, reasoning-token details are reported only
+    /// when counted (including a zero count), and `null` otherwise.
+    #[test]
+    fn token_usage_serializes_reasoning_token_details_only_when_counted() {
+        let json = |reasoning_tokens| {
+            serde_json::to_value(Usage::from_token_usage(USAGE, false, reasoning_tokens))
+                .expect("usage serializes")["completion_tokens_details"]
+                .clone()
+        };
+
+        assert_eq!(json(Some(3)), json!({"reasoning_tokens": 3}));
+        assert_eq!(json(Some(0)), json!({"reasoning_tokens": 0}));
+        assert_eq!(json(None), json!(null));
+    }
+}
+
+/// OpenAI completions-style logprobs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LogProbs {
+    pub tokens: Vec<String>,
+    pub token_logprobs: Vec<Option<f32>>,
+    /// Each position's candidates in the engine's order (the sampled token
+    /// first), serialized in that order like Python's dict.
+    pub top_logprobs: Vec<Option<IndexMap<String, f32>>>,
+    pub text_offset: Vec<u32>,
+}
+
+/// vLLM prompt-logprob metadata keyed by vocabulary token ID.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptLogprob {
+    pub logprob: f32,
+    pub rank: u32,
+    pub decoded_token: String,
+}
+
+/// Each scored position's candidates in the engine's order (the prompt token
+/// first), serialized in that order like Python's dict.
+pub type PromptLogprobs = Vec<Option<IndexMap<u32, PromptLogprob>>>;
+
+/// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatLogProbs {
+    pub content: Option<Vec<ChatLogProbsContent>>,
+}
+
+/// Mirrors the Python vLLM `ChatCompletionLogProbsContent` class.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatLogProbsContent {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Option<Vec<u8>>,
+    pub top_logprobs: Vec<TopLogProb>,
+}
+
+/// Mirrors the Python vLLM `ChatCompletionLogProb` class.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopLogProb {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Option<Vec<u8>>,
+}
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ErrorResponse {
+    pub error: ErrorDetail,
+}
+
+/// Mirrors the Python vLLM `ErrorInfo` class.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ErrorDetail {
+    pub message: String,
+    /// The error class, such as `BadRequestError`.
+    #[serde(rename = "type")]
+    pub error_type: String,
+    pub param: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
+}
+
+// ============================================================================
+// Model types
+// ============================================================================
+
+/// A single model entry in the `/v1/models` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelObject {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub owned_by: String,
+    /// Backend model path (base cards) or adapter path (LoRA cards).
+    pub root: Option<String>,
+    /// Base model a LoRA adapter derives from; `null` for base models.
+    pub parent: Option<String>,
+    /// Maximum context length; `null` for LoRA adapter cards.
+    pub max_model_len: Option<u32>,
+}
+
+/// Response body for `GET /v1/models`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListModelsResponse {
+    pub object: String,
+    pub data: Vec<ModelObject>,
+}
+
+// ============================================================================
+// Shared validation helpers
+// ============================================================================
+
+/// Validates a messages array is non-empty.
+///
+/// Used by both `POST /v1/chat/completions` and `POST /tokenize` (chat form)
+/// so validation behaviour stays in lockstep. Message content may be empty,
+/// like in the Python frontend, which renders it as an empty turn.
+pub(crate) fn validate_messages(
+    messages: &[ChatMessage],
+) -> Result<(), validator::ValidationError> {
+    if messages.is_empty() {
+        return Err(validator::ValidationError::new("messages cannot be empty"));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Normalizable trait
+// ============================================================================
+
+/// Trait for request types that need post-deserialization normalization.
+pub trait Normalizable {
+    /// Normalize the request by applying defaults and transformations.
+    fn normalize(&mut self) {
+        // Default: no-op
+    }
+}

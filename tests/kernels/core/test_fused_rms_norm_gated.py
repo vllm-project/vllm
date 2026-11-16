@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Tests that FusedRMSNormGated decomposes correctly under torch.compile,
+matching the eager triton kernel output."""
+
+import subprocess
+import sys
+
+import pytest
+import torch
+
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config.compilation import CompilationMode
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
+    FusedRMSNormGated,
+)
+from vllm.utils.torch_utils import set_random_seed
+
+DEVICE = "xpu:0" if current_platform.is_xpu() else "cuda:0"
+
+DTYPES = [torch.bfloat16]
+HIDDEN_SIZES = [128, 512]
+NUM_TOKENS = [64, 128]
+ACTIVATIONS = ["swish", "sigmoid"]
+ELEMENTWISE_AFFINE = [True, False]
+SEEDS = [0]
+
+
+@pytest.mark.parametrize("first", ["kda", "fused_norm_gate"])
+def test_norm_gate_import_order(first):
+    second = "fused_norm_gate" if first == "kda" else "kda"
+    code = """
+import importlib
+import sys
+from vllm.model_executor.custom_op import op_registry
+
+prefix = "vllm.third_party.flash_linear_attention.ops."
+first, second = [importlib.import_module(prefix + name) for name in sys.argv[1:]]
+assert first.FusedRMSNormGated is second.FusedRMSNormGated
+assert op_registry["fused_rms_norm_gated"] is first.FusedRMSNormGated
+"""
+    subprocess.run(
+        [sys.executable, "-c", code, first, second],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("activation", ACTIVATIONS)
+@pytest.mark.parametrize("elementwise_affine", ELEMENTWISE_AFFINE)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_compiled_vs_eager(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    activation: str,
+    elementwise_affine: bool,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    """forward_native decomposition matches forward_cuda triton kernel."""
+    torch._dynamo.reset()
+    set_random_seed(seed)
+    device = torch.device(DEVICE)
+
+    module = FusedRMSNormGated(
+        hidden_size,
+        elementwise_affine=elementwise_affine,
+        eps=1e-5,
+        activation=activation,
+        device=device,
+        dtype=dtype,
+    )
+    # Model parameters use torch.empty because checkpoint loading overwrites
+    # them. Initialize the standalone test module so allocator contents cannot
+    # introduce NaNs and make this comparison flaky.
+    if module.weight is not None:
+        module.weight.uniform_(-1, 1)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    g = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+
+    # forward_cuda may modify x in-place, so clone inputs
+    cuda_out = module.forward_cuda(x.clone(), g.clone())
+    compiled_native = torch.compile(module.forward_native, fullgraph=True)
+    native_out = compiled_native(x.clone(), g.clone())
+
+    torch.testing.assert_close(native_out, cuda_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 16, 32, 128),
+        (2, 8, 16, 64),
+    ],
+)
+@pytest.mark.parametrize("activation", ACTIVATIONS)
+@pytest.mark.parametrize("elementwise_affine", ELEMENTWISE_AFFINE)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_compiled_vs_eager_multidim(
+    default_vllm_config,
+    shape: tuple,
+    activation: str,
+    elementwise_affine: bool,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    """forward_native decomposition handles multi-dimensional inputs."""
+    torch._dynamo.reset()
+    set_random_seed(seed)
+    device = torch.device(DEVICE)
+    head_dim = shape[-1]
+
+    module = FusedRMSNormGated(
+        head_dim,
+        elementwise_affine=elementwise_affine,
+        eps=1e-5,
+        activation=activation,
+        device=device,
+        dtype=dtype,
+    )
+    if module.weight is not None:
+        module.weight.uniform_(-1, 1)
+    x = torch.randn(*shape, dtype=dtype, device=device)
+    g = torch.randn(*shape, dtype=dtype, device=device)
+
+    # forward_cuda may modify x in-place, so clone inputs
+    cuda_out = module.forward_cuda(x.clone(), g.clone())
+    compiled_native = torch.compile(module.forward_native, fullgraph=True)
+    native_out = compiled_native(x.clone(), g.clone())
+
+    torch.testing.assert_close(native_out, cuda_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("enforce_enable", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 37])
+@torch.inference_mode()
+def test_enforce_enable_with_custom_ops_off(enforce_enable: bool, num_tokens: int):
+    """enforce_enable keeps the fused kernel when Inductor disables custom ops."""
+    set_random_seed(0)
+    device = torch.device(DEVICE)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=["none"]
+        )
+    )
+    with set_current_vllm_config(config):
+        module = FusedRMSNormGated(
+            128,
+            activation="sigmoid",
+            device=device,
+            dtype=torch.bfloat16,
+            enforce_enable=enforce_enable,
+        )
+    is_native = module._forward_method.__func__ is FusedRMSNormGated.forward_native
+    assert is_native != enforce_enable
+
+    module.weight.uniform_(-1, 1)
+    x = torch.randn(1, num_tokens, 12, 128, dtype=torch.bfloat16, device=device)
+    g = torch.randn(num_tokens, 12, 128, dtype=torch.bfloat16, device=device)
+    ref = module.forward_native(x, g)
+    out = module(x.clone(), g)
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)

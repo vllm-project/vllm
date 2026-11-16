@@ -1,0 +1,2201 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import copy
+import functools
+import os
+from collections.abc import Callable, Mapping
+from dataclasses import field
+from typing import TYPE_CHECKING, Any, Literal, Self, get_args
+
+from pydantic import Field, SkipValidation, field_validator, model_validator
+
+from vllm.config import LoadConfig
+from vllm.config.cache import CacheDType
+from vllm.config.kernel import MoEBackend
+from vllm.config.model import HfOverrides, ModelConfig
+from vllm.config.parallel import ParallelConfig
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    normalize_value,
+    replace,
+)
+from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
+from vllm.transformers_utils.repo_utils import get_subfolder_path
+from vllm.utils.import_utils import LazyLoader
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    SpeculatorConfig,
+    get_custom_speculator_config_class,
+    get_method_config_class,
+    get_speculator_config_class,
+    registered_speculative_methods,
+)
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedConfig
+
+    import vllm.model_executor.layers.quantization as me_quant
+    from vllm.config.vllm import VllmConfig
+else:
+    PreTrainedConfig = Any
+    VllmConfig = Any
+
+    me_quant = LazyLoader(
+        "model_executor", globals(), "vllm.model_executor.layers.quantization"
+    )
+
+logger = init_logger(__name__)
+
+
+# Positional-encoding keys the draft must share with the target (#58080).
+# ``max_position_embeddings`` is deliberately excluded: shared drafts already
+# get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
+_ROPE_HF_OVERRIDE_KEYS = frozenset(
+    {
+        "rope_parameters",
+        "original_max_position_embeddings",
+        "rope_theta",
+        "partial_rotary_factor",
+    }
+)
+# Nested HF configs that commonly wrap those rope fields (VL / hybrid).
+_NESTED_HF_CONFIG_KEYS = frozenset(
+    {
+        "text_config",
+        "language_config",
+        "llm_config",
+        "thinker_config",
+    }
+)
+
+MTPModelTypes = Literal[
+    "deepseek_mtp",
+    "dots3_note_mtp",
+    "mimo_mtp",
+    "mimo_v2_mtp",
+    "glm4_moe_mtp",
+    "glm4_moe_lite_mtp",
+    "glm_ocr_mtp",
+    "ernie_mtp",
+    "nemotron_h_mtp",
+    "nemotron3_5_transcribe_mtp",
+    "exaone_moe_mtp",
+    "exaone4_5_mtp",
+    "qwen3_next_mtp",
+    "qwen4_exp_mtp",
+    "qwen3_5_mtp",
+    "longcat_flash_mtp",
+    "bailing_hybrid_v3_mtp",
+    "minimax_m3_mtp",
+    "bailing_hybrid_mtp",
+    "mtp",
+    "kimi_k3_mtp",
+    "pangu_ultra_moe_mtp",
+    "step3p5_mtp",
+    "step5_mtp",
+    "hy_v3_mtp",
+    "hy_v4_mtp",
+    "gemma4_mtp",
+    "inkling_mtp",
+    "glm5_next_mtp",
+]
+NgramGPUTypes = Literal["ngram_gpu"]
+DFlashModelTypes = Literal["dflash"]
+DSparkModelTypes = Literal["dspark"]
+EagleModelTypes = Literal[
+    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+]
+SpeculativeMethod = Literal[
+    "ngram",
+    "draft_model",
+    "suffix",
+    EagleModelTypes,
+    NgramGPUTypes,
+    DSparkModelTypes,
+]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
+DraftSampleMethod = Literal["greedy", "probabilistic"]
+
+_QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
+    {
+        "Qwen3OmniMoeForConditionalGeneration",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
+    }
+)
+_QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
+# See `SpeculatorConfig.supported_options`.
+_METHOD_SPECIFIC_OPTIONS = (
+    "dspark_draft_topk",
+    "draft_lm_head_quantization",
+    "index_share_for_mtp_iteration",
+    "xpress_topc",
+    "speculator_options",
+)
+
+# RoPE types for which get_rope uses max_position_embeddings only to size the
+# cos_sin_cache, so raising it leaves the rotary frequencies unchanged. Others
+# either size the cache from original_max_position_embeddings (yarn, deepseek)
+# or derive frequencies from it (dynamic, longrope).
+_CACHE_ONLY_ROPE_TYPES = frozenset(
+    {"default", "linear", "llama3", "ntk", "proportional"}
+)
+
+
+def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
+    return all(
+        params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
+        for params in iter_rope_parameters(hf_config)
+    )
+
+
+# RoPE types whose cos_sin_cache holds original_max_position_embeddings * factor
+# positions, whatever max_position_embeddings is.
+_YARN_ROPE_TYPES = frozenset({"yarn", "deepseek_yarn", "deepseek_llama_scaling"})
+
+
+def _yarn_cache_positions(hf_config: PreTrainedConfig) -> int | None:
+    positions = []
+    for params in iter_rope_parameters(hf_config):
+        original = params.get("original_max_position_embeddings")
+        factor = params.get("factor")
+        if (
+            params.get("rope_type") not in _YARN_ROPE_TYPES
+            or not original
+            or not factor
+        ):
+            return None
+        positions.append(int(original * factor))
+    return min(positions, default=None)
+
+
+_MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
+_MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
+
+
+def _get_minimax_m3_dspark_draft(
+    target_model_config: ModelConfig, cache_dir: str | None
+) -> str:
+    """MiniMax-M3 checkpoints ship the DSpark draft as a standalone checkpoint
+    in their `dspark/` subfolder."""
+    draft = get_subfolder_path(
+        target_model_config.model,
+        _MINIMAX_M3_DSPARK_SUBFOLDER,
+        revision=target_model_config.revision,
+        cache_dir=cache_dir,
+    )
+    if not os.path.isfile(os.path.join(draft, "config.json")):
+        raise ValueError(
+            f"MiniMax-M3 DSpark found no draft checkpoint in the "
+            f"'{_MINIMAX_M3_DSPARK_SUBFOLDER}/' subfolder of "
+            f"{target_model_config.model}. Set speculative_config.model to the "
+            "draft checkpoint."
+        )
+    return draft
+
+
+def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
+    hf_config = model_config.hf_config
+    architectures = set(getattr(model_config, "architectures", ()) or ())
+    architectures.update(getattr(hf_config, "architectures", ()) or ())
+    return getattr(hf_config, "model_type", None) == "qwen3_omni_moe" or bool(
+        architectures & _QWEN3_OMNI_TARGET_ARCHITECTURES
+    )
+
+
+def _get_qwen3_omni_text_config(model_config: ModelConfig) -> Any:
+    thinker_config = getattr(model_config.hf_config, "thinker_config", None)
+    text_config = getattr(thinker_config, "text_config", None)
+    if text_config is None:
+        text_config = getattr(model_config, "hf_text_config", None)
+    return text_config
+
+
+def _get_attention_head_dim(config: Any) -> int | None:
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    hidden_size = getattr(config, "hidden_size", None)
+    num_attention_heads = getattr(config, "num_attention_heads", None)
+    if (
+        isinstance(hidden_size, int)
+        and isinstance(num_attention_heads, int)
+        and num_attention_heads > 0
+        and hidden_size % num_attention_heads == 0
+    ):
+        return hidden_size // num_attention_heads
+    return None
+
+
+def _get_nested_config_value(config: Any, section: str, name: str) -> Any:
+    nested_config = getattr(config, section, None)
+    if isinstance(nested_config, Mapping):
+        return nested_config.get(name)
+    return getattr(nested_config, name, None)
+
+
+def _get_qwen3_dspark_value(config: Any, name: str) -> Any:
+    # Match DFlashQwen3Model's precedence: dflash_config overrides
+    # eagle_config, and top-level values are the modern fallback.
+    value = _get_nested_config_value(config, "dflash_config", name)
+    if value is None:
+        value = _get_nested_config_value(config, "eagle_config", name)
+    if value is None:
+        value = getattr(config, name, None)
+    return value
+
+
+def _validate_qwen3_omni_dspark(
+    target_model_config: ModelConfig,
+    draft_model_config: ModelConfig,
+    num_speculative_tokens: int,
+) -> None:
+    """Validate the standalone Qwen3-Omni DSpark checkpoint contract."""
+    if not _is_qwen3_omni_target(target_model_config):
+        return
+
+    draft_hf_config = draft_model_config.hf_config
+    draft_architectures = set(getattr(draft_model_config, "architectures", ()) or ())
+    draft_architectures.update(getattr(draft_hf_config, "architectures", ()) or ())
+    if _QWEN3_OMNI_DSPARK_ARCHITECTURE not in draft_architectures:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a standalone draft checkpoint with "
+            f"architectures=['{_QWEN3_OMNI_DSPARK_ARCHITECTURE}']; generic "
+            "Qwen3DSparkModel checkpoints must be converted first."
+        )
+
+    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
+    if block_size is None:
+        block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a positive integer block_size in the "
+            "draft config."
+        )
+    if num_speculative_tokens != block_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires num_speculative_tokens to match the "
+            f"trained block_size ({block_size}); got {num_speculative_tokens}."
+        )
+
+    target_text_config = _get_qwen3_omni_text_config(target_model_config)
+    if target_text_config is None:
+        raise ValueError(
+            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
+        )
+    target_hidden_size = getattr(
+        target_text_config,
+        "hidden_size",
+        target_model_config.get_hidden_size(),
+    )
+    draft_target_hidden_size = getattr(draft_hf_config, "target_hidden_size", None)
+    if draft_target_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft target_hidden_size must match the target "
+            f"text hidden size ({target_hidden_size}); got {draft_target_hidden_size}."
+        )
+    draft_hidden_size = getattr(draft_hf_config, "hidden_size", None)
+    if draft_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft hidden_size must match the target thinker "
+            f"hidden size ({target_hidden_size}); got {draft_hidden_size}."
+        )
+
+    target_attention = {
+        "num_attention_heads": getattr(target_text_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(
+            target_text_config,
+            "num_key_value_heads",
+            getattr(target_text_config, "num_attention_heads", None),
+        ),
+        "head_dim": _get_attention_head_dim(target_text_config),
+    }
+    draft_attention = {
+        "num_attention_heads": getattr(draft_hf_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(
+            draft_hf_config,
+            "num_key_value_heads",
+            getattr(draft_hf_config, "num_attention_heads", None),
+        ),
+        "head_dim": _get_attention_head_dim(draft_hf_config),
+    }
+    for name, target_value in target_attention.items():
+        if (
+            not isinstance(target_value, int)
+            or isinstance(target_value, bool)
+            or target_value <= 0
+        ):
+            raise ValueError(
+                "Qwen3-Omni DSpark requires a positive integer "
+                f"{name} in the target thinker text_config; got {target_value}."
+            )
+        draft_value = draft_attention[name]
+        if draft_value != target_value:
+            raise ValueError(
+                f"Qwen3-Omni DSpark draft {name} must match the target thinker "
+                f"value ({target_value}); got {draft_value}."
+            )
+
+    target_layer_ids = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "target_layer_ids"
+    )
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
+    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a non-empty target_layer_ids list in "
+            "the draft config."
+        )
+    if any(
+        not isinstance(layer_id, int) or isinstance(layer_id, bool)
+        for layer_id in target_layer_ids
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must contain only integers."
+        )
+    if list(target_layer_ids) != sorted(set(target_layer_ids)):
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must be unique and strictly increasing."
+        )
+    target_num_layers = getattr(
+        target_text_config,
+        "num_hidden_layers",
+        target_model_config.get_total_num_hidden_layers(),
+    )
+    if target_layer_ids[0] < 0 or target_layer_ids[-1] >= target_num_layers:
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must be zero-based text-layer "
+            f"indices in [0, {target_num_layers - 1}]; got {target_layer_ids}."
+        )
+
+    if _get_qwen3_dspark_value(draft_hf_config, "use_aux_hidden_state") is not True:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires use_aux_hidden_state=true because Omni "
+            "conditioning is supplied through thinker hidden states."
+        )
+
+    markov_rank = getattr(draft_hf_config, "markov_rank", None)
+    if (
+        not isinstance(markov_rank, int)
+        or isinstance(markov_rank, bool)
+        or markov_rank <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a positive integer markov_rank in the "
+            "draft config."
+        )
+    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
+    if markov_head_type != "vanilla":
+        raise ValueError(
+            "Qwen3-Omni DSpark currently requires markov_head_type='vanilla'; "
+            f"got {markov_head_type!r}."
+        )
+
+    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
+    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
+    if sample_from_anchor is not True or bonus_anchor is not False:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires sample_from_anchor=true and "
+            "dspark_bonus_anchor=false."
+        )
+
+    target_vocab_size = getattr(
+        target_text_config,
+        "vocab_size",
+        target_model_config.get_vocab_size(),
+    )
+    draft_input_vocab_size = getattr(draft_hf_config, "vocab_size", None)
+    if (
+        not isinstance(draft_input_vocab_size, int)
+        or isinstance(draft_input_vocab_size, bool)
+        or draft_input_vocab_size <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark input vocab_size must be a positive integer; "
+            f"got {draft_input_vocab_size}."
+        )
+    draft_output_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None)
+    if draft_output_vocab_size is None:
+        draft_output_vocab_size = draft_input_vocab_size
+    if (
+        not isinstance(draft_output_vocab_size, int)
+        or isinstance(draft_output_vocab_size, bool)
+        or not 0 < draft_output_vocab_size <= target_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark draft_vocab_size must be a positive integer no "
+            f"larger than target vocab_size ({target_vocab_size}); got "
+            f"{draft_output_vocab_size}."
+        )
+
+    noise_token_id = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "mask_token_id"
+    )
+    for name in (
+        "mask_token_id",
+        "dspark_noise_token_id",
+        "pard_token",
+        "ptd_token_id",
+    ):
+        if noise_token_id is None:
+            noise_token_id = getattr(draft_hf_config, name, None)
+        if noise_token_id is not None:
+            break
+    if (
+        not isinstance(noise_token_id, int)
+        or isinstance(noise_token_id, bool)
+        or not 0 <= noise_token_id < draft_input_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a valid mask/noise token id within the "
+            f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
+        )
+
+    rope_parameters = getattr(draft_hf_config, "rope_parameters", None)
+    has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
+    has_mrope = has_mrope or (
+        isinstance(rope_parameters, Mapping) and "mrope_section" in rope_parameters
+    )
+    if has_mrope:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft checkpoints must use logical 1-D RoPE and "
+            "must not define mrope_section."
+        )
+
+
+# (SpeculativeConfig field, VllmConfig sub-config, overridden field)
+_DRAFT_VLLM_CONFIG_OVERRIDES = (
+    # Otherwise the draft inherits the target's --moe-backend, which fails
+    # when the draft is unquantized and that backend is not.
+    ("moe_backend", "kernel_config", "moe_backend"),
+    # Only when set, so the draft keeps a KV cache layout the target shares.
+    ("attention_backend", "attention_config", "backend"),
+    ("kv_cache_dtype", "cache_config", "cache_dtype"),
+)
+
+
+@config
+class SpeculativeConfig:
+    """Configuration for speculative decoding."""
+
+    enforce_eager: bool | None = None
+    """Override the default enforce_eager from model_config"""
+    # General speculative decoding control
+    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    """The number of speculative tokens, if provided. It will default to the
+    number in the draft model config if present, otherwise, it is required."""
+    model: str | None = None
+    """The name of the draft model, eagle head, or additional weights, if
+    provided."""
+    method: SpeculativeMethod | str | None = None
+    """The name of the speculative method to use. If users provide and set the
+    `model` param, the speculative method type will be detected automatically
+    if possible, if `model` param is not provided, the method name must be
+    provided.
+
+    If using `ngram` method, the related configuration `prompt_lookup_max` and
+    `prompt_lookup_min` should be considered.
+
+    A configured method is never changed based on the draft checkpoint, but it
+    is checked against it where the checkpoint can be recognized (e.g. `mtp`
+    requires an MTP draft, and `draft_model` rejects one).
+
+    Besides the built-in methods, this can be a custom method registered with
+    `vllm.v1.worker.gpu.spec_decode.speculator_config.register_speculative_method`
+    (e.g. by a vLLM plugin). It is then moved to `custom_method`, and this is
+    set to the built-in method that its config is based on (None if it isn't
+    based on one)."""
+    custom_method: str | None = field(default=None, init=False)
+    """The configured custom speculative method, if any (see `method`)."""
+    draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of the tensor parallelism for the draft model. Can only be 1
+    or the same as the target model's tensor parallel size."""
+    draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of decode context parallelism for the draft model. Can only be
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
+    draft_enable_eplb: bool = True
+    """Whether to enable EPLB for the draft model when it is enabled for the
+    target model."""
+    resolved_draft_num_redundant_experts: int | None = field(
+        default=None, init=False, repr=False
+    )
+    """Resolved redundant expert count used for the draft's EPLB config."""
+    tensor_parallel_size: int | None = None
+    """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
+    warn users when they mistakenly provide the wrong argument."""
+
+    # Draft model configuration
+    quantization: me_quant.QuantizationMethods | str | None = None
+    """Quantization method that was used to quantize the draft model weights.
+    If `None`, we assume the model weights are not quantized. Note that it only
+    takes effect when using the draft model-based speculative method."""
+    moe_backend: MoEBackend | None = None
+    """MoE backend to use for the draft model. When `None`, the draft model
+    inherits the target model's `--moe-backend` setting. Useful when the
+    drafter and generator require different MoE kernels (e.g. quantized
+    generator with unquantized drafter)."""
+    attention_backend: AttentionBackendEnum | None = None
+    """Attention backend to use for the draft model. When `None`, the backend is
+    automatically selected. Useful when the drafter requires a different attention
+    backend (e.g. DFlash needs a backend that supports non-causal attention)."""
+    kv_cache_dtype: CacheDType | str | None = None
+    """KV cache dtype for the draft model. When `None`, the draft inherits the
+    target model's `--kv-cache-dtype`. Custom dtypes registered by platform
+    backends are accepted."""
+    max_model_len: int | None = Field(default=None, ge=1)
+    """The maximum model length of the draft model. Used when testing the
+    ability to skip speculation for some sequences."""
+    revision: str | None = None
+    """The specific model version to use for the draft model. It can be a
+    branch name, a tag name, or a commit id. If unspecified, will use the
+    default version."""
+    code_revision: str | None = None
+    """The specific revision to use for the draft model code on Hugging Face
+    Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
+    will use the default version."""
+    index_share_for_mtp_iteration: bool | None = None
+    """Override whether MTP iterations reuse the first step's sparse indices.
+    If `None`, use the value from the draft model's Hugging Face config."""
+
+    # Advanced control
+    disable_eagle_block_drop: bool = False
+    """Disable dropping the trailing prefix-cache block for EAGLE-like
+    speculative methods. This is an experimental option for measuring the
+    acceptance-rate impact of reusing that block. It does not disable the
+    speculative drafter itself."""
+    disable_lookahead_block_hashes: bool = False
+    """Disable lookahead block hashes for EAGLE-like speculative methods and
+    fall back to dropping the trailing prefix-cache block. Lookahead hashes
+    also cover the tokens the drafter reads after each block, so engines
+    sharing a KV store and external consumers of KV cache events must use the
+    same setting."""
+    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
+    """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
+    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
+    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    weight-only on the platform's W4A16 kernel. The target verifies with its
+    own head, so only the acceptance length can change."""
+    use_local_argmax_reduction: bool = False
+    """Use vocab-parallel local argmax instead of all-gathering full logits
+    for draft token generation. Reduces communication from O(vocab_size) to
+    O(2 * tp_size) per token. Only applies to greedy draft selection in
+    non-tree speculation."""
+
+    # Ngram proposer configuration
+    prompt_lookup_max: int | None = Field(default=None, ge=1)
+    """Maximum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_min` if set, otherwise 5."""
+    prompt_lookup_min: int | None = Field(default=None, ge=1)
+    """Minimum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_max` if set, otherwise 5."""
+
+    # Alternative drafting strategies
+    parallel_drafting: bool | None = None
+    """Deprecated and has no effect. DFlash and DSpark always draft in
+    parallel, and no other method supports it."""
+
+    # required configuration params passed from engine
+    target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
+    """The configuration of the target model."""
+    target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
+    """The parallel configuration for the target model."""
+
+    # dynamic speculative decoding control
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    """Batch-size schedule used to dynamically choose speculative-token count.
+
+    Each entry is `(range_start, range_end, num_speculative_tokens)` with an
+    inclusive batch-size range.
+    """
+
+    # params generated in the post-init stage
+    draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
+    """The configuration of the draft model initialized internal."""
+    draft_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
+    """The parallel configuration for the draft model initialized internal."""
+
+    # Suffix decoding configuration
+    suffix_decoding_max_tree_depth: int = 24
+    """The maximum suffix match length for suffix decoding."""
+
+    suffix_decoding_max_cached_requests: int = 10000
+    """Set to 0 to disable the cross-request corpus of finished responses
+    (equivalent to `suffix_decoding_corpus_tokens=0`), so that each request
+    matches only within its own prompt and output."""
+
+    suffix_decoding_corpus_tokens: int = 1 << 20
+    """Token capacity of the GPU corpus of finished responses used for
+    cross-request matching. Oldest responses are overwritten first. Set 0 (or
+    `suffix_decoding_max_cached_requests` to 0) to match only within each
+    request's own prompt and output."""
+
+    suffix_decoding_max_spec_factor: float = 1.0
+    """Deprecated and has no effect: the GPU suffix speculator always drafts
+    `num_speculative_tokens` tokens."""
+
+    suffix_decoding_min_token_prob: float = 0.1
+    """Deprecated and has no effect: the GPU suffix speculator always drafts
+    `num_speculative_tokens` tokens."""
+
+    draft_load_config: LoadConfig | None = None
+    """Load config for the draft model. If not specified, will use the load
+    config from the target model."""
+
+    rejection_sample_method: RejectionSampleMethod = "standard"
+    """The rejection sampling method to use. 'standard' uses probabilistic
+    rejection sampling (with or without cached draft logits, controlled by
+    draft_sample_method). 'synthetic' accepts draft tokens with a decaying
+    probability calibrated to synthetic_acceptance_rate. 'block' uses block
+    verification (Sun et al.), which jointly verifies the draft tokens as a
+    block instead of one at a time. 'fly' applies FLy's lossy, entropy-gated
+    deferred window to the native per-token acceptance decisions."""
+
+    synthetic_acceptance_rates: list[float] | None = None
+    """Per-position *unconditional* acceptance rates for synthetic rejection
+    sampling. Position i's entry is the marginal probability that the first
+    i+1 draft tokens are all accepted; the list must have length
+    num_speculative_tokens, each entry in [0, 1], and be monotonically
+    non-increasing. Only valid when rejection_sample_method is 'synthetic'.
+    Mutually exclusive with synthetic_acceptance_length."""
+
+    synthetic_acceptance_length: float | None = None
+    """Target mean acceptance length for synthetic rejection sampling, in
+    [1, num_speculative_tokens + 1]. Resolved internally to
+    synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
+    Mutually exclusive with synthetic_acceptance_rates."""
+
+    enable_adaptive_verification: bool = False
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
+
+    prefill_context_kv_only: bool = False
+    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
+    to only store the drafter's context K/V, which the decode instance reads:
+    no drafts, no lookahead KV slots, and, for draft models that support it,
+    the draft weights only drafting reads are freed. Requests that decode there
+    run without speculation. Keep the rest of the speculative config as on the
+    decode instance; adaptive verification and dynamic speculative decoding are
+    turned off."""
+
+    @staticmethod
+    def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
+        """Mean acceptance length to unconditional per-position rates, using
+        the minimum-variance schedule."""
+        num_drafts = length - 1  # expected number of accepted draft tokens
+        num_full = int(num_drafts)
+        return (
+            [1.0] * num_full + [num_drafts - num_full] + [0.0] * (n - num_full - 1)
+        )[:n]
+
+    @staticmethod
+    def _resolve_synthetic_acceptance_rates(
+        n: int,
+        rates: list[float] | None,
+        length: float | None,
+    ) -> list[float]:
+        """Return per-position unconditional acceptance rates from exactly one
+        of `rates` or `length` (validates range, length, and monotonicity)."""
+        if (rates is None) == (length is None):
+            raise ValueError(
+                "rejection_sample_method='synthetic' requires exactly one of "
+                "synthetic_acceptance_rates or synthetic_acceptance_length."
+            )
+        if rates is not None:
+            if len(rates) != n:
+                raise ValueError(
+                    f"synthetic_acceptance_rates must have length {n}, got {rates}."
+                )
+            if not all(0.0 <= r <= 1.0 for r in rates):
+                raise ValueError(
+                    f"synthetic_acceptance_rates entries must be in [0, 1], "
+                    f"got {rates}."
+                )
+            if any(rates[i] > rates[i - 1] for i in range(1, n)):
+                raise ValueError(
+                    f"synthetic_acceptance_rates must be non-increasing, got {rates}."
+                )
+            return list(rates)
+        assert length is not None
+        if not 1.0 <= length <= float(n + 1):
+            raise ValueError(
+                f"synthetic_acceptance_length must be in [1, {n + 1}], got {length}."
+            )
+        return SpeculativeConfig._acceptance_length_to_rates(length, n)
+
+    draft_sample_method: DraftSampleMethod = "greedy"
+    """How the draft model samples tokens. 'greedy' always picks the argmax
+    token, and the draft probabilities are treated as one-hot during rejection
+    sampling. 'probabilistic' samples stochastically from the draft
+    distribution and uses the full draft logits for the probability ratio test
+    during rejection sampling. This comes at the cost of additional GPU memory
+    usage."""
+
+    dspark_draft_topk: int | None = Field(default=None, ge=1)
+    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
+    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
+    xpress_topc: int | None = Field(default=None, ge=0)
+    """For XPress drafting, score each Jacobi pass only on the drafter's top-C
+    base-logit candidates. 0 disables the narrowing and scores the full
+    vocabulary. Takes precedence over `xpress_topc` in the draft
+    checkpoint's config, which is used when this is unset."""
+
+    speculator_options: dict[str, Any] | None = None
+    """Options for a custom speculator, interpreted by its `SpeculatorConfig`,
+    which must list `"speculator_options"` in its `supported_options`."""
+
+    fly_window_size: int | None = Field(default=None, ge=1)
+    """Number of subsequent native acceptance decisions checked by FLy.
+    If unset, defaults to `min(6, num_speculative_tokens - 1)`."""
+
+    fly_entropy_threshold: float = Field(default=0.3, ge=0)
+    """Target top-k entropy lower bound for FLy loose acceptance."""
+
+    fly_entropy_top_k: int = Field(default=3, ge=1)
+    """Number of largest target probabilities used by FLy's entropy gate."""
+
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
+        ignored_factors = {
+            "enforce_eager",
+            "num_speculative_tokens",
+            "model",
+            "method",
+            "draft_tensor_parallel_size",
+            "tensor_parallel_size",
+            "quantization",
+            "moe_backend",
+            "attention_backend",
+            "kv_cache_dtype",
+            "max_model_len",
+            "revision",
+            "code_revision",
+            "index_share_for_mtp_iteration",
+            "disable_eagle_block_drop",
+            "disable_lookahead_block_hashes",
+            "draft_lm_head_quantization",
+            "use_local_argmax_reduction",
+            "prompt_lookup_max",
+            "prompt_lookup_min",
+            "parallel_drafting",
+            "target_model_config",
+            "target_parallel_config",
+            "num_speculative_tokens_per_batch_size",
+            "draft_parallel_config",
+            "suffix_decoding_max_tree_depth",
+            "suffix_decoding_max_cached_requests",
+            "suffix_decoding_corpus_tokens",
+            "suffix_decoding_max_spec_factor",
+            "suffix_decoding_min_token_prob",
+            "draft_load_config",
+            "rejection_sample_method",
+            "synthetic_acceptance_rates",
+            "synthetic_acceptance_length",
+            "enable_adaptive_verification",
+            "draft_sample_method",
+            "dspark_draft_topk",
+            "xpress_topc",
+            "fly_window_size",
+            "fly_entropy_threshold",
+            "fly_entropy_top_k",
+        }
+        factors = get_compile_factors(self, ignored_factors)
+        # Eagle3 and extract_hidden_states affect the computation graph because
+        # they return intermediate hidden states in addition to the final hidden
+        # state.
+        factors["uses_aux_hidden_states"] = self.uses_aux_hidden_states
+        factors["speculator"] = normalize_value(self.speculator_config.hash_factors())
+        if self.resolved_draft_num_redundant_experts is not None:
+            factors["resolved_draft_num_redundant_experts"] = (
+                self.resolved_draft_num_redundant_experts
+            )
+        if self.draft_model_config is not None:
+            # The specific layers used also affect the computation graph.
+            layer_ids = getattr(
+                self.draft_model_config.hf_config,
+                "eagle_aux_hidden_state_layer_ids",
+                None,
+            )
+            if layer_ids is not None and self.uses_aux_hidden_states:
+                factors["aux_hidden_state_layer_ids"] = list(layer_ids)
+        return factors
+
+    @staticmethod
+    def hf_config_override(
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        if transformers_mtp_overrides is not None:
+            # The Transformers modeling backend builds the MTP draft from the
+            # target's config, so it needs none of the rewrites below
+            hf_config.update(transformers_mtp_overrides)
+            return hf_config
+        initial_architecture = hf_config.architectures[0]
+        if (
+            initial_architecture == "DSparkDraftModel"
+            and hf_config.model_type == "qwen3"
+        ):
+            # Qwen3 DSpark drafts reuse the DeepSeek-V4 DSpark architecture name.
+            hf_config.update({"architectures": ["Qwen3DSparkModel"]})
+            return hf_config
+        if initial_architecture == "DFlash2DraftModel" and getattr(
+            hf_config, "no_rope_layers", None
+        ):
+            # Ripple's DFlash2 drafter is the one with NoPE layers.
+            hf_config.update({"architectures": ["DFlash2RicursiveDraftModel"]})
+            return hf_config
+        if initial_architecture == "Gemma4DSparkModel":
+            # Normalize the Gemma4 DSpark draft's config keys to DSpark's.
+            if (
+                getattr(hf_config, "dspark_target_layer_ids", None) is None
+                and getattr(hf_config, "target_layer_ids", None) is not None
+            ):
+                hf_config.dspark_target_layer_ids = hf_config.target_layer_ids
+            return hf_config
+        if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
+            getattr(hf_config, "decoder", None), "causal_vision_prefix", False
+        ):
+            hf_config.model_type = "mtp"
+            hf_config.update(
+                {
+                    "architectures": ["ParseAuxMTPModel"],
+                    "n_predict": 1,
+                    "num_nextn_predict_layers": 1,
+                }
+            )
+            return hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(text_config, "model_type", None) == "mistral_large_4" and getattr(
+            text_config, "mtp_config", None
+        ):
+            from vllm.transformers_utils.configs.mistral import (
+                get_mistral_large_4_dspark_config,
+            )
+
+            return get_mistral_large_4_dspark_config(text_config)
+        use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
+        if hf_config.model_type == "dots3_note":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
+            if mtp_layer_types is None:
+                mtp_layer_types = ["sliding_attention"] * n_predict
+            if len(mtp_layer_types) != n_predict:
+                raise ValueError(
+                    "mtp_layer_types must have one entry per MTP layer: "
+                    f"got {len(mtp_layer_types)} for {n_predict} layers"
+                )
+            hf_config.layer_types = [*hf_config.layer_types, *mtp_layer_types]
+            hf_config.model_type = "dots3_note_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
+            )
+        if hf_config.model_type in (
+            "deepseek_v3",
+            "deepseek_v32",
+            "glm_moe_dsa",
+        ):
+            hf_config.model_type = "deepseek_mtp"
+        if hf_config.model_type == "deepseek_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": [
+                        "DeepseekV32MTPModel" if use_v32_mtp else "DeepSeekMTPModel"
+                    ],
+                }
+            )
+        if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
+            # V4.1 has no classic-MTP draft: its checkpoints ship DSpark stages
+            # under ``mtp.*``, so only V4 gets an MTP architecture here. The
+            # DSpark path rewrites ``architectures`` itself;
+            # ``method="mtp"`` on V4.1 is rejected below.
+            is_v41 = hf_config.model_type == "deepseek_v41"
+            hf_config.model_type = "deepseek_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            overrides = {"n_predict": n_predict}
+            if not is_v41:
+                overrides["architectures"] = ["DeepSeekV4MTPModel"]
+            hf_config.update(overrides)
+        if hf_config.model_type in ("pangu_ultra_moe"):
+            hf_config.model_type = "pangu_ultra_moe_mtp"
+        if hf_config.model_type == "pangu_ultra_moe_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
+            )
+
+        if hf_config.model_type == "kimi_k3":
+            # Kimi-K3 keeps the text-model fields (incl. the MTP layer count)
+            # nested under ``text_config`` (a KimiLinearConfig).
+            text_config = getattr(hf_config, "text_config", hf_config)
+            n_predict = getattr(text_config, "num_nextn_predict_layers", None)
+            hf_config.model_type = "kimi_k3_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["KimiK3MTPModel"]}
+            )
+
+        if hf_config.architectures[0] == "MiMoForCausalLM":
+            hf_config.model_type = "mimo_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["MiMoMTPModel"],
+                }
+            )
+
+        if (arch := hf_config.architectures[0]) in (
+            "MiMoV2ForCausalLM",
+            "MiMoV2OmniForCausalLM",
+        ):
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS,
+            )
+
+            mtp_arch_maps = {
+                "MiMoV2ForCausalLM": "MiMoV2MTPModel",
+                "MiMoV2OmniForCausalLM": "MiMoV2OmniMTPModel",
+            }
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": [mtp_arch_maps[arch]],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "Glm4MoeForCausalLM":
+            hf_config.model_type = "glm4_moe_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Glm4MoeMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "Glm4MoeLiteForCausalLM":
+            hf_config.model_type = "glm4_moe_lite_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["Glm4MoeLiteMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "GlmOcrForConditionalGeneration":
+            hf_config.model_type = "glm_ocr_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["GlmOcrMTPModel"],
+                }
+            )
+
+        if hf_config.model_type == "ernie4_5_moe":
+            hf_config.model_type = "ernie_mtp"
+        if hf_config.model_type == "ernie_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
+            )
+
+        if hf_config.architectures[0] in (
+            "NemotronH_Super_Omni_Reasoning_V3",
+            "NemotronH_Omni_Reasoning_V3",
+        ):
+            # Promote VLM's text_config so MTP detection below fires correctly
+            hf_config = hf_config.text_config
+
+        if (
+            hf_config.architectures[0]
+            == "Nemotron3_5TranscribeForConditionalGeneration"
+        ):
+            # Its MTP head reads NeMo checkpoint names and takes the audio
+            # embeddings, so it has its own draft class.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.text_config
+            if quantization_config is not None:
+                # The FP8 and NVFP4 checkpoints quantize the MTP head too.
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+            hf_config.model_type = "nemotron3_5_transcribe_mtp"
+            hf_config.update(
+                {
+                    "n_predict": hf_config.num_nextn_predict_layers,
+                    "architectures": ["Nemotron3_5TranscribeMTPModel"],
+                }
+            )
+
+        if (
+            hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
+            and hasattr(hf_config, "num_nextn_predict_layers")
+            and hf_config.num_nextn_predict_layers > 0
+        ):
+            # Check if this is an MTP variant
+            hf_config.model_type = "nemotron_h_mtp"
+        if hf_config.model_type == "nemotron_h_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
+            )
+
+        if hf_config.model_type == "qwen3_next":
+            hf_config.model_type = "qwen3_next_mtp"
+        if hf_config.model_type == "qwen3_next_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]}
+            )
+        if hf_config.model_type in {"qwen4_exp", "qwen4_exp_text"}:
+            hf_config.model_type = "qwen4_exp_mtp"
+        if hf_config.model_type == "qwen4_exp_mtp":
+            text_config = get_hf_text_config(hf_config)
+            n_predict = getattr(
+                text_config,
+                "mtp_num_hidden_layers",
+                getattr(text_config, "num_nextn_predict_layers", None),
+            )
+            share_mtp_indices = getattr(
+                text_config, "index_share_for_mtp_iteration", False
+            )
+            hf_config.update(
+                {
+                    # hc_count is the HC stream multiplier for Qwen MTP feedback.
+                    "hc_mult": int(text_config.hc_count),
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen4ExpMTP"],
+                    "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
+
+        architectures = getattr(hf_config, "architectures", []) or []
+        if initial_architecture == "BailingMoeV3VLForConditionalGeneration":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = copy.deepcopy(hf_config.text_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if initial_architecture in (
+            "BailingMoeV3ForCausalLM",
+            "BailingMoeV3VLForConditionalGeneration",
+        ):
+            hf_config.model_type = "bailing_hybrid_v3_mtp"
+        elif (
+            hf_config.model_type == "bailing_hybrid"
+            or "BailingMoeV2_5ForCausalLM" in architectures
+        ):
+            hf_config.model_type = "bailing_hybrid_mtp"
+        if hf_config.model_type == "bailing_hybrid_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV25MTPModel"],
+                }
+            )
+        if hf_config.model_type == "bailing_hybrid_v3_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV3MTPModel"],
+                }
+            )
+
+        if hf_config.model_type == "exaone_moe":
+            hf_config.model_type = "exaone_moe_mtp"
+        if hf_config.model_type == "exaone_moe_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
+            )
+        if "exaone4_5" in hf_config.model_type:
+            hf_config.model_type = "exaone4_5_mtp"
+        if hf_config.model_type == "exaone4_5_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
+            )
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Checkpoints that ship only the text config resolve to the
+            # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
+            # same `mtp_num_hidden_layers` field as the multimodal ones.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            if n_predict is None:
+                text_config = get_hf_text_config(hf_config)
+                n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
+        if hf_config.model_type in ("intern_s2_preview", "interns2_mobius"):
+            is_mobius = hf_config.model_type == "interns2_mobius"
+            text_config = getattr(hf_config, "text_config", None)
+            is_moe = is_mobius or (
+                getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            )
+            if is_mobius:
+                assert text_config is not None
+                text_config.model_type = "qwen3_5_moe_text"
+                text_config.num_experts = text_config.mtp_num_experts
+                text_config.num_experts_per_tok = text_config.mtp_num_experts_per_tok
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            architecture = (
+                "InternS2MobiusMTP"
+                if is_mobius
+                else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+            )
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": [architecture],
+                }
+            )
+        if hf_config.model_type == "longcat_flash":
+            hf_config.model_type = "longcat_flash_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
+            )
+
+        if hf_config.model_type in ("step3p5", "step3p7") or hf_config.architectures[
+            0
+        ] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration"):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "step3p5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
+
+        # Step5 has its own draft module because its model and weight-loading
+        # contracts differ from Step3.5.
+        if hf_config.model_type in ("step5", "step5_vl") or {
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        }.intersection(getattr(hf_config, "architectures", None) or []):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "step5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step5MTP"]})
+
+        if initial_architecture == "MistralLarge3ForCausalLM":
+            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+
+        if hf_config.model_type == "hy_v3":
+            hf_config.model_type = "hy_v3_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+            )
+
+        if hf_config.model_type == "hy_v4":
+            hf_config.model_type = "hy_v4_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV4MTPModel"]}
+            )
+
+        if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
+            mtp_config = getattr(hf_config, "mtp_config", None) or {}
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            checkpoint_depths = mtp_config.get("num_nextn_predict_layers", 0)
+            if checkpoint_depths < 1:
+                raise ValueError("The Inkling checkpoint does not contain MTP weights")
+            hf_config.model_type = "inkling_mtp"
+            hf_config.update(
+                {
+                    "n_predict": checkpoint_depths,
+                    "num_nextn_predict_layers": checkpoint_depths,
+                    "chain_hidden_post_norm": mtp_config.get(
+                        "chain_hidden_post_norm", False
+                    ),
+                    "local_layer_ids": mtp_config.get("local_layer_ids", []),
+                    "architectures": ["InklingMTPModel"],
+                }
+            )
+
+        if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
+            hf_config.model_type = "gemma4_mtp"
+            text_config = getattr(hf_config, "text_config", hf_config)
+            # The assistant runs all decoder layers in a single forward
+            # call to produce one draft token, so n_predict=1.
+            # num_kv_shared_layers must be 0: cross-model KV sharing is
+            # set up by the proposer after model construction.
+            if hasattr(text_config, "num_kv_shared_layers"):
+                text_config.num_kv_shared_layers = 0
+            hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
+
+        if initial_architecture == "DSparkMiniMaxDraftModel":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            dflash_config = dict(getattr(hf_config, "dflash_config", None) or {})
+            dflash_config.setdefault("causal", False)
+            hf_config.model_type = "minimax_m3_dspark"
+            hf_config.update(
+                {
+                    "architectures": ["DSparkMiniMaxDraftModel"],
+                    "dflash_config": dflash_config,
+                    "markov_rank": hf_config.dspark_markov_rank,
+                }
+            )
+        elif (
+            hf_config.model_type == "minimax_m3_vl"
+            or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
+        ):
+            # MTP modules live on the language model of this VL checkpoint, so
+            # promote text_config before rewriting it into an MTP config.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "minimax_m3_mtp"
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        elif (
+            hf_config.model_type == "minimax_m3_mtp"
+            or initial_architecture == "MiniMaxM3MTP"
+        ):
+            # Standalone MTP checkpoints already use a flat MTP config with no
+            # VL wrapper / text_config to promote, so just normalize the
+            # architecture and derive n_predict from num_mtp_modules.
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        if hf_config.model_type == "glm5_next":
+            hf_config.model_type = "glm5_next_mtp"
+            text_config = hf_config.get_text_config()
+            share_mtp_indices = getattr(
+                text_config, "index_share_for_mtp_iteration", False
+            )
+            hf_config.update(
+                {
+                    "n_predict": text_config.num_nextn_predict_layers,
+                    "architectures": ["Glm5NextMTPModel"],
+                    "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
+        if hf_config.model_type == "muse_glimmer_assistant":
+            # Non-causal DFlash drafter sharing Muse Glimmer's vocabulary
+            hf_config.update(
+                {
+                    "dflash_config": {"causal": False}
+                    | (getattr(hf_config, "dflash_config", None) or {}),
+                    "vocab_size": getattr(hf_config, "vocab_size", 202048),
+                }
+            )
+
+        return hf_config
+
+    @staticmethod
+    def _apply_composed_hf_override(
+        target_hf_overrides: Callable[[PreTrainedConfig], PreTrainedConfig],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        hf_config = SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+        return target_hf_overrides(hf_config)
+
+    @staticmethod
+    def _select_draft_hf_overrides(
+        overrides: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep rope-relevant keys, including those nested under VL wrappers."""
+        selected: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key in _ROPE_HF_OVERRIDE_KEYS:
+                selected[key] = copy.deepcopy(value)
+            elif key in _NESTED_HF_CONFIG_KEYS and isinstance(value, Mapping):
+                nested = SpeculativeConfig._select_draft_hf_overrides(value)
+                if nested:
+                    selected[key] = nested
+        return selected
+
+    @staticmethod
+    def _apply_dict_then_arch_override(
+        target_hf_overrides: dict[str, Any],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        """Apply dict rope overrides, then the draft arch rewrite.
+
+        Dict patches run first so nested keys (`text_config.rope_parameters`)
+        apply before arch mapping may promote `text_config`. Nested wrappers
+        are skipped on flat draft configs, where setting them would create a
+        bare `text_config` dict that `get_text_config()` picks up instead.
+        """
+        overrides = {
+            key: value
+            for key, value in target_hf_overrides.items()
+            if key not in _NESTED_HF_CONFIG_KEYS
+            or getattr(hf_config, key, None) is not None
+        }
+        ModelConfig._apply_dict_overrides(hf_config, overrides)
+        return SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+
+    @staticmethod
+    def compose_draft_hf_overrides(
+        target_hf_overrides: HfOverrides | None,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
+        """Build the `hf_overrides` for the draft `ModelConfig`.
+
+        Callable overrides on the target are config-to-config transforms
+        (e.g. test harnesses shrinking `num_hidden_layers`) and must also
+        reach the draft config — otherwise a draft belonging to a large
+        target is instantiated at full size even when the target is shrunk.
+
+        Dict overrides are mostly target-specific key patches, but
+        rope-relevant keys (`rope_parameters` / `rope_theta`, including nested
+        `text_config`) must reach the draft or a YaRN-style target override
+        leaves the draft on native rope (#58080). `max_position_embeddings`
+        stays target-only so the draft max-model-len clamp keeps holding
+        (#63909).
+
+        The composed override must stay picklable: the draft `ModelConfig`
+        is sent to spawned engine-core processes, so a local closure would
+        fail with `Can't get local object` during pickling. Bind the
+        target via `functools.partial` over a module-referenceable static
+        method instead.
+        """
+        if callable(target_hf_overrides):
+            return functools.partial(
+                SpeculativeConfig._apply_composed_hf_override,
+                target_hf_overrides,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        if not isinstance(target_hf_overrides, Mapping) or not target_hf_overrides:
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        draft_overrides = SpeculativeConfig._select_draft_hf_overrides(
+            target_hf_overrides
+        )
+        if not draft_overrides:
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        return functools.partial(
+            SpeculativeConfig._apply_dict_then_arch_override,
+            draft_overrides,
+            transformers_mtp_overrides=transformers_mtp_overrides,
+        )
+
+    def __post_init__(self):
+        # Note: "method" is a new parameter that helps to extend the
+        # configuration of non-model-based proposers, and the "model" parameter
+        # will be used to set the draft model, eagle head, or additional weight
+        # when needed. If users do not specify "method", the speculative method
+        # will be detected automatically if possible. If the speculative method
+        # can not be detected, it will be considered as the "draft_model" by
+        # default.
+
+        # infer method from user args
+        if (custom_cls := get_custom_speculator_config_class(self.method)) is not None:
+            logger.warning_once(
+                "Using custom speculative method '%s'. This is an experimental "
+                "feature and the speculator interface is subject to breaking "
+                "changes in future vLLM releases.",
+                self.method,
+            )
+            self.custom_method = self.method
+            self.method = custom_cls.base_method  # type: ignore[assignment]
+        elif self.method is None and self.model in ("ngram", "[ngram]"):
+            self.method = "ngram"
+        elif self.method is None and self.model is None:
+            # No draft checkpoint to detect the method from.
+            self.method = "draft_model"
+        # Otherwise, it stays None until detected from the draft checkpoint.
+
+        if self.method in get_args(MTPModelTypes) and self.method != "mtp":
+            logger.warning(
+                "method `%s` is deprecated and replaced with mtp.", self.method
+            )
+            self.method = "mtp"
+        elif self.method == "[ngram]":
+            self.method = "ngram"
+
+        config_cls = get_method_config_class(self)
+        # DSpark drafts carry their own width (block size), so the default
+        # draft is resolved even without num_speculative_tokens.
+        if self.model is None and (
+            self.num_speculative_tokens is not None or self.use_dspark()
+        ):
+            self.model = config_cls.default_model(self)
+        config_cls.configure(self)
+        # The draft checkpoint may have determined the speculator.
+        config_cls = get_speculator_config_class(self)
+
+        for option in _METHOD_SPECIFIC_OPTIONS:
+            if (
+                getattr(self, option) is not None
+                and option not in config_cls.supported_options
+            ):
+                raise ValueError(
+                    f"{option} is not supported with speculative method "
+                    f"{self.custom_method or self.method!r}."
+                )
+        config_cls.apply_options(self)
+
+        if self.prefill_context_kv_only:
+            if not config_cls.supports_prefill_context_kv_only:
+                raise ValueError(
+                    "prefill_context_kv_only is not supported with speculative "
+                    f"method {self.custom_method or self.method!r}."
+                )
+            if (
+                self.enable_adaptive_verification
+                or self.uses_dynamic_speculative_decoding()
+            ):
+                logger.warning_once(
+                    "prefill_context_kv_only schedules no drafts to verify. "
+                    "Disabling adaptive verification and dynamic speculative "
+                    "decoding."
+                )
+                self.enable_adaptive_verification = False
+                self.num_speculative_tokens_per_batch_size = None
+
+        if (
+            config_cls.adaptive_verification_uses_draft_logits
+            and self.enable_adaptive_verification
+            and self.use_local_argmax_reduction
+        ):
+            raise ValueError(
+                "Adaptive verification estimates per-position acceptance from "
+                "the draft logits, which use_local_argmax_reduction never "
+                "materializes. Disable one of them."
+            )
+
+        return self
+
+    @property
+    def speculator_config(self) -> SpeculatorConfig:
+        """The configured speculator's config. Derived on each access
+        so that it follows changes to the fields it depends."""
+        return get_speculator_config_class(self)(self)
+
+    # Shortcuts for commonly used speculator config properties.
+
+    @property
+    def uses_target_hidden_states(self) -> bool:
+        """See `SpeculatorConfig.uses_target_hidden_states`."""
+        return self.speculator_config.uses_target_hidden_states
+
+    @property
+    def uses_aux_hidden_states(self) -> bool:
+        """See `SpeculatorConfig.uses_aux_hidden_states`."""
+        return self.speculator_config.uses_aux_hidden_states
+
+    @property
+    def uses_separate_workspace_lane(self) -> bool:
+        """See `SpeculatorConfig.uses_separate_workspace_lane`."""
+        return self.speculator_config.uses_separate_workspace_lane
+
+    @staticmethod
+    def _maybe_override_draft_max_model_len(
+        speculative_max_model_len: int | None,
+        draft_max_model_len: int,
+        target_max_model_len: int,
+    ) -> int:
+        """Determine the max sequence len for the draft model. This is usually
+        the draft_max_model_len, but may be the target_max_model_len if it is
+        less than the draft_max_model_len, or may be speculative_max_model_len
+        if it is specified.
+
+        This is necessary so that sequences do not exceed the capacity of the
+        draft model or the target model.
+
+        speculative_max_model_len is mainly used for testing that sequences can
+        skip speculation.
+        """
+        if speculative_max_model_len is not None:
+            if speculative_max_model_len > draft_max_model_len:
+                raise ValueError(
+                    f"{speculative_max_model_len=} cannot be "
+                    f"larger than {draft_max_model_len=}"
+                )
+
+            if speculative_max_model_len > target_max_model_len:
+                raise ValueError(
+                    f"{speculative_max_model_len=} cannot be "
+                    f"larger than {target_max_model_len=}"
+                )
+
+            return speculative_max_model_len
+
+        result = min(
+            draft_max_model_len,
+            target_max_model_len,
+        )
+        if result != draft_max_model_len:
+            logger.info(
+                "Overriding draft model max model len from %d to %d",
+                draft_max_model_len,
+                result,
+            )
+        return result
+
+    @staticmethod
+    def _maybe_override_draft_max_position_embeddings(
+        draft_hf_config: PreTrainedConfig,
+        target_max_model_len: int,
+    ) -> None:
+        """Raise the max_position_embeddings of a draft that shares the
+        target's positional space (see `DraftModelSpeculatorConfig`'s
+        `shares_target_positions`) up to the target's.
+
+        The proposer feeds the draft positions up to the target's
+        max_model_len, while max_position_embeddings sizes the draft's
+        rotary cos_sin_cache. A smaller checkpoint value (e.g. 2048 for
+        yuhuili/EAGLE3-LLaMA3.1-Instruct-8B, or a DFlash or DSpark draft
+        published against a shorter context than the target is served with)
+        makes that cache gather go out of bounds.
+
+        Only drafts whose RoPE types are all in _CACHE_ONLY_ROPE_TYPES are
+        resized.
+
+        Args:
+            draft_hf_config: The draft model's HF config, mutated in place.
+            target_max_model_len: The target model's max_model_len.
+
+        """
+        draft_max_position_embeddings = getattr(
+            draft_hf_config, "max_position_embeddings", None
+        )
+        if (
+            draft_max_position_embeddings is None
+            or draft_max_position_embeddings >= target_max_model_len
+        ):
+            return
+        if not _rope_only_sizes_cache(draft_hf_config):
+            # VllmConfig limits max_model_len to the draft's instead.
+            return
+        logger.info(
+            "Overriding draft model max_position_embeddings from %d to the "
+            "target model's max_model_len (%d); the draft shares the target's "
+            "positional space.",
+            draft_max_position_embeddings,
+            target_max_model_len,
+        )
+        draft_hf_config.max_position_embeddings = target_max_model_len
+
+    @staticmethod
+    def _verify_and_get_draft_tp(
+        target_parallel_config: ParallelConfig,
+        speculative_draft_tensor_parallel_size: int | None,
+    ) -> int:
+        """Verifies and adjusts the tensor parallel size for a draft model
+        specified using speculative_draft_tensor_parallel_size.
+        """
+        # If speculative_draft_tensor_parallel_size is unset then set it
+        # appropriately else verify that it is set correctly.
+        if speculative_draft_tensor_parallel_size is None:
+            speculative_draft_tensor_parallel_size = (
+                target_parallel_config.tensor_parallel_size
+            )
+        elif speculative_draft_tensor_parallel_size not in (
+            1,
+            target_parallel_config.tensor_parallel_size,
+        ):
+            raise ValueError(
+                f"{speculative_draft_tensor_parallel_size=} cannot be "
+                f"other value than 1 or target model tensor_parallel_size"
+            )
+        return speculative_draft_tensor_parallel_size
+
+    @staticmethod
+    def _verify_and_get_draft_dcp(
+        target_parallel_config: ParallelConfig, draft_dcp: int | None
+    ) -> int:
+        """Default the draft's DCP to the target's; an explicit value must be 1
+        or the target's."""
+        target_dcp = target_parallel_config.decode_context_parallel_size
+        if draft_dcp is None:
+            return target_dcp
+        if draft_dcp not in (1, target_dcp):
+            raise ValueError(f"{draft_dcp=} must be 1 or {target_dcp}.")
+        return draft_dcp
+
+    def update_arch_(self):
+        """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
+        architectures-related fields in self.draft_model_config
+        """
+        self.draft_model_config.hf_text_config = get_hf_text_config(
+            self.draft_model_config.hf_config
+        )
+        self.draft_model_config.model_arch_config = (
+            self.draft_model_config.get_model_arch_config()
+        )
+        model_info, arch = self.draft_model_config.registry.inspect_model_cls(
+            self.draft_model_config.architectures,
+            self.draft_model_config,
+        )
+        self.draft_model_config._model_info = model_info
+        self.draft_model_config._architecture = arch
+
+    @staticmethod
+    def create_draft_parallel_config(
+        target_parallel_config: ParallelConfig,
+        speculative_draft_tensor_parallel_size: int,
+        draft_model_config: ModelConfig | None = None,
+    ) -> ParallelConfig:
+        """Create a parallel config for use by the draft worker.
+
+        Use the draft TP size and disable inherited EP for known dense drafts.
+        Without a draft model config, preserve the previous EP inheritance.
+        """
+        enable_ep = target_parallel_config.enable_expert_parallel
+        if draft_model_config is not None:
+            enable_ep = enable_ep and draft_model_config.is_moe
+
+        draft_parallel_config = ParallelConfig(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=speculative_draft_tensor_parallel_size,
+            enable_expert_parallel=enable_ep,
+            distributed_executor_backend=target_parallel_config.distributed_executor_backend,
+            max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
+            disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
+            ray_workers_use_nsight=target_parallel_config.ray_workers_use_nsight,
+            placement_group=target_parallel_config.placement_group,
+        )
+
+        return draft_parallel_config
+
+    def _verify_draft_eplb_config(self) -> None:
+        """Validate EPLB against draft experts and the topology they use."""
+        draft_model_config = self.draft_model_config
+        target_parallel_config = self.target_parallel_config
+        requested_redundant_experts = (
+            target_parallel_config.eplb_config.draft_num_redundant_experts
+            if target_parallel_config is not None
+            else None
+        )
+
+        if not self.draft_enable_eplb:
+            if requested_redundant_experts is not None:
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts requires "
+                    "speculative_config.draft_enable_eplb=true."
+                )
+            return
+
+        if requested_redundant_experts is not None:
+            if target_parallel_config is None or not target_parallel_config.enable_eplb:
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts requires target "
+                    "EPLB to be "
+                    "enabled and speculative_config.draft_enable_eplb=true."
+                )
+            if not self.use_eagle():
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts is only supported for MoE "
+                    "draft methods that use EPLB."
+                )
+
+        if draft_model_config is None or target_parallel_config is None:
+            return
+
+        if self.method == "dspark":
+            if not target_parallel_config.enable_eplb:
+                return
+
+            from vllm.v1.worker.gpu.spec_decode.dspark.config import (
+                dspark_draft_supports_eplb,
+            )
+
+            supports_eplb = dspark_draft_supports_eplb(draft_model_config)
+            if requested_redundant_experts is not None and not supports_eplb:
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts is only supported for "
+                    "DeepSeek V4 or V4.1 DSpark drafts that support EPLB. To "
+                    "disable draft EPLB, remove "
+                    "eplb_config.draft_num_redundant_experts "
+                    "and set speculative_config.draft_enable_eplb=false."
+                )
+            if not supports_eplb:
+                return
+
+            if target_parallel_config.enable_elastic_ep:
+                raise ValueError(
+                    "EPLB for a DSpark draft is not supported with Elastic EP. "
+                    "Set speculative_config.draft_enable_eplb=false to disable "
+                    "draft EPLB."
+                )
+
+            assert self.draft_parallel_config is not None
+            if (
+                self.draft_parallel_config.tensor_parallel_size == 1
+                and target_parallel_config.prefill_context_parallel_size == 1
+                and target_parallel_config.data_parallel_size == 1
+            ):
+                remediation = (
+                    " If you want to disable draft EPLB, remove "
+                    "eplb_config.draft_num_redundant_experts and set "
+                    "speculative_config.draft_enable_eplb=false."
+                    if requested_redundant_experts is not None
+                    else " To disable draft EPLB, set "
+                    "speculative_config.draft_enable_eplb=false."
+                )
+                raise ValueError(
+                    "EPLB for a DSpark draft requires its tensor parallel size, "
+                    "prefill context parallel size, or data parallel size to "
+                    "be greater than 1."
+                    f"{remediation}"
+                )
+            draft_parallel_config = target_parallel_config
+            draft_num_experts = (
+                getattr(draft_model_config.hf_config, "dspark_n_routed_experts", 0)
+                or getattr(
+                    draft_model_config.hf_text_config,
+                    "dspark_n_routed_experts",
+                    0,
+                )
+                or None
+            )
+        else:
+            if not self.use_eagle() or not target_parallel_config.enable_eplb:
+                return
+            if not draft_model_config.is_moe:
+                if requested_redundant_experts is not None:
+                    raise ValueError(
+                        "eplb_config.draft_num_redundant_experts requires a MoE "
+                        "draft model."
+                    )
+                return
+            draft_parallel_config = target_parallel_config
+            draft_num_experts = None
+
+        ep_size = (
+            draft_parallel_config.tensor_parallel_size
+            * draft_parallel_config.prefill_context_parallel_size
+            * draft_parallel_config.data_parallel_size
+        )
+        draft_expert_counts = draft_model_config.get_eplb_expert_counts(
+            draft_num_experts
+        )
+        target_expert_counts = (
+            self.target_model_config.get_eplb_expert_counts()
+            if self.target_model_config is not None
+            else set()
+        )
+        target_num_redundant_experts = (
+            target_parallel_config.eplb_config.num_redundant_experts
+        )
+        can_inherit_target_count = (
+            requested_redundant_experts is None
+            and bool(draft_expert_counts)
+            and draft_expert_counts == target_expert_counts
+            and target_num_redundant_experts is not None
+        )
+        if can_inherit_target_count:
+            self.resolved_draft_num_redundant_experts = target_num_redundant_experts
+        elif requested_redundant_experts is not None:
+            self.resolved_draft_num_redundant_experts = requested_redundant_experts
+        else:
+            default_num_experts = (
+                draft_num_experts
+                if draft_num_experts is not None
+                else draft_model_config.get_num_experts()
+            )
+            minimum_counts = {(-count) % ep_size for count in draft_expert_counts}
+            if len(minimum_counts) == 1:
+                self.resolved_draft_num_redundant_experts = next(iter(minimum_counts))
+            else:
+                self.resolved_draft_num_redundant_experts = (
+                    -default_num_experts
+                ) % ep_size
+            logger.info_once(
+                "Draft EPLB redundant expert count not specified, "
+                "defaulting to minimum valid value: %d "
+                "(routed_expert_counts=%s, ep_size=%d)",
+                self.resolved_draft_num_redundant_experts,
+                tuple(sorted(draft_expert_counts)),
+                ep_size,
+            )
+        draft_parallel_config = replace(
+            draft_parallel_config,
+            eplb_config=replace(
+                draft_parallel_config.eplb_config,
+                num_redundant_experts=self.resolved_draft_num_redundant_experts,
+            ),
+        )
+
+        draft_model_config.verify_eplb_config(
+            draft_parallel_config,
+            num_experts=draft_num_experts,
+            config_name="eplb_config.draft_num_redundant_experts",
+            disable_config_name="speculative_config.draft_enable_eplb",
+        )
+
+    def _apply_draft_eplb_override(
+        self, parallel_config: ParallelConfig
+    ) -> ParallelConfig:
+        """Return the parallel config with the draft EPLB settings applied."""
+        if not self.draft_enable_eplb:
+            return replace(
+                parallel_config,
+                enable_eplb=False,
+                enable_elastic_ep=False,
+                eplb_config=replace(
+                    parallel_config.eplb_config,
+                    num_redundant_experts=0,
+                ),
+            )
+        if self.resolved_draft_num_redundant_experts is None:
+            return parallel_config
+        return replace(
+            parallel_config,
+            eplb_config=replace(
+                parallel_config.eplb_config,
+                num_redundant_experts=self.resolved_draft_num_redundant_experts,
+            ),
+        )
+
+    def apply_draft_eplb_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
+        """Apply draft-only EPLB settings without changing the target config."""
+        if self.draft_enable_eplb and self.resolved_draft_num_redundant_experts is None:
+            return vllm_config
+        # VllmConfig retains the target ModelConfig here. Replacing it would
+        # revalidate the draft count against the target model's expert count.
+        draft_vllm_config = copy.copy(vllm_config)
+        draft_vllm_config.parallel_config = self._apply_draft_eplb_override(
+            vllm_config.parallel_config
+        )
+        return draft_vllm_config
+
+    def apply_draft_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
+        """Overlay this config's draft overrides onto a target VllmConfig.
+
+        Only non-None model overrides are applied. Draft EPLB settings are
+        applied separately, including the draft-specific redundant-expert count
+        from eplb_config.
+        """
+        for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            if (value := getattr(self, src)) is not None:
+                sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
+                vllm_config = replace(vllm_config, **{config_name: sub_config})
+        return self.apply_draft_eplb_overrides(vllm_config)
+
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, value: str | None) -> str | None:
+        if value is None or value in get_args(SpeculativeMethod):
+            return value
+        if value not in (registered := registered_speculative_methods()):
+            raise ValueError(
+                f"Unknown speculative method {value!r}. Built-in methods: "
+                f"{sorted(get_args(SpeculativeMethod))}; registered custom "
+                f"methods: {registered}."
+            )
+        return value
+
+    @field_validator("attention_backend", mode="before")
+    @classmethod
+    def _parse_attention_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
+            return AttentionBackendEnum[value.upper()]
+        return value
+
+    @model_validator(mode="after")
+    def _verify_args(self) -> Self:
+        if self.tensor_parallel_size is not None:
+            raise ValueError(
+                "'tensor_parallel_size' is not a valid argument in the "
+                "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
+            )
+
+        if self.num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided with "
+                "speculative model unless the draft model config contains an "
+                "n_predict parameter."
+            )
+
+        if self.num_speculative_tokens <= 0:
+            raise ValueError(
+                "Expected num_speculative_tokens to be greater "
+                f"than zero ({self.num_speculative_tokens})."
+            )
+
+        if self.rejection_sample_method == "synthetic":
+            # Consolidate to per-position rates
+            self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
+                self.num_speculative_tokens,
+                self.synthetic_acceptance_rates,
+                self.synthetic_acceptance_length,
+            )
+            self.synthetic_acceptance_length = None
+        elif (
+            self.synthetic_acceptance_rates is not None
+            or self.synthetic_acceptance_length is not None
+        ):
+            raise ValueError(
+                "synthetic_acceptance_rates / synthetic_acceptance_length "
+                "are only valid with rejection_sample_method='synthetic'."
+            )
+
+        if self.draft_model_config:
+            self.draft_model_config.verify_with_parallel_config(
+                self.draft_parallel_config
+            )
+        self._verify_draft_eplb_config()
+
+        if self.parallel_drafting is not None:
+            if self.parallel_drafting and self.method not in ("dflash", "dspark"):
+                raise ValueError(
+                    "parallel_drafting is only supported by the dflash and dspark "
+                    f"methods, not {self.method!r}."
+                )
+            logger.warning_once(
+                "parallel_drafting is deprecated and has no effect: dflash and "
+                "dspark always draft in parallel, and no other method supports "
+                "it. It will be removed in a future release."
+            )
+
+        if self.rejection_sample_method == "fly":
+            if not self.speculator_config.proposes_draft_tokens:
+                raise ValueError(
+                    "FLy is not compatible with method='extract_hidden_states', "
+                    "which does not perform speculative decoding."
+                )
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy requires num_speculative_tokens to be at least 2."
+                )
+            if self.fly_window_size is None:
+                self.fly_window_size = min(6, self.num_speculative_tokens - 1)
+            elif self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy requires fly_window_size to be smaller than "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy verification is a lossy speculative decoding method and "
+                "may degrade model outputs."
+            )
+        elif (
+            self.rejection_sample_method == "synthetic"
+            and self.fly_window_size is not None
+        ):
+            # FLy cost overlay: pays FLy's per-step compute while acceptance
+            # stays exactly the synthetic one.
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires num_speculative_tokens >= 2."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires fly_window_size < "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy cost overlay enabled with synthetic acceptance: "
+                "entropy is computed but never used to defer rejections."
+            )
+
+        self.verify_equal_vocab_size_if_draft_model()
+        return self
+
+    def verify_equal_vocab_size_if_draft_model(self):
+        if (
+            self.speculator_config.draft_has_own_vocab
+            and self.target_model_config is not None
+            and self.draft_model_config is not None
+        ):
+            target_vocab_size = self.target_model_config.get_vocab_size()
+            draft_vocab_size = self.draft_model_config.get_vocab_size()
+            if target_vocab_size != draft_vocab_size:
+                raise ValueError(
+                    f"Target and draft model should have the same vocabulary size. "
+                    f"Target model vocab_size={target_vocab_size}. "
+                    f"Draft model vocab_size={draft_vocab_size}. "
+                    f"Using models with different tokenizers can cause out-of-bounds "
+                    f"errors during speculative decoding."
+                )
+
+    @property
+    def max_num_new_slots_for_drafting(self) -> int:
+        """Return the maximum additional drafting slots per request.
+
+        The scheduler budget already includes one query slot per decoding request.
+        Only the autoregressive draft-model input needs one more: it retains one
+        unsliced token. DFlash and DSpark draft in a separate query pass rather
+        than adding rows to the target batch.
+        """
+        return self.speculator_config.max_num_new_slots_for_drafting
+
+    def use_gemma4_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "gemma4_mtp"
+        )
+
+    def use_eagle(self) -> bool:
+        # NOTE: This method is usually a stand-in for "speculative decoding using
+        # target model hidden states"
+        # TODO(ben): Refactor this so the naming is clearer
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+
+    def needs_eagle_block_drop(self) -> bool:
+        """Whether draft KV at a position depends on the next token.
+
+        EAGLE-style drafters build a position's draft KV from its hidden state
+        and the next token. DFlash/DSpark build it from the target hidden state
+        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        """
+        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
+
+    def use_eagle_block_drop(self) -> bool:
+        """Whether the volatile trailing prefix-cache block should be dropped."""
+        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
+
+    def use_dflash(self) -> bool:
+        return self.method == "dflash"
+
+    def use_dspark(self) -> bool:
+        return self.method == "dspark"
+
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return self.num_speculative_tokens_per_batch_size is not None
+
+    def uses_draft_model(self) -> bool:
+        return self.method == "draft_model"
+
+    def uses_draft_kv_cache(self) -> bool:
+        return (
+            self.use_eagle()
+            or self.uses_draft_model()
+            or self.uses_extract_hidden_states()
+        )
+
+    def uses_extract_hidden_states(self) -> bool:
+        return self.method == "extract_hidden_states"
+
+    def use_ngram_gpu(self) -> bool:
+        return self.method == "ngram_gpu"
+
+    def use_ngram(self) -> bool:
+        return self.method in ("ngram", "ngram_gpu")
+
+    def num_mtp_modules(self) -> int:
+        """Number of MTP modules the drafter selects among by draft step."""
+        assert self.draft_model_config is not None
+        return getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
+
+    def use_multi_module_mtp(self) -> bool:
+        if self.method != "mtp" or self.draft_model_config is None:
+            return False
+        hf_config = self.draft_model_config.hf_config
+        if min(self.num_mtp_modules(), self.num_speculative_tokens) <= 1:
+            return False
+        index_share = self.index_share_for_mtp_iteration
+        if index_share is None:
+            index_share = getattr(hf_config, "index_share_for_mtp_iteration", False)
+        if index_share:
+            # TODO: Support index_share_for_mtp_iteration in
+            # MultiModuleMTPSpeculator.
+            return False
+        # TODO: Verify MiniMax-M3 with MultiModuleMTPSpeculator.
+        return hf_config.model_type != "minimax_m3_mtp"
+
+    def __repr__(self) -> str:
+        method = self.custom_method or self.method
+        model = (
+            None
+            if self.method
+            in (
+                "ngram",
+                "suffix",
+                "extract_hidden_states",
+            )
+            else self.draft_model_config.model
+        )
+        num_spec_tokens = self.num_speculative_tokens
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
