@@ -5,7 +5,6 @@ job_dirs:
   - ".buildkite/hardware_tests"
 run_all_patterns:
   - "docker/Dockerfile"
-  - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
   - "requirements/kv_connectors.txt"
@@ -14,11 +13,14 @@ run_all_patterns:
   - "setup.py"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
-# csrc/ is decided by ci-selector on CUDA, from the kernel recordings. AMD is
-# not selected yet, so a csrc/ change still runs every AMD step (ROCm compiles
-# these sources through HIPify). Uses run_all_exclude_patterns below.
+# csrc/ and CMakeLists.txt are decided by ci-selector on CUDA: csrc/ from the
+# kernel recordings, CMakeLists.txt as the csrc sources an edit reaches
+# (ci-infra#895). AMD is not selected yet, so these still run every AMD step
+# (ROCm compiles these sources through HIPify). Uses run_all_exclude_patterns
+# below.
 amd_run_all_patterns:
   - "csrc/"
+  - "CMakeLists.txt"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"

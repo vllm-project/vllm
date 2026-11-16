@@ -19,7 +19,7 @@ long_query = "What is the capital of France?" * 20
 long_doc = "The capital of France is Paris. " * 20
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     model: str
     args: list[str]
