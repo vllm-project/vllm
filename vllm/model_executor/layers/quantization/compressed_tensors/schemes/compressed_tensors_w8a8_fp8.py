@@ -12,6 +12,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
 )
@@ -85,8 +88,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
         kernel = getattr(self, "fp8_linear", None)
-        return self.weight_block_size == [128, 128] and isinstance(
-            kernel, CutlassFp8BlockScaledMMKernel
+        return isinstance(kernel, CutlassFP8ScaledMMLinearKernel) or (
+            self.weight_block_size == [128, 128]
+            and isinstance(kernel, CutlassFp8BlockScaledMMKernel)
         )
 
     @classmethod
@@ -161,6 +165,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 raise RuntimeError(
                     "Compressed-tensors FP8 backend cannot use pre-processed weights"
                 )
+            if self.weight_block_size is None:
+                layer.processed_weight_dims = (0, 1)
             if not self.is_static_input_scheme:
                 layer.input_scale = None
             return

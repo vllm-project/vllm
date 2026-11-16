@@ -1080,37 +1080,40 @@ async fn cohere_routes_follow_the_python_gates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn scale_out_generate_route_is_disabled_by_default() {
+async fn scale_out_generate_and_abort_routes_are_disabled_by_default() {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-scale-out-disabled",
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut app = build_router(Arc::new(AppState::new(vec!["model".to_string()], chat)));
+    let app = build_router(Arc::new(AppState::new(vec!["model".to_string()], chat)));
 
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/inference/v1/generate")
-                .header("content-type", "application/json")
-                .body(Body::from("not JSON"))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
+    for uri in ["/inference/v1/generate", "/inference/v1/abort_requests"] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
-    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
-    assert_eq!(error["error"]["type"], "PermissionDeniedError");
-    assert!(
-        error["error"]["message"]
-            .as_str()
-            .expect("error message")
-            .contains("--enable-scale-out")
-    );
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+        let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+        assert_eq!(error["error"]["type"], "PermissionDeniedError");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .expect("error message")
+                .contains("--enable-scale-out")
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1186,11 +1189,162 @@ async fn generate_rejects_unparsable_data_parallel_rank_header() {
     );
 }
 
+/// Like Python, `/inference/v1/abort_requests` parses its body as JSON
+/// whatever the `Content-Type`, and `request_ids` is a required string or list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_abort_requests_validates_body() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let mut results = Vec::new();
+    for (content_type, body) in [
+        (None, r#"{"request_ids": ["unknown"]}"#),
+        (Some("text/plain"), r#"{"request_ids": "unknown"}"#),
+        (Some("application/json"), r#"{}"#),
+        (Some("application/json"), r#"{"request_ids": null}"#),
+        (Some("application/json"), r#"{"request_ids": [1]}"#),
+        (Some("application/json"), r#"{"request_ids": "#),
+        (None, ""),
+    ] {
+        let mut request = Request::builder().method("POST").uri("/inference/v1/abort_requests");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = app
+            .clone()
+            .call(request.body(Body::from(body)).expect("build request"))
+            .await
+            .expect("call app");
+        let status = response.status();
+        let response_body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        results.push(format!(
+            "{content_type:?} {body} -> {status} {}",
+            String::from_utf8_lossy(&response_body)
+        ));
+    }
+    expect_test::expect![[r#"
+        None {"request_ids": ["unknown"]} -> 200 OK 
+        Some("text/plain") {"request_ids": "unknown"} -> 200 OK 
+        Some("application/json") {} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: missing field `request_ids` at line 1 column 2","type":"Bad Request","param":null,"code":400}}
+        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":null,"code":400}}
+        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":null,"code":400}}
+        Some("application/json") {"request_ids":  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: request_ids: EOF while parsing a value at line 1 column 16","type":"Bad Request","param":null,"code":400}}
+        None  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: EOF while parsing a value at line 1 column 0","type":"Bad Request","param":null,"code":400}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
+/// An abort by the request ID that `/inference/v1/generate` returned finishes
+/// its stream with `finish_reason: "abort"`. An empty `request_ids` list or an
+/// unknown ID aborts nothing, unlike the dev-mode `/abort_requests`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_abort_requests_finishes_generate_stream() {
+    use futures::StreamExt as _;
+
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    let (app, engine_task) = test_admin_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let request_id = decode_add_request(&recv_engine_message(dealer).await).request_id;
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request_id, vec![(vec![7], None)]),
+            )
+            .await;
+            resume_rx.await.expect("resume after the no-op aborts");
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request_id, vec![(vec![8], None)]),
+            )
+            .await;
+
+            let abort = recv_engine_message(dealer).await;
+            assert_eq!(abort[0].as_ref(), b"\x01");
+            assert_eq!(
+                decode_value(&abort[1]).expect("decode abort payload"),
+                Value::Array(vec![Value::from(request_id)])
+            );
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "abort-me",
+                        "token_ids": [11, 22],
+                        "stream": true,
+                        "sampling_params": {"max_tokens": 16},
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let mut chunks = Vec::<serde_json::Value>::new();
+    let mut next_chunk = async || {
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("stream chunk timeout")?
+            .expect("read stream chunk");
+        Some(String::from_utf8(frame.to_vec()).expect("utf8 chunk"))
+    };
+    let abort = async |body: &str| {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/abort_requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{body}");
+    };
+
+    let first = next_chunk().await.expect("first chunk");
+    chunks.extend(sse_json_payloads(&first));
+    abort(r#"{"request_ids": []}"#).await;
+    abort(r#"{"request_ids": ["unknown"]}"#).await;
+    resume_tx.send(()).expect("resume engine");
+    let second = next_chunk().await.expect("second chunk");
+    chunks.extend(sse_json_payloads(&second));
+    abort(r#"{"request_ids": ["abort-me"]}"#).await;
+    while let Some(rest) = next_chunk().await {
+        chunks.extend(sse_json_payloads(&rest));
+    }
+    engine_task.finish().await;
+
+    let choices = chunks
+        .iter()
+        .map(|chunk| {
+            let choice = &chunk["choices"][0];
+            format!("{} {}", choice["token_ids"], choice["finish_reason"])
+        })
+        .collect::<Vec<_>>();
+    expect_test::expect![[r#"
+        [7] null
+        [8] null
+        [] "abort""#]]
+    .assert_eq(&choices.join("\n"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
-    const ROUTES: [&str; 7] = [
-        "/inference/v1/abort_requests",
+    const ROUTES: [&str; 6] = [
         "/v1/chat/completions/render",
         "/v1/completions/render",
         "/v1/messages/render",
