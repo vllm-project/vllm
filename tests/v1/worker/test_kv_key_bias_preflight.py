@@ -66,8 +66,8 @@ class _Model(torch.nn.Module):
 def _bias_with(
     slowest_band_value: float, elsewhere: float = 1.0, neox: bool = True
 ) -> torch.Tensor:
-    """A key bias of ``elsewhere`` on every dim except one dim of head 1 on the
-    slowest band, which is set to ``slowest_band_value``.
+    """A key bias of `elsewhere` on every dim except one dim of head 1 on the
+    slowest band, which is set to `slowest_band_value`.
 
     With HEAD_DIM 128 the slowest eighth is pairs 56..63. Under NeoX those are
     dims 56..63 and 120..127; under GPT-J (interleaved) they are dims 112..127.

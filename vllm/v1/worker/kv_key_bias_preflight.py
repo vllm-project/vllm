@@ -5,13 +5,13 @@
 Some models carry a large bias on the key projection of their first attention
 layer: the Qwen2 and Qwen2.5 families and their fine-tuned and distilled
 derivatives. Under a per-token, per-head quantized KV cache
-(``int4_per_token_head``; fp8 at default scales on some of them) these models
+(`int4_per_token_head`; fp8 at default scales on some of them) these models
 answer retrieval prompts at chance or worse, and the engine reports success.
 
 Why: the bias adds the same offset to every cached key of that layer. The
 quantizer sets its per-token range from that offset instead of from the
 signal, so the signal rounds away. The rotated query then reads noise.
-Leaving the first layer unquantized (``--kv-cache-dtype-skip-layers 0``)
+Leaving the first layer unquantized (`--kv-cache-dtype-skip-layers 0`)
 restores the model and costs a few percent of the quantized option's
 throughput.
 
@@ -55,17 +55,17 @@ def slowest_band_key_bias(
 ) -> float:
     """Largest |bias| on the slowest-rotating eighth of the rotary pairs.
 
-    ``k_bias`` is the key projection's bias for this rank, with shape
-    ``[num_kv_heads * head_dim]``.
+    `k_bias` is the key projection's bias for this rank, with shape
+    `[num_kv_heads * head_dim]`.
 
     Rotary pairs are numbered by frequency: pair 0 rotates fastest and the
-    last pair slowest. The slowest eighth is the last ``rotary_dim // 16``
+    last pair slowest. The slowest eighth is the last `rotary_dim // 16`
     pairs. Which two dims form a pair depends on the layout:
 
-    - NeoX style: dim ``d`` pairs with ``d + rotary_dim // 2``.
-    - GPT-J style (interleaved): pair ``j`` is dims ``2j`` and ``2j + 1``.
+    - NeoX style: dim `d` pairs with `d + rotary_dim // 2`.
+    - GPT-J style (interleaved): pair `j` is dims `2j` and `2j + 1`.
 
-    Dims beyond ``rotary_dim`` (partial rotary) are not rotated and are not
+    Dims beyond `rotary_dim` (partial rotary) are not rotated and are not
     read.
     """
     if head_dim <= 0 or k_bias.numel() % head_dim != 0:
@@ -92,14 +92,14 @@ def _first_attention_key_bias(
     """The first attention layer's key bias and its head geometry, or None.
 
     Walks the module tree in registration order. Stops at the first module
-    that has a ``head_dim`` and a biased key projection, in one of two forms:
+    that has a `head_dim` and a biased key projection, in one of two forms:
 
-    - a fused ``qkv_proj`` whose owner exposes ``q_size`` and ``kv_size``
-      (the K slice is ``bias[q_size : q_size + kv_size]``);
-    - a separate ``k_proj``.
+    - a fused `qkv_proj` whose owner exposes `q_size` and `kv_size`
+      (the K slice is `bias[q_size : q_size + kv_size]`);
+    - a separate `k_proj`.
 
     The returned bias is the K slice this rank holds. Modules without a key
-    bias (for example a ``k_norm`` design such as Qwen3) are passed over, so
+    bias (for example a `k_norm` design such as Qwen3) are passed over, so
     the result is None for such models.
     """
     for module in model.modules():
@@ -141,7 +141,7 @@ def check_key_bias_under_quantized_kv(
 
     The check applies when the cache dtype is a quantized one, layer 0 is not
     in the skip list, and the first attention layer has a key bias. It then
-    reads the slowest-band statistic and warns if it exceeds ``threshold``.
+    reads the slowest-band statistic and warns if it exceeds `threshold`.
 
     Returns the statistic that was read, or None when the check did not
     apply, so callers and tests can see what the model measured.
