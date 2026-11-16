@@ -3260,6 +3260,7 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
     )
 
 
+# TODO: Remove in v0.35.0
 @pytest.mark.parametrize(
     "act, expected",
     [
@@ -3290,6 +3291,7 @@ def test_deprecated_fp8_moe_requant_env_redirects_to_quantization_config(
     assert fp8_moe_requant_args() == quant_config_args(moe=expected)
 
 
+# TODO: Remove in v0.35.0
 @pytest.mark.skip_global_cleanup
 def test_deprecated_fp8_moe_requant_env_warns_and_applies_to_block_fp8_on_rocm(
     caplog, monkeypatch
