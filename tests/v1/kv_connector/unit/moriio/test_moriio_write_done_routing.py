@@ -12,7 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_connector,
+    moriio_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     LayerTransferPlan,
@@ -656,6 +659,100 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     assert results.failed_recving == {"req-1"}
     assert wrapper.pop_finished_write_req_ids() == set()
     assert list(worker._unmatched_write_failures) == ["tOtherRank"]
+
+
+def _write_consumer(wrapper: MoRIIOWrapper):
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    vars(worker).update(
+        is_producer=False,
+        mode=MoRIIOMode.WRITE,
+        moriio_wrapper=wrapper,
+        transfer_id_to_request_id={},
+        _unmatched_write_completions=OrderedDict(),
+        _num_expired_write_completions=0,
+        _num_evicted_write_completions=0,
+    )
+    return worker
+
+
+def _write_done(wrapper: MoRIIOWrapper, *transfer_ids: str) -> None:
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.CONSUMER):
+        for tid in transfer_ids:
+            wrapper._handle_structured_message(
+                {"type": "write_done", "transfer_id": tid}
+            )
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock():
+    c = _Clock()
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.time", c
+    ):
+        yield c
+
+
+def test_write_done_before_its_mapping_is_reported_once_mapped(clock):
+    wrapper = _real_wrapper()
+    worker = _write_consumer(wrapper)
+    _write_done(wrapper, "tA")
+
+    assert worker.get_finished() == (set(), set())
+    clock.now += 30
+    worker.transfer_id_to_request_id = {"tA": "req-1"}
+    assert worker.get_finished() == (set(), {"req-1"})
+    assert not worker._unmatched_write_completions
+
+
+def test_write_done_no_request_matches_is_dropped_after_its_ttl(clock):
+    """A late write_done for a request that already finished (e.g. aborted
+    while waiting for its KV, which unmaps it) used to stay forever."""
+    ttl = moriio_connector._UNMATCHED_WRITE_COMPLETION_TTL_S
+    wrapper = _real_wrapper()
+    worker = _write_consumer(wrapper)
+    _write_done(wrapper, "tGone")
+    assert worker.get_finished() == (set(), set())
+
+    # A repeat that gets past the wrapper's dedup does not restart its clock.
+    clock.now += ttl - 1
+    wrapper.done_write_cache_req_ids.append("tGone")
+    assert worker.get_finished() == (set(), set())
+    assert list(worker._unmatched_write_completions) == ["tGone"]
+
+    clock.now += 2
+    assert worker.get_finished() == (set(), set())
+    assert not worker._unmatched_write_completions
+    assert worker._num_expired_write_completions == 1
+
+
+def test_unmatched_write_done_backlog_drops_the_oldest_at_the_cap(clock):
+    """Past the cap the oldest entries go, not the newest, which are the ones
+    whose mapping may still arrive."""
+    cap = moriio_connector._MAX_UNMATCHED_WRITE_COMPLETIONS
+    wrapper = _real_wrapper()
+    worker = _write_consumer(wrapper)
+    _write_done(wrapper, *(f"old{i}" for i in range(cap)))
+    worker.get_finished()
+    clock.now += 1
+    _write_done(wrapper, *(f"new{i}" for i in range(10)))
+
+    worker.get_finished()
+
+    # A batch is popped as a set, so which old entries go is arbitrary.
+    pending = worker._unmatched_write_completions
+    assert len(pending) == cap
+    assert all(f"new{i}" in pending for i in range(10))
+    assert sum(t.startswith("old") for t in pending) == cap - 10
+    assert worker._num_evicted_write_completions == 10
+    assert worker._num_expired_write_completions == 0
 
 
 def test_write_rejects_unmappable_tp_before_scheduling_any_layer():
