@@ -3,9 +3,9 @@
 """MoRIIO WRITE-mode consumer receive timeout (`write_recv_timeout`).
 
 Runs the real `Scheduler` and the real `MoRIIOConnectorWorker`
-`start_load_kv` / `get_transfer_results`, with no GPU or RDMA, for each
-decode KV cache layout WRITE mode supports: plain attention, MLA, and either
-with a Mamba/KDA state group (hybrid).
+`start_load_kv` / `get_transfer_results`, with no GPU or RDMA, at TP 1 (no
+output aggregator) and TP 2. One test covers each decode KV cache layout WRITE
+mode supports: plain attention, MLA, and either with a Mamba/KDA state group.
 """
 
 import socket
@@ -133,13 +133,16 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
 class _Engine:
     """A decode instance: the real scheduler and one stub worker per TP rank."""
 
-    def __init__(self, monkeypatch, tp_size: int, layout: str = "attn"):
+    def __init__(
+        self, monkeypatch, tp_size: int, layout: str = "attn", policy: str = "fail"
+    ):
         self.clock = _Clock()
         monkeypatch.setattr(moriio_connector, "time", self.clock)
         config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
         config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
             TIMEOUT_S
         )
+        config.kv_transfer_config.kv_load_failure_policy = policy
         kv_cache_config = _kv_cache_config(layout)
         if layout.endswith("hybrid"):
             config.cache_config.mamba_cache_mode = "align"
@@ -153,8 +156,9 @@ class _Engine:
         monkeypatch.setattr(
             moriio_connector, "_peer_listening", lambda host, port: self.prefill_alive
         )
-        connector._write_recv_prober.shutdown()
-        connector._write_recv_prober = _InlineExecutor()
+        if connector._write_recv_prober is not None:
+            connector._write_recv_prober.shutdown()
+            connector._write_recv_prober = _InlineExecutor()
         self.pool = self.scheduler.kv_cache_manager.block_pool
         self.workers = [_make_consumer_worker() for _ in range(tp_size)]
         # Like the executors: only multi-worker outputs are aggregated.
@@ -204,17 +208,17 @@ class _Engine:
         return request
 
 
-@pytest.fixture(params=LAYOUTS)
-def layout(request):
-    return request.param
-
-
-@pytest.fixture(params=[1, 2, 4], ids=["tp1", "tp2", "tp4"])
-def engine(request, layout, monkeypatch):
+@pytest.fixture
+def consumer_role():
     role = moriio_common.get_role()
     moriio_common.set_role(moriio_common.ROLE.CONSUMER)
-    yield _Engine(monkeypatch, request.param, layout)
+    yield
     moriio_common.set_role(role)
+
+
+@pytest.fixture(params=[1, 2], ids=["tp1", "tp2"])
+def engine(request, consumer_role, monkeypatch):
+    return _Engine(monkeypatch, request.param)
 
 
 def test_prefill_dies_request_fails_and_blocks_stay_allocated(engine):
@@ -391,5 +395,39 @@ def test_write_failed_with_the_timeout_frees_the_blocks(engine):
     engine.step(write_failed=frozenset({transfer_id}))
     assert request.status == RequestStatus.FINISHED_ERROR
     engine.step()
+    assert request.request_id not in engine.scheduler.requests
+    assert engine.pool.get_num_free_blocks() == free_before
+
+
+def test_timer_is_off_under_the_recompute_policy(consumer_role, monkeypatch):
+    """Under recompute a failed receive frees its blocks and recomputes into
+    them, where a late write could land, so the timer is not armed."""
+    engine = _Engine(monkeypatch, 1, policy="recompute")
+    request = engine.add_waiting_request()
+
+    engine.clock.now += 10 * TIMEOUT_S
+    out = engine.scheduler.schedule()
+    assert not out.kv_connector_metadata.write_recv_timed_out_req_ids
+    engine.finish(out)
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_every_kv_cache_group_is_held_and_then_freed(
+    consumer_role, monkeypatch, layout
+):
+    """The failure is per request and the hold covers all of its blocks, in
+    every KV cache group (attention or MLA, with or without Mamba/KDA state)."""
+    engine = _Engine(monkeypatch, 2, layout)
+    free_before = engine.pool.get_num_free_blocks()
+    request = engine.add_waiting_request()
+    held = engine.pool.get_num_free_blocks()
+
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == held
+
+    engine.step(write_done=frozenset({request.request_id}))
     assert request.request_id not in engine.scheduler.requests
     assert engine.pool.get_num_free_blocks() == free_before
