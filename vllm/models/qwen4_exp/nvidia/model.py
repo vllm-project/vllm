@@ -194,17 +194,6 @@ def get_qsa_topk_buffer_width(config: Qwen4ExpTextConfig) -> int:
     return config.indexer_budget + config.indexer_compress_ratio
 
 
-def make_physical_topk_indices_buffer(
-    vllm_config: VllmConfig, topk_indices_buffer: torch.Tensor | None
-) -> torch.Tensor | None:
-    if (
-        topk_indices_buffer is None
-        or vllm_config.attention_config.hisparse_config is None
-    ):
-        return None
-    return torch.empty_like(topk_indices_buffer)
-
-
 class Qwen4ExpDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -212,7 +201,6 @@ class Qwen4ExpDecoderLayer(nn.Module):
         layer_type: str,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
-        physical_topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
@@ -270,7 +258,6 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     config=config,
                     layer_id=self.layer_idx,
                     topk_indices_buffer=topk_indices_buffer,
-                    physical_topk_indices_buffer=physical_topk_indices_buffer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
                     reduce_results=not self.use_hc_sequence_parallel,
@@ -464,9 +451,6 @@ class Qwen4ExpModel(nn.Module):
             )
         else:
             self.topk_indices_buffer = None
-        self.physical_topk_indices_buffer = make_physical_topk_indices_buffer(
-            vllm_config, self.topk_indices_buffer
-        )
         self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -482,7 +466,6 @@ class Qwen4ExpModel(nn.Module):
                 layer_type=config.layer_types[layer_idx],
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
-                physical_topk_indices_buffer=self.physical_topk_indices_buffer,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

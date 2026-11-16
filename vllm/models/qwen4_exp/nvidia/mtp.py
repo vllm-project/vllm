@@ -59,7 +59,6 @@ from .model import (
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
     get_qsa_topk_buffer_width,
-    make_physical_topk_indices_buffer,
 )
 
 
@@ -214,9 +213,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 get_qsa_topk_buffer_width(config),
                 dtype=torch.int32,
             )
-        physical_topk_indices_buffer = make_physical_topk_indices_buffer(
-            vllm_config, topk_indices_buffer
-        )
         with set_current_vllm_config(draft_vllm_config, prefix=prefix):
             # residual_linear_shared fusion: fc_embedding projects the token
             # embedding, fc_hidden (shared across HC branches) projects the
@@ -246,7 +242,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                     layer_type="qwen_sparse_attention",
                     prefix=f"{prefix}.layers.{self.mtp_start_layer_idx + idx}",
                     topk_indices_buffer=topk_indices_buffer,
-                    physical_topk_indices_buffer=physical_topk_indices_buffer,
                 )
                 for idx in range(self.num_mtp_layers)
             )

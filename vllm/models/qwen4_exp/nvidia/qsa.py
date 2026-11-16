@@ -49,12 +49,16 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.index_group import (
+    HiSparseMLAIndexGroup,
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
-    create_hisparse_cache_handle,
     hisparse_staging_block_capacity,
 )
 from vllm.v1.kv_cache_interface import (
@@ -71,14 +75,22 @@ from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
 
 
+@dataclass
+class Qwen4ExpQSAHiSparsePrefillMetadata:
+    host_staging_plan: HiSparsePrefillStagingPlan
+
+
 @dataclass(kw_only=True)
 class Qwen4ExpQSAHiSparseMetadata(Qwen4ExpQSAMetadata):
+    """The batch fields `HiSparseMLAIndexGroup` reads."""
+
     num_reqs: int
     num_decodes: int
     num_decode_tokens: int
+    block_size: int
     req_id_per_token: torch.Tensor
     query_start_loc: torch.Tensor
-    host_staging_plan: HiSparsePrefillStagingPlan | None
+    prefill: Qwen4ExpQSAHiSparsePrefillMetadata | None
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
@@ -148,7 +160,7 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
 
 
 class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
-    """Add HiSparse batch fields to the platform-independent QSA metadata."""
+    """Order decodes first and add the batch fields HiSparse reads."""
 
     def __init__(
         self,
@@ -158,48 +170,49 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
-        if self.hisparse_enabled:
-            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-            self.token_to_req_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                dtype=torch.int32,
-                device=device,
-            )
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        self.token_to_req_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> Qwen4ExpQSAMetadata:
+    ) -> Qwen4ExpQSAHiSparseMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        if not self.hisparse_enabled:
-            return metadata
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 1
         )
-        staging_plan = None
+        block_size = self.kv_cache_spec.block_size
+        prefill = None
         if num_prefills:
-            block_size = self.kv_cache_spec.block_size
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
-            staging_plan = build_hisparse_prefill_staging_plan(
-                common_attn_metadata.block_table_tensor[num_decodes:],
-                common_attn_metadata.seq_lens[num_decodes:],
-                block_size,
-                hisparse_staging_block_capacity(seq_lens_cpu[num_decodes:], block_size),
+            prefill = Qwen4ExpQSAHiSparsePrefillMetadata(
+                build_hisparse_prefill_staging_plan(
+                    common_attn_metadata.block_table_tensor[num_decodes:],
+                    common_attn_metadata.seq_lens[num_decodes:],
+                    block_size,
+                    hisparse_staging_block_capacity(
+                        seq_lens_cpu[num_decodes:], block_size
+                    ),
+                )
             )
         return Qwen4ExpQSAHiSparseMetadata(
             **vars(metadata),
             num_reqs=common_attn_metadata.num_reqs,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
+            block_size=block_size,
             req_id_per_token=common_attn_metadata.token_to_req_indices(
                 self.token_to_req_buffer
             ),
             query_start_loc=common_attn_metadata.query_start_loc,
-            host_staging_plan=staging_plan,
+            prefill=prefill,
         )
 
 
@@ -234,8 +247,8 @@ class Qwen4ExpQSABackend(AttentionBackend):
         return Qwen4ExpQSAImpl
 
     @staticmethod
-    def get_builder_cls() -> type[Qwen4ExpQSAHiSparseMetadataBuilder]:
-        return Qwen4ExpQSAHiSparseMetadataBuilder
+    def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
+        return Qwen4ExpQSAMetadataBuilder
 
     @classmethod
     def is_sparse(cls) -> bool:
@@ -244,6 +257,12 @@ class Qwen4ExpQSABackend(AttentionBackend):
     @classmethod
     def supports_kv_connector(cls) -> bool:
         return False
+
+
+class Qwen4ExpQSAHiSparseBackend(Qwen4ExpQSABackend):
+    @staticmethod
+    def get_builder_cls() -> type[Qwen4ExpQSAHiSparseMetadataBuilder]:
+        return Qwen4ExpQSAHiSparseMetadataBuilder
 
 
 class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
@@ -256,6 +275,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         scale: float,
         num_kv_heads: int,
         kv_cache_dtype: str,
+        index_group: HiSparseMLAIndexGroup | None = None,
     ) -> None:
         if self.dcp_world_size != 1:
             raise NotImplementedError(
@@ -270,6 +290,13 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
+        self.index_group = index_group
+
+    def kv_view(self, rows: torch.Tensor) -> torch.Tensor:
+        """View `[blocks, block_size, row_width]` rows as this impl's KV cache."""
+        return rows.unflatten(-1, (self.num_kv_heads, 2 * self.head_size)).transpose(
+            1, 2
+        )
 
     def do_kv_cache_update(
         self,
@@ -312,17 +339,85 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         topk_buffer = getattr(layer, "topk_indices_buffer", None)
         if topk_buffer is None:
             raise RuntimeError("QSA owner did not provide its top-k buffer")
-        self.attend(
-            layer,
-            query[:num_tokens],
-            kv_cache,
-            topk_buffer[:num_tokens],
-            attn_metadata.block_table,
-            token_to_req[:num_tokens],
-            use_prefill_config,
-            output[:num_tokens],
-            output_gate[:num_tokens],
-        )
+        selected = topk_buffer[:num_tokens]
+        query = query[:num_tokens]
+        token_to_req = token_to_req[:num_tokens]
+        out = output[:num_tokens]
+        output_gate = output_gate[:num_tokens]
+        if self.index_group is None:
+            self.attend(
+                layer,
+                query,
+                kv_cache,
+                selected,
+                attn_metadata.block_table,
+                token_to_req,
+                use_prefill_config,
+                out,
+                output_gate,
+            )
+            return output
+
+        group = self.index_group
+        metadata = cast(Qwen4ExpQSAHiSparseMetadata, attn_metadata)
+        cache = group.cache(0)
+        num_decode_tokens = metadata.num_decode_tokens
+        if cache.all_context_pages_resident and num_decode_tokens < num_tokens:
+            # The kernel resolves logical indices against the resident view.
+            state_indices = cache.runtime.request_state_indices
+            assert cache.view is not None and cache.block_table is not None
+            assert state_indices is not None
+            self.attend(
+                layer,
+                query,
+                self.kv_view(cache.view.cache),
+                selected,
+                cache.block_table,
+                state_indices[token_to_req].clamp(min=0),
+                use_prefill_config,
+                out,
+                output_gate,
+            )
+            return output
+        if num_decode_tokens:
+            physical = group.convert_logical_to_physical_topk(
+                0,
+                selected[:num_decode_tokens, :-1],
+                metadata,
+                block_stride_rows=None,
+                return_valid_counts=False,
+            )
+            assert isinstance(physical, torch.Tensor)
+            self.attend(
+                layer,
+                query[:num_decode_tokens],
+                self.kv_view(group.physical_kv_cache(0)),
+                physical,
+                metadata.block_table,
+                token_to_req[:num_decode_tokens],
+                use_prefill_config,
+                out[:num_decode_tokens],
+                output_gate[:num_decode_tokens],
+                valid_counts=selected[:num_decode_tokens, -1],
+            )
+        if num_decode_tokens < num_tokens:
+            host_rows = cache.runtime.host_cache.view(
+                -1, metadata.block_size, cache.runtime.row_width
+            )
+            staged_cache, block_table, req_ids = group.stage_prefill_rows(
+                0, host_rows, metadata
+            )
+            self.attend(
+                layer,
+                query[num_decode_tokens:],
+                self.kv_view(staged_cache),
+                selected[num_decode_tokens:],
+                block_table,
+                req_ids,
+                use_prefill_config,
+                out[num_decode_tokens:],
+                output_gate[num_decode_tokens:],
+            )
         return output
 
     def attend(
@@ -336,7 +431,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         use_prefill_config: bool,
         output: torch.Tensor,
         output_gate: torch.Tensor,
-        physical_indices: bool = False,
+        valid_counts: torch.Tensor | None = None,
     ) -> None:
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
@@ -374,7 +469,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             k_scale=k_scale,
             v_scale=v_scale,
             output_gate=output_gate,
-            physical_indices=physical_indices,
+            valid_counts=valid_counts,
         )
 
 
@@ -390,7 +485,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         config: Qwen4ExpTextConfig,
         layer_id: int,
         topk_indices_buffer: torch.Tensor,
-        physical_topk_indices_buffer: torch.Tensor | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -513,13 +607,31 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
 
-        self.attn_backend = Qwen4ExpQSABackend
+        index_group: HiSparseMLAIndexGroup | None = None
+        if vllm_config.attention_config.hisparse_config is not None:
+            group, _ = SparseMLAIndexGroupBuilder(
+                topk_indices_buffer[:, :-1],
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            ).register_layer(
+                True,
+                vllm_config,
+                row_width=self.num_kv_heads * 2 * self.head_dim,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
+            assert isinstance(group, HiSparseMLAIndexGroup)
+            index_group = group
+        self.index_group = index_group
+        self.hisparse_cache = index_group.cache(0) if index_group else None
+        self.attn_backend = (
+            Qwen4ExpQSAHiSparseBackend if index_group else Qwen4ExpQSABackend
+        )
         self.impl: Qwen4ExpQSAImpl = Qwen4ExpQSAImpl(  # type: ignore[assignment]
             self.num_heads,
             self.head_dim,
             self.scaling,
             self.num_kv_heads,
             self.kv_cache_dtype,
+            index_group=index_group,
         )
         self.indexer = QSAIndexer(
             vllm_config=vllm_config,
@@ -562,14 +674,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # MTP skip_topk steps reuse rows frozen from step 0; the valid count
         # is a row column, so compaction/reuse keep it paired with the content.
         self.topk_indices_buffer = topk_indices_buffer
-        self.hisparse_cache = create_hisparse_cache_handle(
-            vllm_config,
-            self.indexer.output_width,
-            is_index_group_leader=True,
-            row_width=self.num_kv_heads * 2 * self.head_dim,
-            kv_dtype=self.kv_cache_torch_dtype,
-        )
-        self.physical_topk_indices_buffer = physical_topk_indices_buffer
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
@@ -607,87 +711,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 **vars(spec), topk_buffer_width=self.indexer.output_width
             )
         return FullAttentionManager.layer_config(spec)
-
-    def hisparse_kv_view(self, rows: torch.Tensor) -> torch.Tensor:
-        return rows.unflatten(-1, (self.num_kv_heads, 2 * self.head_dim)).transpose(
-            1, 2
-        )
-
-    def _forward_hisparse(
-        self,
-        query: torch.Tensor,
-        output: torch.Tensor,
-        output_gate: torch.Tensor,
-        metadata: Qwen4ExpQSAHiSparseMetadata,
-    ) -> None:
-        cache = self.hisparse_cache
-        assert (
-            cache is not None
-            and cache.view is not None
-            and cache.block_table is not None
-            and cache.source_block_table is not None
-            and self.physical_topk_indices_buffer is not None
-        )
-        output.zero_()
-        num_decode = metadata.num_decode_tokens
-        num_tokens = metadata.num_actual_tokens
-        if num_decode:
-            logical = self.topk_indices_buffer[:num_decode]
-            physical = self.physical_topk_indices_buffer[:num_decode]
-            physical[:, -1].copy_(logical[:, -1])
-            resolved = cache.swap_in(
-                metadata.req_id_per_token,
-                cache.source_block_table,
-                logical[:, :-1],
-                block_size=cache.view.block_size,
-                num_valid_rows=metadata.query_start_loc[-1:],
-            )
-            assert isinstance(resolved, torch.Tensor)
-            physical[:, :-1].copy_(resolved)
-            self.impl.attend(
-                self,
-                query[:num_decode],
-                self.hisparse_kv_view(cache.runtime.hot.attention_cache),
-                physical,
-                metadata.block_table,
-                metadata.req_id_per_token[:num_decode],
-                False,
-                output[:num_decode],
-                output_gate[:num_decode],
-                physical_indices=True,
-            )
-        if num_decode == num_tokens:
-            return
-        req_ids = metadata.req_id_per_token[num_decode:num_tokens]
-        if cache.all_context_pages_resident:
-            state_indices = cache.runtime.request_state_indices
-            assert state_indices is not None
-            prefill_cache = cache.view.cache
-            block_table = cache.block_table
-            req_ids = state_indices[req_ids].clamp(min=0)
-        else:
-            plan = metadata.host_staging_plan
-            assert plan is not None
-            prefill_cache = cache.stage_prefill_rows(
-                cache.runtime.host_cache.view(
-                    -1, cache.view.block_size, cache.runtime.row_width
-                ),
-                plan,
-                metadata.num_decodes,
-            )
-            block_table = plan.block_table
-            req_ids = req_ids - metadata.num_decodes
-        self.impl.attend(
-            self,
-            query[num_decode:num_tokens],
-            self.hisparse_kv_view(prefill_cache),
-            self.topk_indices_buffer[num_decode:num_tokens],
-            block_table,
-            req_ids,
-            True,
-            output[num_decode:num_tokens],
-            output_gate[num_decode:num_tokens],
-        )
 
     @eager_break_during_capture
     def _run_qsa(
@@ -744,13 +767,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         main_kv_cache = self.kv_cache
         slot_mapping = main_metadata.slot_mapping
-        cache = self.hisparse_cache
-        if cache is not None:
-            cache.prepare_group_for_batch(main_metadata)
-            resident, slot_mapping, _ = cache.write_target(
+        if self.index_group is not None:
+            self.index_group.prepare_for_batch(0, main_metadata)
+            resident, slot_mapping, _ = self.index_group.cache(0).write_target(
                 num_tokens, slot_mapping.shape[0]
             )
-            main_kv_cache = self.hisparse_kv_view(resident)
+            main_kv_cache = self.impl.kv_view(resident)
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,
@@ -762,6 +784,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
+        if self.index_group is not None:
+            self.index_group.set_logical_topk_ready(0)
         if main_outputs is None:
             assert key is not None and value is not None
             num_rows = slot_mapping.shape[0]
@@ -770,16 +794,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
         else:
             query, output_gate = main_outputs
-        if cache is not None:
-            cache.finish_kv_update()
-            assert query is not None and output_gate is not None
-            self._forward_hisparse(
-                query,
-                output,
-                output_gate,
-                cast(Qwen4ExpQSAHiSparseMetadata, main_metadata),
-            )
-            return
+        if self.index_group is not None:
+            self.index_group.cache(0).finish_kv_update()
         assert query is not None and output_gate is not None
         self.impl.forward(
             self,

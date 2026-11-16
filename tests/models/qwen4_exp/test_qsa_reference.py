@@ -1388,8 +1388,9 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
         selected // block_size * view.attention_block_stride + selected % block_size,
         -1,
     )
-    packed = torch.cat((physical_rows, counts), dim=1)
-    saved_packed = packed.clone()
+    # Counts stay in the logical packed buffer; resolved rows have no count.
+    logical_packed = torch.cat((selected, counts), dim=1)
+    saved_rows = physical_rows.clone()
     num_rows = selected.shape[0]
     q = torch.randn(num_rows, 24, head_dim, device="cuda", dtype=torch.bfloat16)
     output_gate = torch.randn_like(q)
@@ -1424,18 +1425,18 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
         q,
         key_cache,
         value_cache,
-        packed,
+        physical_rows,
         block_table,
         token_to_req,
         use_prefill_config=False,
         k_scale=k_scale,
         v_scale=v_scale,
         output_gate=output_gate,
-        physical_indices=True,
+        valid_counts=logical_packed[:, -1],
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(packed, saved_packed, rtol=0, atol=0)
+    torch.testing.assert_close(physical_rows, saved_rows, rtol=0, atol=0)
 
 
 @requires_qsa_kernels
@@ -1551,11 +1552,6 @@ def _run_qsa_hisparse_prefill_case(
             config=config,
             layer_id=0,
             topk_indices_buffer=topk_indices_buffer,
-            physical_topk_indices_buffer=(
-                _qwen4_exp_model.make_physical_topk_indices_buffer(
-                    vllm_config, topk_indices_buffer
-                )
-            ),
             prefix="model.layers.0.self_attn",
         )
         k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
