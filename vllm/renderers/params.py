@@ -89,7 +89,7 @@ def recursively_merge_kwargs(
     return merged
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
 
@@ -154,7 +154,7 @@ class ChatParams:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TokenizeParams:
     """Configuration to control how prompts are tokenized."""
 

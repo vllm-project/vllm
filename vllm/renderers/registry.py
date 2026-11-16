@@ -36,7 +36,7 @@ _VLLM_RENDERERS = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class RendererRegistry:
     # Renderer mode ->  (renderer module, renderer class)
     renderers: dict[str, tuple[str, str]] = field(default_factory=dict)
