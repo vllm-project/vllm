@@ -39,6 +39,9 @@ DEFAULT_TRANSFER_TIMEOUT_S = 60.0
 # How long `shutdown` waits for transfers that are still running.
 SHUTDOWN_TIMEOUT_S = 5.0
 
+POLL_INTERVAL_MIN_S = 0.00002
+POLL_INTERVAL_MAX_S = 0.00005
+
 
 class TentTransferBackend(TransferBackend):
     """Moves KV blocks through TENT's batch submission and blocking wait.
@@ -96,22 +99,30 @@ class TentTransferBackend(TransferBackend):
             for member in self._tent.TransferStatusEnum.__members__.values()
         }
         self._completed = int(self._tent.TransferStatusEnum.COMPLETED)
-        self._wait_transfer = getattr(self._engine, "wait_transfer", None)
-        if self._wait_transfer is None:
-            raise RuntimeError(
-                "This Mooncake build does not expose wait_transfer, which the "
-                "TENT backend needs. Use a Mooncake build that includes it "
-                "(main, or a release that ships the binding)."
+        missing = [
+            name
+            for name in (
+                "allocate_transfer_batch",
+                "submit_transfer",
+                "get_transfer_status_overall",
+                "get_transfer_status_list",
+                "free_transfer_batch",
             )
-        self._submit_arrays_fn = getattr(self._engine, "transfer_sync_arrays", None)
+            if not callable(getattr(self._engine, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                "This Mooncake build does not expose "
+                f"{', '.join(missing)}, which the TENT backend needs. Build "
+                "Mooncake with -DUSE_TENT=ON from a tree that provides the "
+                "batch status bindings."
+            )
+        self._pending = int(self._tent.TransferStatusEnum.PENDING)
+        self._timeout_s = float(transfer_timeout_s)
         self._lock = threading.Lock()
         self._segments: dict[str, Any] = {}
         self._peer_locks: dict[str, threading.Lock] = {}
         self._closed = threading.Event()
-        self._list_mode = (
-            self._submit_arrays_fn is None
-            or os.environ.get("TENT_SUBMIT", "arrays") == "list"
-        )
 
     @property
     def rpc_port(self) -> int:
@@ -157,11 +168,7 @@ class TentTransferBackend(TransferBackend):
         lengths = np.fromiter(
             (item.length for item in ranges), dtype=np.uint64, count=len(ranges)
         )
-        states = (
-            self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
-            if self._list_mode
-            else self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
-        )
+        states = self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
         events: list[TransferEvent] = []
         for index in range(len(ranges)):
             code = int(states[index])
@@ -193,11 +200,7 @@ class TentTransferBackend(TransferBackend):
                 f"per range, got {num_ranges}, {remote_addrs.size} and "
                 f"{lengths.size}."
             )
-        states = (
-            self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
-            if self._list_mode
-            else self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
-        )
+        states = self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
         if int(states.size) != num_ranges:
             return BatchTransferResult(
                 num_ranges=num_ranges,
@@ -242,28 +245,6 @@ class TentTransferBackend(TransferBackend):
             finally:
                 self._peer_lock(peer).release()
 
-    def _submit_arrays(
-        self,
-        peer: str,
-        op: TransferOp,
-        local_addrs: NDArray[np.uint64],
-        remote_addrs: NDArray[np.uint64],
-        lengths: NDArray[np.uint64],
-    ) -> NDArray[np.uint8]:
-        with self._peer_lock(peer):
-            segment = self._open_segment(peer)
-            try:
-                return self._submit_arrays_fn(
-                    np.ascontiguousarray(local_addrs, dtype=np.uint64),
-                    np.ascontiguousarray(remote_addrs, dtype=np.uint64),
-                    np.ascontiguousarray(lengths, dtype=np.uint64),
-                    segment,
-                    self._opcodes[op],
-                )
-            except Exception:
-                self._close_segment(peer)
-                raise
-
     def _submit_lists(
         self,
         peer: str,
@@ -291,7 +272,21 @@ class TentTransferBackend(TransferBackend):
                 ]
                 try:
                     self._engine.submit_transfer(batch, requests)
-                    statuses = self._wait_transfer(batch, 0)
+                    deadline = (
+                        time.monotonic() + self._timeout_s
+                        if self._timeout_s > 0
+                        else None
+                    )
+                    delay = POLL_INTERVAL_MIN_S
+                    while True:
+                        overall = self._engine.get_transfer_status_overall(batch)
+                        if int(overall.state) != self._pending:
+                            break
+                        if deadline is not None and time.monotonic() >= deadline:
+                            break
+                        time.sleep(delay)
+                        delay = min(delay * 2, POLL_INTERVAL_MAX_S)
+                    statuses = self._engine.get_transfer_status_list(batch)
                 finally:
                     self._engine.free_transfer_batch(batch)
                 return np.asarray(
