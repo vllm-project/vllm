@@ -180,8 +180,8 @@ def _routed_experts(experts) -> dict[str, torch.Tensor]:
     if backend != Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         raise MonoUnsupported(
             f"routed experts on {backend} ({type(experts).__name__}/"
-            f"{type(method).__name__}); mono reads AITER a4w4 storage "
-            "(--quantization-config.moe mxfp4)"
+            f"{type(method).__name__}); mono reads AITER a4w4 MXFP4 storage "
+            "(backend AITER_MXFP4_MXFP4)"
         )
     out = {}
     for name, key in (

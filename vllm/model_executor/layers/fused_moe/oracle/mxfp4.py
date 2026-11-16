@@ -538,17 +538,29 @@ _ALWAYS_BF16_BOUND = str(2**31 - 1)
 
 
 def _set_aiter_bf16_fp8_moe_bound() -> None:
+    """Set the bound from the user's request for the layer being built (its
+    `targets` spec, else `quantization_config.moe`)."""
+    _set_aiter_bf16_fp8_moe_bound_for(
+        *user_activation_override("moe", get_current_vllm_config_or_none())
+    )
+
+
+def _set_aiter_bf16_fp8_moe_bound_for(
+    requested_activation_key: QuantKey | None, requested: bool
+) -> None:
     """Select the activation dtype of the interleaved AITER_MXFP4_BF16 kernels.
 
     AITER computes with bf16 activations for fewer than
     `AITER_BF16_FP8_MOE_BOUND` tokens and with MXFP8 (per-1x32 e8m0) activations
-    otherwise (gfx950, gate_mode INTERLEAVE). The variable is process-wide. It
-    follows the activation requested for the layer being built (its `targets`
-    spec, else `quantization_config.moe`), so it is set at backend selection.
+    otherwise (gfx950, gate_mode INTERLEAVE). The variable is process-wide, so it
+    is set at backend selection.
+
+    Args:
+        requested_activation_key: The requested activation key.
+        requested: Whether the activation was requested (`null` included), as
+            opposed to being the default of the checkpoint or method.
+
     """
-    requested_activation_key, requested = user_activation_override(
-        "moe", get_current_vllm_config_or_none()
-    )
     if requested_activation_key == kMxfp8Dynamic:
         # MXFP8 activations for every token count.
         bound = "0"
@@ -557,7 +569,7 @@ def _set_aiter_bf16_fp8_moe_bound() -> None:
         bound = _ALWAYS_BF16_BOUND
     elif envs.VLLM_STRICT_QUANT_SCHEME:
         # Adding activation quantization to a weight-only request is forbidden.
-        bound = str(2**31 - 1)
+        bound = _ALWAYS_BF16_BOUND
     else:
         # TODO: This should be cleaned up - this is silently overriding
         # model-requested activation quant key.
@@ -745,11 +757,20 @@ def _get_requested_backends(
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
+    activation_explicit: bool = False,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Select the primary MXFP4 MoE backend (see `_select_mxfp4_moe_backend`)."""
+    """Select the primary MXFP4 MoE backend (see `_select_mxfp4_moe_backend`).
+
+    `activation_explicit` tells that `activation_key` is the layer's resolved
+    request (online quantization, `targets` and legacy env vars included), not
+    only the activation declared by a checkpoint.
+    """
     backend, experts_cls = _select_mxfp4_moe_backend(config, activation_key)
     if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        _set_aiter_bf16_fp8_moe_bound()
+        if activation_explicit:
+            _set_aiter_bf16_fp8_moe_bound_for(activation_key, True)
+        else:
+            _set_aiter_bf16_fp8_moe_bound()
     return backend, experts_cls
 
 

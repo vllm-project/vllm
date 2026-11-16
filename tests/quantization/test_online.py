@@ -214,6 +214,11 @@ else:
 
 DEVICE = current_platform.device_type
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
+# The interleaved AITER_MXFP4_BF16 kernels have no config for this tiny MoE with
+# bf16 activations (`activation: null`).
+_ROCM_BF16_ACTIVATION_MOE_KWARGS = (
+    {"moe_backend": "aiter_triton_mxfp4_bf16"} if current_platform.is_rocm() else {}
+)
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
 )
@@ -2194,11 +2199,7 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             {"moe": {"weight": "mxfp4", "activation": None}},
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
-            # The interleaved AITER_MXFP4_BF16 kernels have no config for this tiny
-            # MoE with bf16 activations.
-            {"moe_backend": "aiter_triton_mxfp4_bf16"}
-            if current_platform.is_rocm()
-            else {},
+            _ROCM_BF16_ACTIVATION_MOE_KWARGS,
             id="mxfp4_null_activation_override",
         ),
         pytest.param(
@@ -2214,7 +2215,7 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             },
             UnquantizedLinearMethod,
             Mxfp4OnlineMoEMethod,
-            {},
+            _ROCM_BF16_ACTIVATION_MOE_KWARGS,
             id="targets_activation_override",
         ),
         pytest.param(
@@ -2281,6 +2282,8 @@ def test_online_quantization(
 
     if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
+        # The oracle sets this process-wide variable at backend selection.
+        monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
         rocm_aiter_ops.refresh_env_variables()
         if not use_rocm_aiter and "activation" in str(online_quant_args):
             pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
