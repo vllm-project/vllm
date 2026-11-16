@@ -795,12 +795,28 @@ def mrope_num_dims(config: PreTrainedConfig) -> int:
     return 3
 
 
-def get_thinker_config(config: PreTrainedConfig) -> PreTrainedConfig | None:
-    """Get the "thinker" config that Transformers can serve for omni models."""
-    thinker_config = getattr(config, "thinker_config", None)
-    if thinker_config is None or thinker_config.model_type not in MODEL_MAPPING_NAMES:
+def get_text_config_parent(config: PreTrainedConfig) -> PreTrainedConfig:
+    text_config = config.get_text_config()
+
+    def find(c: PreTrainedConfig) -> PreTrainedConfig | None:
+        for value in vars(c).values():
+            if value is text_config:
+                return c
+            if isinstance(value, PreTrainedConfig) and (parent := find(value)):
+                return parent
         return None
-    return thinker_config
+
+    return find(config) or config
+
+
+def get_transformers_backend_config(config: PreTrainedConfig) -> PreTrainedConfig:
+    """Get the config that Transformers can serve, which may be a sub-config."""
+    parent = get_text_config_parent(config)
+    if parent is config or parent.model_type not in MODEL_MAPPING_NAMES:
+        return config
+    architectures = config.architectures or []
+    cls = getattr(transformers, architectures[0], None) if architectures else None
+    return parent if cls is None or cls.forward is torch.nn.Module.forward else config
 
 
 def is_encoder_decoder(config: PreTrainedConfig) -> bool:

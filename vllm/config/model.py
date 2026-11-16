@@ -41,7 +41,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config,
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
-    get_thinker_config,
+    get_transformers_backend_config,
     is_encoder_decoder,
     iter_rope_parameters,
     mrope_num_dims,
@@ -1177,8 +1177,8 @@ class ModelConfig:
         task = None
         # architectures is empty for with_hf_config() submodel views.
         architectures = self.architectures
-        if (thinker_config := get_thinker_config(self.hf_config)) is not None:
-            architectures = thinker_config.architectures or architectures
+        if (backend_config := self.transformers_backend_config) is not self.hf_config:
+            architectures = backend_config.architectures or architectures
         if architectures and (
             defaults := try_match_architecture_defaults(architectures[0])
         ):
@@ -2074,6 +2074,10 @@ class ModelConfig:
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
+
+    @property
+    def transformers_backend_config(self) -> PreTrainedConfig:
+        return get_transformers_backend_config(self.hf_config)
 
     @cached_property
     def is_diffusion(self) -> bool:

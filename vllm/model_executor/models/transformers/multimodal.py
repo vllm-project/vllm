@@ -60,7 +60,6 @@ from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import get_thinker_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
@@ -279,11 +278,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             if not (length := self._get_max_audio_length()):
                 length = self._get_max_long_form_audio_length(seq_len)
             return math.ceil(length / self._audio_samples_per_token)
-        config = self.get_hf_config()
+        config = self.ctx.model_config.transformers_backend_config
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
-        if (thinker_config := get_thinker_config(config)) is not None:
-            config = thinker_config
         audio_config = getattr_iter(config, audio_config_names, default=config)
         val = getattr_iter(audio_config, names)
         if val is None:
@@ -1690,11 +1687,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 ("video_grid_thw", video_grid_thw),
                 (seconds_name, second_per_grid_ts),
                 ("audio_seqlens", audio_feature_lengths),
+                ("use_audio_in_video", use_audio_in_video or None),
             )
             if value is not None or accepts_kwarg(name)
         }
-        if accepts_kwarg("use_audio_in_video"):
-            kwargs["use_audio_in_video"] = use_audio_in_video
         if accepts_kwarg("attention_mask"):
             kwargs["attention_mask"] = torch.ones(1, len(input_tokens), dtype=torch.int)
         if accepts_kwarg("mm_token_type_ids"):

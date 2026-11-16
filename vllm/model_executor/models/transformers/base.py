@@ -16,7 +16,6 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
-import inspect
 import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -71,6 +70,7 @@ from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     get_feature_request_tip,
     has_bidirectional_attention,
+    infer_dynamic_arg_dims,
     init_on_device_without_buffers,
     log_replacement,
     maybe_disable_dynamic_rope_update,
@@ -91,7 +91,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.offloader import BaseOffloader, NoopOffloader, get_offloader
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import get_thinker_config
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -130,9 +129,7 @@ class Base(
         logger.info("Using Transformers modeling backend.")
 
         self.vllm_config = vllm_config
-        self.config = vllm_config.model_config.hf_config
-        if (thinker_config := get_thinker_config(self.config)) is not None:
-            self.config = thinker_config
+        self.config = vllm_config.model_config.transformers_backend_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -322,16 +319,17 @@ class Base(
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
         supports torch compile if `can_enable_torch_compile` is True."""
-        # Applied to a PreTrainedModel so the batch dimension will exist
-        dynamic_arg_dims = DynamicArgDims(
+        decoder_cls = self._pre_trained_model_classes.decoder
+        # Applied to a PreTrainedModel so every input has a batch dimension
+        dynamic_arg_dims: DynamicArgDims = dict.fromkeys(
+            infer_dynamic_arg_dims(decoder_cls), 1
+        )
+        dynamic_arg_dims.pop("attention_mask", None)
+        dynamic_arg_dims.update(
             input_ids=1,  # shape: [1, seq_len]
             inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
             position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
         )
-        decoder_cls = self._pre_trained_model_classes.decoder
-        if "per_layer_inputs" in inspect.signature(decoder_cls.forward).parameters:
-            # shape: [1, seq_len, num_hidden_layers, hidden_size_per_layer_input]
-            dynamic_arg_dims["per_layer_inputs"] = 1
         self._decorate_cls_for_torch_compile(
             cls=decoder_cls,
             dynamic_arg_dims=dynamic_arg_dims,
@@ -931,8 +929,7 @@ class Base(
         # so drop a match only if it has nowhere to go
         if keys := self.model._keys_to_ignore_on_load_unexpected:
             pattern = re.compile("|".join(keys))
-            expected = {name for name, _ in self.named_parameters()}
-            expected |= {name for name, _ in self.named_buffers()}
+            expected = {name for name, _ in named_state(self)}
             weights = (
                 (name, weight)
                 for name, weight in weights
