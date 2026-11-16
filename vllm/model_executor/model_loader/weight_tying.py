@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 _TIE_CHECKED = "_word_embeddings_tie_checked"
 
 
-@dataclass
+@dataclass(slots=True)
 class _UntiedLMHead:
     name: str
     lm_head: ParallelLMHead
