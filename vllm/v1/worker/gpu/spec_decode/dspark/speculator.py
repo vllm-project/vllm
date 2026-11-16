@@ -196,10 +196,10 @@ class DSparkSpeculator(DFlashSpeculator):
         return not hasattr(self.model, "sample_sequential")
 
     def _compute_draft_logits(self, sample_hidden: torch.Tensor) -> torch.Tensor:
-        """The draft model's base logits of ``sample_hidden``.
+        """The draft model's base logits of `sample_hidden`.
 
         When the target model opts in with `SupportsFP32LogitsGather`, they
-        are computed under a forward context whose ``logits_gather_dtype``
+        are computed under a forward context whose `logits_gather_dtype`
         has `LogitsProcessor` gather them in one fused pass, in the head's
         dtype (bitwise main's logits). FP32 would save no copy: the Markov
         bias is added in the head's dtype and the Gumbel sampler upcasts in
