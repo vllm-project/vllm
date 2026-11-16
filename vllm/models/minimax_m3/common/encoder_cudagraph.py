@@ -34,6 +34,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     multimodal_config: "MultiModalConfig | None"
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        from vllm.model_executor.layers.attention import MMEncoderAttention
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
@@ -72,13 +73,6 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "(ROCm), or disable cudagraph_mm_encoder."
             )
 
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Zero-length padding (same as Qwen): tail slots repeat the last
-            # real offset, so FlashAttn schedules no work for padding rows.
-            n = src.shape[0]
-            dst[:n].copy_(src)
-            dst[n:] = src[-1]
-
         def pad_rope_planes(dst: torch.Tensor, src: torch.Tensor) -> None:
             # cos/sin planes are (3, N, half_rot_dim): the row axis is dim 1,
             # not dim 0 as the manager's default slice-copy assumes.
@@ -96,7 +90,9 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             ],
             out_hidden_size=self.vision_tower.out_hidden_size,
             padding_logics={
-                "cu_seqlens": pad_cu_seqlens,
+                **MMEncoderAttention.get_cu_seqlens_padding_logics(
+                    backend, "cu_seqlens"
+                ),
                 "rotary_cos": pad_rope_planes,
                 "rotary_sin": pad_rope_planes,
             },
@@ -233,8 +229,8 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         )
 
         pixel_values = self._get_pixel_values(mm_kwargs)
-        # Unpadded: the manager zero-pads the row buffers and pad_cu_seqlens
-        # leaves the padding rows outside every sequence.
+        # Unpadded: the manager zero-pads the row buffers and pads the
+        # cu_seqlens tail so padding rows lie outside every sequence.
         metadata = self.vision_tower.vision_model.prepare_encoder_metadata(
             self._get_grid_thw_list(mm_kwargs),
             device=pixel_values.device,
@@ -249,12 +245,12 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = inputs.pop("pixel_values")
+        pixel_values = values.pop("pixel_values")
         # Remaining keys are consumed as encoder_metadata.
-        return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=inputs)
+        return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=values)
 
     def encoder_eager_forward(
         self,
