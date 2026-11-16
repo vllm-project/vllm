@@ -35,11 +35,6 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
 
-For `LFM3-VL`, encoder CUDA Graphs are disabled by default. Enable them with
-`--compilation-config '{"cudagraph_mm_encoder": true}'`. The vision encoder runs
-eagerly when using the `TORCH_SDPA` attention backend or dynamically scaled FP8
-vision attention, even when encoder CUDA Graphs are enabled.
-
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
     For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
