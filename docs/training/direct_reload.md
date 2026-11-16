@@ -4,6 +4,10 @@ Direct reload updates a running model's weights in place. Set the
 `VLLM_RELOAD_MODE` environment variable to `direct`; the default is
 `layerwise` (see [Layerwise (Re)loading](layerwise.md)).
 
+!!! tip
+    Prefer direct reload for RL weight updates. Use layerwise reload only for
+    the configurations direct reload refuses (see below).
+
 ```bash
 VLLM_RELOAD_MODE=direct vllm serve <model>
 ```
