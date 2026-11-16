@@ -579,11 +579,9 @@ def test_glm52_sm107_warp_splitk_rows() -> None:
         for backend, tokens in tokens_by_backend.items():
             assert {m for m, (b, _) in plan.items() if b == backend} == tokens
         covered[(spec.n, spec.k)] = set(plan)
-    # q_b at TP8 is the SM103 entry; the shared expert down uses cuBLAS from M=25
-    # and the indexer wk + weights_proj at M=7.
+    # q_b at TP8 is the SM103 entry; the shared expert down uses cuBLAS from M=25.
     assert covered.pop((2048, 2048)) == set(range(1, 17))
     assert covered.pop((6144, 512)) == set(range(1, 25))
-    assert covered.pop((160, 6144)) == set(range(1, 33)) - {7}
     assert all(tokens == set(range(1, 33)) for tokens in covered.values())
 
 
