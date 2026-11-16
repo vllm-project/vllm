@@ -97,6 +97,132 @@ __device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
 }
 
 // ---------------------------------------------------------------------------
+// Skinny WMMA path (9 <= M <= 64), after the upstream wvSplitK design. One
+// block per 16-column tile covers ALL M rows (MT <= 4 row tiles), so every
+// weight byte is read exactly once per launch and the B stream can bypass the
+// caches (nontemporal). KW waves each own a contiguous K slice and reduce
+// through LDS at the end (no global atomics, no extra launches); each wave
+// keeps PF groups of B/A/scale loads in flight in a register ring. Per group a
+// lane loads its 8-byte B word pair (octets 2*hi, 2*hi+1) and 16 A bytes per
+// row tile, and issues 2*MT WMMAs.
+template <typename T, int MT, int KW, int PF>
+__global__ void __launch_bounds__(32 * KW)
+    gemm_mxfp4_wmma_fp8_skinny(const uint8_t* __restrict__ aq,
+                               const float* __restrict__ ascale,
+                               const uint32_t* __restrict__ b_q,
+                               const uint8_t* __restrict__ b_scales,
+                               T* __restrict__ c, int M, int N, int K) {
+  const int wave = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int lo = lane & 15;
+  const int hi = lane >> 4;
+  const int n_col = blockIdx.x * 16 + lo;
+  const bool n_ok = n_col < N;
+  const int ngroups = K / kGroup;
+  const int g_begin = (ngroups * wave) / KW;
+  const int g_end = (ngroups * (wave + 1)) / KW;
+
+  bool a_ok[MT];
+  #pragma unroll
+  for (int t = 0; t < MT; t++) a_ok[t] = (16 * t + lo) < M;
+
+  struct Slot {
+    unsigned long long b;
+    uint4 a[MT];
+    float ws;
+  };
+  Slot ring[PF];
+  auto load = [&](int g, Slot& sl) {
+    const int k_g = g * kGroup;
+    sl.b = 0ull;
+    sl.ws = 0.0f;
+    if (n_ok) {
+      const auto* bp = reinterpret_cast<const unsigned long long*>(
+          b_q + ((size_t)g * N + n_col) * 4 + 2 * hi);
+      sl.b = __builtin_nontemporal_load(bp);
+      sl.ws = mxfp4_e8m0_to_f32(b_scales[(size_t)g * N + n_col]);
+    }
+  #pragma unroll
+    for (int t = 0; t < MT; t++) {
+      uint4 aw = {0u, 0u, 0u, 0u};
+      if (a_ok[t])
+        __builtin_memcpy(&aw, aq + (size_t)(16 * t + lo) * K + k_g + 16 * hi,
+                         16);
+      sl.a[t] = aw;
+    }
+  };
+
+  v8f32 acc[MT];
+  #pragma unroll
+  for (int t = 0; t < MT; t++) acc[t] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  #pragma unroll
+  for (int d = 0; d < PF; d++)
+    if (g_begin + d < g_end) load(g_begin + d, ring[d]);
+
+  for (int g0 = g_begin; g0 < g_end; g0 += PF) {
+  #pragma unroll
+    for (int d = 0; d < PF; d++) {
+      const int g = g0 + d;
+      if (g >= g_end) break;
+      const Slot& sl = ring[d];
+      v8f32 grp[MT];
+  #pragma unroll
+      for (int t = 0; t < MT; t++) grp[t] = {0, 0, 0, 0, 0, 0, 0, 0};
+  #pragma unroll
+      for (int s = 0; s < 2; s++) {  // step s, half hi -> K-octet 2*hi + s
+        uint32_t blo, bhi;
+        dequant_mxfp4_8_e4m3((uint32_t)(s == 0 ? sl.b : (sl.b >> 32)), blo,
+                             bhi);
+        v2i32 bf;
+        bf[0] = (int)blo;
+        bf[1] = (int)bhi;
+  #pragma unroll
+        for (int t = 0; t < MT; t++) {
+          v2i32 af;
+          af[0] = (int)(s == 0 ? sl.a[t].x : sl.a[t].z);
+          af[1] = (int)(s == 0 ? sl.a[t].y : sl.a[t].w);
+          grp[t] = wmma_fp8(af, bf, grp[t]);
+        }
+      }
+      const float ws = sl.ws;
+  #pragma unroll
+      for (int t = 0; t < MT; t++)
+  #pragma unroll
+        for (int i = 0; i < 8; i++) acc[t][i] = fmaf(grp[t][i], ws, acc[t][i]);
+      if (g + PF < g_end) load(g + PF, ring[d]);
+    }
+  }
+
+  if constexpr (KW > 1) {
+    __shared__ float red[KW][MT][32][8];
+  #pragma unroll
+    for (int t = 0; t < MT; t++)
+  #pragma unroll
+      for (int i = 0; i < 8; i++) red[wave][t][lane][i] = acc[t][i];
+    __syncthreads();
+    if (wave != 0) return;
+  #pragma unroll
+    for (int w = 1; w < KW; w++)
+  #pragma unroll
+      for (int t = 0; t < MT; t++)
+  #pragma unroll
+        for (int i = 0; i < 8; i++) acc[t][i] += red[w][t][lane][i];
+  }
+  if (!n_ok) return;
+  // gfx12 accumulator: lane -> n = lo, slot i -> m = 8*hi + i.
+  #pragma unroll
+  for (int t = 0; t < MT; t++) {
+  #pragma unroll
+    for (int i = 0; i < 8; i++) {
+      const int m_row = 16 * t + 8 * hi + i;
+      if (m_row >= M) continue;
+      c[(size_t)m_row * N + n_col] = from_f<T>(acc[t][i] * ascale[m_row]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Section 1: general (prefill) path. 16M x 16N tile, one wave, full K.
 // ---------------------------------------------------------------------------
 // WM x WN waves per block, each wave owning one 16x16 WMMA tile, so the block
@@ -389,6 +515,11 @@ __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t*, const float*,
                                           const uint32_t*, const uint8_t*, T*,
                                           int, int, int, float*, int) {}
 
+template <typename T, int MT, int KW, int PF>
+__global__ void gemm_mxfp4_wmma_fp8_skinny(const uint8_t*, const float*,
+                                           const uint32_t*, const uint8_t*, T*,
+                                           int, int, int) {}
+
 template <typename T, int WM, int WN, bool KSPLIT>
 __global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t*, const float*,
                                            const uint32_t*, const uint8_t*, T*,
@@ -512,6 +643,33 @@ inline bool use_swmmac_skinny() {
   return v;
 }
 
+// Skinny WMMA (9 <= M <= 64): VLLM_MXFP4_RDNA4_SKWMMA=0 disables it;
+// VLLM_MXFP4_RDNA4_SKW = waves per tile (1/2/4), VLLM_MXFP4_RDNA4_SPF = ring
+// depth (2/4/8). Defaults are the measured best (see launch_wmma).
+inline int env_int(const char* name, int dflt) {
+  const char* e = std::getenv(name);
+  return e ? atoi(e) : dflt;
+}
+inline bool skinny_wmma_enabled() {
+  static const bool v = env_int("VLLM_MXFP4_RDNA4_SKWMMA", 1) != 0;
+  return v;
+}
+// Measured on gfx1201 (K=N=4096): KW=4 wins for <=2 row tiles (M=16/32:
+// 0.040/0.051 -> 0.023/0.024 ms), KW=2 for 3-4 row tiles (M=64: 0.054 ->
+// 0.038 ms; KW=4 there is 0.040-0.044 from ring x row-tile register pressure).
+inline int skinny_kw(int mt) {
+  static const int ov = env_int("VLLM_MXFP4_RDNA4_SKW", 0);
+  if (ov == 1 || ov == 2 || ov == 4) return ov;
+  return mt <= 2 ? 4 : 2;
+}
+inline int skinny_pf() {
+  static const int v = [] {
+    const int k = env_int("VLLM_MXFP4_RDNA4_SPF", 4);
+    return (k == 2 || k == 8) ? k : 4;
+  }();
+  return v;
+}
+
 inline int choose_ksplit(int M, int N, int K, int WM, int WN) {
   (void)M;
   (void)N;
@@ -534,6 +692,50 @@ void launch_wmma(const uint8_t* aqp, const float* asp, const uint32_t* bq,
   // Tile configs (VLLM_MXFP4_RDNA4_TILE): 1 16x16/1w, 2 32x32/4w, 3 64x32/8w
   // (one 16x16 tile per wave; LDS or direct by use_lds_kernel), 4 64x64/4w,
   // 5 128x64/8w (32x32 per wave, LDS only), 6 32x16/2w (LDS only).
+  if (M <= 64 && skinny_wmma_enabled()) {
+    const int mt = (M + 15) / 16;
+    const int kw = skinny_kw(mt), pf = skinny_pf();
+    const dim3 grd((N + 15) / 16);
+#define SKW_LAUNCH(MT_, KW_, PF_)               \
+  gemm_mxfp4_wmma_fp8_skinny<TT, MT_, KW_, PF_> \
+      <<<grd, 32 * (KW_), 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K)
+#define SKW_PF(MT_, KW_)       \
+  do {                         \
+    if (pf == 2)               \
+      SKW_LAUNCH(MT_, KW_, 2); \
+    else if (pf == 8)          \
+      SKW_LAUNCH(MT_, KW_, 8); \
+    else                       \
+      SKW_LAUNCH(MT_, KW_, 4); \
+  } while (0)
+#define SKW_KW(MT_)   \
+  do {                \
+    if (kw == 1)      \
+      SKW_PF(MT_, 1); \
+    else if (kw == 2) \
+      SKW_PF(MT_, 2); \
+    else              \
+      SKW_PF(MT_, 4); \
+  } while (0)
+    switch (mt) {
+      case 1:
+        SKW_KW(1);
+        break;
+      case 2:
+        SKW_KW(2);
+        break;
+      case 3:
+        SKW_KW(3);
+        break;
+      default:
+        SKW_KW(4);
+        break;
+    }
+#undef SKW_KW
+#undef SKW_PF
+#undef SKW_LAUNCH
+    return;
+  }
   int cfg = tile_cfg_override();
   if (cfg == 0) cfg = 1;
   int WMv = 1, WNv = 1, TMv = 1, TNv = 1;
