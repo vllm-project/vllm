@@ -60,7 +60,9 @@ def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expe
         pytest.param(70000, 140000, id="default-uses-model-length"),
     ],
 )
-def test_max_tokenize_tokens_default_uses_model_length_floor(max_model_len, expected):
+def test_max_tokenize_tokens_default_uses_model_length_floor(monkeypatch ,max_model_len, expected):
+    envs.disable_envs_cache()
+    monkeypatch.delenv("VLLM_MAX_TOKENIZE_TOKENS", raising=False)
     model_config = SimpleNamespace(max_tokenize_tokens=None, max_model_len=max_model_len)
     assert resolve_max_tokenize_tokens(model_config) == expected
 
