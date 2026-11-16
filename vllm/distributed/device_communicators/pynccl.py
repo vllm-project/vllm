@@ -130,11 +130,17 @@ class PyNcclCommunicator:
             return
         try:
             self.nccl = NCCLLibrary(library_path)
-        except Exception:
+        except Exception as e:
             # disable because of missing NCCL library
             # e.g. in a non-GPU environment
             self.available = False
             self.disabled = True
+            logger.warning_once(
+                "PyNcclCommunicator is disabled; vLLM will fall back to "
+                "torch.distributed collectives, which can be slower. If this "
+                "is due to an old NCCL, upgrade to >= 2.29.7: %s",
+                e,
+            )
             return
 
         self.available = True
