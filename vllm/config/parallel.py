@@ -96,9 +96,28 @@ class EPLBConfig:
     """
     Export per-physical-expert placement and token load to Prometheus.
     Token load is accumulated per step as prefill, decode, or mixed, then
-    published once per EPLB rearrangement with one all-reduce over the
-    expert-parallel group. Disabled by default because the per-expert
-    topology has high label cardinality.
+    published every ``expert_metrics_interval`` steps with one all-reduce
+    over the expert-parallel group. Disabled by default because the
+    per-expert topology has high label cardinality.
+    """
+    expert_metrics_interval: int = Field(default=100, ge=1)
+    """
+    Steps between per-expert metric samples. Set to 1 for per-step samples
+    at the cost of an EP-group all-reduce every step.
+    """
+    expert_metrics_trace: bool = False
+    """
+    Write per-step expert load records to JSONL files. One file is written
+    per DP/EP rank under ``expert_metrics_trace_path``. This is a diagnostic
+    path and synchronously copies expert load tensors to CPU.
+    """
+    expert_metrics_trace_interval: int = Field(default=1, ge=1)
+    """
+    Steps between per-step JSONL trace records.
+    """
+    expert_metrics_trace_path: str = "eplb_expert_trace.jsonl"
+    """
+    Base path for per-step EPLB JSONL traces. Rank suffixes are appended.
     """
     use_async: bool = True
     """

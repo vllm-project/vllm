@@ -34,6 +34,10 @@ class EplbExpertTokens:
     """Batch phase for this sample: prefill, decode, or mixed."""
     timestamp: float = 0.0
     """Unix timestamp when this load sample was taken."""
+    steps: int = 0
+    """Number of engine steps covered by this load sample."""
+    rearranged: bool = False
+    """Whether this sample was taken at an EPLB rearrangement."""
 
 
 @dataclass

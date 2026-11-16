@@ -68,6 +68,8 @@ def test_eplb_expert_metrics_serialization():
                 tokens=[[1, 2, 3, 4]],
                 phase=EPLB_PHASE_DECODE,
                 timestamp=123.5,
+                steps=5,
+                rearranged=True,
             )
         ],
         topology=[

@@ -53,6 +53,8 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
                 physical_to_logical=[[0, 1, 0, 1]],
                 phase=EPLB_PHASE_PREFILL,
                 timestamp=123.0,
+                steps=5,
+                rearranged=True,
             )
         ],
         topology=[
@@ -116,6 +118,17 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
             "vllm:eplb_expert_topology_timestamp_seconds", model_labels
         )
         == 124.0
+    )
+    load_labels = {**model_labels, "phase": EPLB_PHASE_PREFILL}
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_expert_load_timestamp_seconds", load_labels
+        )
+        == 123.0
+    )
+    assert (
+        registry.get_sample_value("vllm:eplb_expert_load_window_steps", load_labels)
+        == 5.0
     )
 
 

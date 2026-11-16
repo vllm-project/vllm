@@ -40,22 +40,38 @@ The following metrics are exposed:
 ## Expert Parallel Load Balancer (EPLB) Metrics
 
 These metrics are exposed when EPLB is enabled with
-`--enable-eplb --eplb-config '{"enable_expert_metrics": true}'`. They are
-sampled once per EPLB rearrangement (see `step_interval`) and report one
-series per MoE layer and physical expert:
+`--enable-eplb --eplb-config '{"enable_expert_metrics": true}'`. They report
+one series per MoE layer and physical expert:
 
 - `vllm:eplb_expert_topology` is the logical expert currently held by each
   physical slot. Physical experts are assigned to EP ranks in contiguous
   blocks, so `physical_expert // num_local_experts` identifies the owning GPU.
 - `vllm:eplb_expert_tokens_total` counts tokens routed to each physical expert
-  since the previous rearrangement. The `phase` label is `prefill`, `decode`,
-  or `mixed` when a single step contains both. Each engine reports its own
+  over the last metric sample. The `phase` label is `prefill`, `decode`, or
+  `mixed` when a single step contains both. Each engine reports its own
   contribution; aggregate across engines for global load.
-- `vllm:eplb_rearrangements_total` and
-  `vllm:eplb_rearrangement_timestamp_seconds` mark when the load sample was
+- `vllm:eplb_expert_load_window_steps` is the number of engine steps in the
+  sample, and `vllm:eplb_expert_load_timestamp_seconds` is when the sample was
   taken.
+- `vllm:eplb_rearrangements_total` and
+  `vllm:eplb_rearrangement_timestamp_seconds` mark actual rearrangements.
 - `vllm:eplb_expert_topology_timestamp_seconds` marks when the current
   placement was committed.
+
+Samples are taken every `expert_metrics_interval` steps (default `100`). Set it
+to `1` for per-step samples; each sample then costs one EP-group all-reduce per
+step. For exact per-step analysis without scrape loss, enable JSONL tracing:
+
+```json
+{"enabled": true, "enable_expert_metrics": true,
+ "expert_metrics_interval": 1,
+ "expert_metrics_trace": true,
+ "expert_metrics_trace_interval": 1,
+ "expert_metrics_trace_path": "/tmp/eplb_expert_trace.jsonl"}
+```
+
+This writes one JSONL file per DP/EP rank. Each line contains the step,
+timestamp, phase, model, rank, and the per-layer/per-expert token vector.
 
 ```promql
 # Global tokens per logical expert and phase, aggregated across replicas and
@@ -65,8 +81,8 @@ sum by (model_name, layer, logical_expert, phase) (
 )
 
 # Age of the last expert-load sample.
-time() - max by (model_name, engine, model) (
-  vllm:eplb_rearrangement_timestamp_seconds
+time() - max by (model_name, engine, model, phase) (
+  vllm:eplb_expert_load_timestamp_seconds
 )
 
 # Current logical expert placement for layer 0 on EP rank 2.

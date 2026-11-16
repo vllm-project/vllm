@@ -25,11 +25,14 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import json
+import os
 import threading
 import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TextIO
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -267,6 +270,11 @@ class EplbState:
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
         self._pending_expert_tokens: list[EplbExpertTokens] = []
+        self.expert_metrics_window_step = 0
+        """Steps accumulated into the current per-expert metric sample."""
+        self.expert_metrics_total_step = 0
+        """Monotonic step counter used by JSONL traces."""
+        self._expert_metrics_trace_files: dict[str, TextIO] = {}
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected EPLB algorithm class
@@ -689,8 +697,28 @@ class EplbState:
 
         metrics_enabled = self.parallel_config.eplb_config.enable_expert_metrics
         if not is_dummy and metrics_enabled:
+            self.expert_metrics_total_step += 1
+            self.expert_metrics_window_step += 1
             for eplb_model_state in self.model_states.values():
                 self._accumulate_expert_metrics(eplb_model_state)
+
+            will_rearrange = (
+                self.expert_rearrangement_step + 1
+                >= self.expert_rearrangement_step_interval
+                and not (
+                    self.is_async
+                    and any(
+                        model_state.rebalanced
+                        for model_state in self.model_states.values()
+                    )
+                )
+            )
+            if (
+                will_rearrange
+                or self.expert_metrics_window_step
+                >= self.parallel_config.eplb_config.expert_metrics_interval
+            ):
+                self._sample_expert_metrics(rearranged=will_rearrange)
 
         if log_stats:
             self._maybe_log_balancedness()
@@ -807,9 +835,87 @@ class EplbState:
         if pending is None or phase_accum is None:
             return
         pass_load = model_state.expert_load_pass
+        self._write_expert_trace(model_state, pass_load)
         pending.add_(pass_load)
         phase_accum[model_state.metrics.phase].add_(pass_load)
         pass_load.zero_()
+
+    def _write_expert_trace(
+        self,
+        model_state: EplbModelState,
+        pass_load: torch.Tensor,
+    ) -> None:
+        config = self.parallel_config.eplb_config
+        if not config.expert_metrics_trace:
+            return
+        if self.expert_metrics_total_step % config.expert_metrics_trace_interval:
+            return
+
+        metrics = model_state.metrics
+        model_name = "".join(
+            c if c.isalnum() or c in "-_." else "_" for c in metrics.model_name
+        )
+        dp_rank = self.parallel_config.data_parallel_rank
+        path = os.path.expanduser(
+            f"{config.expert_metrics_trace_path}"
+            f".dp{dp_rank}.ep{metrics.ep_rank}.{model_name}.jsonl"
+        )
+        trace_file = self._expert_metrics_trace_files.get(path)
+        if trace_file is None:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            trace_file = open(path, "a", encoding="utf-8")  # noqa: SIM115
+            self._expert_metrics_trace_files[path] = trace_file
+
+        record = {
+            "timestamp": time.time(),
+            "step": self.expert_metrics_total_step,
+            "model": metrics.model_name,
+            "dp_rank": dp_rank,
+            "ep_rank": metrics.ep_rank,
+            "num_ep_ranks": metrics.num_ep_ranks,
+            "num_local_experts": metrics.num_local_experts,
+            "phase": metrics.phase,
+            "tokens": pass_load.cpu().tolist(),
+        }
+        trace_file.write(json.dumps(record, separators=(",", ":")) + "\n")
+        trace_file.flush()
+
+    def _sample_expert_metrics(self, *, rearranged: bool) -> None:
+        if not self.model_states:
+            return
+        phase_loads = []
+        for model_state in self.model_states.values():
+            assert model_state.phase_load_accum is not None
+            phase_loads.extend(
+                model_state.phase_load_accum[phase] for phase in EPLB_PHASES
+            )
+        global_phase_loads = self._allreduce_list(phase_loads)
+        timestamp = time.time()
+        steps = self.expert_metrics_window_step
+        load_idx = 0
+        for model_state in self.model_states.values():
+            assert model_state.phase_load_accum is not None
+            metrics = model_state.metrics
+            physical_to_logical = model_state.physical_to_logical_map.cpu().tolist()
+            for phase in EPLB_PHASES:
+                expert_load = global_phase_loads[load_idx]
+                load_idx += 1
+                self._pending_expert_tokens.append(
+                    EplbExpertTokens(
+                        model_name=metrics.model_name,
+                        ep_rank=metrics.ep_rank,
+                        num_ep_ranks=metrics.num_ep_ranks,
+                        num_local_experts=metrics.num_local_experts,
+                        tokens=expert_load.cpu().tolist(),
+                        physical_to_logical=physical_to_logical,
+                        phase=phase,
+                        timestamp=timestamp,
+                        steps=steps,
+                        rearranged=rearranged,
+                    )
+                )
+                model_state.phase_load_accum[phase].zero_()
+        self.expert_metrics_window_step = 0
 
     def _reset_expert_metrics_accumulators(self) -> None:
         if not self.parallel_config.eplb_config.enable_expert_metrics:
@@ -1005,37 +1111,6 @@ class EplbState:
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
-
-        if self.parallel_config.eplb_config.enable_expert_metrics and not is_profile:
-            phase_loads = []
-            for model_state in self.model_states.values():
-                assert model_state.phase_load_accum is not None
-                phase_loads.extend(
-                    model_state.phase_load_accum[phase] for phase in EPLB_PHASES
-                )
-            global_phase_loads = self._allreduce_list(phase_loads)
-            timestamp = time.time()
-            load_idx = 0
-            for model_state in self.model_states.values():
-                assert model_state.phase_load_accum is not None
-                metrics = model_state.metrics
-                physical_to_logical = model_state.physical_to_logical_map.cpu().tolist()
-                for phase in EPLB_PHASES:
-                    expert_load = global_phase_loads[load_idx]
-                    load_idx += 1
-                    self._pending_expert_tokens.append(
-                        EplbExpertTokens(
-                            model_name=metrics.model_name,
-                            ep_rank=metrics.ep_rank,
-                            num_ep_ranks=metrics.num_ep_ranks,
-                            num_local_experts=metrics.num_local_experts,
-                            tokens=expert_load.cpu().tolist(),
-                            physical_to_logical=physical_to_logical,
-                            phase=phase,
-                            timestamp=timestamp,
-                        )
-                    )
-                    model_state.phase_load_accum[phase].zero_()
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))

@@ -209,7 +209,11 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `enable_expert_metrics` | Export per-physical-expert placement and token load to Prometheus. Adds one all-reduce per rearrangement and has high label cardinality | `false` |
+| `enable_expert_metrics` | Export per-physical-expert placement and token load to Prometheus. Has high label cardinality | `false` |
+| `expert_metrics_interval` | Steps between per-expert metric samples. `1` gives per-step samples at the cost of an all-reduce per step | `100` |
+| `expert_metrics_trace` | Write per-step expert load vectors to JSONL for offline analysis | `false` |
+| `expert_metrics_trace_interval` | Steps between JSONL trace records | `1` |
+| `expert_metrics_trace_path` | Base path for per-rank JSONL trace files | `"eplb_expert_trace.jsonl"` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |

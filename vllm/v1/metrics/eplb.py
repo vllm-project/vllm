@@ -97,12 +97,31 @@ class EplbProm:
             multiprocess_mode="mostrecent",
             labelnames=model_labelnames,
         )
+        load_labelnames = [*labelnames, "model", "phase"]
+        gauge_load_timestamp = self._gauge_cls(
+            name="vllm:eplb_expert_load_timestamp_seconds",
+            documentation="Unix timestamp of the last per-expert load sample.",
+            multiprocess_mode="mostrecent",
+            labelnames=load_labelnames,
+        )
+        gauge_window_steps = self._gauge_cls(
+            name="vllm:eplb_expert_load_window_steps",
+            documentation=(
+                "Number of engine steps covered by the last per-expert load sample."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=load_labelnames,
+        )
         self.counter_rearrangements: dict[tuple[int, str], object] = {}
         self.gauge_rearrangement_timestamp: dict[tuple[int, str], object] = {}
         self.gauge_topology_timestamp: dict[tuple[int, str], object] = {}
+        self.gauge_load_timestamp: dict[tuple[int, str, str], object] = {}
+        self.gauge_window_steps: dict[tuple[int, str, str], object] = {}
         self._counter_rearrangements_metric = counter_rearrangements
         self._gauge_rearrangement_timestamp_metric = gauge_rearrangement_timestamp
         self._gauge_topology_timestamp_metric = gauge_topology_timestamp
+        self._gauge_load_timestamp_metric = gauge_load_timestamp
+        self._gauge_window_steps_metric = gauge_window_steps
 
     def _labels(
         self,
@@ -130,6 +149,23 @@ class EplbProm:
     def _model_labels(self, engine_idx: int, model_name: str) -> list[object]:
         return [*self.per_engine_labelvalues[engine_idx], model_name]
 
+    def _load_metric(
+        self,
+        cache: dict[tuple[int, str, str], object],
+        metric,
+        engine_idx: int,
+        model_name: str,
+        phase: str,
+    ):
+        key = (engine_idx, model_name, phase)
+        child = cache.get(key)
+        if child is None:
+            child = metric.labels(
+                *self.per_engine_labelvalues[engine_idx], model_name, phase
+            )
+            cache[key] = child
+        return child
+
     def _model_metric(
         self,
         cache: dict[tuple[int, str], object],
@@ -150,9 +186,26 @@ class EplbProm:
 
         rearranged_models: dict[str, float] = {}
         for model in snapshot.tokens:
-            rearranged_models[model.model_name] = max(
-                rearranged_models.get(model.model_name, 0.0), model.timestamp
-            )
+            if model.rearranged:
+                rearranged_models[model.model_name] = max(
+                    rearranged_models.get(model.model_name, 0.0), model.timestamp
+                )
+            if model.timestamp > 0:
+                self._load_metric(
+                    self.gauge_load_timestamp,
+                    self._gauge_load_timestamp_metric,
+                    engine_idx,
+                    model.model_name,
+                    model.phase,
+                ).set(model.timestamp)
+            if model.steps > 0:
+                self._load_metric(
+                    self.gauge_window_steps,
+                    self._gauge_window_steps_metric,
+                    engine_idx,
+                    model.model_name,
+                    model.phase,
+                ).set(model.steps)
             layout = model.physical_to_logical
             for layer, token_counts in enumerate(model.tokens):
                 for physical_expert, num_tokens in enumerate(token_counts):

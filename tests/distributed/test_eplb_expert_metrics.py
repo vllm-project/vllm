@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,12 @@ pytestmark = pytest.mark.cpu_test
 def test_take_expert_metrics_snapshot_copies_topology_once():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(enable_expert_metrics=True)
+        eplb_config=SimpleNamespace(
+            enable_expert_metrics=True,
+            expert_metrics_trace=False,
+            expert_metrics_trace_interval=1,
+            expert_metrics_trace_path="unused.jsonl",
+        )
     )
     state._pending_expert_tokens = [
         EplbExpertTokens(
@@ -60,8 +66,14 @@ def test_take_expert_metrics_snapshot_copies_topology_once():
 def test_phase_load_accumulation_separates_prefill_and_decode():
     state = EplbState.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(enable_expert_metrics=True)
+        eplb_config=SimpleNamespace(
+            enable_expert_metrics=True,
+            expert_metrics_trace=False,
+            expert_metrics_trace_interval=1,
+            expert_metrics_trace_path="unused.jsonl",
+        )
     )
+    state.expert_metrics_total_step = 1
     pass_load = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
     phase_load = {
         phase: torch.zeros_like(pass_load)
@@ -98,3 +110,76 @@ def test_phase_load_accumulation_separates_prefill_and_decode():
     state._reset_expert_metrics_accumulators()
     assert torch.count_nonzero(model_state.expert_load_pending) == 0
     assert all(torch.count_nonzero(t) == 0 for t in phase_load.values())
+
+
+def test_sample_expert_metrics_emits_phase_samples_and_resets():
+    state = EplbState.__new__(EplbState)
+    state.parallel_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(enable_expert_metrics=True)
+    )
+    state.expert_metrics_window_step = 7
+    state._pending_expert_tokens = []
+    phase_load = {
+        phase: torch.ones((1, 4), dtype=torch.int32)
+        for phase in (EPLB_PHASE_PREFILL, EPLB_PHASE_DECODE, EPLB_PHASE_MIXED)
+    }
+    model_state = SimpleNamespace(
+        phase_load_accum=phase_load,
+        metrics=EplbModelMetricsState(
+            model_name="model",
+            ep_rank=0,
+            num_ep_ranks=2,
+            num_local_experts=2,
+        ),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),
+    )
+    state.model_states = {"model": model_state}
+    state._allreduce_list = lambda tensors: tensors
+
+    state._sample_expert_metrics(rearranged=True)
+
+    assert len(state._pending_expert_tokens) == 3
+    assert {sample.phase for sample in state._pending_expert_tokens} == {
+        EPLB_PHASE_PREFILL,
+        EPLB_PHASE_DECODE,
+        EPLB_PHASE_MIXED,
+    }
+    assert all(sample.steps == 7 for sample in state._pending_expert_tokens)
+    assert all(sample.rearranged for sample in state._pending_expert_tokens)
+    assert all(sample.timestamp > 0 for sample in state._pending_expert_tokens)
+    assert state.expert_metrics_window_step == 0
+    assert all(torch.count_nonzero(t) == 0 for t in phase_load.values())
+
+
+def test_trace_writes_per_rank_jsonl(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    state = EplbState.__new__(EplbState)
+    state.parallel_config = SimpleNamespace(
+        data_parallel_rank=0,
+        eplb_config=SimpleNamespace(
+            expert_metrics_trace=True,
+            expert_metrics_trace_interval=1,
+            expert_metrics_trace_path=str(trace_path),
+        ),
+    )
+    state.expert_metrics_total_step = 3
+    state._expert_metrics_trace_files = {}
+    model_state = SimpleNamespace(
+        metrics=SimpleNamespace(
+            model_name="model",
+            ep_rank=1,
+            num_ep_ranks=2,
+            num_local_experts=2,
+            phase=EPLB_PHASE_DECODE,
+        )
+    )
+
+    state._write_expert_trace(model_state, torch.tensor([[1, 2], [3, 4]]))
+
+    output = tmp_path / "trace.jsonl.dp0.ep1.model.jsonl"
+    record = json.loads(output.read_text().strip())
+    assert record["step"] == 3
+    assert record["dp_rank"] == 0
+    assert record["ep_rank"] == 1
+    assert record["phase"] == EPLB_PHASE_DECODE
+    assert record["tokens"] == [[1, 2], [3, 4]]
