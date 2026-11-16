@@ -373,7 +373,7 @@ def create_hisparse_layout(
             f"HiSparse host pool holds {host_num_blocks * gpu_block_size} tokens "
             f"but max_model_len needs {min_host_blocks * gpu_block_size}; "
             f"increase host_pool_gib to at least "
-            f"{min_host_blocks * logical_block_bytes / GiB_bytes:.2f}."
+            f"{cdiv(min_host_blocks * logical_block_bytes * 100, GiB_bytes) / 100:.2f}."
         )
     logger.info_once(
         "HiSparse host pool: %.2f GiB per replica holds %d tokens; pinning "
