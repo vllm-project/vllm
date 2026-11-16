@@ -15,7 +15,6 @@ from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcesso
 from vllm.entrypoints.pooling.types import (
     OfflineEncodeInputsContext,
     OfflineInputsContext,
-    OfflineScoringInputsContext,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
@@ -443,52 +442,33 @@ class TestOfflineFactoryDefaults:
         call = fake_chat_params.with_defaults.call_args
         assert call.kwargs["default_media_io_kwargs"] == {"image": {"timeout": 5}}
 
-    def test_chat_template_validation_runs_before_build_chat_params(
+    def test_offline_factory_accepts_request_chat_template(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        """`_validate_chat_template` must reject untrusted templates before
-        the offline factory builds `ChatParams` for them."""
+        """Offline encode/score must accept per-call chat templates without
+        requiring `trust_request_chat_template=True`; the serving-side trust
+        gate only applies to the online factory."""
         proc = _make_offline_processor(monkeypatch)
 
         ctx = _make_encode_ctx(chat_template="user_jinja")
         build_calls: list[str] = []
-        monkeypatch.setattr(
-            OfflineEncodeInputsContext,
-            "build_chat_params",
-            MagicMock(side_effect=lambda *a, **kw: build_calls.append("called")),
+
+        original_build = OfflineEncodeInputsContext.build_chat_params
+
+        def _build(self_ctx, *args, **kwargs):
+            build_calls.append("called")
+            return original_build(self_ctx, *args, **kwargs)
+
+        monkeypatch.setattr(OfflineEncodeInputsContext, "build_chat_params", _build)
+
+        # Must not raise: offline callers are trusted library users.
+        factory, num_requests = proc.get_request_factory_offline(ctx)
+        assert num_requests == 1
+
+        # The caller's template must be forwarded into ChatParams building.
+        assert build_calls == ["called"], (
+            "offline factory should build ChatParams from the caller's template"
         )
-
-        with pytest.raises(VLLMValidationError, match="trust-request-chat-template"):
-            proc.get_request_factory_offline(ctx)
-
-        assert build_calls == [], (
-            "build_chat_params should not run for an untrusted chat template"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Cross-encoder offline path must validate the request chat template
-# ---------------------------------------------------------------------------
-
-
-class TestCrossEncoderChatTemplateValidation:
-    def test_rejects_untrusted_chat_template(self):
-        """`LLM.score(..., chat_template=...)` with the trust flag off must be
-        rejected before any rendering happens."""
-        proc = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
-
-        ctx = OfflineScoringInputsContext(
-            pooling_task="classify",
-            tokenization_kwargs=None,
-            lora_request=None,
-            priorities=None,
-            chat_template="user_jinja",
-            scoring_data=MagicMock(),
-            pooling_params=PoolingParams(),
-        )
-
-        with pytest.raises(VLLMValidationError, match="trust-request-chat-template"):
-            proc.get_request_factory_offline(ctx)
 
 
 # ---------------------------------------------------------------------------

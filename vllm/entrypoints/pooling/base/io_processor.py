@@ -254,27 +254,15 @@ class PoolingIOProcessor:
             ctx.chat_template_kwargs,
         )
 
-        prompt_extras = dict(ctx.build_prompt_extras() or {})
+        prompt_extras_dict = dict(ctx.build_prompt_extras() or {})
         for key in ("mm_processor_kwargs", "cache_salt"):
-            if key not in prompt_extras and extra_kwargs.get(key) is not None:
-                prompt_extras[key] = extra_kwargs[key]
-        prompt_extras = prompt_extras or None
+            if key not in prompt_extras_dict and extra_kwargs.get(key) is not None:
+                prompt_extras_dict[key] = extra_kwargs[key]
+        prompt_extras: dict[str, Any] | None = prompt_extras_dict or None
 
-        # Rebuild `chat_params` from a context whose `chat_template_kwargs`
-        # are the merged result. `dataclasses.replace` keeps this local to the
-        # current call so the caller's context is not mutated.
         ctx = replace(ctx, chat_template_kwargs=merged_chat_template_kwargs)
 
-        # Mirror `get_request_factory_online`: apply the same template
-        # defaults so that chat rendering is byte-identical between
-        # online and offline paths.
-        #   - `tools`: kept for symmetry (`self.tool_dicts` is None today,
-        #     so this is a no-op, but follows the field if it ever gets
-        #     populated).
-        #   - `tokenize=is_mistral_tokenizer(...)`: Mistral tokenizers
-        #     require the chat template to receive `tokenize`.
-        #   - `default_media_io_kwargs`: pick up the model's default media
-        #     IO kwargs for multimodal models.
+        # Mirror `get_request_factory_online`:
         default_template_kwargs = merge_kwargs(
             self.template_kwargs,
             dict(

@@ -598,17 +598,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_kwargs.update(ctx.tokenization_kwargs or {})
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
 
-        # Merge `PoolingParams.extra_kwargs` so offline `LLM.score` callers
-        # that pass `chat_template_kwargs`, `mm_processor_kwargs` or
-        # `cache_salt` via `PoolingParams(extra_kwargs=...)` keep working.
-        # Explicit context values win over `extra_kwargs`.
         extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
 
-        prompt_extras = dict(ctx.build_prompt_extras() or {})
+        prompt_extras_dict = dict(ctx.build_prompt_extras() or {})
         for key in ("mm_processor_kwargs", "cache_salt"):
-            if key not in prompt_extras and extra_kwargs.get(key) is not None:
-                prompt_extras[key] = extra_kwargs[key]
-        prompt_extras = prompt_extras or None
+            if key not in prompt_extras_dict and extra_kwargs.get(key) is not None:
+                prompt_extras_dict[key] = extra_kwargs[key]
+        prompt_extras: dict[str, Any] | None = prompt_extras_dict or None
 
         merged_chat_template_kwargs = merge_kwargs(
             extra_kwargs.get("chat_template_kwargs"),
