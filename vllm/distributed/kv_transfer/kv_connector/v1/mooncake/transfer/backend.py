@@ -4,16 +4,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
-# Bumped whenever the peer payload changes shape. Peers refuse to transfer
-# across a mismatch instead of failing somewhere inside the engine.
-WIRE_VERSION = 1
-
-
-class TransferEngineKind(Enum):
-    TE = "te"
-    TENT = "tent"
+import numpy as np
+from numpy.typing import NDArray
 
 
 class TransferOp(Enum):
@@ -22,18 +15,8 @@ class TransferOp(Enum):
 
 
 class TransferState(Enum):
-    """Outcome of one range.
-
-    `IN_FLIGHT` is what a backend reports when it could not confirm that the
-    engine stopped touching the memory. The ranges were submitted and may still
-    be written, so the caller has to keep the memory reserved instead of
-    treating the ranges as finished and handing them to the next request.
-    """
-
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELED = "canceled"
-    IN_FLIGHT = "in_flight"
 
 
 @dataclass(frozen=True)
@@ -55,40 +38,22 @@ class TransferEvent:
     error: str | None = None
 
 
-def format_peer_address(hostname: str, port: int) -> str:
-    """Names a peer the way both engines parse it.
+@dataclass(frozen=True, slots=True)
+class BatchTransferResult:
+    """Terminal outcome covering `num_ranges`, not a count of successful ranges."""
 
-    IPv6 addresses are bracketed, which is what the Transfer Engine's
-    `parseHostNameWithPort` and TENT's segment naming both expect.
-    """
-    if ":" in hostname:
-        return f"[{hostname}]:{port}"
-    return f"{hostname}:{port}"
+    num_ranges: int
+    state: TransferState
+    error: str | None = None
 
 
 class TransferBackend(ABC):
-    """Moves KV blocks between two workers and reports per-range outcomes."""
-
-    @property
-    @abstractmethod
-    def kind(self) -> TransferEngineKind:
-        """Engine backing this backend. Peers compare it during the handshake."""
+    """Moves KV blocks between two workers synchronously."""
 
     @property
     @abstractmethod
     def rpc_port(self) -> int:
         """Port peers use to reach this worker's engine."""
-
-    @property
-    def engine(self) -> Any | None:
-        """The engine another connector can attach to, if this backend has one.
-
-        A Mooncake store connector in the same worker process can reuse the PD
-        connector's Transfer Engine instead of initializing a second one, which
-        requires the engine object itself. Backends that cannot share an engine
-        return None.
-        """
-        return None
 
     @abstractmethod
     def register_regions(self, regions: Sequence[MemoryRegion]) -> None:
@@ -115,10 +80,27 @@ class TransferBackend(ABC):
         returns an empty list. Blocks until every range reached a terminal
         state. Called from worker threads, so an implementation must accept
         concurrent calls.
+        """
 
-        An engine fault is reported as an event, not raised: a caller books
-        the blocks it submitted against the outcome of every range, and an
-        exception escaping here would leave those blocks pinned.
+    @abstractmethod
+    def transfer_sync_arrays(
+        self,
+        peer: str,
+        op: TransferOp,
+        local_addrs: NDArray[np.uint64],
+        remote_addrs: NDArray[np.uint64],
+        lengths: NDArray[np.uint64],
+    ) -> BatchTransferResult:
+        """Moves equal-length, 1D, contiguous native uint64 columns.
+
+        Blocks until all ranges are terminal, holding the input buffers for the
+        duration of the call. Callers must not modify them meanwhile. Concurrent
+        calls keep their own inputs and results. Empty input completes without
+        engine work. COMPLETED means all ranges succeeded; FAILED does not mean
+        all failed. Use the first failure in input order when available.
+
+        Returns one batch summary without constructing per-range requests,
+        events or status arrays. Invalid inputs and engine exceptions propagate.
         """
 
     @abstractmethod

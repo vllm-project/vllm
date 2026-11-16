@@ -4,7 +4,6 @@
 import asyncio
 import contextlib
 import errno
-import queue
 import socket
 import threading
 import time
@@ -19,6 +18,7 @@ import torch
 import zmq.asyncio
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
@@ -56,14 +56,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
-    WIRE_VERSION,
-    TransferEngineKind,
-)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MLAAttentionSpec,
 )
@@ -177,14 +172,14 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 [
                     "model.layers.0.self_attn",
                     "model.layers.1.self_attn",
                     "model.layers.0.mla_attn",
                     "model.layers.1.eagle_attn",
                 ],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=64,
@@ -214,7 +209,7 @@ def _make_compressed_kv_cache_config() -> KVCacheConfig:
         dtype=torch.uint8,
         tokens_per_state=8,
     )
-    return KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+    return KVCacheConfig(2, [], [make_kv_cache_group(["summary"], spec)])
 
 
 def _make_packed_mla_kv_cache_config(
@@ -228,15 +223,15 @@ def _make_packed_mla_kv_cache_config(
     )
     if num_groups == 1:
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.0.mla_attn", "model.layers.1.indexer"],
                 spec,
             )
         ]
     else:
         groups = [
-            KVCacheGroupSpec(["model.layers.0.mla_attn"], spec),
-            KVCacheGroupSpec(["model.layers.1.indexer"], spec),
+            make_kv_cache_group(["model.layers.0.mla_attn"], spec),
+            make_kv_cache_group(["model.layers.1.indexer"], spec),
         ]
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -354,6 +349,23 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
     assert mismatch_err is not None
 
 
+def test_del_keeps_quiet_when_the_constructor_did_not_finish():
+    """A constructor that raised leaves no state for the hook to tear down."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+    worker.__del__()
+
+
+def test_del_shuts_down_a_worker_that_started():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.shutdown = MagicMock()
+
+    worker.__del__()
+
+    worker.shutdown.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_build_transfer_params_separates_prefill_pp_layers():
     """Each producer PP stage should send only its registered layer shard."""
@@ -460,7 +472,6 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
             src_ptrs,
             dst_ptrs,
             lengths,
-            owners,
             err_reqs,
             err_msg,
         ) = await worker._build_transfer_params(
@@ -472,9 +483,13 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
 
         assert err_reqs == []
         assert err_msg is None
-        assert src_ptrs == expected_by_pp_rank[pp_rank]["src_ptrs"]
-        assert dst_ptrs == expected_by_pp_rank[pp_rank]["dst_ptrs"]
-        assert lengths == [2 * block_len, 2 * block_len]
+        np.testing.assert_array_equal(
+            src_ptrs, expected_by_pp_rank[pp_rank]["src_ptrs"]
+        )
+        np.testing.assert_array_equal(
+            dst_ptrs, expected_by_pp_rank[pp_rank]["dst_ptrs"]
+        )
+        np.testing.assert_array_equal(lengths, [2 * block_len, 2 * block_len])
 
 
 @pytest.mark.asyncio
@@ -541,15 +556,14 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         identity = b"consumer-layer-align"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=([], [], None)
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
-        src_ptrs, dst_ptrs, lengths, owners = mock_send_blocks.call_args[0][1:]
-        assert src_ptrs == [0x1000 + 10 * block_len]
-        assert dst_ptrs == [0xB000 + 20 * block_len]
-        assert lengths == [block_len]
-        assert owners == ["d-req-layer-align"]
+        src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
+        np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+        np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
+        np.testing.assert_array_equal(lengths, [block_len])
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
@@ -1155,8 +1169,7 @@ def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
     with (
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-            "mooncake_connector._load_transfer_engine",
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector._load_transfer_engine",
             return_value=FakeMooncakeWrapper,
         ),
         patch(
@@ -1253,8 +1266,6 @@ def _xfer_meta(
             list(region.shared_group_ids) for region in regions
         ],
         registered_row_offsets=[region.row_offset for region in regions],
-        remote_transfer_engine=TransferEngineKind.TE.value,
-        wire_version=WIRE_VERSION,
     )
     fields.update(overrides)
     return MooncakeXferMetadata(**fields)
@@ -1282,6 +1293,88 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
             FakeMooncakeWrapper, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("array_api", ["available", "missing", "not_callable"])
+@pytest.mark.parametrize("base_addr", [0x1000, 0xFF00000000200000])
+async def test_transfer_arrays_and_legacy_list_fallback(
+    monkeypatch, array_api, base_addr
+):
+    """Both engine generations receive exact descriptors, including high pointers."""
+    calls = []
+
+    def transfer(api, session, src, dst, lengths):
+        calls.append((api, session, src, dst, lengths))
+        expected_type = np.ndarray if array_api == "available" else list
+        for values in (src, dst, lengths):
+            assert isinstance(values, expected_type)
+            if isinstance(values, np.ndarray):
+                assert values.dtype == np.uint64
+                assert values.ndim == 1 and values.flags.c_contiguous
+            else:
+                assert all(type(value) is int for value in values)
+        return 0
+
+    monkeypatch.setattr(
+        FakeMooncakeWrapper,
+        "batch_transfer_sync_write",
+        lambda engine, *args: transfer("list", *args),
+    )
+    if array_api != "missing":
+        monkeypatch.setattr(
+            FakeMooncakeWrapper,
+            "batch_transfer_sync_write_arrays",
+            (lambda engine, *args: transfer("arrays", *args))
+            if array_api == "available"
+            else None,
+            raising=False,
+        )
+
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        try:
+            local_regions = [_region(base_addr + i * 0x10000) for i in range(2)]
+            remote_regions = [
+                _region(base_addr + i * 0x10000 + 0x8000) for i in range(2)
+            ]
+            meta = SendBlockMeta(
+                p_req_id="p-array",
+                transfer_id="xfer-array",
+                local_block_ids=[[2, 5]],
+                ready=asyncio.Event(),
+            )
+            xfer = _xfer_meta(remote_regions, {"d-array": ("xfer-array", [[7, 9]])})
+            src, dst, lengths, errors, error = await worker._build_transfer_params(
+                [("d-array", meta)], xfer, local_regions, remote_regions
+            )
+            assert errors == [] and error is None
+            for values in (src, dst, lengths):
+                assert isinstance(values, np.ndarray)
+                assert values.dtype == np.uint64
+                assert values.ndim == 1 and values.flags.c_contiguous
+            assert worker._send_blocks("peer:1234", src, dst, lengths) is None
+            assert len(calls) == 1
+            api, session, got_src, got_dst, got_lengths = calls[0]
+            assert api == ("arrays" if array_api == "available" else "list")
+            assert session == "peer:1234"
+            if array_api == "available":
+                assert got_src is src and got_dst is dst and got_lengths is lengths
+            np.testing.assert_array_equal(
+                got_src, [r.base_addr + b * 256 for r in local_regions for b in (2, 5)]
+            )
+            np.testing.assert_array_equal(
+                got_dst, [r.base_addr + b * 256 for r in remote_regions for b in (7, 9)]
+            )
+            np.testing.assert_array_equal(got_lengths, [256] * 4)
+            stats = worker.xfer_stats.clone_and_reset().data
+            assert stats["bytes_transferred"] == [1024]
+            assert type(stats["bytes_transferred"][0]) is int
+            assert stats["num_descriptors"] == [4]
+            empty = await worker._build_transfer_params([], xfer, [], [])
+            for values in empty[:3]:
+                assert values.shape == (0,) and values.dtype == np.uint64
+        finally:
+            worker.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1420,9 +1513,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
             sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
             with (
                 patch.object(worker, "sender_loop", asyncio.get_running_loop()),
-                patch.object(
-                    worker, "_send_blocks", return_value=([], [], None)
-                ) as send,
+                patch.object(worker, "_send_blocks", return_value=None) as send,
             ):
                 for pp_rank in range(2):
                     metadata = _xfer_meta(
@@ -1449,9 +1540,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
                     assert worker.finished_sending_reqs == (
                         set() if pp_rank == 0 else {"p-req"}
                     )
-                send.assert_called_once_with(
-                    "consumer:1234", [0x1100], [0x2200], [256], ["d-req"]
-                )
+                send.assert_called_once_with("consumer:1234", [0x1100], [0x2200], [256])
         finally:
             worker.shutdown()
             worker.is_kv_consumer = True
@@ -1459,8 +1548,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
 
 @pytest.mark.asyncio
 @patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-    "mooncake_connector._load_transfer_engine",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector._load_transfer_engine",
     return_value=FakeMooncakeWrapper,
 )
 async def test_kv_producer(monkeypatch):
@@ -1520,7 +1608,7 @@ async def test_kv_producer(monkeypatch):
         identity = b"consumer-id"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=([], [], None)
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
 
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
@@ -1529,20 +1617,16 @@ async def test_kv_producer(monkeypatch):
                     [src_base + src_blocks[0] * block_len],
                     [dst_base + dst_blocks[0] * block_len],
                     [n * block_len],
-                    ["d-req-1"],
                 )
 
             # Normal case: 2 blocks to 2 blocks
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
-            src, dst, lens, owners = expected_transfers(
-                0x1000, 0x2000, [10, 11], [20, 21]
-            )
+            src, dst, lens = expected_transfers(0x1000, 0x2000, [10, 11], [20, 21])
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321",
                 src,
                 dst,
                 lens,
-                owners,
             )
             mock_socket.send_multipart.assert_called_once()
 
@@ -1569,13 +1653,12 @@ async def test_kv_producer(monkeypatch):
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct: 11 to 20
-            src, dst, lens, owners = expected_transfers(0x1000, 0x2000, [11], [20])
+            src, dst, lens = expected_transfers(0x1000, 0x2000, [11], [20])
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321",
                 src,
                 dst,
                 lens,
-                owners,
             )
             mock_socket.send_multipart.assert_called_once()
 
@@ -1617,7 +1700,7 @@ async def test_kv_producer(monkeypatch):
         with patch.object(
             prefill_worker,
             "_send_blocks",
-            return_value=(["d-req-1"], [], "Mooncake transfer engine returned 123"),
+            return_value="Mooncake transfer engine returned 123",
         ) as mock_send_blocks:
             mock_socket.send_multipart.reset_mock()
             prefill_worker.reqs_need_send[transfer_id] = send_meta
@@ -1634,150 +1717,6 @@ async def test_kv_producer(monkeypatch):
             assert response.err_reqs == ["d-req-1"]
 
         # Clean up
-        prefill_worker.sender_loop = origin_sender_loop
-        prefill_worker.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_a_backend_exception_fails_every_request_in_the_submission(monkeypatch):
-    """A raised backend error must still settle the producer bookkeeping.
-
-    The consumer has to learn which requests failed, and the producer's
-    outstanding count has to drop, otherwise its blocks never expire.
-    """
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = _make_worker_vllm_config("kv_producer")
-
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
-        )
-        prefill_worker = prefill_connector.connector_worker
-        prefill_worker.kv_caches_base_addr = [0x1000]
-        block_len = 4096
-        prefill_worker.block_len_per_layer = [block_len]
-        prefill_worker.kv_block_len_per_layer = [block_len]
-        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
-        prefill_worker.registered_layer_indices = [0]
-        origin_sender_loop = prefill_worker.sender_loop
-        prefill_worker.sender_loop = asyncio.get_event_loop()
-
-        transfer_id = "xfer-req-1"
-        send_meta = SendBlockMeta(
-            p_req_id="p-req-1",
-            transfer_id=transfer_id,
-            local_block_ids=[[10, 11]],
-            ready=asyncio.Event(),
-        )
-        send_meta.ready.set()
-        prefill_worker.reqs_need_send[transfer_id] = send_meta
-        xfer_meta = _xfer_meta(
-            [
-                _region(
-                    0x2000,
-                    block_len=block_len,
-                    row_offset=-1,
-                    layer_name="model.layers.0.self_attn",
-                    layer_index=0,
-                )
-            ],
-            {"d-req-1": (transfer_id, [[20, 21]])},
-        )
-        mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
-        mock_socket.send_multipart = AsyncMock()
-
-        with patch.object(
-            prefill_worker,
-            "_send_blocks",
-            side_effect=RuntimeError("transport exploded"),
-        ):
-            await prefill_worker.send_kv_to_decode(
-                b"consumer-id", mock_socket, xfer_meta
-            )
-
-        _, sent_payload = mock_socket.send_multipart.call_args[0][0]
-        response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-        assert response.err_reqs == ["d-req-1"]
-        assert "transport exploded" in response.err_msg
-        assert send_meta.sending == 0
-        assert "p-req-1" not in prefill_worker.finished_sending_reqs
-
-        # Hand the original loop back: shutdown drains through it and would wait
-        # on the test's own loop forever.
-        prefill_worker.sender_loop = origin_sender_loop
-        prefill_worker.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_an_unresolved_request_is_not_reported_as_completed(monkeypatch):
-    """A range the engine may still write must not finish on either side.
-
-    Listing the request as completed would let the decoder release blocks the
-    engine is still writing to.
-    """
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = _make_worker_vllm_config("kv_producer")
-
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
-        )
-        prefill_worker = prefill_connector.connector_worker
-        prefill_worker.kv_caches_base_addr = [0x1000]
-        block_len = 4096
-        prefill_worker.block_len_per_layer = [block_len]
-        prefill_worker.kv_block_len_per_layer = [block_len]
-        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
-        prefill_worker.registered_layer_indices = [0]
-        origin_sender_loop = prefill_worker.sender_loop
-        prefill_worker.sender_loop = asyncio.get_event_loop()
-
-        transfer_id = "xfer-req-1"
-        send_meta = SendBlockMeta(
-            p_req_id="p-req-1",
-            transfer_id=transfer_id,
-            local_block_ids=[[10, 11]],
-            ready=asyncio.Event(),
-        )
-        send_meta.ready.set()
-        prefill_worker.reqs_need_send[transfer_id] = send_meta
-        xfer_meta = _xfer_meta(
-            [
-                _region(
-                    0x2000,
-                    block_len=block_len,
-                    row_offset=-1,
-                    layer_name="model.layers.0.self_attn",
-                    layer_index=0,
-                )
-            ],
-            {"d-req-1": (transfer_id, [[20, 21]])},
-        )
-        mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
-        mock_socket.send_multipart = AsyncMock()
-
-        with patch.object(
-            prefill_worker,
-            "_send_blocks",
-            return_value=([], ["d-req-1"], None),
-        ):
-            await prefill_worker.send_kv_to_decode(
-                b"consumer-id", mock_socket, xfer_meta
-            )
-
-        _, sent_payload = mock_socket.send_multipart.call_args[0][0]
-        response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-        assert response.ok_reqs is None
-        assert response.unresolved_reqs == ["d-req-1"]
-        assert response.err_reqs is None
-        # The request stays counted as sending, so its blocks never expire.
-        assert send_meta.sending == 1
-        assert "p-req-1" not in prefill_worker.finished_sending_reqs
-
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
 
@@ -1814,123 +1753,6 @@ def test_pull_completion_requires_local_blocks(
 
     assert pull_meta.pull_tasks_count == 0
     assert worker.finished_recving_reqs == expected_finished
-
-
-def test_a_request_the_engine_could_not_stop_stays_reserved():
-    """P could not confirm its engine stopped, so D neither completes nor retries."""
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.shutdown = MagicMock()
-    worker.finished_recving_reqs = set()
-    worker._unresolved_pull_reqs = set()
-    pull_meta = PullReqMeta(
-        d_req_id="d-req-1",
-        transfer_id="xfer-req-1",
-        local_block_ids=[[100]],
-        remote_engine_id="p-engine",
-        remote_bootstrap_addr="http://bootstrap:33333",
-        pull_tasks_count=1,
-    )
-    pull_metas = {"d-req-1": pull_meta}
-
-    worker.process_pulling_result(
-        MooncakeXferResponse(
-            status=MooncakeXferResponseStatus.CONTINUE,
-            unresolved_reqs=["d-req-1"],
-        ),
-        pull_metas,
-    )
-
-    assert pull_meta.pull_tasks_count == 1
-    assert worker.finished_recving_reqs == set()
-    assert worker._unresolved_pull_reqs == {"d-req-1"}
-    assert pull_metas == {}
-
-    # A later reply for the same request cannot settle blocks that may still be
-    # written.
-    worker.process_pulling_result(
-        MooncakeXferResponse(
-            status=MooncakeXferResponseStatus.FINISH,
-            ok_reqs=["d-req-1"],
-        ),
-        pull_metas,
-    )
-    assert pull_meta.pull_tasks_count == 1
-    assert worker.finished_recving_reqs == set()
-
-
-def test_an_unresolved_pull_masks_the_failures_of_the_other_peers():
-    """Every peer holds its own view of the metas; one refusal must win.
-
-    The blocks a peer could not confirm stopped must not be reported invalid,
-    because the scheduler would hand them out while the engine still writes.
-    """
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.shutdown = MagicMock()
-    worker.finished_recving_reqs = set()
-    worker._unresolved_pull_reqs = set()
-    worker._invalid_block_ids = queue.Queue()
-    worker._failed_recv_reqs = queue.Queue()
-    worker._is_hma_required = False
-    worker.xfer_stats = MagicMock()
-    pull_meta = PullReqMeta(
-        d_req_id="d-req-1",
-        transfer_id="xfer-req-1",
-        local_block_ids=[[100]],
-        remote_engine_id="p-engine",
-        remote_bootstrap_addr="http://bootstrap:33333",
-        pull_tasks_count=2,
-    )
-    first_peer = {"d-req-1": pull_meta}
-    second_peer = dict(first_peer)
-
-    worker.process_pulling_result(
-        MooncakeXferResponse(
-            status=MooncakeXferResponseStatus.CONTINUE,
-            unresolved_reqs=["d-req-1"],
-        ),
-        first_peer,
-    )
-    worker._handle_failed_recv(
-        second_peer,
-        ["d-req-1"],
-        "peer finished without reporting a transfer result",
-    )
-
-    assert worker._invalid_block_ids.empty()
-    assert worker._failed_recv_reqs.empty()
-    assert pull_meta.failed is False
-    assert pull_meta.pull_tasks_count == 2
-    assert worker.finished_recving_reqs == set()
-
-
-def test_shutdown_is_quiet_when_the_constructor_did_not_finish():
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-
-    worker.shutdown()
-
-
-def test_shutdown_releases_what_a_failed_constructor_created():
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker._sender_executor = MagicMock()
-    worker.bootstrap_server = MagicMock()
-    worker.transfer_backend = MagicMock()
-
-    worker.shutdown()
-
-    worker._sender_executor.shutdown.assert_called_once_with(wait=False)
-    worker.bootstrap_server.shutdown.assert_called_once()
-    worker.transfer_backend.shutdown.assert_called_once()
-
-
-def test_del_runs_shutdown_for_a_backend_built_before_the_context():
-    """The backend exists before the context, so a failed constructor still
-    leaves teardown that has to run."""
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.transfer_backend = MagicMock()
-
-    worker.__del__()
-
-    worker.transfer_backend.shutdown.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2480,7 +2302,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
             req_blocks,
         )
         sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
-        with patch.object(producer, "_send_blocks", return_value=([], [], None)):
+        with patch.object(producer, "_send_blocks", return_value=None):
             await producer.send_kv_to_decode(b"consumer", sock, metadata)
 
         # No placeholder that would wait for a prefill that already ran.
@@ -2557,7 +2379,7 @@ def test_worker_publishes_and_clears_shared_engine():
 )
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -2638,7 +2460,7 @@ def test_register_noncontiguous_packed_allows_matching_pp():
     A remote PP mismatch is rejected at send time, once the peer PP size is
     known. Rejecting every local PP>1 layout at startup is too strict.
     """
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -2833,7 +2655,6 @@ async def test_build_transfer_params_sends_packed_region_once(
         src_ptrs,
         dst_ptrs,
         lengths,
-        owners,
         err_reqs,
         err_msg,
     ) = await worker._build_transfer_params(
@@ -2845,9 +2666,9 @@ async def test_build_transfer_params_sends_packed_region_once(
 
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [0x1000 + 10 * block_len]
-    assert dst_ptrs == [0xA000 + 20 * block_len]
-    assert lengths == [n_blocks * block_len]
+    np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+    np.testing.assert_array_equal(dst_ptrs, [0xA000 + 20 * block_len])
+    np.testing.assert_array_equal(lengths, [n_blocks * block_len])
 
 
 @pytest.mark.parametrize(
@@ -2919,7 +2740,6 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
         src_ptrs,
         dst_ptrs,
         lengths,
-        owners,
         err_reqs,
         err_msg,
     ) = await worker._build_transfer_params(
@@ -2935,13 +2755,15 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
         local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [
-        r.base_addr + b * block_len for r in local_regions for b in local_ids
-    ]
-    assert dst_ptrs == [
-        r.base_addr + b * block_len for r in remote_regions for b in remote_ids
-    ]
-    assert lengths == sizes * len(local_regions)
+    np.testing.assert_array_equal(
+        src_ptrs,
+        [r.base_addr + b * block_len for r in local_regions for b in local_ids],
+    )
+    np.testing.assert_array_equal(
+        dst_ptrs,
+        [r.base_addr + b * block_len for r in remote_regions for b in remote_ids],
+    )
+    np.testing.assert_array_equal(lengths, sizes * len(local_regions))
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
@@ -3169,8 +2991,6 @@ def _short_xfer_meta(worker, layout_id: int, req_blocks: dict) -> MooncakeXferMe
         remote_tp_size=worker.tp_size,
         remote_tp_rank=0,
         remote_pp_size=worker.pp_size,
-        remote_transfer_engine=TransferEngineKind.TE.value,
-        wire_version=WIRE_VERSION,
         layout_id=layout_id,
         req_blocks=req_blocks,
         kv_caches_base_addr=[],
@@ -3433,7 +3253,7 @@ def _register_sliced_packed_mla(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec([_layer_name(i) for i in layer_idxs], spec),
+            make_kv_cache_group([_layer_name(i) for i in layer_idxs], spec),
         ],
     )
     backing = torch.zeros((num_blocks, page * len(layer_idxs)), dtype=torch.uint8)
@@ -3467,7 +3287,7 @@ def test_sliced_packed_mla_registers_each_layer_view():
             num_blocks=4,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     [_layer_name(i) for i in layer_idxs],
                     MLAAttentionSpec(
                         block_size=maybe_update_block_size(16),
@@ -3520,14 +3340,7 @@ async def _copy_packed_slices(
         ready=asyncio.Event(),
     )
     p_worker.kv_cache_config = p_config
-    (
-        src,
-        dst,
-        lengths,
-        owners,
-        err_reqs,
-        err_msg,
-    ) = await p_worker._build_transfer_params(
+    src, dst, lengths, err_reqs, err_msg = await p_worker._build_transfer_params(
         ready_reqs=[("d-slices", send_meta)],
         agent_meta=_xfer_meta(coalesced_d, {"d-slices": (transfer_id, remote_ids)}),
         local_regions=coalesced_p,
@@ -3569,15 +3382,21 @@ async def test_packed_hetero_pp_keeps_shared_layers():
     assert copied.coalesced_d[0].base_addr == copied.d_base + 2 * page
     assert copied.err_reqs == []
     assert copied.err_msg is None
-    assert copied.lengths == [2 * page, 2 * page]
-    assert copied.src == [
-        copied.p_base + 10 * (2 * page),
-        copied.p_base + 11 * (2 * page),
-    ]
-    assert copied.dst == [
-        copied.d_base + 2 * page + 10 * (4 * page),
-        copied.d_base + 2 * page + 11 * (4 * page),
-    ]
+    np.testing.assert_array_equal(copied.lengths, [2 * page, 2 * page])
+    np.testing.assert_array_equal(
+        copied.src,
+        [
+            copied.p_base + 10 * (2 * page),
+            copied.p_base + 11 * (2 * page),
+        ],
+    )
+    np.testing.assert_array_equal(
+        copied.dst,
+        [
+            copied.d_base + 2 * page + 10 * (4 * page),
+            copied.d_base + 2 * page + 11 * (4 * page),
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -3597,9 +3416,9 @@ async def test_packed_matching_layers_coalesce_to_one_copy():
     assert len(copied.coalesced_p) == 1
     assert copied.coalesced_p[0].kv_block_len == copied.coalesced_p[0].block_len
     block_len = 2 * page
-    assert copied.src == [copied.p_base + 10 * block_len]
-    assert copied.dst == [copied.d_base + 20 * block_len]
-    assert copied.lengths == [2 * block_len]
+    np.testing.assert_array_equal(copied.src, [copied.p_base + 10 * block_len])
+    np.testing.assert_array_equal(copied.dst, [copied.d_base + 20 * block_len])
+    np.testing.assert_array_equal(copied.lengths, [2 * block_len])
 
 
 @pytest.mark.asyncio
@@ -3677,7 +3496,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         }
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=([], [], None)
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             for d_rank in target_d_ranks:
                 remote_block_ids = d_rank_remote_blocks[d_rank]
@@ -3760,7 +3579,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
 
 def test_sleep_unregisters_and_restores_kv_caches():
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -3783,72 +3602,3 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
-
-
-class _StubTransfer:
-    def __init__(self, kind: TransferEngineKind) -> None:
-        self.kind = kind
-
-
-def _peer(worker_engine: str = "tent", **overrides) -> MooncakeXferMetadata:
-    fields = {
-        "remote_hostname": "10.0.0.2",
-        "remote_port": 9100,
-        "remote_tp_size": 1,
-        "remote_tp_rank": 0,
-        "req_blocks": {},
-        "kv_caches_base_addr": [],
-        "block_lens": [],
-        "kv_block_lens": [],
-        "remote_transfer_engine": worker_engine,
-        "wire_version": WIRE_VERSION,
-    }
-    fields.update(overrides)
-    return MooncakeXferMetadata(**fields)
-
-
-def test_worker_accepts_a_peer_that_moves_kv_the_same_way():
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.transfer_backend = _StubTransfer(TransferEngineKind.TENT)
-
-    assert worker._engine_mismatch(_peer()) is None
-
-
-def test_worker_rejects_a_peer_running_another_engine():
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.transfer_backend = _StubTransfer(TransferEngineKind.TENT)
-
-    mismatch = worker._engine_mismatch(_peer("te"))
-
-    assert mismatch is not None
-    assert "both sides must select the same engine" in mismatch
-    assert "transfer_engine='te'" in mismatch
-
-
-def test_worker_rejects_a_peer_with_another_wire_version():
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.transfer_backend = _StubTransfer(TransferEngineKind.TENT)
-
-    mismatch = worker._engine_mismatch(_peer(wire_version=WIRE_VERSION + 1))
-
-    assert mismatch is not None
-    assert "wire version" in mismatch
-
-
-def test_worker_shutdown_closes_the_transfer_backend():
-    """The backend owns batches and segments, so worker shutdown must reach it."""
-    config = _make_worker_vllm_config("kv_producer")
-    with (
-        set_current_vllm_config(config),
-        patch_worker_dependencies(),
-        patch.object(MooncakeConnectorWorker, "_sync_block_size_with_kernel"),
-    ):
-        worker = MooncakeConnector(
-            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
-        ).connector_worker
-        backend = MagicMock()
-        worker.transfer_backend = backend
-
-        worker.shutdown()
-
-    backend.shutdown.assert_called_once_with()
