@@ -110,23 +110,18 @@ struct RouteGates {
     dev_mode: bool,
     /// `VLLM_ALLOW_RUNTIME_LORA_UPDATING`: LoRA load and unload routes.
     runtime_lora_updating: bool,
-    /// `--enable-scale-out` or `--tokens-only`: scale-out routes, which answer
-    /// 403 when disabled.
+    /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
     scale_out: bool,
-    /// `--tokens-only`: the legacy `/abort_requests`.
-    tokens_only: bool,
     /// `VLLM_ENABLE_COHERE_API`: Cohere v2 chat routes.
     cohere_api: bool,
 }
 
 impl RouteGates {
     fn resolve(state: &AppState) -> Self {
-        let options = &state.api_server_options;
         Self {
-            dev_mode: options.server_dev_mode,
+            dev_mode: state.api_server_options.server_dev_mode,
             runtime_lora_updating: runtime_lora_updating_enabled(),
-            scale_out: options.enable_scale_out || options.tokens_only,
-            tokens_only: options.tokens_only,
+            scale_out: state.api_server_options.enable_scale_out,
             cohere_api: cohere_api_enabled(),
         }
     }
@@ -220,12 +215,6 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
             .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter));
-    }
-
-    // The dev-mode `/abort_requests` below takes precedence, as in Python.
-    if gates.tokens_only && !gates.dev_mode {
-        // TODO: share the `/inference/v1/abort_requests` handler once implemented.
-        router = router.route("/abort_requests", post(not_supported));
     }
 
     if gates.dev_mode {
