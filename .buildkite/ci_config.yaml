@@ -23,7 +23,6 @@ amd_run_all_patterns:
   - ".buildkite/scripts/rocm/build.sh"
   - "requirements/rocm.txt"
   - "requirements/test/rocm.txt"
-  - "tools/install_torchcodec_rocm.sh"
   - "tools/vllm-rocm/therock_wheels.py"
 # Separate from run_all_exclude_patterns, which skips AMD files like csrc/rocm/.
 amd_run_all_exclude_patterns:
