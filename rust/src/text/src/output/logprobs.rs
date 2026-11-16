@@ -87,7 +87,12 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
         .first()
         .copied()
         .expect("prompt logprobs require at least one prompt token");
-    let first_token = decode_token(tokenizer, first_token_id)?;
+    // The first prompt token starts the sequence, so plain decoding rightly drops
+    // a SentencePiece dummy-prefix space. Python echoes it with `decode` as well,
+    // which keeps the echoed prompt's `text_offset` aligned.
+    let first_token = tokenizer.map_or(Ok(String::new()), |tokenizer| {
+        tokenizer.decode(&[first_token_id], false)
+    })?;
     let scored_positions = logprobs
         .positions
         .iter()
@@ -291,6 +296,24 @@ mod tests {
                 "sequenced={sequenced}",
             );
         }
+    }
+
+    #[test]
+    fn decode_prompt_logprobs_keeps_first_metaspace_token_undecorated() {
+        let tokenizer = metaspace_tokenizer(false);
+        let logprobs = Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![TokenLogprob {
+                    token_id: 1,
+                    logprob: -0.1,
+                    rank: 1,
+                }],
+            }],
+        };
+
+        let decoded = decode_prompt_logprobs(Some(&tokenizer), &[1, 1], &logprobs).unwrap();
+        assert_eq!(decoded.first_token, "the");
+        assert_eq!(decoded.scored_positions[0].entries[0].token, " the");
     }
 
     #[test]
