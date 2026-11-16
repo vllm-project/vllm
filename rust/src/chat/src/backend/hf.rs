@@ -201,6 +201,7 @@ pub(super) async fn load_model_backends(
         tokenizer: options.tokenizer.clone(),
         hf_config: options.hf_config.clone(),
         skip_tokenizer_init: options.skip_tokenizer_init,
+        hf_token: options.hf_token.clone(),
     })
     .await?;
     files.apply_overrides(&options.hf_overrides)?;
@@ -325,6 +326,7 @@ mod tests {
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
                 skip_tokenizer_init: false,
+                hf_token: None,
             },
             test_tokenizer(),
         )
