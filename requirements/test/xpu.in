@@ -34,7 +34,7 @@ soundfile
 blobfile
 rapidfuzz
 gpt-oss[eval] >= 0.0.7; python_version > '3.11'
-schemathesis>=4.0.0 # Required for openai schema test.
+schemathesis>=4.26.2 # Required for openai schema test; 4.26.2 supports pytest 9.2.
 jiwer
 kaldi-native-fbank>=1.18.7 # required for fireredasr2 test
 bm25s
