@@ -1098,6 +1098,23 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
     assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 800}
 
 
+def _encoder_deferral_scheduler(
+    async_scheduling: bool = True, enable_chunked_prefill: bool = False, **kwargs
+) -> Scheduler:
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=enable_chunked_prefill,
+        async_scheduling=async_scheduling,
+        **kwargs,
+    )
+    # The CPU platform turns async scheduling off. These tests overlap steps as
+    # async scheduling does, so keep it on in the config the scheduler reads.
+    scheduler.scheduler_config.async_scheduling = async_scheduling
+    assert (scheduler.vllm_config.max_concurrent_batches > 1) == async_scheduling
+    return scheduler
+
+
 FOUR_IMAGES = [(10, 250), (260, 250), (510, 250), (760, 250)]
 
 
@@ -1117,12 +1134,7 @@ def test_encoder_deferred_request_is_not_overtaken(
 ):
     """A request deferred for encoder cache space is scheduled while one-image
     requests keep arriving (#67292)."""
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        max_num_batched_tokens=1024,
-        enable_chunked_prefill=enable_chunked_prefill,
-        async_scheduling=async_scheduling,
-    )
+    scheduler = _encoder_deferral_scheduler(async_scheduling, enable_chunked_prefill)
     num_small = 0
 
     def add_small():
@@ -1179,13 +1191,7 @@ def test_encoder_deferred_request_is_not_overtaken(
 def test_encoder_deferral_holds_only_later_requests_needing_the_encoder():
     """Behind a request deferred for encoder cache space, only later requests
     that need the encoder in this step wait."""
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        max_num_batched_tokens=1024,
-        enable_chunked_prefill=False,
-        enable_prefix_caching=True,
-        async_scheduling=True,
-    )
+    scheduler = _encoder_deferral_scheduler(enable_prefix_caching=True)
     in_flight, deferred = create_requests(
         num_requests=2,
         num_tokens=800,
