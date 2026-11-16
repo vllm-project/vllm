@@ -242,7 +242,12 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/event-stream"
+            if req_data.get("stream")
+            else "application/json",
+        )
 
     except Exception as e:
         import sys

@@ -64,11 +64,7 @@ variants:
     precision: bf16
     vram_minimum_gb: 1848
     description: "Full precision BF16 — 16xB200 or 8xB300 minimum for weights + KV cache"
-    hardware_overrides:
-      amd:
-        extra_args:
-          - "--gpu-memory-utilization"
-          - "0.92"
+    hardware_overrides: {}
   fp8:
     model_id: "tencent/Hy4-preview-FP8"
     precision: mxfp8
@@ -97,8 +93,6 @@ hardware_overrides:
     extra_args:
       - "--max-model-len"
       - "262144"
-      - "--gpu-memory-utilization"
-      - "0.85"
       - "--max-num-batched-tokens"
       - "8192"
 
@@ -106,7 +100,7 @@ strategy_overrides:
   single_node_tp:
     hardware_overrides:
       # gfx942 stores the MXFP8 checkpoint as BF16. The shared AMD window
-      # (262144, util 0.85, 8192 batched tokens) stays the MI355X path.
+      # (262144, 8192 batched tokens) stays the MI355X path.
       # These flags replace that window on MI325X only.
       mi325x:
         extra_args:
@@ -198,7 +192,6 @@ guide: |
   vllm serve tencent/Hy4-preview-FP8 \
     --tensor-parallel-size 8 \
     --max-model-len 262144 \
-    --gpu-memory-utilization 0.85 \
     --max-num-batched-tokens 8192 \
     --tool-call-parser hy_v4 \
     --reasoning-parser hy_v4 \
