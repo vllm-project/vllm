@@ -70,13 +70,13 @@ class _PPGroup:
         return tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class _ModelRunner:
     attn_groups: list[list[AttentionGroup]]
     is_pooling_model: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class _Backend:
     name: str
 
@@ -84,7 +84,7 @@ class _Backend:
         return self.name
 
 
-@dataclass
+@dataclass(slots=True)
 class _Worker:
     model_runner: _ModelRunner
 

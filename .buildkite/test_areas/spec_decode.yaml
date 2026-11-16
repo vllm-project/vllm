@@ -267,6 +267,8 @@ steps:
       - vllm/model_executor/layers/
       - vllm/transformers_utils/configs/speculators/
       - vllm/model_executor/models/qwen3_5_mtp.py
+      - vllm/models/qwen3_5/
+      - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/qwen3_next_mtp.py
       - vllm/config/speculative.py
       - tests/v1/e2e/spec_decode/
@@ -518,7 +520,6 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/laguna.py
@@ -637,7 +638,6 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dspark.py
