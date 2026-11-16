@@ -80,6 +80,69 @@ def test_tracks_bf16_head_through_logits_processor(
 
 
 @requires_cuda
+def test_quantized_lm_head_copy_platform_format(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A format the platform provides through the hook builds a copy with
+    the hook's method factory."""
+    monkeypatch.setattr(
+        current_platform,
+        "get_draft_lm_head_quantization_methods",
+        lambda: {
+            "platform-fp8": (
+                "vllm.model_executor.layers.quantization.online.fp8"
+                ".Fp8PtpcOnlineLinearMethod"
+            )
+        },
+    )
+    head = _target_head(monkeypatch)
+    draft_head = quantized_lm_head_copy(head, "platform-fp8")
+    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
+    for name, tensor in _tensors(draft_head).items():
+        if name != "workspace":
+            assert torch.equal(tensor, expected[name]), name
+
+
+@requires_cuda
+def test_platform_format_takes_precedence_over_core(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A platform format using a core format's name resolves to the
+    platform's factory, not the core method."""
+    monkeypatch.setattr(
+        current_platform,
+        "get_draft_lm_head_quantization_methods",
+        lambda: {
+            "nvfp4": (
+                "vllm.model_executor.layers.quantization.online.fp8"
+                ".Fp8PtpcOnlineLinearMethod"
+            )
+        },
+    )
+    head = _target_head(monkeypatch)
+    draft_head = quantized_lm_head_copy(head, "nvfp4")
+    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
+    for name, tensor in _tensors(draft_head).items():
+        if name != "workspace":
+            assert torch.equal(tensor, expected[name]), name
+
+
+@requires_cuda
+def test_unknown_format_lists_supported_formats(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """An unknown format is rejected listing the core and platform formats."""
+    monkeypatch.setattr(
+        current_platform,
+        "get_draft_lm_head_quantization_methods",
+        lambda: {"platform-fp8": "irrelevant.qualname"},
+    )
+    head = _target_head(monkeypatch)
+    with pytest.raises(ValueError, match="bogus.*fp8.*nvfp4.*platform-fp8"):
+        quantized_lm_head_copy(head, "bogus")
+
+
+@requires_cuda
 @pytest.mark.parametrize("quantization", ["fp8", NVFP4])
 def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization
