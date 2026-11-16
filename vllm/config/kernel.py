@@ -290,6 +290,12 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
+    enable_flashinfer_mm_encoder_autotune: bool = False
+    """Include multimodal encoders and projectors in FlashInfer autotuning.
+    Disabled by default because profiling can increase startup time. Requires
+    enable_flashinfer_autotune and Model Runner V2. Skipped when
+    skip_mm_profiling is set."""
+
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
@@ -358,6 +364,13 @@ class KernelConfig:
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
+    """
+
+    step5_attention_backend: Literal["native", "prims_ts"] = "native"
+    """Step5 attention backend. PrimTS supports SM100, SM103 and SM107 and
+    handles all FP8 attention and BF16 prefill.
+    BF16 decode uses PrimTS for MTP=3/Q=4 batches with at least 32 requests,
+    using the padded batch size for full CUDA graphs.
     """
 
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
@@ -492,6 +505,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_flashinfer_mm_encoder_autotune",
             "enable_rocm_segmented_attn_autotune",
             "enable_rocm_aiter_gemm_warmup",
         }
