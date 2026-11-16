@@ -9,7 +9,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+@dataclass(slots=True)
 class Mxfp8LinearLayerConfig:
     """Configuration for an MXFP8 linear layer.
 
@@ -55,9 +55,24 @@ class Mxfp8LinearKernel(ABC):
         raise NotImplementedError
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
+
+    @classmethod
     @abstractmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the batch."""
+        return False
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
