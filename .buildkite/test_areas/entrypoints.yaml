@@ -177,6 +177,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/tool_use
   - tests/entrypoints/tool_parsers
+  - tests/parser/test_chat_parsing.py
   - tests/entrypoints/generate
   - tests/entrypoints/anthropic
   - tests/entrypoints/cohere
