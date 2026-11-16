@@ -20,7 +20,7 @@ from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard
 from .wy_fast import recompute_w_u_fwd
 
 
-def chunk_gated_delta_rule_fwd(
+def _chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -117,13 +117,14 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         core_attn_out: torch.Tensor | None = None,
-        state_kwargs: dict[str, torch.Tensor | None] | None = None,
+        checkpoint_state: torch.Tensor | None = None,
+        checkpoint_offsets: torch.Tensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
 
-        g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
+        g, o, A, final_state, w, h, v_new = _chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -136,7 +137,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             core_attn_out=core_attn_out,
-            **(state_kwargs or {}),
+            checkpoint_state=checkpoint_state,
+            checkpoint_offsets=checkpoint_offsets,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -163,12 +165,8 @@ def chunk_gated_delta_rule(
     chunk_offsets: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     core_attn_out: torch.Tensor | None = None,
-    state_cache: torch.Tensor | None = None,
-    state_indices: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
-    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -194,14 +192,11 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.Tensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        state_cache (Optional[torch.Tensor]):
-            Paged recurrent state of shape `[slots, H, V, K]`, read and written in place
-            through `state_indices` and `has_initial_state` instead of `initial_state`
-            and `output_final_state`. Rows may be strided apart.
         checkpoint_state (Optional[torch.Tensor]):
-            Destination of the states after `checkpoint_offsets` tokens of each sequence,
-            optionally at rows `checkpoint_state_indices`. See
-            `chunk_gated_delta_rule_fwd_h` for all six paged-state arguments.
+            Contiguous `[N, H, V, K]` buffer; row `n` receives sequence `n`'s state.
+        checkpoint_offsets (Optional[torch.Tensor]):
+            `[N]` token offsets, with `0` for none. Only multiples of 64 strictly
+            inside each sequence are stored.
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
@@ -237,34 +232,30 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    assert q.dtype == k.dtype == v.dtype
-    assert q.dtype != torch.float32, (
-        "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
-    )
-    assert len(beta.shape) == 3, "beta must be of shape [B, T, H]."
+    _check_chunk_inputs(q, k, v, beta, cu_seqlens)
     if cu_seqlens is not None:
-        if q.shape[0] != 1:
-            raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
-            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
+    if (checkpoint_state is None) != (checkpoint_offsets is None):
+        raise ValueError("checkpoint_state and checkpoint_offsets go together")
+    if checkpoint_state is not None:
+        num_seqs = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+        # input_guard must not replace a writable buffer with a copy.
+        expected_shape = (num_seqs, *v.shape[-2:], k.shape[-1])
+        if (
+            checkpoint_state.shape != expected_shape
+            or not checkpoint_state.is_contiguous()
+        ):
+            raise ValueError(
+                "checkpoint_state must be a contiguous [N, H, V, K] buffer"
+            )
+        if checkpoint_offsets.shape != (num_seqs,):
+            raise ValueError(f"checkpoint_offsets must have shape [{num_seqs}]")
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    # Passed as a dict so input_guard leaves the tensors alone: it would replace
-    # a strided cache view with a contiguous copy, losing the in-place writes.
-    state_kwargs = {
-        "state_cache": state_cache,
-        "state_indices": state_indices,
-        "has_initial_state": has_initial_state,
-        "checkpoint_state": checkpoint_state,
-        "checkpoint_offsets": checkpoint_offsets,
-        "checkpoint_state_indices": checkpoint_state_indices,
-    }
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
@@ -279,6 +270,99 @@ def chunk_gated_delta_rule(
         chunk_offsets,
         use_qk_l2norm_in_kernel,
         core_attn_out,
-        state_kwargs,
+        checkpoint_state,
+        checkpoint_offsets,
     )
     return o, final_state
+
+
+@torch.compiler.disable
+def chunk_gated_delta_rule_paged(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    *,
+    state_cache: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = False,
+    core_attn_out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run inference with recurrent states read and written in the same pool.
+
+    Args:
+        state_cache: `[slots, H, V, K]` pool with contiguous rows. Rows may be
+            strided apart. The original storage is updated in place.
+        state_indices: `[N]` initial and final state row per sequence. Rows
+            <= 0 are skipped. Valid final-state rows must be unique.
+        has_initial_state: `[N]` bool; false starts from zero.
+        checkpoint_offsets: `[N]` token offsets; 0 skips the checkpoint.
+            Only multiples of 64 strictly inside each sequence are stored.
+        checkpoint_state_indices: `[N]` checkpoint destinations in state_cache;
+            rows <= 0 are skipped. Valid destinations must be unique and must
+            not overlap any sequence's initial or final state row.
+
+    Returns:
+        Attention output. Final states and checkpoints are written in place.
+    """
+    _check_chunk_inputs(q, k, v, beta, cu_seqlens)
+    if (checkpoint_offsets is None) != (checkpoint_state_indices is None):
+        raise ValueError("checkpoint_offsets and checkpoint_state_indices go together")
+    if core_attn_out is not None and (
+        not core_attn_out.is_contiguous() or core_attn_out.dtype != q.dtype
+    ):
+        raise ValueError("core_attn_out must be contiguous and have the query dtype")
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    # Normalize read-only inputs explicitly; never copy the writable pool.
+    with torch.accelerator.device_index(q.device.index):
+        q, k, v, g, beta = (x.contiguous() for x in (q, k, v, g, beta))
+        if use_qk_l2norm_in_kernel:
+            q, k = l2norm_fwd(q), l2norm_fwd(k)
+        _, o, _, _, _, _, _ = _chunk_gated_delta_rule_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=None,
+            output_final_state=False,
+            cu_seqlens=cu_seqlens.contiguous() if cu_seqlens is not None else None,
+            chunk_indices=(
+                chunk_indices.contiguous() if chunk_indices is not None else None
+            ),
+            chunk_offsets=(
+                chunk_offsets.contiguous() if chunk_offsets is not None else None
+            ),
+            core_attn_out=core_attn_out,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
+            checkpoint_state=state_cache if checkpoint_offsets is not None else None,
+            checkpoint_offsets=checkpoint_offsets,
+            checkpoint_state_indices=checkpoint_state_indices,
+        )
+    return o.to(q.dtype)
+
+
+def _check_chunk_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+) -> None:
+    assert q.dtype == k.dtype == v.dtype
+    assert q.dtype != torch.float32, "Use bfloat16 inputs for chunked GDN."
+    assert len(beta.shape) == 3, "beta must be of shape [B, T, H]."
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError("Flatten variable-length inputs to batch size 1")

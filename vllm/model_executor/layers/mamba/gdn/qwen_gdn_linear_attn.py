@@ -77,6 +77,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
 from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule_paged,
     fused_post_conv_prep,
     fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
@@ -1759,7 +1760,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if self._exports_checkpoints:
                 checkpoint_variants.append(
                     dict(
-                        checkpoint_state=state_cache,
                         checkpoint_offsets=torch.full_like(
                             rows, seq_len // 2 // FLA_CHUNK_SIZE * FLA_CHUNK_SIZE
                         ),
@@ -1767,7 +1767,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                 )
             for checkpoint_kwargs in checkpoint_variants:
-                fla_chunk_gated_delta_rule(
+                chunk_gated_delta_rule_paged(
                     *(x[:, : num_seqs * seq_len] for x in (q, k, v, g, beta)),
                     cu_seqlens=torch.arange(
                         num_seqs + 1, device=device, dtype=torch.int32
@@ -2103,7 +2103,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            checkpoint = attn_metadata.checkpoint
             if self.gdn_prefill_backend == "flashinfer":
                 # Without spec decodes the prefill rows follow the peeled
                 # decodes contiguously, so FlashInfer writes them straight
@@ -2127,47 +2126,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 prefill_in_place = prefill_out is not None
             elif _prefill_on_paged_state(self.gdn_prefill_backend):
-                # The kernel reads and writes the prefill rows of the paged
-                # state cache and stores each checkpoint's recurrent state into
-                # its block; the exporter adds the conv window.
-                checkpoint_kwargs = {}
-                if checkpoint is not None:
-                    # The prefill kernel runs the trailing checkpoint rows.
-                    num_prefill_rows = prefill_state_indices.shape[0]
-                    checkpoint_kwargs = dict(
-                        checkpoint_state=ssm_state,
-                        checkpoint_offsets=checkpoint.checkpoint_offsets[
-                            -num_prefill_rows:
-                        ],
-                        checkpoint_state_indices=checkpoint.state_indices[
-                            -num_prefill_rows:
-                        ],
-                    )
-                core_attn_out_non_spec, _ = fla_chunk_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    cu_seqlens=attn_metadata.prefill_query_start_loc,
-                    chunk_indices=attn_metadata.chunk_indices,
-                    chunk_offsets=attn_metadata.chunk_offsets,
-                    use_qk_l2norm_in_kernel=False,
-                    state_cache=ssm_state,
-                    state_indices=prefill_state_indices,
-                    has_initial_state=prefill_has_initial_state,
-                    **checkpoint_kwargs,
+                core_attn_out_non_spec = self._forward_triton_prefill(
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                    attn_metadata,
+                    ssm_state=ssm_state,
+                    conv_state=conv_state,
+                    conv_input=conv_input_non_spec,
                 )
-                if checkpoint is not None:
-                    assert non_spec_query_start_loc is not None
-                    self._checkpoint_exporter.export(
-                        checkpoint,
-                        raw_qkv=conv_input_non_spec,
-                        conv_state=conv_state,
-                        cu_seqlens=non_spec_query_start_loc,
-                    )
             else:
-                assert checkpoint is None, (
+                assert attn_metadata.checkpoint is None, (
                     "A prefill checkpoint was scheduled but nothing exports it"
                 )
                 initial_state = gather_initial_states(
@@ -2234,6 +2205,47 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         elif not prefill_in_place:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+
+    def _forward_triton_prefill(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+        *,
+        ssm_state: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert attn_metadata.prefill_state_indices is not None
+        assert attn_metadata.prefill_has_initial_state is not None
+        out = chunk_gated_delta_rule_paged(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            cu_seqlens=attn_metadata.prefill_query_start_loc,
+            chunk_indices=attn_metadata.chunk_indices,
+            chunk_offsets=attn_metadata.chunk_offsets,
+            state_cache=ssm_state,
+            state_indices=attn_metadata.prefill_state_indices,
+            has_initial_state=attn_metadata.prefill_has_initial_state,
+            checkpoint_offsets=attn_metadata.prefill_checkpoint_offsets,
+            checkpoint_state_indices=attn_metadata.prefill_checkpoint_state_indices,
+        )
+        if attn_metadata.checkpoint is not None:
+            assert conv_input is not None
+            assert attn_metadata.non_spec_query_start_loc is not None
+            self._checkpoint_exporter.export(
+                attn_metadata.checkpoint,
+                raw_qkv=conv_input,
+                conv_state=conv_state,
+                cu_seqlens=attn_metadata.non_spec_query_start_loc,
+            )
+        return out
 
     def _forward_flashinfer_prefill(
         self,

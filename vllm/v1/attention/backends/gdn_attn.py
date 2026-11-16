@@ -132,6 +132,8 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    prefill_checkpoint_offsets: torch.Tensor | None = None
+    prefill_checkpoint_state_indices: torch.Tensor | None = None
     aiter_prefill_metadata: object | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
@@ -611,6 +613,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
 
+        prefill_checkpoint_offsets = prefill_checkpoint_state_indices = None
+        if checkpoint is not None:
+            assert prefill_state_indices is not None
+            num_prefill_rows = prefill_state_indices.shape[0]
+            prefill_checkpoint_offsets = checkpoint.checkpoint_offsets[
+                -num_prefill_rows:
+            ]
+            prefill_checkpoint_state_indices = checkpoint.state_indices[
+                -num_prefill_rows:
+            ]
+
         flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
         if checkpoint is not None and self.plan_flashinfer_checkpoints:
             assert checkpoint.offsets is not None
@@ -715,6 +728,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            prefill_checkpoint_offsets=prefill_checkpoint_offsets,
+            prefill_checkpoint_state_indices=prefill_checkpoint_state_indices,
             aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
@@ -809,11 +824,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_indices = self.non_spec_state_indices_tensor[:batch_size]
             non_spec_indices[m.num_decodes :].fill_(NULL_BLOCK_ID)
 
+        prefill_checkpoint_state_indices = None
+        if prefill_indices is not None:
+            prefill_indices = prefill_indices.contiguous()
+            if checkpoint is not None:
+                prefill_checkpoint_state_indices = checkpoint.state_indices[
+                    -prefill_indices.shape[0] :
+                ]
+
         return replace(
             m,
             spec_state_indices_tensor=spec_indices,
             non_spec_state_indices_tensor=non_spec_indices,
             prefill_state_indices=prefill_indices,
+            prefill_checkpoint_state_indices=prefill_checkpoint_state_indices,
             checkpoint=checkpoint,
         )
 

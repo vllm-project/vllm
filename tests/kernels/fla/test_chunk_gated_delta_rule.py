@@ -12,7 +12,10 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops import chunk_gated_delta_rule
+from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule,
+    chunk_gated_delta_rule_paged,
+)
 from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
 )
@@ -57,6 +60,12 @@ def _run(inputs: tuple[torch.Tensor, ...], seq_lens: list[int], **kwargs):
     q, k, v, g, beta = inputs
     return chunk_gated_delta_rule(
         q=q, k=k, v=v, g=g, beta=beta, cu_seqlens=_cu_seqlens(seq_lens), **kwargs
+    )
+
+
+def _run_paged(inputs: tuple[torch.Tensor, ...], seq_lens: list[int], **kwargs):
+    return chunk_gated_delta_rule_paged(
+        *inputs, cu_seqlens=_cu_seqlens(seq_lens), **kwargs
     )
 
 
@@ -105,7 +114,7 @@ def test_state_cache_matches_gathered_states(
     autotuner = chunk_gated_delta_rule_fwd_kernel_h_blockdim64.fn
     monkeypatch.setattr(autotuner, "cache", {})
     monkeypatch.setattr(autotuner, "cache_results", False)
-    o, final_state = _run(
+    o = _run_paged(
         inputs,
         seq_lens,
         state_cache=_state_rows(pages),
@@ -113,7 +122,6 @@ def test_state_cache_matches_gathered_states(
         has_initial_state=has_initial_state,
     )
 
-    assert final_state is None
     _assert_equal(o, o_ref)
     # Whole pages: the written rows, and everything else (padding included) left
     # alone.
@@ -155,13 +163,12 @@ def test_checkpoints_are_states_at_their_offsets(
     )
     if paged:
         before = cache.clone()
-        o, _ = _run(
+        o = _run_paged(
             inputs,
             seq_lens,
             state_cache=cache,
             state_indices=state_indices,
             has_initial_state=has_initial_state,
-            checkpoint_state=cache,
             checkpoint_offsets=checkpoint_offsets,
             checkpoint_state_indices=torch.tensor(checkpoint_rows, dtype=torch.int32),
         )
@@ -213,9 +220,7 @@ def test_offset_checkpoint_metadata_reuses_warmed_kernel(monkeypatch):
     )
 
     def run(metadata):
-        return chunk_gated_delta_rule(
-            *inputs, state_cache=cache, checkpoint_state=cache, **metadata
-        )[0]
+        return chunk_gated_delta_rule_paged(*inputs, state_cache=cache, **metadata)
 
     expected = run(metadata)
     expected_pages = pages.clone()
@@ -235,3 +240,17 @@ def test_offset_checkpoint_metadata_reuses_warmed_kernel(monkeypatch):
     _assert_equal(actual, expected)
     _assert_equal(pages, expected_pages)
     assert "chunk_gated_delta_rule_fwd_kernel_h_blockdim64" not in compiled
+
+
+def test_buffer_checkpoints_reject_a_view_that_input_guard_would_copy():
+    """Reject strided checkpoint output before writes can land in a copy."""
+    torch.set_default_device(DEVICE)
+    inputs = _make_inputs([128, 128])
+    snapshots = _state_rows(_make_pages(torch.bfloat16))[:2]
+    with pytest.raises(ValueError, match="contiguous"):
+        _run(
+            inputs,
+            [128, 128],
+            checkpoint_state=snapshots,
+            checkpoint_offsets=torch.tensor([64, 64], dtype=torch.int32),
+        )

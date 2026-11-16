@@ -539,6 +539,16 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     torch.testing.assert_close(
         actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
     )
+    assert actual.prefill_state_indices is not None
+    num_rows = actual.prefill_state_indices.shape[0]
+    torch.testing.assert_close(
+        actual.prefill_checkpoint_offsets,
+        torch.tensor(offsets[-num_rows:], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        actual.prefill_checkpoint_state_indices,
+        torch.tensor(slots[-num_rows:], dtype=torch.int32),
+    )
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
@@ -570,6 +580,13 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     )
     torch.testing.assert_close(
         actual.checkpoint.checkpoint_offsets, expected.checkpoint.checkpoint_offsets
+    )
+    torch.testing.assert_close(
+        actual.prefill_checkpoint_state_indices,
+        expected.prefill_checkpoint_state_indices,
+    )
+    torch.testing.assert_close(
+        actual.prefill_checkpoint_offsets, expected.prefill_checkpoint_offsets
     )
     assert not torch.equal(
         actual.checkpoint.state_indices, source.checkpoint.state_indices
