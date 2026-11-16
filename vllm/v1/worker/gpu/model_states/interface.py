@@ -43,6 +43,11 @@ class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
 
+    positions_depend_on_encoder: bool = False
+    """Whether the positions this state prepares depend on encoder outputs.
+    Only the first PP stage runs the encoder, so later stages take the
+    positions from it."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -184,8 +189,14 @@ class ModelState(ABC):
         """Prepare the `inputs_embeds` tensor for the current forward pass."""
         raise NotImplementedError
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+    def dummy_inputs_embeds(
+        self, num_tokens: int, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        """Pre-allocated inputs_embeds buffer for dummy runs.
+
+        Holds the embeddings of `input_ids` when given; otherwise the contents
+        are unused.
+        """
         return None
 
     def execute_mm_encoder(

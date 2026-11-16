@@ -257,6 +257,10 @@ RERANKER_TEXT_DOCS = [
 
 RERANKER_IMAGE_QUERY = "photo of a red stop sign on a street"
 
+RERANKER_SIGMOID_OVERRIDES = {
+    "sbert_ce_default_activation_function": "torch.nn.modules.activation.Sigmoid"
+}
+
 RerankerDocument = tuple[str | None, Image.Image | None]
 RerankerCase = tuple[str, Sequence[RerankerDocument]]
 
@@ -273,6 +277,7 @@ def _run_hf_reranker(
     model: str,
     dtype: str,
     input_cases: Sequence[RerankerCase],
+    apply_sigmoid: bool,
 ) -> list[list[float]]:
     """Run all HF reranker cases in one model lifecycle."""
     with hf_runner(
@@ -305,8 +310,11 @@ def _run_hf_reranker(
             }
             with torch.inference_mode():
                 logits = hf_model.model(**batch_dict, return_dict=True).logits
-            # vLLM applies sigmoid activation to raw logits before returning scores.
-            scores = torch.sigmoid(logits.squeeze(-1).float())
+            # The checkpoint declares an Identity activation, so vLLM returns logits
+            # unless hf_overrides sets a sigmoid.
+            scores = logits.squeeze(-1).float()
+            if apply_sigmoid:
+                scores = torch.sigmoid(scores)
             scores_per_case.append(scores.detach().cpu().tolist())
 
     return scores_per_case
@@ -317,6 +325,7 @@ def _run_vllm_reranker(
     model: str,
     dtype: str,
     input_cases: Sequence[RerankerCase],
+    hf_overrides: dict[str, str],
 ) -> list[list[float]]:
     """Run all vLLM reranker cases in one model lifecycle.
 
@@ -330,6 +339,7 @@ def _run_vllm_reranker(
         max_model_len=2048,
         enforce_eager=True,
         trust_remote_code=True,
+        hf_overrides=hf_overrides,
         **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         scores_per_case = []
@@ -385,13 +395,18 @@ def _run_reranker_test(
     model: str,
     dtype: str,
     input_cases: Sequence[RerankerCase],
+    hf_overrides: dict[str, str],
 ) -> None:
     """Compare HF and vLLM reranker scores for all input cases.
 
     NOTE: Run vLLM first to avoid CUDA initialization issues with multiprocessing.
     """
-    vllm_scores_per_case = _run_vllm_reranker(vllm_runner, model, dtype, input_cases)
-    hf_scores_per_case = _run_hf_reranker(hf_runner, model, dtype, input_cases)
+    vllm_scores_per_case = _run_vllm_reranker(
+        vllm_runner, model, dtype, input_cases, hf_overrides
+    )
+    hf_scores_per_case = _run_hf_reranker(
+        hf_runner, model, dtype, input_cases, apply_sigmoid=bool(hf_overrides)
+    )
 
     # ROCm has slightly higher variance because vLLM and HF use different
     # attention backends.
@@ -408,12 +423,16 @@ def _run_reranker_test(
 
 @pytest.mark.parametrize("model", RERANKER_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize(
+    "hf_overrides", [{}, RERANKER_SIGMOID_OVERRIDES], ids=["logits", "sigmoid"]
+)
 def test_reranker(
     hf_runner,
     vllm_runner,
     image_assets,
     model: str,
     dtype: str,
+    hf_overrides: dict[str, str],
 ) -> None:
     """Test reranking with text and image documents."""
     text_docs: list[RerankerDocument] = [(text, None) for text in RERANKER_TEXT_DOCS]
@@ -424,4 +443,4 @@ def test_reranker(
         (RERANKER_TEXT_QUERY, text_docs),
         (RERANKER_IMAGE_QUERY, image_docs),
     ]
-    _run_reranker_test(hf_runner, vllm_runner, model, dtype, input_cases)
+    _run_reranker_test(hf_runner, vllm_runner, model, dtype, input_cases, hf_overrides)
