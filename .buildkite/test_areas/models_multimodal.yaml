@@ -190,11 +190,12 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (B200) Multimodal FlashInfer Autotuning"
+- label: ":nvidia: (B200) [Nightly] Multimodal FlashInfer Autotuning"
   key: multi-modal-flashinfer-autotuning
   device: b200-k8s
   num_devices: 2
   timeout_in_minutes: 30
+  optional: true
   env:
     VLLM_WORKER_MULTIPROC_METHOD: spawn
   source_file_dependencies:
