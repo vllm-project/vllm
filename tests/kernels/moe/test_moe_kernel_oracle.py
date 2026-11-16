@@ -829,29 +829,6 @@ def test_aiter_activation_bound_keeps_a_bf16_request(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "activation_key, expected_bound",
-    [(None, _NO_ACTIVATION_BOUND), (kMxfp8Dynamic, "0")],
-    ids=["null", "mxfp8"],
-)
-@pytest.mark.skip_global_cleanup
-def test_aiter_activation_bound_follows_the_resolved_online_activation(
-    activation_key, expected_bound, monkeypatch
-) -> None:
-    """The online method passes its resolved activation (from `targets` or the
-    deprecated env vars, which set no global `quantization_config.moe`)."""
-    monkeypatch.setattr(
-        mxfp4_oracle,
-        "_select_mxfp4_moe_backend",
-        lambda config, activation_key: (Mxfp4MoeBackend.AITER_MXFP4_BF16, None),
-    )
-    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
-    mxfp4_oracle.select_mxfp4_moe_backend(
-        None, activation_key, activation_explicit=True
-    )
-    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
-
-
-@pytest.mark.parametrize(
     "backend, expected_bound",
     [
         pytest.param(Mxfp4MoeBackend.AITER_MXFP4_BF16, "0", id="aiter_mxfp4_bf16"),

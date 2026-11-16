@@ -950,6 +950,8 @@ def test_online_quantization_configures_prequantized_moe(
     if isinstance(moe, dict):
         # MXFP8 or bf16 activations with MXFP4 weights need the AITER backend.
         _enable_aiter_mxfp4_moe(monkeypatch)
+        # The oracle sets this process-wide variable at backend selection.
+        monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
     if checkpoint == "block_fp8":
         quant_config = Fp8Config(weight_block_size=[128, 128])
         expected_source_cls = Fp8MoEMethod
@@ -960,7 +962,7 @@ def test_online_quantization_configures_prequantized_moe(
         expected_source_cls = QuarkMoEMethod
         online_args = quant_config_args(linear="mxfp4", moe=moe)
         hidden_size, intermediate_size = 32, 64
-    default_vllm_config.model_config.quantization_config = online_args
+    # No global `model_config.quantization_config`, as with the deprecated env vars.
     quant_config.online_quantization_config = OnlineQuantizationConfig(online_args)
 
     layer = FusedMoEFactory(
@@ -981,8 +983,12 @@ def test_online_quantization_configures_prequantized_moe(
     assert all(p.is_meta for p in method.requantization_source_parameters.values())
     assert method.activation_quant_key == expected_activation
     if isinstance(moe, dict):
-        # The interleaved AITER kernels serve both bf16 and MXFP8 activations.
+        # The interleaved AITER kernels serve both bf16 and MXFP8 activations, as
+        # selected by AITER_BF16_FP8_MOE_BOUND.
         assert method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+        assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
+            "0" if expected_activation == kMxfp8Dynamic else str(2**31 - 1)
+        )
 
 
 def _pack_e2m1(values: torch.Tensor) -> torch.Tensor:

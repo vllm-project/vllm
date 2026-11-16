@@ -13,6 +13,7 @@ from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
     QuantizationConfigArgs,
     QuantSpec,
+    layer_target_spec_scope,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -530,7 +531,10 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 kwargs["activation_quant_key"] = quant_spec.activation
             if isinstance(layer, RoutedExperts):
                 assert issubclass(quant_method_cls, OnlineMoEMethodBase)
-                return quant_method_cls(moe=layer.moe_config, **kwargs)
+                # The oracles read the layer's resolved spec (`targets`, `moe` or
+                # the deprecated env vars) as the user's request.
+                with layer_target_spec_scope(quant_spec):
+                    return quant_method_cls(moe=layer.moe_config, **kwargs)
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
             if quant_spec.hadamard_size is not None:

@@ -178,9 +178,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.w2_precision_config: Any = None
 
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            config=self.moe,
-            activation_key=self.activation_quant_key,
-            activation_explicit=True,
+            config=self.moe, activation_key=self.activation_quant_key
         )
         # The oracle may fall back to a backend computing another activation
         # format (EMULATION computes MXFP4): reject an override it cannot honour.
