@@ -16,6 +16,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -525,6 +526,61 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions(self_addres
             -1,
         )
         assert compressed.tolist() == expected.tolist()
+
+
+@requires_accelerator
+def test_kimi_k3_indexer_writes_block_table_slots_without_group_slot_mapping(
+    monkeypatch,
+):
+    """K3.1's self-addressed indexer writes at block-table slots even when its
+    group's slot mapping is all padding, as in a group of its own."""
+    device = torch.device(DEVICE_TYPE)
+    builder = object.__new__(KimiK3IndexerMetadataBuilder)
+    builder.kv_cache_spec = SimpleNamespace(block_size=4)
+    builder.slot_mapping_buffer = torch.zeros(16, dtype=torch.int64, device=device)
+    builder.dcp_world_size = 1
+    builder.dcp_rank = 0
+    builder.cp_kv_cache_interleave_size = 1
+    builder.indexer_uses_fp4 = False
+    built = []
+    monkeypatch.setattr(
+        DeepseekV32IndexerMetadataBuilder,
+        "build",
+        lambda self, common_prefix_len, common, fast_build=False: built.append(common),
+    )
+    query_start_loc = torch.tensor([0, 6], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([10], dtype=torch.int32, device=device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens.cpu(),
+        num_reqs=1,
+        num_actual_tokens=6,
+        max_query_len=6,
+        max_seq_len=10,
+        block_table_tensor=torch.tensor([[5, 7, 9]], dtype=torch.int32, device=device),
+        slot_mapping=torch.full((6,), -1, dtype=torch.int64, device=device),
+        causal=True,
+    )
+
+    builder.build(0, common)
+
+    (written,) = built
+    assert written.slot_mapping[:6].tolist() == [28, 29, 30, 31, 36, 37]
+
+
+def test_compressed_slot_mapping_warmup_covers_self_addressed_cache():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2, cp_kv_cache_interleave_size=1
+        ),
+    )
+
+    (key,) = CompressedSlotMappingKernel().get_warmup_keys(
+        config, self_addressed_block_size=2304
+    )
+    assert (key.compress_ratio, key.has_slot_mapping) == (1, False)
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():

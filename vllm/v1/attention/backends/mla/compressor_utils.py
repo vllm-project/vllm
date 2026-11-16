@@ -39,12 +39,11 @@ class CompressedSlotMappingKernel(
         triton_block_size: int
         block_size: int
         dcp_world_size: int
-        dcp_rank: int
         cp_interleave: int
         has_slot_mapping: bool
 
     @staticmethod
-    @triton.jit(do_not_specialize=["block_table_stride"])
+    @triton.jit(do_not_specialize=["block_table_stride", "dcp_rank"])
     def kernel(
         # [num_tokens]
         compressed_slot_mapping_ptr,
@@ -119,7 +118,6 @@ class CompressedSlotMappingKernel(
         compress_ratio: int,
         block_size: int,
         dcp_world_size: int,
-        dcp_rank: int,
         cp_interleave: int,
         HAS_SLOT_MAPPING: bool,
     ) -> CompileKey:
@@ -128,12 +126,24 @@ class CompressedSlotMappingKernel(
             triton_block_size=self.TRITON_BLOCK_SIZE,
             block_size=triton_scalar_specialization_rep(block_size),
             dcp_world_size=triton_scalar_specialization_rep(dcp_world_size),
-            dcp_rank=triton_scalar_specialization_rep(dcp_rank),
             cp_interleave=triton_scalar_specialization_rep(cp_interleave),
             has_slot_mapping=HAS_SLOT_MAPPING,
         )
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+    def get_warmup_keys(
+        self, vllm_config: Any, *, self_addressed_block_size: int | None = None
+    ) -> list[CompileKey]:
+        parallel_config = vllm_config.parallel_config
+        if self_addressed_block_size is not None:
+            return [
+                self.dispatch(
+                    compress_ratio=1,
+                    block_size=self_addressed_block_size,
+                    dcp_world_size=parallel_config.decode_context_parallel_size,
+                    cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+                    HAS_SLOT_MAPPING=False,
+                )
+            ]
         hf_text_config = vllm_config.model_config.hf_text_config
         configured_ratios = (
             *get_compress_ratios(hf_text_config),
@@ -144,7 +154,6 @@ class CompressedSlotMappingKernel(
         )
         if not compress_ratios:
             return []
-        parallel_config = vllm_config.parallel_config
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 *(
@@ -152,7 +161,6 @@ class CompressedSlotMappingKernel(
                         compress_ratio=ratio,
                         block_size=vllm_config.cache_config.block_size // ratio,
                         dcp_world_size=parallel_config.decode_context_parallel_size,
-                        dcp_rank=0,
                         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
                         HAS_SLOT_MAPPING=True,
                     )
@@ -176,7 +184,7 @@ class CompressedSlotMappingKernel(
             block_size=compile_key.block_size,
             compress_ratio=compile_key.compress_ratio,
             dcp_world_size=compile_key.dcp_world_size,
-            dcp_rank=compile_key.dcp_rank,
+            dcp_rank=0,
             cp_interleave=compile_key.cp_interleave,
             HAS_SLOT_MAPPING=compile_key.has_slot_mapping,
         )

@@ -16,6 +16,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
+    _COMPRESSED_SLOT_MAPPING_KERNEL,
     get_compressed_slot_mapping,
 )
 from vllm.v1.attention.backends.mla.indexer import (
@@ -90,6 +91,11 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             dtype=torch.int64,
             device=self.device,
         )
+        if self.vllm_config.kernel_config.enable_jit_warmup:
+            _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup(
+                vllm_config=self.vllm_config,
+                self_addressed_block_size=self.kv_cache_spec.block_size,
+            )
 
     def build(
         self,
