@@ -3,6 +3,11 @@
 
 import pytest
 
+from vllm.distributed.eplb.metrics import (
+    EplbExpertTokens,
+    EplbExpertTopology,
+    EplbMetricsSnapshot,
+)
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -49,6 +54,38 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_eplb_expert_metrics_serialization():
+    eplb_metrics = EplbMetricsSnapshot(
+        tokens=[
+            EplbExpertTokens(
+                model_name="model",
+                ep_rank=0,
+                num_ep_ranks=2,
+                num_local_experts=2,
+                tokens=[[1, 2, 3, 4]],
+            )
+        ],
+        topology=[
+            EplbExpertTopology(
+                model_name="model",
+                ep_rank=0,
+                num_ep_ranks=2,
+                num_local_experts=2,
+                physical_to_logical=[[0, 1, 0, 1]],
+            )
+        ],
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(eplb_metrics=eplb_metrics)
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.eplb_metrics == eplb_metrics
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():

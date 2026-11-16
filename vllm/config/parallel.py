@@ -92,6 +92,13 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
+    enable_expert_metrics: bool = False
+    """
+    Export per-physical-expert placement and token load to Prometheus.
+    Collection happens once per EPLB rearrangement and adds one all-reduce
+    over the expert-parallel group. Disabled by default because the
+    per-expert topology has high label cardinality.
+    """
     use_async: bool = True
     """
     Whether to use non-blocking EPLB.

@@ -24,6 +24,7 @@ from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.eplb import EplbProm
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -478,6 +479,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _kv_connector_cls = KVConnectorProm
     _ec_connector_cls = ECConnectorProm
     _perf_metrics_cls = PerfMetricsProm
+    _eplb_cls = EplbProm
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -519,6 +521,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
+        )
+        self.eplb_prom = self._eplb_cls(
+            vllm_config.parallel_config, labelnames, per_engine_labelvalues
         )
 
         #
@@ -1206,6 +1211,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            if scheduler_stats.eplb_metrics is not None:
+                self.eplb_prom.observe(scheduler_stats.eplb_metrics, engine_idx)
 
             if (
                 self.kv_cache_metrics_enabled

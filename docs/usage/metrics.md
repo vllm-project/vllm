@@ -37,6 +37,32 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+## Expert Parallel Load Balancer (EPLB) Metrics
+
+These metrics are exposed when EPLB is enabled with
+`--enable-eplb --eplb-config '{"enable_expert_metrics": true}'`. They are
+sampled once per EPLB rearrangement (see `step_interval`) and report one
+series per MoE layer and physical expert:
+
+- `vllm:eplb_expert_topology` is the logical expert currently held by each
+  physical slot. Physical experts are assigned to EP ranks in contiguous
+  blocks, so `physical_expert // num_local_experts` identifies the owning GPU.
+- `vllm:eplb_expert_tokens_total` counts tokens routed to each physical expert
+  over the load window. Each engine reports its own contribution; aggregate
+  across engines for global load.
+
+```promql
+# Global tokens per logical expert, aggregated across replicas and engines.
+sum by (model_name, layer, logical_expert) (
+  rate(vllm:eplb_expert_tokens_total[1m])
+)
+
+# Current logical expert placement for layer 0 on EP rank 2.
+vllm:eplb_expert_topology{layer="0", ep_rank="2"}
+```
+
+--8<-- "gen:metrics-eplb"
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"

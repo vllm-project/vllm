@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.connector import AuxRequestOutput
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+    from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -304,6 +305,9 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Per-expert EPLB topology and token load for Prometheus.
+    eplb_metrics: "EplbMetricsSnapshot | None" = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 

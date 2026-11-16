@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from vllm.config import CompilationConfig, CompilationMode
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
@@ -284,3 +285,20 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_step_eplb_after_attaches_metrics_without_mutating_empty_output():
+    snapshot = EplbMetricsSnapshot()
+    runner = SimpleNamespace(
+        eplb=SimpleNamespace(step=lambda **_: snapshot),
+    )
+
+    @eplb.step_eplb_after()
+    def run(_runner):
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    output = run(runner)
+
+    assert output is not EMPTY_MODEL_RUNNER_OUTPUT
+    assert output.eplb_metrics is snapshot
+    assert EMPTY_MODEL_RUNNER_OUTPUT.eplb_metrics is None

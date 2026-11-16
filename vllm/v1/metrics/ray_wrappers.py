@@ -5,6 +5,7 @@ import time
 from typing import Self
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
+from vllm.v1.metrics.eplb import EplbProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.perf import PerfMetricsProm
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
@@ -196,6 +197,13 @@ class RayPerfMetricsProm(PerfMetricsProm):
     _counter_cls = RayCounterWrapper
 
 
+class RayEplbProm(EplbProm):
+    """Ray metrics variant of :class:`EplbProm`."""
+
+    _gauge_cls = RayGaugeWrapper
+    _counter_cls = RayCounterWrapper
+
+
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
 
@@ -205,3 +213,4 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _spec_decoding_cls = RaySpecDecodingProm
     _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
+    _eplb_cls = RayEplbProm

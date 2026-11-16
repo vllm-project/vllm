@@ -19,6 +19,7 @@ ROOT_DIR = Path(__file__).parent.parent.parent.parent
 METRIC_SOURCE_FILES = [
     {"path": "vllm/v1/metrics/loggers.py", "key": "metrics-general"},
     {"path": "vllm/v1/spec_decode/metrics.py", "key": "metrics-spec-decode"},
+    {"path": "vllm/v1/metrics/eplb.py", "key": "metrics-eplb"},
     {
         "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl/stats.py",
         "key": "metrics-nixl",

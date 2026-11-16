@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from copy import copy
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
@@ -11,12 +12,18 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     get_mixture_of_experts_model,
 )
 from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    AsyncModelRunnerOutput,
+    ModelRunnerOutput,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -56,7 +63,9 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
 
             result = fn(self, *args, **kwargs)
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
-            self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
+            snapshot = self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
+            if snapshot is not None:
+                result = _attach_eplb_metrics(result, snapshot)
             return result
 
         return wrapper
@@ -78,6 +87,22 @@ def preserve_serving_state(model_runner: "GPUModelRunner") -> Iterator[None]:
         model_runner.block_tables.redirect_writes_to_null_block = False
         if model_runner.kv_block_zeroer is not None:
             model_runner.kv_block_zeroer.zero_block_ids([0])
+
+
+def _attach_eplb_metrics(
+    output: AsyncModelRunnerOutput | ModelRunnerOutput | None,
+    snapshot: EplbMetricsSnapshot,
+) -> AsyncModelRunnerOutput | ModelRunnerOutput | None:
+    if output is None:
+        return None
+    if isinstance(output, AsyncModelRunnerOutput):
+        output.model_runner_output.eplb_metrics = snapshot
+        return output
+    if output is EMPTY_MODEL_RUNNER_OUTPUT:
+        # EMPTY_MODEL_RUNNER_OUTPUT is shared; never mutate it in place.
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+    output.eplb_metrics = snapshot
+    return output
 
 
 def _remove_all_requests(model_runner: "GPUModelRunner") -> None:
@@ -184,17 +209,19 @@ class EPLBController:
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
-    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
+    def step(
+        self, is_dummy: bool = False, is_profile: bool = False
+    ) -> EplbMetricsSnapshot | None:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
             or self.state is None
             or not self._has_registered_models
         ):
-            return
+            return None
 
         log_stats = self.parallel_config.eplb_config.log_balancedness
-        self.state.step(is_dummy, is_profile, log_stats=log_stats)
+        return self.state.step(is_dummy, is_profile, log_stats=log_stats)
 
     def prepare_forward(
         self,

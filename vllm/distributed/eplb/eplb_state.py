@@ -54,6 +54,11 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
+from .metrics import (
+    EplbExpertTokens,
+    EplbExpertTopology,
+    EplbMetricsSnapshot,
+)
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
@@ -97,6 +102,17 @@ class EplbStats:
     """
     Number of GPUs.
     """
+
+
+@dataclass
+class EplbModelMetricsState:
+    """Bookkeeping for per-expert Prometheus metrics."""
+
+    model_name: str
+    ep_rank: int
+    num_ep_ranks: int
+    num_local_experts: int
+    topology_dirty: bool = True
 
 
 @dataclass
@@ -214,6 +230,8 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
+    metrics: EplbModelMetricsState
+    """Per-expert Prometheus metrics bookkeeping."""
     pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
@@ -239,6 +257,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
+        self._pending_expert_tokens: list[EplbExpertTokens] = []
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected EPLB algorithm class
@@ -531,6 +550,7 @@ class EplbState:
         expert_buffer = communicator.owned_expert_buffer or expert_buffer
         assert expert_buffer is not None
 
+        ep_group = get_ep_group().device_group
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_buffer=physical_to_logical_map_buffer,
@@ -551,6 +571,12 @@ class EplbState:
             eplb_stats=None,
             device_index=self.device_index,
             communicator=communicator,
+            metrics=EplbModelMetricsState(
+                model_name=model_name or model_config.model,
+                ep_rank=ep_group.rank(),
+                num_ep_ranks=ep_group.size(),
+                num_local_experts=model.num_local_physical_experts,
+            ),
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
@@ -593,7 +619,7 @@ class EplbState:
         is_dummy: bool = False,
         is_profile: bool = False,
         log_stats: bool = False,
-    ) -> None:
+    ) -> EplbMetricsSnapshot | None:
         """Step the EPLB state.
 
         Args:
@@ -621,7 +647,7 @@ class EplbState:
 
         if is_profile:
             self.rearrange(is_profile=True)
-            return
+            return None
 
         if log_stats:
             self._maybe_log_balancedness()
@@ -718,11 +744,39 @@ class EplbState:
                 # should_record (step > step_interval, so always True) and
                 # bail out before the step counter is reset.
                 self._update_layer_should_record(log_stats=log_stats)
-                return
+                return self._take_expert_metrics_snapshot()
             self.expert_rearrangement_step = 0
             self.rearrange()
 
         self._update_layer_should_record(log_stats=log_stats)
+        return self._take_expert_metrics_snapshot()
+
+    def _take_expert_metrics_snapshot(self) -> EplbMetricsSnapshot | None:
+        """Return pending per-expert metrics, if collection is enabled."""
+        if not self.parallel_config.eplb_config.enable_expert_metrics:
+            return None
+
+        tokens = self._pending_expert_tokens
+        self._pending_expert_tokens = []
+        topology: list[EplbExpertTopology] = []
+        for model_state in self.model_states.values():
+            metrics = model_state.metrics
+            if not metrics.topology_dirty:
+                continue
+            topology.append(
+                EplbExpertTopology(
+                    model_name=metrics.model_name,
+                    ep_rank=metrics.ep_rank,
+                    num_ep_ranks=metrics.num_ep_ranks,
+                    num_local_experts=metrics.num_local_experts,
+                    physical_to_logical=model_state.physical_to_logical_map.cpu().tolist(),
+                )
+            )
+            metrics.topology_dirty = False
+
+        if not tokens and not topology:
+            return None
+        return EplbMetricsSnapshot(tokens=tokens, topology=topology)
 
     def _maybe_log_balancedness(self) -> None:
         pending = self._pending_balancedness
@@ -879,6 +933,30 @@ class EplbState:
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
+
+        if self.parallel_config.eplb_config.enable_expert_metrics and not is_profile:
+            physical_expert_load_windows = self._allreduce_list(
+                [
+                    model_state.expert_load_window.sum(dim=0)
+                    for model_state in self.model_states.values()
+                ]
+            )
+            for model_state, expert_load in zip(
+                self.model_states.values(), physical_expert_load_windows
+            ):
+                metrics = model_state.metrics
+                self._pending_expert_tokens.append(
+                    EplbExpertTokens(
+                        model_name=metrics.model_name,
+                        ep_rank=metrics.ep_rank,
+                        num_ep_ranks=metrics.num_ep_ranks,
+                        num_local_experts=metrics.num_local_experts,
+                        tokens=expert_load.cpu().tolist(),
+                        physical_to_logical=(
+                            model_state.physical_to_logical_map.cpu().tolist()
+                        ),
+                    )
+                )
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -1170,6 +1248,8 @@ class EplbState:
             expanded_physical_to_logical
         )
         eplb_model_state.expert_load_pass.zero_()
+        if (metrics := getattr(eplb_model_state, "metrics", None)) is not None:
+            metrics.topology_dirty = True
         physical_to_logical_map = eplb_model_state.physical_to_logical_map
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
@@ -1213,6 +1293,8 @@ class EplbState:
             :, :num_physical_experts
         ]
         model_state.expert_load_pass = expert_load_pass_buffer[:, :num_physical_experts]
+        if (metrics := getattr(model_state, "metrics", None)) is not None:
+            metrics.topology_dirty = True
 
         pad_size = num_physical_experts - model_state.expert_load_window.shape[-1]
         model_state.expert_load_window = torch.nn.functional.pad(
@@ -1468,6 +1550,8 @@ def _commit_eplb_maps(
     if PIN_MEMORY:
         src = src.pin_memory()
     dst.copy_(src, non_blocking=True)
+    if (metrics := getattr(model_state, "metrics", None)) is not None:
+        metrics.topology_dirty = True
 
 
 def _move_to_workspace(
@@ -1492,6 +1576,8 @@ def _move_to_workspace(
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
+        if (metrics := getattr(model_state, "metrics", None)) is not None:
+            metrics.topology_dirty = True
 
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None

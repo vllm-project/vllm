@@ -68,6 +68,7 @@ from vllm.v1.metrics.stats import (
     KV_FETCH_IN_PROGRESS,
     KV_FETCH_STAGES,
     KV_FETCH_WAITING_TO_START,
+    EplbMetricsSnapshot,
     PrefixCacheStats,
     RequestSpecDecodeMetrics,
     SchedulerStats,
@@ -2312,6 +2313,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        eplb_metrics = model_runner_output.eplb_metrics
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2715,6 +2717,7 @@ class Scheduler(SchedulerInterface):
                 cudagraph_stats,
                 perf_stats,
                 ec_connector_stats=ec_connector_stats,
+                eplb_metrics=eplb_metrics,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -3348,6 +3351,7 @@ class Scheduler(SchedulerInterface):
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
         ec_connector_stats: ECConnectorStats | None = None,
+        eplb_metrics: EplbMetricsSnapshot | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -3385,6 +3389,7 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            eplb_metrics=eplb_metrics,
         )
 
     def make_spec_decoding_stats(
