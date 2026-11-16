@@ -12,8 +12,6 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
-import vllm.envs as envs
-
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -413,10 +411,6 @@ def resolve_quant_method(
                 "(requantization) is not supported yet."
             )
 
-        if envs.VLLM_RELOAD_MODE == "direct":
-            raise NotImplementedError(
-                f"{prefix}: requantization does not support VLLM_RELOAD_MODE=direct"
-            )
         online_quant_method = online_config.get_quant_method(layer, prefix)
 
         assert base_quant_method is not None and not isinstance(
