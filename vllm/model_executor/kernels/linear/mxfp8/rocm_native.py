@@ -95,6 +95,7 @@ def _mxfp8_linear_kernel(
     QUANT_ROWS: tl.constexpr,
     FP8_MAX: tl.constexpr,
     TINY: tl.constexpr,
+    UNMASKED_LOADS: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -109,10 +110,21 @@ def _mxfp8_linear_kernel(
     xm_mask = offs_xm < M
     n_mask = offs_n < N
 
-    x_ptrs = x_ptr + offs_xm[:, None] * stride_xm + offs_k[None, :] * stride_xk
-    xs_ptrs = xs_ptr + offs_m[:, None] * stride_xsm + offs_sk[None, :] * stride_xsk
-    w_ptrs = w_ptr + offs_n[:, None] * stride_wn + offs_k[None, :] * stride_wk
-    ws_ptrs = ws_ptr + offs_n[:, None] * stride_wsn + offs_sk[None, :] * stride_wsk
+    if UNMASKED_LOADS:
+        # Rows/columns past M/N read row 0 instead of being masked; their
+        # outputs are never stored. Needs a whole number of K tiles.
+        tl.static_assert(K % BLOCK_K == 0)
+        load_xm = tl.where(xm_mask, offs_xm, 0)
+        load_m = tl.where(m_mask, offs_m, 0)
+        load_n = tl.where(n_mask, offs_n, 0)
+    else:
+        load_xm = offs_xm
+        load_m = offs_m
+        load_n = offs_n
+    x_ptrs = x_ptr + load_xm[:, None] * stride_xm + offs_k[None, :] * stride_xk
+    xs_ptrs = xs_ptr + load_m[:, None] * stride_xsm + offs_sk[None, :] * stride_xsk
+    w_ptrs = w_ptr + load_n[:, None] * stride_wn + offs_k[None, :] * stride_wk
+    ws_ptrs = ws_ptr + load_n[:, None] * stride_wsn + offs_sk[None, :] * stride_wsk
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for _ in range(0, tl.cdiv(K, BLOCK_K)):
@@ -135,6 +147,12 @@ def _mxfp8_linear_kernel(
                     tl.broadcast_to(xs[None, :, :], (REPS, QUANT_ROWS, BLOCK_K // 32)),
                     (BLOCK_M, BLOCK_K // 32),
                 )
+        elif UNMASKED_LOADS:
+            x = tl.load(x_ptrs)
+            w = tl.load(w_ptrs)
+            xs = tl.load(xs_ptrs)
+            ws = tl.load(ws_ptrs)
+            xs_ptrs += (BLOCK_K // 32) * stride_xsk
         else:
             x = tl.load(x_ptrs, mask=m_mask[:, None], other=0.0)
             w = tl.load(w_ptrs, mask=n_mask[:, None], other=0.0)
@@ -178,6 +196,16 @@ def _launch(
     else:
         quant_rows = block_m
     grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
+    # Short-K large prefill (see _select_cfg) skips the M/N load masks.
+    unmasked_loads = (
+        _ON_GFX950
+        and not quant_x
+        and M > 1024
+        and N > 1024
+        and K <= 1024
+        and (block_m, block_n, block_k) == (128, 128, 128)
+        and K % block_k == 0
+    )
     _mxfp8_linear_kernel[grid](
         x,
         xs,
@@ -204,6 +232,7 @@ def _launch(
         QUANT_ROWS=quant_rows,
         FP8_MAX=_FP8_MAX,
         TINY=_TINY,
+        UNMASKED_LOADS=unmasked_loads,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -380,6 +409,11 @@ def _select_cfg(M, N, K):
         cfg = _select_m31_cfg(M, N, K)
         if cfg is not None:
             return cfg
+    if _ON_GFX950 and M > 1024 and N > 1024 and K <= 1024 and K % 128 == 0:
+        # Short-K large prefill (e.g. shared_down K=768): 128x128x128 with two
+        # stages and unmasked M/N loads beats the deeper 3-stage / BLOCK_K=256
+        # tiles below; at larger K those stay faster.
+        return 128, 128, 128, 8, 2
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
