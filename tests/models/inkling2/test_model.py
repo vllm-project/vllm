@@ -143,3 +143,38 @@ def test_piecewise_graphs_match_eager(tmp_path):
     eager = _chunked_mixed_run(str(tmp_path), enforce_eager=True)
     for g, e in zip(graph, eager):
         torch.testing.assert_close(torch.tensor(g), torch.tensor(e), rtol=0, atol=1e-2)
+
+
+@pytest.mark.parametrize("quant_algo", ["NVFP4", "MXFP8"])
+def test_released_checkpoint_quant_config(tmp_path, quant_algo):
+    """Released checkpoints declare a ModelOpt `quantization_config` in
+    config.json; the per-tensor precisions in hf_quant_config.json win."""
+    from vllm.config import LoadConfig, ModelConfig
+    from vllm.model_executor.model_loader.weight_utils import get_quant_config
+    from vllm.models.inkling2.quant_config import Inkling2QuantConfig
+
+    config = {
+        **TINY_CONFIG,
+        "quantization_config": {"quant_method": "modelopt", "quant_algo": quant_algo},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    experts = "model.llm.layers.{}.mlp.experts.w13_weight"
+    mxfp8 = [0, 1] if quant_algo == "MXFP8" else [1]
+    groups = [
+        {"compute_dtype": "mxfp8", "tensors": [experts.format(i) for i in mxfp8]},
+        {"compute_dtype": "bfloat16", "tensors": ["model.llm.embed_tokens.weight"]},
+    ]
+    if quant_algo == "NVFP4":
+        groups.append({"compute_dtype": "nvfp4", "tensors": [experts.format(0)]})
+    (tmp_path / "hf_quant_config.json").write_text(
+        json.dumps({"quant_method": "inkling2", "model": {"parameter_groups": groups}})
+    )
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, tokenizer_mode="hf"
+    )
+    assert model_config.quantization == "inkling2"
+    quant_config = get_quant_config(model_config, LoadConfig())
+    assert isinstance(quant_config, Inkling2QuantConfig)
+    assert [quant_config.is_mxfp8_layer(i) for i in range(2)] == [
+        i in mxfp8 for i in range(2)
+    ]

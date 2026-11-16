@@ -34,8 +34,8 @@ def _multicast_memory(size: int, group: dist.ProcessGroup):
     )
 
     class MinimumGranularityMemory(SymmDeviceMemory):
-        def _get_allocation_prop(self, buf_size: int):
-            allocation_prop, mc_prop = super()._get_allocation_prop(buf_size)
+        def _get_allocation_prop(self, buf_size: int, *args):
+            allocation_prop, mc_prop = super()._get_allocation_prop(buf_size, *args)
             granularity = checkCudaErrors(
                 cuda.cuMemGetAllocationGranularity(
                     allocation_prop,

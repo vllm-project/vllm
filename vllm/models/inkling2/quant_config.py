@@ -52,6 +52,21 @@ class Inkling2QuantConfig(QuantizationConfig):
     def from_config(cls, config: dict[str, Any]) -> Inkling2QuantConfig:
         return cls(config)
 
+    @classmethod
+    def override_quantization_method(
+        cls,
+        hf_quant_cfg: dict[str, Any],
+        user_quant: str | None,
+        hf_config: Any = None,
+    ) -> QuantizationMethods | None:
+        # Released checkpoints also declare a ModelOpt `quantization_config`
+        # in config.json; their per-tensor precisions are in
+        # hf_quant_config.json.
+        architectures = getattr(hf_config, "architectures", None) or []
+        if "Inkling2ForConditionalGeneration" in architectures:
+            return "inkling2"
+        return None
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
