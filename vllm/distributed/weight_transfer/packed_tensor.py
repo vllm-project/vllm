@@ -228,8 +228,6 @@ def packed_nccl_broadcast_consumer(
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     caller_stream = torch.accelerator.current_stream()
-    # Order receives and loads after work the caller already queued, such as
-    # the padding zero-fill at the start of a direct reload.
     for stream in streams:
         stream.wait_stream(caller_stream)
     prev_received: torch.Event | None = None
