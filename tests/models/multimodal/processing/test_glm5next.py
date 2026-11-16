@@ -31,6 +31,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     collect_ec_item_metadata,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.models.glm5next.common.multimodal import Glm5NextProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
@@ -237,6 +238,52 @@ def _pixel_path_grid(
         resized_height // video_processor.patch_size,
         resized_width // video_processor.patch_size,
     )
+
+
+@pytest.mark.parametrize(
+    ("mm_kwargs", "budget", "grid_side"),
+    [
+        ({}, 30_000, 346),
+        ({"videos_kwargs": {"max_image_tokens": 14_400}}, 14_400, 240),
+        ({"videos_kwargs": {"max_image_tokens": 40_000}}, 40_000, 400),
+        ({"videos_kwargs": {"max_image_tokens": 240_000}}, 240_000, 400),
+        ({"max_image_tokens": 40_000}, 40_000, 400),
+        (
+            {"max_image_tokens": 14_400, "videos_kwargs": {"max_image_tokens": 40_000}},
+            40_000,
+            400,
+        ),
+    ],
+)
+def test_video_startup_budget_controls_profiling(mm_kwargs, budget, grid_side):
+    """Startup overrides must resize profiling inputs and size the encoder cache."""
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_kwargs=mm_kwargs,
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, tokenizer=ctx.tokenizer
+    ).info
+    assert isinstance(info, Glm5NextProcessingInfo)
+    max_pixels = info._get_video_max_pixels()
+    assert max_pixels == budget * 2 * 28 * 28
+    assert info.get_mm_max_tokens_per_item(1048576, {"video": 1}) == {
+        "video": budget + 2242,  # Frame markers and timestamp token allowance.
+    }
+    _, profile_tokens = info._get_vision_info(
+        image_width=5600,
+        image_height=5600,
+        num_frames=2,
+        max_image_pixels=max_pixels,
+    )
+    assert profile_tokens == grid_side * grid_side // 4
+    runtime_patches = info.get_hf_processor().video_processor.get_num_of_video_patches(
+        2, 5600, 5600, {"max_image_tokens": budget}
+    )
+    assert runtime_patches // 4 == profile_tokens
+    if "max_image_tokens" not in mm_kwargs:
+        assert info.get_hf_processor().image_processor.max_image_tokens == 8000
 
 
 @pytest.mark.parametrize(
