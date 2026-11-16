@@ -97,30 +97,35 @@ class BaseModelLoader(ABC):
                     time_after_load - time_before_load,
                 )
 
-            logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            try:
+                logger.debug("Loading weights on %s ...", load_device)
+                self.load_weights(model, model_config)
 
-            # Release transient tensors held by PyTorch's caching allocator
-            # before weight post-processing and raw CUDA driver allocations.
-            gc.collect()
-            torch.accelerator.empty_cache()
+                # Release transient tensors held by PyTorch's caching allocator
+                # before weight post-processing and raw CUDA driver allocations.
+                gc.collect()
+                torch.accelerator.empty_cache()
 
-            # Log peak GPU memory after loading weights. This is needed
-            # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                peak_memory = torch.accelerator.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                )
+                # Log peak GPU memory after loading weights. This is needed
+                # to have test coverage on peak memory for online quantization.
+                if current_platform.is_cuda_alike() or current_platform.is_xpu():
+                    peak_memory = torch.accelerator.max_memory_allocated()
+                    logger.debug_once(
+                        "Peak GPU memory after loading weights: %s GiB",
+                        format_gib(peak_memory),
+                    )
 
-            # Process weights into kernel format. Note that when using online
-            # quantization, weights are (typically) quantized as they are loaded.
-            if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
+                # Process weights into kernel format. Note that when using online
+                # quantization, weights are (typically) quantized as they are loaded.
+                if _has_online_quant(model):
+                    finalize_layerwise_processing(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
-            log_online_quantization_time(vllm_config)
+                process_weights_after_loading(model, model_config, target_device)
+                log_online_quantization_time(vllm_config)
+            except Exception:
+                # The selections were made before the failure: record them.
+                log_backend_summary(model, model_config, load_failed=True)
+                raise
             log_backend_summary(model, model_config)
 
             gc.collect()
@@ -129,7 +134,9 @@ class BaseModelLoader(ABC):
         return model.eval()
 
 
-def log_backend_summary(model: nn.Module, model_config: ModelConfig) -> None:
+def log_backend_summary(
+    model: nn.Module, model_config: ModelConfig, load_failed: bool = False
+) -> None:
     """Log which backend each kind of layer selected. The individual
     selections are logged at DEBUG where they are made."""
     from vllm.model_inspection import format_backend_summary
@@ -148,9 +155,10 @@ def log_backend_summary(model: nn.Module, model_config: ModelConfig) -> None:
     if summary is not None:
         # A draft model can share its class with the target: name the model.
         logger.info_once(
-            "Backends selected for %s (%s):\n%s",
+            "Backends selected for %s (%s)%s:\n%s",
             type(model).__name__,
             model_config.model,
+            " before loading failed" if load_failed else "",
             summary,
             scope="global",
         )

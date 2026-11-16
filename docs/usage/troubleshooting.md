@@ -47,6 +47,8 @@ Each row is one backend: the kind of layer, how many layers run it, the kernel o
 
 The table replaces the individual `Using <backend> ...` and `Selected <kernel> for ...` lines, which are now logged at DEBUG where each selection is made, along with the candidates that were considered: set `VLLM_LOGGING_LEVEL=DEBUG` to see them. Selections that explain a fallback or an override are still logged at INFO or WARNING.
 
+If loading the weights fails, the table is logged before the error with the selections made up to that point (its first line ends in `before loading failed`); MoE rows then show the experts class without the precision.
+
 For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM.get_model_inspection()`.
 
 ## Enable more logging

@@ -2,13 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 import torch.nn as nn
 
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.model_loader.base_loader import log_backend_summary
+from vllm.model_executor.model_loader import base_loader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    log_backend_summary,
+)
 from vllm.model_inspection import _format_layer_names, format_backend_summary
 
 pytestmark = pytest.mark.cpu_test
@@ -65,3 +70,43 @@ def test_backend_summary_failure_does_not_fail_the_load():
     with pytest.raises(TypeError):
         format_backend_summary(Opaque())
     log_backend_summary(Opaque(), SimpleNamespace(model="opaque"))
+
+
+def test_backends_are_logged_when_loading_fails(monkeypatch):
+    """Selections are made before the weights load, so a failed load still
+    reports them, and the original error propagates unchanged."""
+
+    class Proj(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(1))
+            self.quant_method = UnquantizedLinearMethod()
+
+    class FailingLoader(BaseModelLoader):
+        def download_model(self, model_config): ...
+
+        def create_model(self, vllm_config, model_config, prefix=""):
+            return nn.ModuleDict({"proj": Proj()})
+
+        def load_weights(self, model, model_config):
+            raise RuntimeError("out of memory")
+
+    logger = Mock()
+    monkeypatch.setattr(base_loader, "logger", logger)
+    vllm_config = SimpleNamespace(
+        device_config=SimpleNamespace(device="cpu"),
+        load_config=SimpleNamespace(device=None),
+    )
+    model_config = SimpleNamespace(dtype=torch.float32, model="org/toy")
+
+    with pytest.raises(RuntimeError, match="out of memory") as error:
+        FailingLoader(vllm_config.load_config).load_model(vllm_config, model_config)
+
+    assert error.value.__context__ is None
+    (logged,) = [
+        call.args
+        for call in logger.info_once.call_args_list
+        if call.args[0].startswith("Backends selected")
+    ]
+    assert logged[1:4] == ("ModuleDict", "org/toy", " before loading failed")
+    assert "unquantized [float32] | proj" in logged[4]

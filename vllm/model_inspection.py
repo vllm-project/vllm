@@ -160,7 +160,10 @@ def _describe_kernel(method: object) -> str | None:
             )
         if type(value).__module__.startswith("vllm.model_executor.kernels.linear"):
             return type(value).__name__
-    return None
+    # The MoE kernel is built after the weights load; before that, name the
+    # experts class the method selected.
+    experts_cls = getattr(method, "experts_cls", None)
+    return experts_cls.__name__ if experts_cls is not None else None
 
 
 def _describe_backend(module: nn.Module) -> tuple[str, str] | None:
