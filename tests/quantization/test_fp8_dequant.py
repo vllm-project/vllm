@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Checkpoint weights that are stored in FP8 but run in BF16.
 
-- `Fp8DequantLinearMethod` (GLM5-next MLA projections): the checkpoint's own
-  block-FP8 `weight` and `weight_scale_inv`, dequantized after loading.
+- `DequantLinearMethod` (GLM5-next MLA projections): the checkpoint's own
+  FP8 `weight` and its block or per-tensor scale, dequantized after loading.
 - The sparse-attention indexer: `wk` in the checkpoint's layout (block,
   per-channel or MX scales), `weights_proj` in BF16, fused into one BF16
   weight after loading.
@@ -18,12 +18,13 @@ import torch
 
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.fp8 import (
-    Fp8Config,
-    dequantized_fp8_config,
+from vllm.model_executor.layers.quantization.dequant_linear import (
+    DequantLinearMethod,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
 )
@@ -41,9 +42,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 _DEVICE = torch.device("cuda")
-# q_a / kv_a-like shards: the first spans several dequantization chunks, the
-# last ends in a partial block
+# q_a / kv_a-like shards of unequal sizes; the last ends in a partial block
 _OUT = [1280, 192]
+# MLA checkpoint schemes and their scale's name: one scale per 128x128 block,
+# or per tensor (one per merged shard)
+_SCALE = {"block": "weight_scale_inv", "tensor": "weight_scale"}
 
 
 @pytest.fixture
@@ -66,8 +69,10 @@ def _block_fp8(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Ten
 
 def _dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     rows, cols = weight.shape
-    s = scale.repeat_interleave(128, 0)[:rows].repeat_interleave(128, 1)[:, :cols]
-    return (weight.float() * s).to(torch.bfloat16)
+    if scale.ndim == 2:  # per block
+        scale = scale.repeat_interleave(128, 0)[:rows]
+        scale = scale.repeat_interleave(128, 1)[:, :cols]
+    return (weight.float() * scale).to(torch.bfloat16)
 
 
 def _ptrs(model: torch.nn.Module) -> dict[str, int]:
@@ -86,12 +91,13 @@ def _reload(model, ckpt, mode, model_config, monkeypatch, reverse=False):
 
 
 class _MlaModel(torch.nn.Module):
-    """A fused (q_a / kv_a-like) and a row-parallel projection that a
-    block-FP8 checkpoint stores in FP8 and the model runs in BF16."""
+    """A fused (q_a / kv_a-like) and a row-parallel projection that an FP8
+    checkpoint stores in FP8 and the model runs in BF16."""
 
-    def __init__(self):
+    def __init__(self, scheme: str):
         super().__init__()
-        config = dequantized_fp8_config(Fp8Config(weight_block_size=[128, 128]))
+        block = [128, 128] if scheme == "block" else None
+        config = Fp8Config(weight_block_size=block)
         with _DEVICE:
             self.qkv_a = MergedColumnParallelLinear(
                 256, _OUT, bias=False, params_dtype=torch.bfloat16, quant_config=config
@@ -99,6 +105,8 @@ class _MlaModel(torch.nn.Module):
             self.o = RowParallelLinear(
                 256, 128, bias=False, params_dtype=torch.bfloat16, quant_config=config
             )
+        assert DequantLinearMethod.wrap(self.qkv_a)
+        assert DequantLinearMethod.wrap(self.o)
 
     def load_weights(self, weights) -> None:
         for name, tensor in weights:
@@ -108,23 +116,30 @@ class _MlaModel(torch.nn.Module):
             param.weight_loader(param, tensor, *shard_ids)
 
 
-def _mla_checkpoint(seed: int) -> dict[str, torch.Tensor]:
+def _mla_checkpoint(seed: int, scheme: str) -> dict[str, torch.Tensor]:
     """`layer.shard.param` -> tensor, scales first."""
     ckpt = {}
-    for shard, rows in enumerate(_OUT):
-        weight, ckpt[f"qkv_a.{shard}.weight_scale_inv"] = _block_fp8(
-            rows, 256, seed + shard
+    shards = [(f"qkv_a.{i}", rows) for i, rows in enumerate(_OUT)] + [("o.-", 128)]
+    for i, (prefix, rows) in enumerate(shards):
+        weight, scale = _block_fp8(rows, 256, seed * 10 + i)
+        ckpt[f"{prefix}.{_SCALE[scheme]}"] = (
+            scale if scheme == "block" else scale[0, :1]
         )
-        ckpt[f"qkv_a.{shard}.weight"] = weight
-    ckpt["o.-.weight_scale_inv"], ckpt["o.-.weight"] = reversed(
-        _block_fp8(128, 256, seed + 9)
-    )
+        ckpt[f"{prefix}.weight"] = weight
     return ckpt
+
+
+def _scale_of(ckpt: dict[str, torch.Tensor], weight_name: str) -> torch.Tensor:
+    prefix = weight_name.removesuffix(".weight")
+    return next(
+        ckpt[f"{prefix}.{s}"] for s in _SCALE.values() if f"{prefix}.{s}" in ckpt
+    )
 
 
 def _mla_expected(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     def dq(prefix: str) -> torch.Tensor:
-        return _dequant(ckpt[f"{prefix}.weight"], ckpt[f"{prefix}.weight_scale_inv"])
+        name = f"{prefix}.weight"
+        return _dequant(ckpt[name], _scale_of(ckpt, name))
 
     qkv_a = torch.cat([dq(f"qkv_a.{shard}") for shard in range(len(_OUT))])
     return {"qkv_a": qkv_a, "o": dq("o.-")}
@@ -133,14 +148,14 @@ def _mla_expected(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 def _as_bf16(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """What an RL trainer sends instead: each weight dequantized, no scales."""
     return {
-        name: _dequant(tensor, ckpt[f"{name}_scale_inv"])
+        name: _dequant(tensor, _scale_of(ckpt, name))
         for name, tensor in ckpt.items()
         if name.endswith(".weight")
     }
 
 
-def _mla_cold_start(ckpt, model_config, scales_first=True) -> _MlaModel:
-    model = _MlaModel()
+def _mla_cold_start(ckpt, scheme, model_config, scales_first=True) -> _MlaModel:
+    model = _MlaModel(scheme)
     ptrs = _ptrs(model)
     record_metadata_for_reloading(model)
     items = list(ckpt.items())
@@ -157,29 +172,32 @@ def _assert_mla(model: _MlaModel, expected: dict[str, torch.Tensor]) -> None:
         layer = getattr(model, name)
         assert layer.weight.dtype == torch.bfloat16
         torch.testing.assert_close(layer.weight, weight, rtol=0, atol=0)
-        assert get_live_param(layer, "weight_scale_inv") is None  # retired
+        for scale in _SCALE.values():
+            assert get_live_param(layer, scale) is None  # retired
     x = torch.randn(3, 256, dtype=torch.bfloat16, device=_DEVICE)
     torch.testing.assert_close(model.o(x)[0], x @ expected["o"].t())
 
 
+@pytest.mark.parametrize("scheme", list(_SCALE))
 @pytest.mark.parametrize("scales_first", [True, False])
-def test_mla_cold_start_separate_calls(model_config, scales_first):
-    ckpt = _mla_checkpoint(0)
-    model = _mla_cold_start(ckpt, model_config, scales_first)
+def test_mla_cold_start_separate_calls(model_config, scheme, scales_first):
+    ckpt = _mla_checkpoint(0, scheme)
+    model = _mla_cold_start(ckpt, scheme, model_config, scales_first)
     _assert_mla(model, _mla_expected(ckpt))
 
 
+@pytest.mark.parametrize("scheme", list(_SCALE))
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_mla_reload_equals_cold_start(monkeypatch, model_config, mode):
+def test_mla_reload_equals_cold_start(monkeypatch, model_config, scheme, mode):
     """Direct reload views the BF16 storage back to the FP8 checkpoint layout
     (a dtype and size change); layerwise reload restages the FP8 layer. Both
     dequantize the new tensors at the cold-start addresses. An update may
     send the weights in BF16 instead, without scales."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    model = _mla_cold_start(_mla_checkpoint(1), model_config)
+    model = _mla_cold_start(_mla_checkpoint(1, scheme), scheme, model_config)
     ptrs = _ptrs(model)
     for seed, bf16 in ((2, False), (3, True), (4, False)):
-        new = _mla_checkpoint(seed)
+        new = _mla_checkpoint(seed, scheme)
         expected = _mla_expected(new)
         _reload(model, _as_bf16(new) if bf16 else new, mode, model_config, monkeypatch)
         _assert_mla(model, expected)
@@ -364,7 +382,7 @@ def test_indexer_reload_fp8_or_bf16(monkeypatch, model_config, layout, cold, mod
 
 def _glm5_mla_params() -> dict:
     """Params of a GLM5-next MLA layer whose projections load a block-FP8
-    checkpoint (see `dequantized_fp8_config`): only the names matter here."""
+    checkpoint (see `bf16_linear`): only the names matter here."""
     prefix = "layers.3.self_attn"
     return {
         f"{prefix}.{target}.weight_scale_inv": None
@@ -374,8 +392,7 @@ def _glm5_mla_params() -> dict:
 
 def test_glm5next_attn_loader_renames_weight_scale():
     # Some exporters name the block scale ``weight_scale``; under Fp8Config
-    # the projection's scale parameter is ``weight_scale_inv`` (Quark-configured
-    # models are not covered: their projections are built BF16).
+    # the projection's scale parameter is ``weight_scale_inv``.
     from transformers import Glm5NextTextConfig
 
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
@@ -428,6 +445,15 @@ def test_indexer_wk_stays_bf16_under_online_quantization(model_config):
     model = _indexer_cold_start(ckpt, "online", model_config)
     fused = model.indexer.wk_weights_proj.weight
     torch.testing.assert_close(fused, expected, rtol=0, atol=0)
+
+
+def test_wrap_skips_online_quantized_layer(model_config):
+    """An online-quantized FP8 weight quantizes the BF16 tensors it loads
+    (`quantizes_on_load`): viewing it in the sent dtype would skip that."""
+    with set_default_torch_dtype(torch.bfloat16), _DEVICE:
+        layer = ReplicatedLinear(256, 128, bias=False, quant_config=Fp8Config())
+    layer.quantizes_on_load = True
+    assert not DequantLinearMethod.wrap(layer)
 
 
 def test_layerwise_metadata_does_not_keep_layers_alive(model_config):

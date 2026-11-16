@@ -1622,7 +1622,7 @@ def _mla_proj_checkpoint_tensor(
     scale_name = f"{prefix}.{_FP8_ATTN_PROJS[suffix]}.weight_scale_inv"
     if scale_name not in params_dict:  # no q_lora_rank: kv_a is not fused
         scale_name = f"{prefix}{suffix}weight_scale_inv"
-    is_fp8_proj = scale_name in params_dict  # see `dequantized_fp8_config`
+    is_fp8_proj = scale_name in params_dict  # see `bf16_linear`
     if is_fp8_proj and name.endswith(".weight_scale"):
         name = f"{name}_inv"
     if kv_a_pad_size > 0 and suffix == ".kv_a_proj_with_mqa.":

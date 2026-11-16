@@ -29,7 +29,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import dequantized_fp8_config
+from vllm.model_executor.layers.quantization.dequant_linear import (
+    DequantLinearMethod,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import (
@@ -285,9 +287,10 @@ class Dots3NoteFullAttention(DeepseekV2MLAAttention):
                 config.hidden_size,
                 self.indexer.n_head,
                 bias=False,
-                quant_config=dequantized_fp8_config(quant_config) or quant_config,
+                quant_config=quant_config,
                 prefix=f"{self.indexer.prefix}.weights_proj",
             )
+            DequantLinearMethod.wrap(self.indexer.weights_proj)
         wrapper = self._modules.pop("mla_attn")
         inner_attention = wrapper.mla_attn
         vllm_config.compilation_config.static_forward_context.pop(
