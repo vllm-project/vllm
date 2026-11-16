@@ -1291,23 +1291,27 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
 
     use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
-    if not use_1stage:
-        # The AITER 2-stage IPC kernel (cross_device_reduce_2stage) is slower
-        # than an explicit all-reduce + separate norm + quant for tensors that
-        # exceed the 1-stage threshold (> 128 KB at TP8, > 80 tokens).
-        # tensor_model_parallel_all_reduce routes through QuickReduce (INT4
-        # compressed) for small-to-mid tensors and RCCL for large ones (> QR
-        # size cap), both of which outperform CDR for this workload on MI350.
-        # This path is also CUDA-graph-safe: at graph-capture time the branch
-        # evaluates the same way as at runtime, so the correct kernels
-        # (QR / RCCL + elementwise add + Triton quant) are baked into the
-        # graph rather than CDR.
+    if not use_1stage and not aiter_ar.should_custom_ar(input_):
+        # CDR (cross_device_reduce_2stage) is used when use_1stage=False but
+        # only degrades severely for tensors that exceed AITER CA's IPC buffer
+        # cap (default 64 MB, controlled by AITER_CUSTOM_AR_MAX_SIZE). For
+        # those tensors should_custom_ar() returns False and CDR has no
+        # efficient IPC path — observed cost: ~4,500 µs for a 117 MB preamble
+        # tensor at c8/TP8 on MI350.
+        # For mid-range tensors (128 KB – 64 MB) that fall in the 2-stage range
+        # but are within the IPC cap, CDR is competitive; leave them on the CDR
+        # path to avoid regressing models like DeepSeek V4 that hit those sizes
+        # at decode time.
+        # tensor_model_parallel_all_reduce routes oversized tensors to RCCL
+        # (~11 µs for 117 MB), which is correct for large payloads.
+        # This branch is CUDA-graph-safe: it evaluates at capture time so the
+        # RCCL + add + Triton kernels are baked into the graph, not CDR.
         from vllm.distributed import tensor_model_parallel_all_reduce
 
         ar_out = tensor_model_parallel_all_reduce(input_)
-        # Residual add: combine the all-reduced output with the residual stream.
-        # residual_out is returned to the caller as the new residual (pre-norm),
-        # matching the contract of the fused kernel (result[1]).
+        # residual_out is the pre-norm hidden states; returned to the caller
+        # as the new residual (matching the contract of result[1] from the
+        # fused kernel).
         residual_out = ar_out + residual
         quant_out, scale_out = _rocm_aiter_rmsnorm_fp8_group_quant_impl(
             residual_out, weight, epsilon, group_size
