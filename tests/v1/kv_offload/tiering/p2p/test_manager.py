@@ -575,9 +575,7 @@ class TestSubmitLoad:
 
     @pytest.mark.parametrize("symmetric", [False, True])
     @pytest.mark.parametrize("empty", [False, True])
-    def test_lookup_after_fetch_preserves_only_reusable_supply(
-        self, monkeypatch, symmetric, empty
-    ):
+    def test_pd_lookup_misses_after_first_fetch(self, monkeypatch, symmetric, empty):
         """Only a nonempty PD fetch consumes the request's one-time supply."""
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
@@ -685,6 +683,76 @@ class TestPromotionLatency:
         assert stats is not None
         observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
         assert len(observations[("1:p2p", "success")]) == 1
+
+
+def test_pd_partial_promotion_does_not_refetch_tail():
+    """A full primary must not turn a deferred PD tail into a second fetch."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import FetchMsg
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier.locality = None
+    _attach_fake_transports(p2p_tier)
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=3, mmap_region=_mock_mmap_region(3)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    # An in-flight write leaves only two chunks available for the PD prompt.
+    other = ReqContext(req_id="other", kv_transfer_params=None)
+    filler = OffloadKey(b"filler")
+    assert primary.prepare_write([filler], other) is not None
+    ctx = ReqContext(req_id="pd", kv_transfer_params=_remote_prefiller_kv_params())
+    tiering.on_new_request(ctx)
+    prompt = [OffloadKey(f"prompt-{i}".encode()) for i in range(3)]
+
+    def prefix_lookup():
+        results = []
+        for key in prompt:
+            results.append(tiering.lookup(key, ctx))
+            if results[-1] is LookupResult.MISS:
+                break
+        return results
+
+    def sent_fetch_rounds():
+        return [
+            msg[FetchMsg.ROUND_SEQ]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ]
+
+    expected = [LookupResult.HIT_PENDING, LookupResult.HIT_PENDING, LookupResult.MISS]
+    assert prefix_lookup() == expected
+    tiering.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+    assert sent_fetch_rounds() == [0]
+
+    # Free space before the deferred rescan: the tail must still MISS.
+    primary.complete_write([filler], other, success=False)
+    assert primary._get_num_free_chunks() == 1
+    assert prefix_lookup() == expected
+    tiering.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+    assert sent_fetch_rounds() == [0]
 
 
 def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
