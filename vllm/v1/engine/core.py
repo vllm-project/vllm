@@ -612,6 +612,10 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def drop_retained_kv_exports(self) -> int:
+        """Stop keeping finished requests' KV for remote readers."""
+        return self.scheduler.drop_retained_exports()
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -1052,8 +1056,10 @@ class EngineCore:
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
 
         if mode == "abort":
+            # Also drops the exports kept for remote readers.
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
-            self.scheduler.drop_retained_exports()
+        elif mode == "keep" and clear_cache:
+            self.scheduler.retract_kv_transfers()
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
@@ -2464,10 +2470,13 @@ class EngineCoreProc(EngineCore):
                 None, RequestStatus.FINISHED_ABORTED
             )
             self._send_abort_outputs(aborted_reqs)
-            # The abort row of the pause table: exports kept for a remote
-            # reader are dropped, not waited for (the reader may be paused
-            # or asleep and keep renewing them indefinitely).
-            self.scheduler.drop_retained_exports()
+            # Aborting everything also drops the exports kept for a remote
+            # reader instead of waiting for it (it may be paused or asleep and
+            # keep renewing them indefinitely).
+        elif mode == "keep" and clear_cache:
+            # The kept requests' remote loads become local prefills, so the
+            # reset needs to wait only for the transfers in flight.
+            self.scheduler.retract_kv_transfers()
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)

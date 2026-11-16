@@ -6761,6 +6761,53 @@ def test_abort_drops_only_remote_read_exports(monkeypatch, remote_readers_only):
     assert (request.request_id in scheduler.requests) != remote_readers_only
 
 
+def test_abort_all_frees_dropped_exports_when_connector_reports(monkeypatch):
+    """Aborting everything drops the exports kept for remote readers. A
+    connector that fails the reads not started yet reports each export once
+    no read in flight uses it; its blocks stay pinned until then."""
+    scheduler = create_scheduler(use_kv_connector=True)
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    num_free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+
+    for name in ("request_finished", "request_finished_all_groups"):
+        monkeypatch.setattr(
+            scheduler.connector, name, lambda *a, **k: (True, None), raising=False
+        )
+    monkeypatch.setattr(
+        scheduler.connector, "holds_blocks_only_for_remote_readers", lambda: True
+    )
+    dropped: list[Request] = []
+    monkeypatch.setattr(
+        scheduler.connector,
+        "drop_exports",
+        lambda requests: dropped.extend(requests) or True,
+    )
+    # The prefill finished; its blocks are kept for a remote reader.
+    scheduler.finish_requests(
+        (request.request_id,), RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    assert dropped == [request]
+    assert scheduler.ledger.pins_blocks()
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == num_free
+
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending={request.request_id}
+            ),
+        ),
+    )
+    assert not scheduler.ledger.pins_blocks()
+    assert request.request_id not in scheduler.requests
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() > num_free
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(

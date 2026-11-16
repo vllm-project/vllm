@@ -10,7 +10,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -708,13 +708,15 @@ class MooncakeLeaseHeartbeat(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
 ):
-    """Sent by D to renew P's lease on KV blocks that D has not pulled yet.
+    """Sent by D to renew P's lease on KV blocks that D has not pulled yet,
+    or, with `withdraw`, to tell P that D no longer wants them.
 
     It shares P's side channel with pulls. A pull decodes as a heartbeat with
     no transfer ids, because msgspec skips the fields it does not know.
     """
 
     lease_transfer_ids: list[TransferId] = msgspec.field(default_factory=list)
+    withdraw: bool = False
 
 
 @dataclass(slots=True)
@@ -723,6 +725,8 @@ class LeaseHeartbeat:
 
     remote_bootstrap_addr: str
     transfer_ids: list[TransferId]
+    # D no longer wants these transfers (aborted or retracted).
+    withdraw: bool = False
 
 
 def _get_kv_lease_duration(kv_transfer_config: KVTransferConfig) -> float | None:
@@ -762,6 +766,8 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    # Dropped while a send read it; freed when the send ends, not expired.
+    dropped: bool = False
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -773,6 +779,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_not_processed: set[TransferId] = set()
         # D side: lease renewals to send this step, by remote P engine.
         self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
+        # D side: transfers D no longer wants, by remote P engine.
+        self.withdrawals: dict[EngineId, LeaseHeartbeat] = {}
+        # P side: exports the scheduler dropped.
+        self.exports_to_drop: set[TransferId] = set()
 
     def add_new_req(
         self,
@@ -902,6 +912,16 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     def holds_blocks_only_for_remote_readers(self) -> bool:
         return True
+
+    def drop_exports(self, requests: list["Request"]) -> bool:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.drop_exports(requests)
+        # The worker reports each in finished_sending once no send reads it.
+        return True
+
+    def withdraw_imports(self, requests: list["Request"]) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.withdraw_imports(requests)
 
     def request_finished(
         self,
@@ -1074,6 +1094,10 @@ class MooncakeConnectorScheduler:
         self._kv_lease_duration = _get_kv_lease_duration(vllm_config.kv_transfer_config)
         self._lease_reqs: dict[ReqId, tuple[EngineId, str, TransferId]] = {}
         self._last_heartbeat_time = 0.0
+        # D side: transfers to withdraw from their P engines next step.
+        self._withdrawals: list[tuple[EngineId, str, TransferId]] = []
+        # P side: exports the scheduler dropped, to drop on the workers.
+        self._exports_to_drop: set[TransferId] = set()
 
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
@@ -1177,6 +1201,28 @@ class MooncakeConnectorScheduler:
         # Failed pulls are reported here too.
         for req_id in connector_output.finished_recving or ():
             self._lease_reqs.pop(req_id, None)
+
+    def drop_exports(self, requests: list["Request"]) -> None:
+        for request in requests:
+            params = request.kv_transfer_params
+            if params and params.get("transfer_id"):
+                self._exports_to_drop.add(params["transfer_id"])
+
+    def withdraw_imports(self, requests: list["Request"]) -> None:
+        for request in requests:
+            self._lease_reqs.pop(request.request_id, None)
+            params = request.kv_transfer_params
+            if params and all(
+                params.get(p)
+                for p in ("remote_engine_id", "remote_bootstrap_addr", "transfer_id")
+            ):
+                self._withdrawals.append(
+                    (
+                        params["remote_engine_id"],
+                        params["remote_bootstrap_addr"],
+                        params["transfer_id"],
+                    )
+                )
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -1306,6 +1352,12 @@ class MooncakeConnectorScheduler:
                         )
                     heartbeat.transfer_ids.append(transfer_id)
 
+            for engine_id, bootstrap_addr, transfer_id in self._withdrawals:
+                meta.withdrawals.setdefault(
+                    engine_id, LeaseHeartbeat(bootstrap_addr, [], withdraw=True)
+                ).transfer_ids.append(transfer_id)
+            self._withdrawals.clear()
+
         if not self.is_kv_consumer:
             for req_id, (req, block_ids) in self._reqs_need_send.items():
                 assert req.kv_transfer_params is not None
@@ -1318,6 +1370,8 @@ class MooncakeConnectorScheduler:
             self._reqs_need_send.clear()
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
+            meta.exports_to_drop = self._exports_to_drop
+            self._exports_to_drop = set()
 
         return meta
 
@@ -1729,7 +1783,13 @@ class MooncakeConnectorWorker:
                 # waiting for prefills, and the renewal must not wait.
                 heartbeat = self._decode_heartbeat(metadata_bytes)
                 if heartbeat is not None:
-                    response = self._renew_kv_leases(heartbeat.lease_transfer_ids)
+                    if heartbeat.withdraw:
+                        self._drop_transfers(heartbeat.lease_transfer_ids)
+                        response = MooncakeXferResponse(
+                            status=MooncakeXferResponseStatus.FINISH
+                        )
+                    else:
+                        response = self._renew_kv_leases(heartbeat.lease_transfer_ids)
                     await sock.send_multipart(
                         (identity, self._encoder.encode(response))
                     )
@@ -2018,6 +2078,9 @@ class MooncakeConnectorWorker:
                     and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
                 ):
                     self.finished_sending_reqs.add(send_meta.p_req_id)
+                    # A later pull for it (e.g. the release pull of a request
+                    # rejected after admission) must fail, not wait.
+                    self._tombstone(send_meta.transfer_id)
 
             response = MooncakeXferResponse(
                 status=response_status,
@@ -2633,26 +2696,30 @@ class MooncakeConnectorWorker:
                 and send_meta.expire_time < now
                 and send_meta.sending == 0
             ):
-                if self._kv_lease_duration is None:
+                if send_meta.dropped:
+                    # Dropped while a send read it; that send has ended.
+                    pass
+                elif self._kv_lease_duration is None:
                     logger.warning(
                         "Request %s timed out after %d seconds without "
                         "being sent. Freeing its blocks on the producer side.",
                         send_meta.p_req_id,
                         envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
                     )
+                    self.xfer_stats.record_kv_expired_req()
                 else:
                     logger.warning(
                         "KV lease of request %s expired before the decoder "
                         "pulled it. Freeing its blocks on the producer side.",
                         send_meta.p_req_id,
                     )
-                self.xfer_stats.record_kv_expired_req()
+                    self.xfer_stats.record_kv_expired_req()
                 finished_sending_reqs.add(send_meta.p_req_id)
                 expired_transfer_id.append(transfer_id)
 
         for transfer_id in expired_transfer_id:
             del self.reqs_need_send[transfer_id]
-            self._expired_transfer_ids[transfer_id] = now
+            self._tombstone(transfer_id)
         # A pull later than this falls back to the ready-wait timeout.
         horizon = now - envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
         while self._expired_transfer_ids:
@@ -3028,7 +3095,9 @@ class MooncakeConnectorWorker:
                 )
                 return
         payload = self._encoder.encode(
-            MooncakeLeaseHeartbeat(lease_transfer_ids=heartbeat.transfer_ids)
+            MooncakeLeaseHeartbeat(
+                lease_transfer_ids=heartbeat.transfer_ids, withdraw=heartbeat.withdraw
+            )
         )
         selected_remote_pp = self._select_remote_workers(remote_engine_id)
         await asyncio.gather(
@@ -3041,13 +3110,14 @@ class MooncakeConnectorWorker:
         )
 
     async def _send_heartbeat_to_worker(self, worker_addr: str, payload: bytes):
-        assert self._kv_lease_duration is not None
+        # Withdrawals are sent without leases too.
+        timeout = self._kv_lease_duration / 6 if self._kv_lease_duration else 5.0
         try:
             with make_zmq_socket(
                 self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
             ) as sock:
                 # Wait for the reply: linger=0 drops a message still unsent.
-                sock.setsockopt(zmq.RCVTIMEO, int(self._kv_lease_duration / 6 * 1000))
+                sock.setsockopt(zmq.RCVTIMEO, int(timeout * 1000))
                 await sock.send(payload)
                 response = self._xfer_resp_decoder.decode(await sock.recv())
         except zmq.ContextTerminated:
@@ -3099,7 +3169,11 @@ class MooncakeConnectorWorker:
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
             if block_ids:
                 # Already gone through request_finished()
-                send_meta = self.reqs_need_send[transfer_id]
+                send_meta = self.reqs_need_send.get(transfer_id)
+                if send_meta is None:
+                    # D withdrew it while it was in prefill: free it now.
+                    self.finished_sending_reqs.add(p_req_id)
+                    continue
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
                 send_meta.expire_time = time.perf_counter() + (
@@ -3111,26 +3185,50 @@ class MooncakeConnectorWorker:
                 # but not reach request_finished() yet
                 # This may be already created by send_kv_to_decode()
                 # when D is sending MooncakeXferMetadata.
-                if transfer_id not in self.reqs_need_send:
+                if (
+                    transfer_id not in self.reqs_need_send
+                    and transfer_id not in self._expired_transfer_ids
+                ):
                     self.reqs_need_send[transfer_id] = SendBlockMeta(
                         p_req_id=p_req_id,
                         transfer_id=transfer_id,
                         local_block_ids=[],
                         ready=asyncio.Event(),
                     )
-        for transfer_id in metadata.reqs_not_processed:
-            # The request finished (e.g. aborted) before its KV was exported.
-            # A pull already waiting must be answered, and a later pull must
-            # fail fast; neither may create a fresh entry that waits forever.
-            # The worker may never have seen the transfer (no KeyError).
-            self._expired_transfer_ids.pop(transfer_id, None)
-            self._expired_transfer_ids[transfer_id] = time.perf_counter()
-            send_meta = self.reqs_need_send.pop(transfer_id, None)
-            if send_meta is not None:
-                assert not send_meta.ready.is_set()
-                # Wake waiters: they find the entry gone and the reply omits
-                # them, which the decoder settles as failed on FINISH.
+        # The request finished (e.g. aborted) before its KV was exported.
+        self._drop_transfers(metadata.reqs_not_processed)
+        # The scheduler dropped these exports (abort, or a clearing pause).
+        self._drop_transfers(metadata.exports_to_drop)
+
+    def _tombstone(self, transfer_id: TransferId) -> None:
+        """Make later pulls for this transfer fail on arrival instead of
+        waiting for a prefill that will not come."""
+        # Re-insert to keep the map in expiry order.
+        self._expired_transfer_ids.pop(transfer_id, None)
+        self._expired_transfer_ids[transfer_id] = time.perf_counter()
+
+    def _drop_transfers(self, transfer_ids: Iterable[TransferId]) -> None:
+        """P is done with these transfers: fail the pulls that wait for them
+        or come later, and report their exported KV finished once no send
+        reads it. The worker may never have seen a transfer (no KeyError)."""
+        for transfer_id in transfer_ids:
+            self._tombstone(transfer_id)
+            send_meta = self.reqs_need_send.get(transfer_id)
+            if send_meta is None:
+                continue
+            if not send_meta.ready.is_set():
+                # Not exported yet. Wake waiters: they find the entry gone and
+                # the reply omits them, which the decoder settles as failed on
+                # FINISH. An export that arrives later is freed at once.
+                del self.reqs_need_send[transfer_id]
                 send_meta.ready.set()
+            elif send_meta.sending == 0:
+                del self.reqs_need_send[transfer_id]
+                self.finished_sending_reqs.add(send_meta.p_req_id)
+            else:
+                # A send reads the blocks: report them when it ends.
+                send_meta.dropped = True
+                send_meta.expire_time = 0
 
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]
@@ -3144,14 +3242,16 @@ class MooncakeConnectorWorker:
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
             )
 
-        if not self.is_kv_producer and metadata.lease_heartbeats:
-            asyncio.run_coroutine_threadsafe(
-                self._send_lease_heartbeats(metadata.lease_heartbeats),
-                self.receiver_loop,
-            )
+        for heartbeats in (metadata.lease_heartbeats, metadata.withdrawals):
+            if not self.is_kv_producer and heartbeats:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_lease_heartbeats(heartbeats), self.receiver_loop
+                )
 
         if not self.is_kv_consumer and (
-            metadata.reqs_to_send or metadata.reqs_not_processed
+            metadata.reqs_to_send
+            or metadata.reqs_not_processed
+            or metadata.exports_to_drop
         ):
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop

@@ -354,6 +354,9 @@ class EngineCoreClient(ABC):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
+    async def drop_retained_kv_exports_async(self) -> None:
+        raise NotImplementedError
+
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -1415,6 +1418,9 @@ class AsyncMPClient(MPClient):
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
+
+    async def drop_retained_kv_exports_async(self) -> None:
+        await self.call_utility_all_async("drop_retained_kv_exports")
 
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False

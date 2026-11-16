@@ -1729,8 +1729,7 @@ def test_reset_running_requests_resumes_in_reporting_step():
     )
     engine_scheduler.schedule()
     # The in-flight save fails the reset, but only after the preemption.
-    with pytest.raises(RuntimeError):
-        engine_scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert not engine_scheduler.reset_prefix_cache(reset_running_requests=True)
 
     resumed = engine_scheduler.schedule()
     assert resumed.preempted_req_ids == {"req-0"}

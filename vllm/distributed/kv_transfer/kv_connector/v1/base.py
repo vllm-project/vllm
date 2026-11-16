@@ -739,6 +739,26 @@ class KVConnectorBase_V1(ABC):
         the pause waits for the connector to report them finished."""
         return False
 
+    def drop_exports(self, requests: list["Request"]) -> bool:
+        """Stop keeping these finished requests' blocks for remote readers
+        (an abort, or a pause that clears the cache). Called only when
+        `holds_blocks_only_for_remote_readers()` is True.
+
+        Return True if the connector fails the reads that have not started
+        and reports each request in `finished_sending` once no read in flight
+        uses its blocks; the scheduler frees them then. Return False (the
+        default) to let the scheduler free them now.
+        """
+        return False
+
+    def withdraw_imports(self, requests: list["Request"]) -> None:
+        """The scheduler no longer wants the remote KV of these requests:
+        they were aborted while their load was in flight, or a pause that
+        clears the cache retracted them. Tell the remote engine to stop
+        holding it. A load in flight still reports `finished_recving`
+        (possibly as failed) before its blocks are freed."""
+        return
+
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires
         the engine main loop to keep stepping (e.g. a P-side request whose

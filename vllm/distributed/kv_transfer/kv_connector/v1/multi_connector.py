@@ -711,6 +711,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def holds_blocks_only_for_remote_readers(self) -> bool:
         return all(c.holds_blocks_only_for_remote_readers() for c in self._connectors)
 
+    def drop_exports(self, requests: list["Request"]) -> bool:
+        # Wait if any child still reports the requests finished.
+        confirms = [c.drop_exports(requests) for c in self._connectors]
+        return any(confirms)
+
+    def withdraw_imports(self, requests: list["Request"]) -> None:
+        for c in self._connectors:
+            c.withdraw_imports(requests)
+
     def has_pending_push_work(self) -> bool:
         return any(c.has_pending_push_work() for c in self._connectors)
 
