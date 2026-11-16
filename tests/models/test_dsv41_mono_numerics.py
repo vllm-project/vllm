@@ -355,6 +355,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
         torch.Generator(device=device).manual_seed(2000),
         inter=2304 // tp,
     )
+    # The flag the model sets at load (mono_decode._keep_row_major_at_load): the
+    # kernels read the shared expert row-major, not preshuffled for AITER.
+    for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
+        lin.keep_row_major_weight = True
     process_weights_after_loading(moe, vc.model_config, device)
 
     def f32(*shape, s=1.0, gen=g):
