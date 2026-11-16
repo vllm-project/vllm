@@ -55,16 +55,13 @@ _BACKEND_DERIVED_BLOCK_FIELDS = (
 
 
 def update_block_size_for_backend(vllm_config: VllmConfig) -> None:
-    """Pick the KV cache block size from the attention backends, the same on
+    """Pick the KV cache block sizes from the attention backends, the same on
     every pipeline stage.
 
     `Platform.update_block_size_for_backend` derives the block size, and for
     hybrid models the Mamba block and page sizes, from the attention layers of
-    this worker. A pipeline stage that holds only Mamba layers has none, so it
-    would keep the defaults: its Mamba state blocks and pages would differ from
-    the other stages', and the scheduler would align prefill chunks to the
-    smaller block. These sizes belong to the whole model, so such a stage takes
-    them from the stages that hold attention layers.
+    this worker. A pipeline stage without attention layers takes these sizes
+    from the stages that have them.
     """
     from vllm.config.vllm import get_layers_from_vllm_config
     from vllm.distributed.parallel_state import get_pp_group
