@@ -5,8 +5,8 @@ written from the model definitions, never from a vLLM, AITER or Triton kernel.
 
 Rounding points a kernel documents are explicit calls here (`bf16_rne`,
 `to_e4m3_rne`, the E8M0 code rules), so a test reproduces them on purpose.
-`tests/kernels/models/amd/test_mono_primitives.py` proves each rounding and
-code rule bit-exact against the device helpers the kernels use.
+`tests/kernels/models/amd/test_dsv41_mono_primitives.py` proves each rounding
+and code rule bit-exact against the device helpers the kernels use.
 
 This is the formats and rounding half. The layer math and the error metrics
 arrive with the model tests that call them."""
