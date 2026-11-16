@@ -6633,12 +6633,15 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
 
 
 @pytest.mark.parametrize("lookahead", [0, 1])
-def test_mamba_zero_retention_keeps_latest_decode_boundary(lookahead):
-    """Zero retention keeps only the latest decode-crossed Mamba state, so the
-    next turn replaying the output hits there."""
+def test_mamba_sparse_retention_caches_decode_resume_state_on_free(lookahead):
+    """Sparse retention caches only the latest decode-crossed Mamba state, once
+    the request is freed, so the next turn replaying the output hits there."""
     block_size = 16
+    kv_cache_config = _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"])
+    # Lookahead hashes come with MTP, which also reserves speculative blocks.
+    _replace_group(kv_cache_config, 1, num_speculative_blocks=lookahead)
     manager = make_kv_cache_manager(
-        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
+        kv_cache_config,
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
@@ -6651,24 +6654,33 @@ def test_mamba_zero_retention_keeps_latest_decode_boundary(lookahead):
         "0", prompt, block_size, sha256, num_hash_lookahead_tokens=lookahead
     )
     for chunk_end in (16, 32, 48, 52):
-        blocks = manager.allocate_slots(req0, chunk_end - req0.num_computed_tokens)
+        blocks = manager.allocate_slots(
+            req0,
+            chunk_end - req0.num_computed_tokens,
+            num_lookahead_tokens=lookahead,
+        )
         assert blocks is not None
         req0.num_computed_tokens = chunk_end
     # Decode crosses boundaries 64, 80 and 96.
     for token in range(100, 156):
         req0.append_output_token_ids(token)
-        assert manager.allocate_slots(req0, 1) is not None
+        blocks = manager.allocate_slots(req0, 1, num_lookahead_tokens=lookahead)
+        assert blocks is not None
         req0.num_computed_tokens += 1
 
-    # Block 2: replay boundary (51 -> 48); block 5: decode boundary 96.
     pool = manager.block_pool
-    for i in range(len(req0.block_hashes)):
-        cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
-        if i in (2, 5):
-            assert cached is not None, f"mamba hash {i} should be cached"
-        else:
-            assert cached is None, f"mamba hash {i} should not be cached"
+
+    def cached_mamba_blocks() -> set[int]:
+        return {
+            i
+            for i, block_hash in enumerate(req0.block_hashes)
+            if pool.get_cached_block(block_hash, kv_cache_group_ids=[1])
+        }
+
+    # Block 2 holds the replay boundary (51 -> 48); block 5 the state at 96.
+    assert cached_mamba_blocks() == {2}
     manager.free(req0)
+    assert cached_mamba_blocks() == {2, 5}
 
     req1 = make_request(
         "1",
