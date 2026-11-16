@@ -196,9 +196,11 @@ direct_register_custom_op(
 )
 
 
-def _quantized_activation(
+def act_nvfp4_quant(
     x: torch.Tensor, linear: LinearBase, act: str
 ) -> QuantizedActivation:
+    """Fuse ReLU2 or exact GELU, selected by act ("relu2" or "gelu"), and block16
+    NVFP4 with 128x4 swizzled scales."""
     from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
     from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 
@@ -212,15 +214,3 @@ def _quantized_activation(
         orig_shape=x.shape,
         quant_key=kNvfp4Dynamic,
     )
-
-
-def relu_squared_nvfp4_quant(
-    x: torch.Tensor, linear: LinearBase
-) -> QuantizedActivation:
-    """Fuse BF16 ReLU2 and block16 NVFP4 with 128x4 swizzled scales."""
-    return _quantized_activation(x, linear, "relu2")
-
-
-def gelu_nvfp4_quant(x: torch.Tensor, linear: LinearBase) -> QuantizedActivation:
-    """Fuse exact GELU and block16 NVFP4 with 128x4 swizzled scales."""
-    return _quantized_activation(x, linear, "gelu")

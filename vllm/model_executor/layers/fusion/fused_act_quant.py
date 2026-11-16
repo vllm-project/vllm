@@ -14,6 +14,7 @@ pass cannot fuse the same boundary again.
 """
 
 from collections.abc import Callable
+from functools import partial
 from types import FunctionType, MethodType
 
 import torch
@@ -25,8 +26,7 @@ from vllm.model_executor.layers.activation import (
 )
 from vllm.model_executor.layers.fusion.act_nvfp4_quant import (
     _act_nvfp4_max_rows,
-    gelu_nvfp4_quant,
-    relu_squared_nvfp4_quant,
+    act_nvfp4_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -197,11 +197,16 @@ def _uses_native_relu_squared(act_fn: torch.nn.Module) -> bool:
     )
 
 
-def _act_nvfp4_quant_input_supported(x: torch.Tensor, linear: LinearBase) -> bool:
-    """Return whether the act + NVFP4 Triton producers can consume this input."""
+def _act_nvfp4_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    """Return whether the Triton act + NVFP4 producer can consume this input."""
     scale = getattr(linear, "input_global_scale_inv", None)
     return (
         x.is_cuda
+        and x.dtype in (torch.float16, torch.bfloat16)
         and x.ndim == 2
         and x.shape[-1] > 0
         and x.shape[-1] % 16 == 0
@@ -222,18 +227,7 @@ def _relu_squared_nvfp4_quant_supported(
     return (
         # CUDA ReLU2 suppresses NaNs; this producer matches native semantics.
         _uses_native_relu_squared(act_fn)
-        and x.dtype == torch.bfloat16
-        and _act_nvfp4_quant_input_supported(x, linear)
-    )
-
-
-def _gelu_nvfp4_quant_supported(
-    act_fn: torch.nn.Module,
-    x: torch.Tensor,
-    linear: LinearBase,
-) -> bool:
-    return x.dtype in (torch.float16, torch.bfloat16) and (
-        _act_nvfp4_quant_input_supported(x, linear)
+        and _act_nvfp4_quant_supported(act_fn, x, linear)
     )
 
 
@@ -259,19 +253,14 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
 
-if current_platform.is_cuda() and current_platform.is_device_capability_family(100):
+# The Triton act + NVFP4 producer uses Blackwell FP4/FP8 conversion PTX.
+if current_platform.is_cuda() and current_platform.has_device_capability(100):
     _RELU2_NVFP4_KEY = (ReLUSquaredActivation, kNvfp4Dynamic)
-    _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = relu_squared_nvfp4_quant
+    _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = partial(act_nvfp4_quant, act="relu2")
     _FUSED_ACT_QUANT_SUPPORT[_RELU2_NVFP4_KEY] = _relu_squared_nvfp4_quant_supported
-
-# Same Triton producer as ReLU2: tested on SM10x in CI and validated on SM12x.
-if current_platform.is_cuda() and (
-    current_platform.is_device_capability_family(100)
-    or current_platform.is_device_capability_family(120)
-):
     _GELU_NVFP4_KEY = (GELU, kNvfp4Dynamic)
-    _FUSED_ACT_QUANT[_GELU_NVFP4_KEY] = gelu_nvfp4_quant
-    _FUSED_ACT_QUANT_SUPPORT[_GELU_NVFP4_KEY] = _gelu_nvfp4_quant_supported
+    _FUSED_ACT_QUANT[_GELU_NVFP4_KEY] = partial(act_nvfp4_quant, act="gelu")
+    _FUSED_ACT_QUANT_SUPPORT[_GELU_NVFP4_KEY] = _act_nvfp4_quant_supported
 
 
 def maybe_fused_act_quant(

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -139,24 +141,26 @@ def native_vllm_config():
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="Act + NVFP4 fusion is tested on SM10x",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Act + NVFP4 fusion requires SM100+",
 )
 @pytest.mark.parametrize(
-    "act_cls, dtype",
+    "make_act, dtype",
     [
-        (ReLUSquaredActivation, torch.bfloat16),
-        (GELU, torch.float16),
-        (GELU, torch.bfloat16),
+        pytest.param(
+            partial(ReLUSquaredActivation, compile_native=False),
+            torch.bfloat16,
+            id="relu2-bf16",
+        ),
+        pytest.param(GELU, torch.float16, id="gelu-fp16"),
+        pytest.param(GELU, torch.bfloat16, id="gelu-bf16"),
     ],
 )
 @pytest.mark.parametrize("shape", [(1, 16), (17, 80), (129, 1344), (256, 5376)])
 @pytest.mark.parametrize("scale_value", [0.0009765625, 17.125])
 @torch.inference_mode()
 def test_act_nvfp4_matches_unfused(
-    native_vllm_config, act_cls, dtype, shape, scale_value
+    native_vllm_config, make_act, dtype, shape, scale_value
 ):
     """Match unfused act + NVFP4 bitwise and zero every padded scale."""
     from tests.kernels.quantization.test_nvfp4_quant import recover_swizzled_scales
@@ -166,11 +170,7 @@ def test_act_nvfp4_matches_unfused(
     x[::2] = -x[::2].abs()
     scale = torch.tensor(scale_value, dtype=torch.float32, device=x.device)
     linear = MockLinearNvfp4(scale)
-    act = (
-        ReLUSquaredActivation(compile_native=False)
-        if act_cls is ReLUSquaredActivation
-        else act_cls()
-    )
+    act = make_act()
     compiled_act = torch.compile(act.forward_native, fullgraph=True)
     expected = ops.scaled_fp4_quant(compiled_act(x), scale)
     before = x.clone()
@@ -189,10 +189,8 @@ def test_act_nvfp4_matches_unfused(
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Act + NVFP4 fusion requires SM100+",
 )
 @pytest.mark.parametrize("width", [0, 15, 17, 33])
 @torch.inference_mode()
@@ -212,10 +210,8 @@ class MockLinearRequiresUnquantized(MockLinearFp8Static):
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Act + NVFP4 fusion requires SM100+",
 )
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), 3.0e20, 100.0])
 @pytest.mark.parametrize("scale_value", [2.0**-30, 1.0, 64.0, 1.0e20])
@@ -235,10 +231,8 @@ def test_relu2_nvfp4_nonfinite_and_saturation(native_vllm_config, value, scale_v
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Act + NVFP4 fusion requires SM100+",
 )
 @pytest.mark.parametrize("mode", ["native", "compiled_native", "cuda"])
 @torch.inference_mode()
@@ -406,10 +400,8 @@ def test_maybe_fused_act_quant_preserves_required_unquantized_input(
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Act + NVFP4 fusion requires SM100+",
 )
 @pytest.mark.parametrize("width", [16, 5376])
 def test_relu2_nvfp4_oversized_dispatch_falls_back(
@@ -447,10 +439,8 @@ def test_relu2_nvfp4_oversized_dispatch_falls_back(
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Act + NVFP4 fusion requires SM100+",
 )
 @pytest.mark.parametrize("width", [16, 48, 80, 1344, 5376])
 @torch.inference_mode()
