@@ -660,7 +660,7 @@ async fn chat_completion_chunk_stream(
                         enable_per_request_metrics,
                         timestamps,
                         final_usage.output_token_count,
-                        spec_decode_metrics,
+                        spec_decode_metrics.map(|value| *value),
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
@@ -1272,12 +1272,12 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
-                spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,
                     histogram: vec![0, 1, 1, 0],
                     num_draft_tokens: 6,
                     ..Default::default()
-                }),
+                })),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -430,7 +430,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         DeepEPLLAll2AllManager._last_mask[rank] = int(masked)
 
 
-@dataclass
+@dataclass(slots=True)
 class _NixlEPBufferState:
     buffer: Any
     max_num_ep_ranks: int
@@ -574,7 +574,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             self._unmask_connected_ranks(target_ep_size)
 
     @contextmanager
-    def mask_remote_ranks(self) -> Iterator[None]:
+    def mask_remote_ranks(self) -> Generator[None]:
         peers = [rank for rank in range(self.world_size) if rank != self.rank]
         assert NixlEPAll2AllManager._buffer is not None
         buffer = NixlEPAll2AllManager._buffer.buffer
@@ -740,9 +740,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             top_k=top_k,
             max_tokens_per_rank=max_num_tokens,
             hidden_size=hidden_size,
-            # Received rows past a source rank's token count keep expert id
-            # num_experts, which no rank owns.
-            invalid_expert_id=num_experts,
+            invalid_expert_id=-1,
         )
         config = NVLinkTwoSidedConfig(comm_backend=CustomCommunicator(self.cpu_group))
         # Bootstrap metadata must stay on the CPU even when model layers are
@@ -1083,7 +1081,7 @@ def _mori_epv2_arena_bytes(cfg) -> int:
 _MORI_EPV2_WINDOW_ALIGN = 4 << 30
 
 
-@dataclass
+@dataclass(slots=True)
 class _MoriEPv2Window:
     comm: Any
     free_bytes: int
