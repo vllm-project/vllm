@@ -126,8 +126,8 @@ class ServingTokenization(BaseServing):
         if request.return_token_strs:
             tokenizer = self.renderer.get_tokenizer()
             token_strs = [
-              t.decode("utf-8", errors="replace") if isinstance(t, bytes) else t
-              for t in tokenizer.convert_ids_to_tokens(input_ids)
+                t.decode("utf-8", errors="replace") if isinstance(t, bytes) else t
+                for t in tokenizer.convert_ids_to_tokens(input_ids)
             ]
 
         return TokenizeResponse(
