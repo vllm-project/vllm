@@ -6,6 +6,7 @@ import asyncio
 import copy
 import inspect
 import itertools
+import json
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -619,6 +620,50 @@ def _detect_developer_role_support(chat_template: str) -> bool:
     return '"developer"' in chat_template or "'developer'" in chat_template
 
 
+@lru_cache(maxsize=32)
+def _detect_tool_reference_support(chat_template: str) -> bool:
+    return "tool_reference" in chat_template
+
+
+def _expand_tool_references(
+    conversation: list[ConversationMessage],
+    tools: list[dict[str, Any]] | None,
+) -> list[ConversationMessage]:
+    """Render `tool_reference` parts as the referenced tool's definition, so
+    templates that skip unknown part types still show the loaded schema."""
+    definitions: dict[str, str] = {}
+    for tool in tools or []:
+        fn = tool.get("function", tool)
+        if "name" not in fn:
+            continue
+        definitions[fn["name"]] = json.dumps(
+            {k: fn[k] for k in ("name", "description", "parameters") if k in fn}
+        )
+
+    expanded: list[ConversationMessage] = []
+    for msg in conversation:
+        content = msg.get("content")
+        if not isinstance(content, list) or not any(
+            isinstance(part, dict) and part.get("type") == "tool_reference"
+            for part in content
+        ):
+            expanded.append(msg)
+            continue
+        parts: list[Any] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "tool_reference":
+                name = part.get("name", "")
+                part = {"type": "text", "text": definitions.get(name, name)}
+            parts.append(part)
+        new_msg = dict(msg)
+        if all(isinstance(p, dict) and p.get("type") == "text" for p in parts):
+            new_msg["content"] = "\n".join(p.get("text", "") for p in parts)
+        else:
+            new_msg["content"] = parts
+        expanded.append(new_msg)  # type: ignore[arg-type]
+    return expanded
+
+
 def _convert_developer_to_system(
     conversation: list[ConversationMessage],
 ) -> list[ConversationMessage]:
@@ -914,6 +959,8 @@ def safe_apply_chat_template(
             "Chat template does not support the 'developer' message role. "
             "Converting developer messages to 'system' role.",
         )
+    if not _detect_tool_reference_support(chat_template):
+        conversation = _expand_tool_references(conversation, tools)
     resolved_kwargs = resolve_chat_template_kwargs(
         tokenizer=tokenizer,
         chat_template=chat_template,
