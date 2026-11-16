@@ -139,8 +139,19 @@ def merge_attn_states(
             return headdim % 4 == 0
         return headdim % 8 == 0
 
+    # CDNA3 and newer (gfx942, gfx950, gfx1250). gfx90a is CDNA2 and
+    # stays on the Triton merge.
+    def supported_platform() -> bool:
+        if current_platform.is_cuda():
+            return True
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import get_cdna_version
+
+            return get_cdna_version() >= 3
+        return False
+
     if (
-        current_platform.is_cuda()
+        supported_platform()
         and supported_dtypes(prefix_output)
         and supported_headdim(prefix_output)
     ):

@@ -32,8 +32,8 @@ class RequestState:
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
         # To save GPU memory, we use UVA instead of GPU by default, but
-        # ngram_gpu benefits from dense device residency because it scans
-        # active rows repeatedly during proposal.
+        # ngram_gpu and suffix decoding benefit from dense device residency because
+        # they scan active rows repeatedly during proposal.
         self.all_token_ids = StagedWriteTensor(
             (self.max_num_reqs, self.max_model_len),
             dtype=torch.int32,
@@ -114,7 +114,8 @@ class RequestState:
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
-        self.draft_tokens[req_idx].zero_()
+        if self.num_speculative_steps > 0:
+            self.draft_tokens[req_idx].zero_()
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()

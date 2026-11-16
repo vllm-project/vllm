@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import Field, model_validator
-from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -17,6 +16,15 @@ WatermarkPRFName = Literal["philox"]
 WatermarkContextScope = Literal["none", "single_turn", "all"]
 
 _MIN_RECOMMENDED_DEDUP_HISTORY = 1024
+
+
+def warn_watermarking_override() -> None:
+    logger.warning_once(
+        "Watermark enforcement is enabled; overriding watermarking=False at "
+        "request admission. This does not guarantee that the decoding mode "
+        "can apply a watermark.",
+        scope="global",
+    )
 
 
 def derive_watermark_key(key: int, domain: bytes) -> int:
@@ -51,6 +59,8 @@ class WatermarkConfig:
     """Pseudorandom function used by the watermarking algorithm."""
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
+    enforce: bool = False
+    """Override request-level opt-outs; unsupported decoding remains unwatermarked."""
 
     @property
     def supports_speculative_decoding(self) -> bool:

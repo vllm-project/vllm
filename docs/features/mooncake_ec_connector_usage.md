@@ -52,7 +52,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --port 19534 \
   --gpu-memory-utilization 0.35 \
   --enable-request-id-headers \
-  --no-enable-prefix-caching \
+  --disable-prefix-caching \
   --max-num-batched-tokens 16384 \
   --allowed-local-media-path /path/to/media \
   --ec-transfer-config '{
@@ -69,10 +69,9 @@ CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
 ```bash
 CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --port 19537 \
-  --gpu-memory-utilization 0.75 \
   --enable-mm-embeds \
   --enable-request-id-headers \
-  --no-enable-prefix-caching \
+  --disable-prefix-caching \
   --allowed-local-media-path /path/to/media \
   --ec-transfer-config '{
     "ec_connector": "ECMooncakeConnector",

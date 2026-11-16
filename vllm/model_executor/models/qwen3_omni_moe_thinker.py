@@ -39,6 +39,7 @@ from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
 )
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
+    Qwen3OmniMoeProcessorKwargs,
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
@@ -54,6 +55,10 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -83,6 +88,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.utils import copy_mm_embedding_modality
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -104,6 +110,7 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalDataParser,
     Qwen2_5OmniThinkerMultiModalProcessor,
+    Qwen2_5OmniThinkerProcessingInfo,
     _get_feature_tensor,
     check_interleaved_audio_video,
     merge_interleaved_embeddings,
@@ -361,7 +368,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
+        # Transformers-format Qwen3-ASR checkpoints do not set this
+        self.max_source_positions = getattr(config, "max_source_positions", 1500)
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize
@@ -763,6 +771,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -783,6 +792,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             in_channels=vision_config.in_channels,
             hidden_size=self.hidden_size,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         # vit pos embedding, TODO: spatial_patch_size vs patch_size
         if self.apply_vit_abs_pos_embed:
@@ -970,7 +980,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.input_norm(x.to(device=self.device), self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         if self.apply_vit_abs_pos_embed:
@@ -1158,16 +1168,9 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3OmniMoeThinkerMultiModalDataParser(Qwen2_5OmniThinkerMultiModalDataParser):
-    # Keep the existing raw-media fallback for vision inputs.
-    embedding_fields = {
-        "audio": Qwen2_5OmniThinkerMultiModalDataParser.embedding_fields["audio"],
-    }
+class Qwen3OmniMoeThinkerProcessingInfo(Qwen2_5OmniThinkerProcessingInfo):
+    processor_kwargs_cls = Qwen3OmniMoeProcessorKwargs
 
-
-class Qwen3OmniMoeThinkerProcessingInfo(
-    Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
-):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3OmniMoeConfig).thinker_config
 
@@ -1191,7 +1194,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         return feature_extractor
 
     def get_data_parser(self):
-        return Qwen3OmniMoeThinkerMultiModalDataParser(
+        return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=self.get_feature_extractor().sampling_rate,
             target_channels=self.get_target_channels(),
@@ -1239,6 +1242,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
 Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder[
     Qwen3OmniMoeThinkerProcessingInfo
 ]
+
 
 _I = TypeVar("_I", bound=BaseProcessingInfo, default=Qwen3OmniMoeThinkerProcessingInfo)
 
@@ -1498,8 +1502,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
             audio_in_video_item_idx += 1
 
+            # Match the fps the processor used, as HF and the mrope positions do.
+            processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
+            if isinstance(processed_second_per_grid_ts, torch.Tensor):
+                video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
+            elif second_per_grid_ts:
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 2.0
@@ -1621,6 +1629,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsTranscription,
 ):
     is_3d_moe_weight: ClassVar[bool] = True
+    supports_mm_device_do_normalize = True
     supports_tower_connector_lora: ClassVar[bool] = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1686,6 +1695,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1904,7 +1914,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     embeddings_main, embeddings_multiscale = torch.split(
                         embeddings, [visual_dim, multi_dim], dim=-1
                     )
-                    multimodal_embeddings[index] = embeddings_main
+                    multimodal_embeddings[index] = copy_mm_embedding_modality(
+                        embeddings, embeddings_main
+                    )
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
                     if not is_interleaved:
                         current_positions = mm_positions[

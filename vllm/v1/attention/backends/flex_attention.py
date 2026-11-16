@@ -31,7 +31,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
-    is_quantized_kv_cache,
     is_torch_equal_or_newer,
 )
 from vllm.v1.attention.backend import (
@@ -43,10 +42,11 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import get_attn_type_from_layers
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheLayout,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -144,10 +144,6 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
         return FlexAttentionMetadataBuilder
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -375,12 +371,6 @@ class FlexAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
-
     # Block info
     total_cache_tokens: int
     block_size: int
@@ -581,7 +571,7 @@ class FlexAttentionMetadata:
         """Creates the Reference Sliding Window Attention (R-SWA) mask_mod.
 
         R-SWA keeps the whole prefix (image + prompt tokens, i.e. logical index
-        ``< prefix_len``) globally visible while generated tokens additionally
+        `< prefix_len`) globally visible while generated tokens additionally
         attend a fixed sliding window of recent tokens. This term is combined
         with the base causal mask via logical AND, so it only ever *removes*
         far-away generated tokens that fall outside the window and outside the
@@ -831,11 +821,6 @@ class FlexAttentionMetadata:
         )
 
     def __post_init__(self):
-        assert self.use_cascade is False, "Not implemented yet."
-        assert self.common_prefix_len == 0, "Not implemented yet."
-        assert self.cu_prefix_query_lens is None, "Not implemented yet."
-        assert self.prefix_kv_lens is None, "Not implemented yet."
-        assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
         self.doc_ids = _offsets_to_doc_ids_tensor(
             self.query_start_loc_cpu, self.query_start_loc.device
@@ -871,7 +856,18 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
-        uses_paged_kv = not isinstance(kv_cache_spec, EncoderOnlyAttentionSpec)
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        self.uses_paged_kv = (
+            get_attn_type_from_layers(vllm_config, layer_names)
+            != AttentionType.ENCODER_ONLY
+        )
+        uses_paged_kv = self.uses_paged_kv
+        sliding_windows = {
+            getattr(layer.impl, "sliding_window", None) for layer in layers.values()
+        }
+        self.sliding_window = (
+            sliding_windows.pop() if len(sliding_windows) == 1 else None
+        )
         self.direct_build: bool = supports_small_blocks
 
         self.q_block_size, self.kv_block_size = self._get_block_sizes(
@@ -1029,16 +1025,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         slot_mapping = common_attn_metadata.slot_mapping
         num_blocks_per_seq = cdiv(seq_lens, self.block_size)
 
-        use_cascade = common_prefix_len > 0
-        cu_prefix_query_lens = None
-        prefix_kv_lens = None
-        suffix_kv_lens = None
-        if use_cascade:
-            raise NotImplementedError(
-                "Cascade prefix attention is not yet implemented "
-                "for FlexAttention backend"
-            )
-
         block_size = self.kv_cache_spec.block_size
         max_possible_seq_len = self.model_config.max_model_len
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -1101,7 +1087,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             copy_to_persistent(self.persistent_rswa_prefix_lens, rswa_prefix_lens)
             rswa_prefix_lens = self.persistent_rswa_prefix_lens
 
-        uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
+        uses_paged_kv = self.uses_paged_kv
         logical_mask_mod = (
             bidirectional_mask_mod
             if uses_paged_kv and not common_attn_metadata.causal
@@ -1112,7 +1098,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         if self._uses_full_cudagraphs():
             if self.custom_logical_mask_mod is not None:
                 logical_mask_mod = self.custom_logical_mask_mod
-            sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+            sliding_window = self.sliding_window
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
@@ -1128,11 +1114,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             seq_lens=self.persistent_seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
             block_size=block_size,
             max_possible_sequence_length=max_possible_seq_len,
             num_reqs=num_reqs,
@@ -1165,9 +1146,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 out.block_mask = out.build_block_mask()
 
         return out
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
 
 class FlexAttentionImpl(AttentionImpl):

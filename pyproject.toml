@@ -7,7 +7,7 @@ requires = [
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
     "setuptools-rust>=1.9.0",
-    "torch == 2.13.0",
+    "torch == 2.14.0",
     "wheel",
     "jinja2",
 ]
@@ -21,7 +21,6 @@ license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -32,7 +31,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -59,6 +58,8 @@ include = ["vllm*"]
 "!vllm/**" = ["INP"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
+# packages re-export their submodules
+"vllm/**/__init__.py" = ["F403"]
 "vllm/_version.py" = ["ALL"]
 # test args are mostly pytest fixtures, which don't benefit from descriptions
 "tests/**" = ["D417"]
@@ -93,16 +94,10 @@ ignore = [
     "D205", "D209", "D301", "D400", "D401", "D404", "D415",
     # incompatible pydocstyle pairs; pin the half `ruff` already picks
     "D203", "D213",
-    # star imports
-    "F405", "F403",
     # lambda expression assignment
     "E731",
     # zip without `strict=`
     "B905",
-    # Loop control variable not used within loop body
-    "B007",
-    # f-string format
-    "UP032",
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -198,9 +193,11 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
     "docs/governance/process.md", "docs/community/reviewers.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
     "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
+    "tests/entrypoints/scale_out/token_in_token_out/test_protocol.py",
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*", "rust/src/parser/**",
     "rust/src/text/src/output/decoded.rs",
-    "rust/src/tokenizer/src/incremental.rs"]
+    "rust/src/tokenizer/src/incremental.rs",
+    "recipes/models/*"]
 ignore-hidden = false
 
 [tool.typos.default]
@@ -223,8 +220,18 @@ FoPE = "FoPE"
 k_ot = "k_ot"
 view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
+# Muse Spark K3 monokernel: threads an expert
+TPE = "TPE"
+stride_bse = "stride_bse"
 
 [tool.typos.default.extend-words]
+# Muse Spark monokernel: shuffled-weight / scale tags, o_proj flag region
+shs = "shs"
+shw = "shw"
+opf = "opf"
+certifi = "certifi"
+MoNE = "MoNE"
+mone = "mone"
 Hel = "Hel"
 wether = "wether"
 iy = "iy"
@@ -248,10 +255,15 @@ pard = "pard"
 AKS = "AKS"
 ba = "ba"
 fo = "fo"
+ot = "ot"
 nd = "nd"
 eles = "eles"
 datas = "datas"
 ser = "ser"
+# numpy flags.writeable
+writeable = "writeable"
+# HF CLIP weight name
+layrnorm = "layrnorm"
 ure = "ure"
 VALU = "VALU"
 # Walsh-Hadamard Transform

@@ -269,11 +269,11 @@ def silu_mul_quant_fp8_packed_triton(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse activation and FP8 quantization, optionally skipping expert padding.
 
-    ``expert_ends`` uses DeepGEMM's prefix-sum layout: each entry is the
+    `expert_ends` uses DeepGEMM's prefix-sum layout: each entry is the
     exclusive end of an expert's live rows, including earlier alignment gaps.
-    An expert starts at the preceding end rounded up to ``expert_alignment``.
+    An expert starts at the preceding end rounded up to `expert_alignment`.
     Padding outputs are left unwritten and must not be consumed as live rows.
-    Without ``expert_ends``, the original dense launch configuration is used
+    Without `expert_ends`, the original dense launch configuration is used
     and the metadata loads are compiled out.
     """
     assert input.dim() == 2
@@ -482,7 +482,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     expert_ends: torch.Tensor | None = None,
     expert_alignment: int = 0,
 ):
-    """Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
+    """Gated activation + block-fp8 quant. `alpha`/`beta` select the gate
     (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
 
     Optional expert endpoints follow DeepGEMM's prefix-sum layout. Padding
@@ -1041,7 +1041,10 @@ def w8a8_triton_block_scaled_mm(
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+    if envs.VLLM_BATCH_INVARIANT:
+        configs = None  # use the default config
+    else:
+        configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
     if configs:
         # Get the optimal config if there is one
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
@@ -1454,7 +1457,7 @@ def process_fp8_weight_tensor_strategy(
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Requantize fused shards to one scale and return ``(K, N)`` weight."""
+    """Requantize fused shards to one scale and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
@@ -1481,7 +1484,7 @@ def process_fp8_weight_channel_strategy(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Normalize FNUZ if needed and return ``(K, N)`` weight."""
+    """Normalize FNUZ if needed and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1498,7 +1501,7 @@ def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Normalize FNUZ if needed and return ``(N, K)`` weight (no transpose)."""
+    """Normalize FNUZ if needed and return `(N, K)` weight (no transpose)."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )

@@ -90,6 +90,55 @@ class TestPackedBroadcastProducer:
         assert mock_group.broadcast_count == 0
 
 
+# Long enough (~1 s on current GPUs) that the host always gets through the
+# checked window first; the tests assert that it did.
+SLEEP_CYCLES = 2_000_000_000
+
+
+def roundtrip(params: list[tuple[str, torch.Tensor]], buffer_size_bytes: int):
+    producer_group = MockCommunicationGroup()
+    packed_nccl_broadcast_producer(
+        iterator=iter(params),
+        group=producer_group,
+        src=0,
+        post_iter_func=lambda x: x[1],
+        buffer_size_bytes=buffer_size_bytes,
+    )
+    dst = {name: torch.empty_like(t) for name, t in params}
+
+    def consume(sleep: bool) -> bool:
+        torch.accelerator.synchronize()
+        if sleep:
+            torch.cuda._sleep(SLEEP_CYCLES)
+        for t in dst.values():
+            t.zero_()
+        filled = torch.Event()
+        filled.record()
+        fill_pending_at_load: list[bool] = []
+
+        def post_unpack_func(tensor_list):
+            fill_pending_at_load.append(not filled.query())
+            for name, tensor in tensor_list:
+                target = dst[name]
+                assert (tensor.shape, tensor.dtype) == (target.shape, target.dtype)
+                target.copy_(tensor)
+
+        packed_nccl_broadcast_consumer(
+            iterator=iter(create_state_dict_info(params).items()),
+            group=MockConsumerCommunicationGroup(producer_group.broadcasted_tensors),
+            src=0,
+            post_unpack_func=post_unpack_func,
+            buffer_size_bytes=buffer_size_bytes,
+        )
+        torch.accelerator.synchronize()
+        for name, t in params:
+            assert torch.equal(dst[name], t), name
+        return fill_pending_at_load[0]
+
+    consume(sleep=False)
+    assert consume(sleep=True), "the fill finished before the first load"
+
+
 # --- Integration Tests: Producer-Consumer Roundtrip ---
 
 
@@ -101,44 +150,7 @@ class TestPackedBroadcastRoundtrip:
     def test_roundtrip_different_dtypes(self, dtype):
         """Test roundtrip with different data types."""
         params = create_mock_model_params(num_layers=2, dtype=dtype)
-        params_cuda = [(name, tensor.cuda()) for name, tensor in params]
-
-        buffer_size = 1000
-        producer_group = MockCommunicationGroup()
-
-        packed_nccl_broadcast_producer(
-            iterator=iter(params_cuda),
-            group=producer_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=buffer_size,
-        )
-
-        consumer_group = MockConsumerCommunicationGroup(
-            producer_group.broadcasted_tensors
-        )
-
-        state_dict_info = create_state_dict_info(params_cuda)
-        unpacked_tensors = {}
-
-        def post_unpack_func(tensor_list):
-            for name, tensor in tensor_list:
-                unpacked_tensors[name] = tensor.clone()
-
-        packed_nccl_broadcast_consumer(
-            iterator=iter(state_dict_info.items()),
-            group=consumer_group,
-            src=0,
-            post_unpack_func=post_unpack_func,
-            buffer_size_bytes=buffer_size,
-        )
-
-        # Verify roundtrip preserves data
-        for name, original_tensor in params_cuda:
-            assert name in unpacked_tensors
-            unpacked = unpacked_tensors[name]
-            assert unpacked.dtype == dtype
-            assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
+        roundtrip([(n, t.cuda()) for n, t in params], buffer_size_bytes=1000)
 
     def test_roundtrip_mixed_dtypes(self):
         """Test roundtrip with mixed data types."""
@@ -148,87 +160,13 @@ class TestPackedBroadcastRoundtrip:
             ("layer1.bias", torch.randn(10, dtype=torch.float16).cuda()),
             ("layer2.weight", torch.randn(20, 30, dtype=torch.bfloat16).cuda()),
         ]
-
-        buffer_size = 500
-        producer_group = MockCommunicationGroup()
-
-        packed_nccl_broadcast_producer(
-            iterator=iter(params),
-            group=producer_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=buffer_size,
-        )
-
-        consumer_group = MockConsumerCommunicationGroup(
-            producer_group.broadcasted_tensors
-        )
-
-        state_dict_info = create_state_dict_info(params)
-        unpacked_tensors = {}
-
-        def post_unpack_func(tensor_list):
-            for name, tensor in tensor_list:
-                unpacked_tensors[name] = tensor.clone()
-
-        packed_nccl_broadcast_consumer(
-            iterator=iter(state_dict_info.items()),
-            group=consumer_group,
-            src=0,
-            post_unpack_func=post_unpack_func,
-            buffer_size_bytes=buffer_size,
-        )
-
-        # Verify all params roundtrip correctly with correct dtypes
-        for name, original_tensor in params:
-            assert name in unpacked_tensors
-            unpacked = unpacked_tensors[name]
-            assert unpacked.shape == original_tensor.shape
-            assert unpacked.dtype == original_tensor.dtype
-            assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
+        roundtrip(params, buffer_size_bytes=500)
 
     @pytest.mark.parametrize("target_size", [100, 100000])
     def test_roundtrip_different_batch_sizes(self, target_size):
         """Test roundtrip with different target batch sizes."""
         params = create_mock_model_params(num_layers=5)
-        params_cuda = [(name, tensor.cuda()) for name, tensor in params]
-
-        producer_group = MockCommunicationGroup()
-
-        packed_nccl_broadcast_producer(
-            iterator=iter(params_cuda),
-            group=producer_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=target_size,
-        )
-
-        consumer_group = MockConsumerCommunicationGroup(
-            producer_group.broadcasted_tensors
-        )
-
-        state_dict_info = create_state_dict_info(params_cuda)
-        unpacked_tensors = {}
-
-        def post_unpack_func(tensor_list):
-            for name, tensor in tensor_list:
-                unpacked_tensors[name] = tensor.clone()
-
-        packed_nccl_broadcast_consumer(
-            iterator=iter(state_dict_info.items()),
-            group=consumer_group,
-            src=0,
-            post_unpack_func=post_unpack_func,
-            buffer_size_bytes=target_size,
-        )
-
-        # Verify all params roundtrip correctly
-        assert len(unpacked_tensors) == len(params)
-        for name, original_tensor in params_cuda:
-            assert name in unpacked_tensors
-            assert torch.allclose(
-                unpacked_tensors[name], original_tensor, rtol=1e-5, atol=1e-7
-            )
+        roundtrip([(n, t.cuda()) for n, t in params], buffer_size_bytes=target_size)
 
     def test_roundtrip_non_contiguous_tensors(self):
         """Test roundtrip with non-contiguous tensors from the trainer."""
@@ -250,43 +188,163 @@ class TestPackedBroadcastRoundtrip:
         for name, tensor in params:
             assert not tensor.is_contiguous(), f"{name} should be non-contiguous"
 
-        buffer_size = 500
-        producer_group = MockCommunicationGroup()
+        roundtrip(params, buffer_size_bytes=500)
 
-        packed_nccl_broadcast_producer(
-            iterator=iter(params),
-            group=producer_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=buffer_size,
+
+class DelayedFirstBroadcastGroup:
+    """Fills each pack with its sentinel on the current (slot) stream; the
+    first pack is zeroed and its sentinel lands only after a GPU sleep, at
+    `first_received`."""
+
+    def __init__(self, sentinels: list[float]):
+        self.sentinels = sentinels
+        self.first_received = torch.Event()
+        self.calls = 0
+
+    def broadcast(self, tensor, src):
+        dst = tensor.view(torch.float32)
+        if self.calls == 0:
+            dst.zero_()
+            torch.cuda._sleep(SLEEP_CYCLES)
+        dst.fill_(self.sentinels[self.calls])
+        if self.calls == 0:
+            self.first_received.record()
+        self.calls += 1
+
+
+class SentinelBroadcastGroup:
+    """Immediately fills each pack with its own sentinel, recording each pack's
+    address and whether `pending` (once set) was still incomplete."""
+
+    def __init__(self, sentinels: list[float]):
+        self.sentinels = sentinels
+        self.pending: torch.Event | None = None
+        self.ptrs: list[int] = []
+        self.pending_at_receive: list[bool] = []
+        self.calls = 0
+
+    def broadcast(self, tensor, src):
+        tensor.view(torch.float32).fill_(self.sentinels[self.calls])
+        self.ptrs.append(tensor.data_ptr())
+        self.pending_at_receive.append(
+            self.pending is not None and not self.pending.query()
         )
+        self.calls += 1
 
-        consumer_group = MockConsumerCommunicationGroup(
-            producer_group.broadcasted_tensors
-        )
 
-        state_dict_info = create_state_dict_info(params)
-        unpacked_tensors = {}
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestPackedBroadcastDeferredConsumer:
+    """Consumers that keep unpacked tensors and read them from a later pack's
+    callback, as layerwise reload does, on a different slot stream."""
+
+    def test_deferred_read_is_ordered_after_receive(self):
+        numel = 4
+        state_dict_info = [
+            ("a", ([numel], torch.float32)),
+            ("b", ([numel], torch.float32)),
+        ]
+        # A fresh sentinel per run keeps a stale allocator block that held a
+        # previous run's value from masking an unordered read.
+        expected = float(torch.randint(1, 2**20, ()).item())
+        group = DelayedFirstBroadcastGroup(sentinels=[expected, -expected])
+        observed = torch.full((numel,), -1.0, device="cuda")
+        torch.accelerator.synchronize()
+
+        retained: list[torch.Tensor] = []
+        read_enqueued_before_receive: list[bool] = []
 
         def post_unpack_func(tensor_list):
-            for name, tensor in tensor_list:
-                unpacked_tensors[name] = tensor.clone()
+            [(_, tensor)] = tensor_list
+            if not retained:
+                retained.append(tensor)
+            else:
+                read_enqueued_before_receive.append(not group.first_received.query())
+                observed.copy_(retained[0])
 
         packed_nccl_broadcast_consumer(
-            iterator=iter(state_dict_info.items()),
-            group=consumer_group,
+            iterator=iter(state_dict_info),
+            group=group,
             src=0,
             post_unpack_func=post_unpack_func,
-            buffer_size_bytes=buffer_size,
+            # Smaller than one tensor, so each tensor gets its own pack.
+            buffer_size_bytes=numel * 4 - 1,
+            num_buffers=2,
         )
+        torch.accelerator.synchronize()
 
-        # Verify all non-contiguous params roundtrip correctly
-        for name, original_tensor in params:
-            assert name in unpacked_tensors
-            unpacked = unpacked_tensors[name]
-            assert unpacked.shape == original_tensor.shape
-            assert unpacked.dtype == original_tensor.dtype
-            assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
+        assert group.calls == 2
+        assert read_enqueued_before_receive == [True], (
+            "the first receive finished before the deferred read was enqueued"
+        )
+        torch.testing.assert_close(observed, torch.full_like(observed, expected))
+
+    @pytest.mark.parametrize(
+        ("num_buffers", "packs_per_layer"), [(2, 4), (2, 5), (3, 5)]
+    )
+    def test_freed_pack_not_reused_while_replay_pending(
+        self, num_buffers, packs_per_layer
+    ):
+        """Views dropped right after the replay is enqueued (as layerwise
+        reload's `info.reset()` does) must not let the next receive reuse a
+        buffer the replay still reads."""
+        num_packs = packs_per_layer + 4
+        # A size unique to this run keeps blocks cached by earlier tests from
+        # being picked instead of the ones this layer frees.
+        numel = 128 * int(torch.randint(1, 64, ()).item())
+        state_dict_info = [
+            (f"w{i}", ([numel], torch.float32)) for i in range(num_packs)
+        ]
+        sentinels = torch.randperm(2**20)[:num_packs].float().tolist()
+        group = SentinelBroadcastGroup(sentinels)
+        observed = torch.full((packs_per_layer, numel), -1.0, device="cuda")
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
+        retained: list[torch.Tensor] = []
+        replayed = False
+
+        def post_unpack_func(tensor_list):
+            nonlocal replayed
+            [(_, tensor)] = tensor_list
+            if replayed:
+                return
+            retained.append(tensor)
+            if len(retained) == packs_per_layer:
+                torch.cuda._sleep(SLEEP_CYCLES)
+                for i, t in enumerate(retained):
+                    observed[i].copy_(t)
+                group.pending = torch.Event()
+                group.pending.record()
+                retained.clear()
+                replayed = True
+
+        packed_nccl_broadcast_consumer(
+            iterator=iter(state_dict_info),
+            group=group,
+            src=0,
+            post_unpack_func=post_unpack_func,
+            # Smaller than one tensor, so each tensor gets its own pack.
+            buffer_size_bytes=numel * 4 - 1,
+            num_buffers=num_buffers,
+        )
+        torch.accelerator.synchronize()
+
+        assert group.calls == num_packs
+        # Receives before the host next waits on the replay's slot stream.
+        window = range(packs_per_layer, packs_per_layer + num_buffers - 1)
+        assert all(group.pending_at_receive[i] for i in window), (
+            "the replay finished before every receive in the window was issued"
+        )
+        pack_bytes = numel * 4
+        for i in window:
+            for j in range(packs_per_layer):
+                assert abs(group.ptrs[i] - group.ptrs[j]) >= pack_bytes, (
+                    f"pack {i} reused pack {j}'s buffer while the replay was pending"
+                )
+        expected = torch.tensor(sentinels[:packs_per_layer], device="cuda")
+        torch.testing.assert_close(
+            observed, expected.unsqueeze(1).expand_as(observed), rtol=0, atol=0
+        )
 
 
 # --- Unit Tests: unpack_tensor ---
@@ -296,10 +354,10 @@ class TestPackedBroadcastRoundtrip:
 class TestUnpackTensor:
     """Test the shared unpack_tensor function."""
 
-    def test_unpack_produces_independent_copies(self):
-        """Verify unpacked tensors don't share memory with packed buffer."""
-        original = torch.randn(10, dtype=torch.float32).cuda()
-        packed = original.contiguous().view(torch.uint8).view(-1)
+    def test_unpack_returns_views(self):
+        """Unpacked tensors alias the packed buffer; callers that need
+        independent storage must clone."""
+        packed = torch.randn(10, dtype=torch.float32).cuda().view(torch.uint8)
 
         result = unpack_tensor(
             packed,
@@ -309,11 +367,9 @@ class TestUnpackTensor:
             tensor_sizes=[packed.numel()],
         )
 
-        # Mutate the packed buffer
+        assert result[0][1].data_ptr() == packed.data_ptr()
         packed.zero_()
-
-        # Unpacked tensor should be unaffected
-        assert torch.allclose(result[0][1], original)
+        assert torch.count_nonzero(result[0][1]) == 0
 
 
 # --- Unit Tests: pack_tensors ---
@@ -563,14 +619,14 @@ class TestPackedIpcRoundtrip:
     def _run_roundtrip(self, chunk_iter, device_index, timeout=30):
         """Stream chunks through a child consumer one at a time.
 
-        ``packed_ipc_producer`` reuses a single IPC buffer for every
+        `packed_ipc_producer` reuses a single IPC buffer for every
         chunk, so the producer must not be advanced until the consumer
         has finished reading the current chunk. We enforce that with an
-        ack queue: the consumer puts ``"ack"`` after it has copied the
+        ack queue: the consumer puts `"ack"` after it has copied the
         chunk to CPU, and only then do we pull the next chunk from the
         generator.
 
-        Returns ``(num_chunks, results)``.
+        Returns `(num_chunks, results)`.
         """
         import multiprocessing as mp
 
@@ -618,6 +674,7 @@ class TestPackedIpcRoundtrip:
         """Test basic IPC producer -> consumer roundtrip."""
         params = [
             ("w1", torch.randn(10, 20, dtype=torch.float32).cuda()),
+            ("scale", torch.tensor(1.5, dtype=torch.float32).cuda()),
             ("w2", torch.randn(5, dtype=torch.float16).cuda()),
         ]
         gpu_uuid = self._get_gpu_uuid()
@@ -634,7 +691,7 @@ class TestPackedIpcRoundtrip:
         )
 
         assert num_chunks == 1
-        assert len(result) == 2
+        assert len(result) == len(params)
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(params, result):
             assert orig_name == res_name
             assert res_tensor.shape == orig_tensor.shape
@@ -746,3 +803,29 @@ class TestPackedIpcRoundtrip:
                 tensor_sizes=c.tensor_sizes,
                 device_index=torch.cuda.current_device(),
             )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_pack_unpack_scalar(dtype):
+    """Preserve scalar shape, dtype and value alongside a matrix on CPU."""
+    params = [
+        ("weight", torch.randn(2, 3, dtype=dtype)),
+        ("scale", torch.tensor(1.5, dtype=dtype)),
+    ]
+
+    chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
+    assert chunk is not None
+
+    result = unpack_tensor(
+        chunk.packed_tensor,
+        chunk.names,
+        chunk.shapes,
+        chunk.dtypes,
+        chunk.tensor_sizes,
+    )
+
+    for (expected_name, expected), (name, actual) in zip(params, result, strict=True):
+        assert name == expected_name
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

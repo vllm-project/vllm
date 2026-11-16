@@ -26,6 +26,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from functools import cached_property
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -34,6 +35,7 @@ import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
 from vllm.distributed.nixl_utils import alias_nixl_for_ray
+from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
     register_nixl_memory,
@@ -322,9 +324,9 @@ class TestFreeBarrier:
     def test_freed_groups_are_reported_back_to_the_engine(self, server_factory):
         """The engine holds the CUDA-IPC export refs and may only drop them once
         the server says the group is gone — and it hears that ONLY through
-        ``wait_freed`` / ``end_sync``, never a publish return (a freed notice
+        `wait_freed` / `end_sync`, never a publish return (a freed notice
         riding an unharvested async publish while the engine blocks in
-        ``wait_freed`` would wedge the loop)."""
+        `wait_freed` would wedge the loop)."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -351,16 +353,23 @@ class TestFreeBarrier:
         assert server._group_names.get(GI_A) is None
 
 
-class _CountingSource:
-    """`iter_groups` yielding one CPU-tensor group per call, built lazily so a
-    group's tensors exist only once the engine's credit gate lets it gather."""
+class _CountingSource(WeightSource):
+    """`iter_full` yielding CPU tensors built lazily, so a group's tensors exist
+    only once the engine's credit gate lets it gather."""
 
     def __init__(self, groups):
         self._groups = groups
 
-    def iter_groups(self):
+    @cached_property
+    def metadata(self):
+        return [
+            ParamMeta(n, torch.float32, (16,)) for names in self._groups for n in names
+        ]
+
+    def iter_full(self):
         for names in self._groups:
-            yield list(names), [torch.zeros(16, dtype=torch.float32) for _ in names]
+            for n in names:
+                yield n, torch.zeros(16, dtype=torch.float32)
 
 
 class _ResidencyDict(dict):
@@ -382,18 +391,21 @@ def _loop_engine(server, n_groups, *, lookahead):
     state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
     `_publish_async` sees no `.remote` and runs inline too."""
     groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
-    e = ShardedRDTTrainerWeightTransferEngine.__new__(
-        ShardedRDTTrainerWeightTransferEngine
+    e = ShardedRDTTrainerWeightTransferEngine(
+        client=Mock(),  # the loop runs below the client; never called
+        source=_CountingSource(groups),
+        is_sender=True,
+        init_info=ShardedRDTTrainerInitInfo(
+            rank=0, num_consumers=1, gather_lookahead=lookahead
+        ),
     )
-    e._init_info = ShardedRDTTrainerInitInfo(
-        rank=0, num_consumers=1, gather_lookahead=lookahead
-    )
-    e.source = _CountingSource(groups)
+    e._sync_idx = 0  # what send_weights has counted up before it runs the loop
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
+    e._meta = e.source.metadata
     e._groups = [list(g) for g in groups]
     e._owned_idx = list(range(n_groups))
-    e._held_names = None
+    e._owned_names = {m.name for m in e._meta}
     e._inflight = _ResidencyDict()
     return e
 
@@ -682,6 +694,33 @@ class TestBeginSync:
         assert ("sentinel",) in server._pack_dsts
 
 
+class TestSyncTaggedFreeSignals:
+    def test_tagged_signals_apply_only_to_their_sync(self, server_factory):
+        server = server_factory()
+        server.free_group(GI_A, sync_idx=0)
+        server.free_group(GI_A, sync_idx=0)
+        server.begin_sync(2, sync_idx=0)
+        _publish(server, GI_A, GROUP_A)
+        assert server._inflight_groups == []
+
+        server.end_sync()
+        server.begin_sync(2, sync_idx=1)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A, sync_idx=1)
+        server.free_group(GI_A, sync_idx=0)
+        assert server._inflight_groups == [GI_A]
+
+        server.free_group(GI_A, sync_idx=1)
+        assert server._inflight_groups == []
+
+    def test_untagged_signal_remains_backward_compatible(self, server_factory):
+        server = server_factory()
+        server.begin_sync(1, sync_idx=3)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A)
+        assert server._inflight_groups == []
+
+
 class TestServedNamesGuard:
     """A producer serves only the names it holds: its stage's groups, and
     within them its own EP coordinate's experts plus the replicated names.
@@ -922,14 +961,17 @@ class TestFakeServerAgreesWithTheRealOne:
 
 class TestExportRing:
     """The packed export path. Its one hard invariant is that the trainer packs
-    a group exactly the way ``publish_group`` rebuilds it — a layout
+    a group exactly the way `publish_group` rebuilds it — a layout
     disagreement would serve the wrong bytes with nothing downstream to catch
     it."""
 
     @staticmethod
     def _engine():
-        eng = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        eng = ShardedRDTTrainerWeightTransferEngine(
+            client=Mock(),
+            source=None,
+            is_sender=True,
+            init_info=ShardedRDTTrainerInitInfo(rank=0, num_consumers=1),
         )
         eng._export_ring = [None, None]
         eng._export_ring_args = [None, None]
@@ -1099,8 +1141,8 @@ def sharing_server(server_factory):
     """A producer whose serve slots are plain CPU tensors.
 
     The pack is the only part of the serve path that touches a buffer, so
-    replacing the one allocation seam (``_new_serve_buffer``, which would
-    ``torch.empty(..., device="cuda")`` and register the result with NIXL) puts
+    replacing the one allocation seam (`_new_serve_buffer`, which would
+    `torch.empty(..., device="cuda")` and register the result with NIXL) puts
     the whole shared-pack path within reach of a CPU test.
     """
 
@@ -1131,7 +1173,7 @@ def _blob_bytes(server, name):
 class TestSharedServeSlots:
     """One registered slot serving several inference deployments.
 
-    Consumers whose ids differ by a multiple of ``workers_per_replica`` are the
+    Consumers whose ids differ by a multiple of `workers_per_replica` are the
     same worker of different deployments: same parallel config, same baked plan,
     same chunk sequence, byte-identical pack layout. They rendezvous per chunk,
     the last arrival packs, and every one of them returns that blob, so R
@@ -1189,7 +1231,7 @@ class TestSharedServeSlots:
 
     def test_the_slot_follows_the_consumers_issue_order(self, sharing_server):
         """The invariant slot safety rests on. The consumer drains pull i before
-        issuing i+K, so choosing the slot as ``seq % K`` means a slot is only
+        issuing i+K, so choosing the slot as `seq % K` means a slot is only
         repacked once the read of its previous contents is over. Deriving it from
         a per-call counter on the producer instead (execution order) can hand a
         slot to a pull whose predecessor is still being read, because Ray may
@@ -1219,7 +1261,7 @@ class TestSharedServeSlots:
         assert slots == {0: 0, 1: 1, 2: 0}, slots
 
     def test_a_seqless_call_is_refused(self, sharing_server):
-        """The slot comes from ``seq``, so a caller that sends none cannot be
+        """The slot comes from `seq`, so a caller that sends none cannot be
         served safely."""
         server = sharing_server(workers_per_replica=2)
         server.begin_sync(1, [0])
@@ -1279,7 +1321,7 @@ class TestSharedServeSlots:
 
 
 class TestSharedReservation:
-    """``reserve_serve_buffer`` under sharing: one ring per GROUP, and the
+    """`reserve_serve_buffer` under sharing: one ring per GROUP, and the
     init-time check that the group's members pull the same chunks."""
 
     def test_matching_plans_reserve_one_ring_between_them(self, sharing_server):
