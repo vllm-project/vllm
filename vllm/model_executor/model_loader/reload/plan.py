@@ -40,6 +40,7 @@ from .geometry import (
     Write,
     box_and_region,
     byte_runs,
+    byte_span,
     merge_writes,
 )
 
@@ -156,28 +157,71 @@ def load_planned(
     pass fallbacks to `model.load_weights`. Call between `start_reload`
     and `finish_reload`."""
     fallbacks = []
+    names: list[str] = []
     dsts: list[torch.Tensor] = []
     srcs: list[torch.Tensor] = []
+    pending: set[tuple] = set()
     held = 0
+
+    def flush() -> None:
+        nonlocal held
+        _copy_all(names, dsts, srcs)
+        names.clear()
+        dsts.clear()
+        srcs.clear()
+        pending.clear()
+        held = 0
+
     for name, full in weights:
         dest = plan.get_dest(name)
         if dest is None:
             fallbacks.append((name, full))
             continue
-        for box, tensor in dest:
+        keys = [_dest_key(tensor) for _, tensor in dest]
+        # A destination already in the batch (a name sent twice): copy the
+        # batch first so the later write lands last, as one copy_ each would.
+        if not pending.isdisjoint(keys):
+            flush()
+        for (box, tensor), key in zip(dest, keys):
             part = full[tuple(slice(start, stop) for start, stop in box)]
+            names.append(name)
             dsts.append(tensor)
             srcs.append(part.reshape(tensor.shape))
+            pending.add(key)
         held += full.nbytes if dest else 0
         # Batch copies into one dispatch per ~2 GiB instead of one per tensor;
         # flushing bounds how many source tensors a streaming caller keeps alive.
-        if held > (2 << 30):
-            torch._foreach_copy_(dsts, srcs)
-            dsts, srcs, held = [], [], 0
+        if held > _FLUSH_BYTES:
+            flush()
     if dsts:
-        torch._foreach_copy_(dsts, srcs)
+        flush()
     if fallbacks:
         model.load_weights(fallbacks)
+
+
+_FLUSH_BYTES = 2 << 30
+
+
+def _dest_key(tensor: torch.Tensor) -> tuple:
+    return tensor.data_ptr(), tuple(tensor.shape), tensor.stride()
+
+
+def _copy_all(
+    names: list[str], dsts: list[torch.Tensor], srcs: list[torch.Tensor]
+) -> None:
+    """One `_foreach_copy_` over the batch; if it fails, copy pair by pair to
+    name the checkpoint tensor that failed."""
+    try:
+        torch._foreach_copy_(dsts, srcs)
+    except Exception:
+        for name, dst, src in zip(names, dsts, srcs):
+            try:
+                dst.copy_(src)
+            except Exception as e:
+                raise RuntimeError(
+                    f"load_planned: copying {name!r} into its destination failed: {e}"
+                ) from e
+        raise
 
 
 def check_plannable(model: torch.nn.Module) -> None:
@@ -276,35 +320,37 @@ def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
     for name, copies in traced.copies.items():
         for c in copies:
             if c.storage in targets.by_storage and 0 not in c.shape:
-                size = c.dtype.itemsize
-                end = (
-                    c.byte_offset
-                    + (sum((n - 1) * s for n, s in zip(c.shape, c.stride)) + 1) * size
+                start, stop = byte_span(
+                    c.byte_offset, c.shape, c.stride, c.dtype.itemsize
                 )
-                spans[c.storage].append(
-                    (c.byte_offset, end, len(spans[c.storage]), name, c)
-                )
+                spans[c.storage].append((start, stop, len(spans[c.storage]), name, c))
     reasons: dict[str, str] = {}
     for items in spans.values():
         items.sort()
+        runs: dict[int, list[tuple[int, int]]] = {}  # sorted runs, by item id
         active: list[tuple[int, int, str, Copy]] = []  # heap of (stop, id, name, copy)
         for start, stop, i, name, c in items:
             while active and active[0][0] <= start:
-                heapq.heappop(active)
-            for _, _, other, oc in active:
-                if _runs_intersect(c, oc):
+                runs.pop(heapq.heappop(active)[1], None)
+            for _, j, other, oc in active:
+                if _runs_intersect(_sorted_runs(runs, i, c), _sorted_runs(runs, j, oc)):
                     reasons.setdefault(name, f"writes overlap with {other!r}")
                     reasons.setdefault(other, f"writes overlap with {name!r}")
             heapq.heappush(active, (stop, i, name, c))
     return reasons
 
 
-def _runs_intersect(a: Copy, b: Copy) -> bool:
-    """Whether two copies into one storage write a common byte."""
-    ra = byte_runs(a.byte_offset, a.shape, a.stride, a.dtype.itemsize)
-    rb = byte_runs(b.byte_offset, b.shape, b.stride, b.dtype.itemsize)
-    ra.sort()
-    rb.sort()
+def _sorted_runs(
+    cache: dict[int, list[tuple[int, int]]], i: int, c: Copy
+) -> list[tuple[int, int]]:
+    """The sorted byte runs of copy `c` (item `i`), computed once."""
+    if i not in cache:
+        cache[i] = sorted(byte_runs(c.byte_offset, c.shape, c.stride, c.dtype.itemsize))
+    return cache[i]
+
+
+def _runs_intersect(ra: list[tuple[int, int]], rb: list[tuple[int, int]]) -> bool:
+    """Whether two sorted lists of [start, stop) runs share a byte."""
     i = j = 0
     while i < len(ra) and j < len(rb):
         if ra[i][0] < rb[j][1] and rb[j][0] < ra[i][1]:

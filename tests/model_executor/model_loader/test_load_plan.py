@@ -32,6 +32,7 @@ from vllm.model_executor.model_loader.reload import (
     plan_loads,
     start_reload,
 )
+from vllm.model_executor.model_loader.reload import plan as plan_module
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -465,6 +466,30 @@ def test_setitem_is_direct():
     assert box == ((0, 4),)
 
 
+def test_setitem_with_a_traced_index_falls_back():
+    """An index computed from a checkpoint tensor is not a view of the
+    destination: the write goes to dispatch and falls back."""
+    make, shapes = _single(
+        lambda p, w: p.__setitem__(w[:2], w[2:]), shape=(4,), dtype=torch.int64
+    )
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    plan = _plan(model, shapes)
+    assert plan.get_dest("layer.weight") is None
+    assert "index_put_" in (plan.entries["layer.weight"].reason or "")
+
+
+def test_setitem_with_an_advanced_index_falls_back():
+    """`param[[0, 2]] = weight` writes through a copy of the index: it is
+    dispatched, not planned as a direct write."""
+    make, shapes = _single(
+        lambda p, w: p.__setitem__([0, 2], w), shape=(2,), param_shape=(4,)
+    )
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("layer.weight") is None
+    assert "index_put_" in (plan.entries["layer.weight"].reason or "")
+
+
 def test_noop_to_and_constant_fill_stay_direct():
     """A constant write into a checkpoint tensor (padding, as
     `VocabParallelEmbedding` fills) runs while planning and stays out of
@@ -751,6 +776,97 @@ def test_overlapping_writes_fall_back():
         assert plan.get_dest(name) is None
         assert plan.entries[name].reason == f"writes overlap with {other!r}"
     assert plan.get_dest("proj.weight") is not None
+
+
+def _two_column_blocks(first: slice, second: slice):
+    """`a` and `b` write column blocks of one (4, 4) parameter."""
+    cols = {0: first, 1: second}
+
+    def make():
+        model = _Toy()
+        model.layer = _Layer()
+        model.layer.weight = _param(
+            4, 4, loader=lambda p, w, shard: p[:, cols[shard]].copy_(w)
+        )
+        model.stacked = {"a": ("layer.weight", 0), "b": ("layer.weight", 1)}
+        return model
+
+    width = lambda s: s.stop - s.start  # noqa: E731
+    return make, {"a": ((4, width(first)), BF16), "b": ((4, width(second)), BF16)}
+
+
+def test_interleaved_writes_do_not_overlap():
+    """Each write's byte span covers the other's rows, but no byte is shared."""
+    make, shapes = _two_column_blocks(slice(0, 2), slice(2, 4))
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("a") is not None
+    assert plan.get_dest("b") is not None
+
+
+def test_interleaved_writes_sharing_a_column_overlap():
+    make, shapes = _two_column_blocks(slice(0, 3), slice(2, 4))
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.entries["a"].reason == "writes overlap with 'b'"
+    assert plan.entries["b"].reason == "writes overlap with 'a'"
+
+
+def _planned_params(n: int):
+    shapes = {f"p{i}": ((4,), BF16) for i in range(n)}
+
+    def make():
+        model = _Toy()
+        for name in shapes:
+            setattr(model, name, _param(4))
+        return model
+
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    return model, _plan(model, shapes), shapes
+
+
+def _count_foreach(monkeypatch) -> list[int]:
+    sizes: list[int] = []
+    foreach = torch._foreach_copy_
+
+    def counting(dsts, srcs):
+        sizes.append(len(dsts))
+        return foreach(dsts, srcs)
+
+    monkeypatch.setattr(torch, "_foreach_copy_", counting)
+    return sizes
+
+
+def test_load_planned_flushes_without_dropping_or_repeating(monkeypatch):
+    model, plan, shapes = _planned_params(5)
+    sizes = _count_foreach(monkeypatch)
+    monkeypatch.setattr(plan_module, "_FLUSH_BYTES", 12)  # past it every 2 names
+    new = _checkpoint(shapes, 1)
+    load_planned(model, plan, new.items())
+    assert sizes == [2, 2, 1]
+    for name, weight in new.items():
+        assert torch.equal(getattr(model, name), weight), name
+
+
+def test_load_planned_last_write_of_a_name_wins(monkeypatch):
+    model, plan, shapes = _planned_params(2)
+    sizes = _count_foreach(monkeypatch)
+    first, second = _checkpoint(shapes, 1), _checkpoint(shapes, 2)
+    load_planned(
+        model,
+        plan,
+        [("p0", first["p0"]), ("p1", first["p1"]), ("p0", second["p0"])],
+    )
+    assert sizes == [2, 1]
+    assert torch.equal(model.p0, second["p0"])
+    assert torch.equal(model.p1, first["p1"])
+
+
+def test_load_planned_names_a_failed_copy():
+    model, plan, shapes = _planned_params(2)
+    weights = _checkpoint(shapes, 1)
+    weights["p1"] = torch.empty(4, dtype=BF16, device="meta")  # no data to copy
+    with pytest.raises(RuntimeError, match="copying 'p1'"):
+        load_planned(model, plan, weights.items())
 
 
 def test_layerwise_mode_is_refused(monkeypatch):
