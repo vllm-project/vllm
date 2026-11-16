@@ -565,9 +565,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             content_dim,
         ]
 
+        ptr_dtype = torch.uint64 if self._device.type == "xpu" else torch.int64
         self._kvcache_ptrs = torch.tensor(
             [cache.data_ptr() for cache in self._kv_caches.values()],
-            dtype=torch.uint64,
+            dtype=ptr_dtype,
             device=self._device,
         )
 
