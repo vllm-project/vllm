@@ -8,6 +8,7 @@ the whole-layer kernels run the FFN launch on the same steps, from wo_b's
 unreduced output."""
 
 import sys
+from collections import defaultdict
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -24,6 +25,10 @@ class _Runner:
     def __init__(self):
         self.calls = []
         self.draft = None
+        self.merge = False
+
+    def merges(self, rows):
+        return self.merge
 
     def forward(self, *args, **kwargs):
         self.calls.append((args, {**kwargs, "draft_runner": self.draft}))
@@ -80,7 +85,7 @@ def _inputs(rows=M):
 @pytest.fixture
 def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
-    ``mode`` and ``metadata``; returns (result, runner calls)."""
+    `mode` and `metadata`; returns (result, runner calls)."""
 
     def _run(
         mode=CUDAGraphMode.FULL,
@@ -90,6 +95,7 @@ def run(monkeypatch):
         layer=None,
         max_rows=md.MAX_ROWS,
         mono=None,
+        merges=False,
         **inputs,
     ):
         # The row limit depends on the GPU (MAX_ROWS_GFX942 on gfx942), so the
@@ -102,6 +108,7 @@ def run(monkeypatch):
             }
         fc = SimpleNamespace(cudagraph_runtime_mode=mode, attn_metadata=metadata)
         runner = _Runner()
+        runner.merge = merges
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
 
@@ -247,6 +254,175 @@ def test_padded_decode_step_runs_mono(run):
 def test_other_steps_take_the_original_path(run, case):
     out, calls = run(**case)
     assert out is None and not calls
+
+
+def _link(case):
+    layer, nxt = _layer(), _layer()
+    layer.attn.layer_id, nxt.attn.layer_id = 0, 1
+    layer.mono, nxt.mono = md.MonoDecodeLayer(), md.MonoDecodeLayer()
+    md.link_layers([layer, nxt])
+    kwargs = case(layer, nxt) or {}
+    md.link_layers([layer, nxt], blocked=(2,))
+    return dict(layer=layer, mono=layer.mono, merges=True) | kwargs
+
+
+@pytest.mark.parametrize(
+    ("case", "defers"),
+    [
+        pytest.param(lambda layer, nxt: None, True, id="linked"),
+        pytest.param(lambda layer, nxt: dict(merges=False), False, id="width"),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "engram", object()),
+            False,
+            id="next-engram",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt.attn, "layer_id", 2), False, id="next-aux"
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "mono", md.MonoDecodeLayer(True)),
+            False,
+            id="next-ffn",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "mono", md.MonoDecodeLayer(draft=True)),
+            False,
+            id="next-draft",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt.attn.swa_cache_layer, "prefix", "other"),
+            False,
+            id="next-declines",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(layer, "_forward_hooks", {0: print}),
+            False,
+            id="hook",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "_forward_pre_hooks", {0: print}),
+            False,
+            id="next-pre-hook",
+        ),
+    ],
+)
+def test_layer_defers_k2_to_the_next_layers_k1(run, case, defers):
+    out, calls = run(**_link(case))
+    assert out == ("mono outputs",) and calls[0][1]["defer"] is defers
+
+
+def _logged(events, name, out=lambda x, *args: x):
+    def call(*args):
+        events.append(name)
+        return out(*args)
+
+    return call
+
+
+def _engram_layer(monkeypatch, run, events):
+    layer = _layer()
+    layer.mhc_post = _logged(events, "mhc_post")
+    layer.engram = _logged(events, "engram")
+    layer.engram.layer_hash_index = 0
+    run(layer=layer, engram_hashes=torch.zeros(M, 2, dtype=torch.int64))
+
+
+def _layers(events, n):
+    return [_logged(events, f"layer {i}", lambda x, *args: (x,) * 5) for i in range(n)]
+
+
+def _target_model(monkeypatch, events, **attrs):
+    from vllm.models.deepseek_v41.amd import model as model_mod
+
+    pp = SimpleNamespace(is_first_rank=True, is_last_rank=False)
+    monkeypatch.setattr(model_mod, "get_pp_group", lambda: pp)
+    model = SimpleNamespace(
+        layers=_layers(events, 4),
+        start_layer=0,
+        end_layer=4,
+        aux_hidden_state_layers=(2,),
+        decoder_replay_layers=None,
+        mhc_post=_logged(events, "mhc_post", lambda x, *args: x.unsqueeze(1)),
+        use_sequence_parallel=False,
+        use_mega_moe=False,
+        engram_hash=None,
+        _link_mono=lambda: None,
+        **attrs,
+    )
+    cls = model_mod.DeepseekV4Model
+    model._run_layers = lambda *args: cls._run_layers(model, *args)
+    return cls, model, torch.zeros(M, 8)
+
+
+def _target_forward(monkeypatch, run, events):
+    cls, model, x = _target_model(monkeypatch, events, decoder_replay_start=4)
+    cls.forward(model, None, x, None, inputs_embeds=x)
+
+
+def _target_replay_layers(monkeypatch, run, events):
+    cls, model, x = _target_model(monkeypatch, events, decoder_replay_start=2)
+    cls._run_replay_layers(model, x, x, None, x, x, x, x)
+
+
+def _draft_forward(monkeypatch, run, events):
+    from vllm.models.deepseek_v41.amd import dspark
+
+    monkeypatch.setattr(dspark, "mhc_post_torch", _logged(events, "mhc_post"))
+    monkeypatch.setattr(
+        dspark.DeepseekV4DecoderLayer, "_hc_collapse", lambda x, pre_mix: x
+    )
+    model = SimpleNamespace(
+        layers=_layers(events, 1),
+        use_sequence_parallel=False,
+        hc_mult=4,
+        _mono_linked=True,
+    )
+    dspark.DSparkDeepseekV4Model.forward(model, None, torch.zeros(M), torch.zeros(M, 8))
+
+
+@pytest.mark.parametrize(
+    ("case", "want"),
+    [
+        pytest.param(
+            lambda monkeypatch, run, events: run(mode=CUDAGraphMode.PIECEWISE),
+            ["flush"],
+            id="declines",
+        ),
+        pytest.param(
+            lambda monkeypatch, run, events: run(
+                residual=None, x=torch.zeros(M, 4, 5120, dtype=torch.bfloat16)
+            ),
+            ["flush"],
+            id="stage-input",
+        ),
+        pytest.param(
+            lambda monkeypatch, run, events: run(ffn_only=True, entry="layer"),
+            ["flush"],
+            id="ffn-layer",
+        ),
+        pytest.param(_engram_layer, ["flush", "mhc_post", "engram"], id="engram"),
+        pytest.param(
+            _target_forward,
+            ["layer 0", "layer 1", "flush", "mhc_post"]
+            + ["layer 2", "layer 3", "flush", "mhc_post"],
+            id="target-forward",
+        ),
+        pytest.param(
+            _target_replay_layers,
+            ["flush", "mhc_post", "layer 2", "layer 3", "flush", "mhc_post"],
+            id="target-replay-layers",
+        ),
+        pytest.param(
+            _draft_forward, ["layer 0", "flush", "mhc_post"], id="draft-forward"
+        ),
+    ],
+)
+def test_reading_a_layers_outputs_flushes_a_deferred_k2(monkeypatch, run, case, want):
+    events: list[str] = []
+    pending = SimpleNamespace(pending=True, flush=lambda: events.append("flush"))
+    monkeypatch.setattr(md, "_runner", pending)
+    case(monkeypatch, run, events)
+    assert events == want
 
 
 def _linear():
@@ -396,7 +572,7 @@ def _config(monokernel=True, **parallel):
 
 def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL).
-    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
+    `target` is the architecture FlyDSL compiles for, by default the GPU's."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
@@ -732,6 +908,64 @@ def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
     assert rocm.DeepseekV41Gfx942Indexer.attn_cls is Gfx942SparseAttnIndexer
 
 
+@pytest.mark.parametrize("monokernel", [True, False])
+@pytest.mark.parametrize("cdna", [3, 4])
+def test_swa_decode_meta_runs_on_cdna3_and_cdna4_with_the_flag(
+    monkeypatch, cdna, monokernel
+):
+    """swa_decode_meta's kernel is plain Triton, so with --monokernel a decode
+    batch gets its SWA metadata from the one launch on CDNA4 (gfx950) as on
+    CDNA3 (gfx942). Without the flag, the builder keeps vLLM's build."""
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.models.deepseek_v41.amd import ops, rocm
+    from vllm.models.deepseek_v41.amd.ops import swa_decode_meta
+
+    monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
+    ops.record_monokernel(_config(monokernel=monokernel))
+    launches = []
+    monkeypatch.setattr(
+        swa_decode_meta, "launch", lambda *args, noncausal: launches.append(noncausal)
+    )
+    ints = lambda *shape: torch.zeros(shape, dtype=torch.int32)  # noqa: E731
+    builder = SimpleNamespace(
+        decode_threshold=M,
+        window_size=md.SWA_WIDTH,
+        block_size=128,
+        decode_swa_indices=ints(64, 1, md.SWA_WIDTH),
+        decode_swa_lens=ints(64),
+        is_valid_token=torch.zeros(64, dtype=torch.bool),
+        token_to_req_indices=ints(64),
+        no_replay_start=ints(2),
+        decode_swa_ragged_indices_buffer=ints(64 * md.SWA_WIDTH),
+        decode_swa_ragged_indptr_buffer=ints(65),
+        build_tile_scheduler=lambda rows: defaultdict(lambda: None),
+        _build_deepseek_v4_metadata=lambda *args: {},
+    )
+    query_start_loc = torch.tensor([0, M], dtype=torch.int32)
+    cam = SimpleNamespace(
+        causal=True,
+        max_query_len=M,
+        num_reqs=1,
+        num_actual_tokens=M,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([1000], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([1000], dtype=torch.int32),
+        slot_mapping=torch.arange(M),
+        block_table_tensor=ints(1, 8),
+        token_to_req_indices=lambda buffer: buffer[:M],
+    )
+    out = swa_decode_meta.build(
+        builder, 0, cam, False, None, rocm.DeepseekV41ROCMAiterSparseSWAMetadata
+    )
+    # No later test may see this test's cached gate.
+    ops.record_monokernel(_config(monokernel=False))
+    assert launches == ([False] if monokernel else [])
+    assert (out is not None) is monokernel
+
+
 def test_dspark_speculator_asks_the_draft_model_first():
     """A draft model that samples a step itself returns True, and vLLM's
     loop then does not run. The stub speculator has none of the loop's
@@ -752,21 +986,78 @@ def test_dspark_speculator_asks_the_draft_model_first():
     assert calls == [(spec, 2, hidden)]
 
 
-@pytest.mark.parametrize("taken", [True, False])
-def test_dspark_draft_model_samples_with_fused_markov(monkeypatch, taken):
+@pytest.mark.parametrize(
+    "cdna, monokernel, rows, taken",
+    [
+        (4, True, 5, True),
+        (4, True, 6, False),
+        (3, True, 8, True),
+        (4, False, 1, False),
+    ],
+)
+def test_dspark_draft_model_samples_with_fused_markov(
+    monkeypatch, cdna, monokernel, rows, taken
+):
     """The DSv4.1 draft model answers the speculator with fused_markov, which
     returns False for a step that the fused launches do not take."""
-    from vllm.models.deepseek_v41.amd import dspark
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+    from vllm.models.deepseek_v41.amd import dspark, ops
     from vllm.models.deepseek_v41.amd.ops import fused_markov
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
-    calls = []
+    monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
+    ops.record_monokernel(_config(monokernel=monokernel))
+    launches = []
 
-    def sample_sequential(s, n, h):
-        calls.append((s, n, h))
-        return taken
+    class _Kernel:
+        def __getitem__(self, grid):
+            return lambda *args, num_warps=None, **kw: launches.append(num_warps)
 
-    monkeypatch.setattr(fused_markov, "sample_sequential", sample_sequential)
-    spec, hidden = object(), torch.zeros(4, 8)
+    monkeypatch.setattr(fused_markov, "_markov_step_kernel", _Kernel())
+    monkeypatch.setattr(fused_markov, "_markov_last_kernel", _Kernel())
+    monkeypatch.setattr(fused_markov, "_buffers", {})
+    n_spec, vocab = 2, 512
+    bf16 = lambda *shape: torch.zeros(shape, dtype=torch.bfloat16)  # noqa: E731
+    head = SimpleNamespace(
+        markov_w1=SimpleNamespace(weight=bf16(vocab, 4)),
+        markov_w2=SimpleNamespace(
+            weight=bf16(vocab, 4), quant_method=UnquantizedEmbeddingMethod()
+        ),
+    )
+    spec = SimpleNamespace(
+        num_speculative_steps=n_spec,
+        model=SimpleNamespace(
+            model=SimpleNamespace(markov_head=head),
+            compute_draft_logits=lambda hidden: bf16(len(hidden), vocab),
+        ),
+        draft_logits=DraftLogitsCache(
+            rows, n_spec, vocab, dtype=torch.bfloat16, fill=0.0, device="cpu"
+        ),
+        draft_watermarker=None,
+        _d2t_scatter_index=None,
+        use_confidence_head=False,
+        acceptance_estimator=None,
+        sample_indices=torch.arange(rows * n_spec),
+        sample_idx_mapping=torch.zeros(rows * n_spec, dtype=torch.int64),
+        sample_pos=torch.zeros(rows * n_spec, dtype=torch.int64),
+        draft_tokens=torch.zeros(rows, n_spec + 1, dtype=torch.int64),
+        use_fp64_gumbel=False,
+        input_buffers=SimpleNamespace(input_ids=None),
+        _anchor_idx=None,
+        temperature=None,
+        seeds=None,
+    )
     model_cls = dspark.DSparkDeepseekV4ForCausalLM
-    assert model_cls.sample_sequential(None, spec, 2, hidden) is taken
-    assert calls == [(spec, 2, hidden)]
+    try:
+        got = model_cls.sample_sequential(
+            None, spec, rows, torch.zeros(rows * n_spec, 8)
+        )
+    finally:
+        ops.record_monokernel(_config(monokernel=False))
+    assert got is taken
+    assert launches == ([fused_markov.NUM_WARPS] * n_spec + [None] if taken else [])

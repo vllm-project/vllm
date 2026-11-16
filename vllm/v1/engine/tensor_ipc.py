@@ -5,7 +5,7 @@
 
 This module contains the queue-based transport logic for sharing tensors
 between processes (e.g., API server -> engine core). The msgpack layer
-emits/consumes lightweight :class:`TensorIpcData` values, while transport
+emits/consumes lightweight `TensorIpcData` values, while transport
 state such as request association, handle generation, queue routing, buffering,
 and cleanup lives here.
 """
@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 TensorIpcQueue = MPQueue
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TensorIpcData:
     """Data sent via torch.multiprocessing.Queue for zero-copy IPC.
 
@@ -53,13 +53,6 @@ class TensorIpcSender(OOBTensorConsumer):
         self._tensor_id_counter = 0
         self._message_counter = 0
         self._sender_id = uuid.uuid4().hex[:8]
-
-    def set_target_engine(self, target_engine: int) -> None:
-        if target_engine != 0:
-            raise IndexError(
-                "TensorIpcSender only supports a single queue; "
-                f"got target engine {target_engine}"
-            )
 
     def new_message(self) -> None:
         self._message_counter += 1
@@ -104,7 +97,7 @@ class TensorIpcSender(OOBTensorConsumer):
             return None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class _Sender:
     current_message_id: int = -1
     tensors: dict[int, dict[int, torch.Tensor]] = field(default_factory=dict)

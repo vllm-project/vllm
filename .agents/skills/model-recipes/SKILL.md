@@ -7,9 +7,9 @@ description: Find vLLM deployment recipes and configs for LLMs and Hugging Face 
 
 Model serving recipes are maintained in this repository's
 [recipes/models/ directory](../../../recipes/models). Omni (image, video,
-audio) recipes stay in vllm-project/recipes for now (moving to vllm-omni),
-and Ascend NPU content is inline in these recipes (moving to vllm-ascend
-overlays). The published catalog, rendered by
+audio) recipes live in vllm-project/vllm-omni, and Ascend NPU content lives in
+vllm-project/vllm-ascend as overlays merged into these recipes. The published
+catalog, rendered by
 [vllm-project/recipes](https://github.com/vllm-project/recipes), is at
 [recipes.vllm.ai](https://recipes.vllm.ai).
 

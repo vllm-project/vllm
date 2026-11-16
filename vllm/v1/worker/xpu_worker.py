@@ -14,7 +14,6 @@ from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environmen
 from vllm.v1.worker.xpu_model_runner import (
     XPUMMEncoderModelRunner,
     XPUModelRunner,
-    XPUModelRunnerV2,
 )
 
 from .utils import request_memory
@@ -194,9 +193,6 @@ class XPUWorker(Worker):
         ):
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
-        if self.use_v2_model_runner:
-            logger.info_once("Using V2 Model Runner")
-
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -215,15 +211,9 @@ class XPUWorker(Worker):
         self._init_workspace_and_model_runner()
 
     def _make_model_runner(self):
-        if self.use_v2_model_runner:
-            model_runner = (
-                XPUMMEncoderModelRunner
-                if self.vllm_config.is_mm_encoder_only
-                else XPUModelRunnerV2
-            )
-        else:
-            model_runner = XPUModelRunner  # type: ignore[assignment]
-        return model_runner(self.vllm_config, self.device)  # type: ignore
+        if self.vllm_config.is_mm_encoder_only:
+            return XPUMMEncoderModelRunner(self.vllm_config, self.device)
+        return XPUModelRunner(self.vllm_config, self.device)
 
     def shutdown(self) -> None:
         logger.info(

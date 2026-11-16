@@ -13,7 +13,6 @@ The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-
 
 Startup fails with a `ValueError` unless:
 
-- **Model Runner V2** is used (`VLLM_USE_V2_MODEL_RUNNER=1` if vLLM falls back to V1);
 - the runner is `generate` and the model is **MoE**;
 - **prefix caching is enabled** (the default). `--no-enable-prefix-caching` fails; the old v0.21 advice to disable it is wrong.
 
@@ -22,6 +21,22 @@ Rejected at startup: adaptive speculative verification, PP > 1, DCP/PCP > 1, and
 ### How it works: aux output connector
 
 Routing is stored by the aux output connector (`vllm/distributed/aux_output_connector/`, configured via `--aux-output-config`), keyed by KV block hash and shared with prefix caching, which is why prefix caching is required. `max_bytes` is its host-memory LRU capacity (default: derived from KV cache capacity). If a prefix-cache hit needs evicted rows, the worker raises `BlockObjectStoreError`; increase `max_bytes`.
+
+### Backend row restoration
+
+A backend's `MoERunner` or `RoutedExpertsCaptureSource` can optionally implement
+`restore_routed_experts_rows(topk_ids, ctx) -> Tensor`. During binding, the capturer
+selects the first such module in `model.modules()` order and uses its callback
+for every captured layer. Without a provider, the existing DP/TP recovery is used.
+Existing capture sources need no changes.
+
+The callback must restore this DP rank's token-ordered logical expert IDs for all
+captured layers, using the supplied `ForwardContext` rather than the provider's
+layer-specific state. It must preserve the input, device, dtype and top-k width,
+and keep collective participation consistent across ranks, including empty
+ranks. Operations must support graph replay. Models requiring different per-layer
+restorers cannot use this hook. Repeated layer IDs do not select a different
+restorer; the existing buffer-write semantics are unchanged.
 
 ## Output format
 
@@ -46,9 +61,5 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 ## `routed_experts_prompt_start`
 
 Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
-
-## Limitations
-
-- The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).

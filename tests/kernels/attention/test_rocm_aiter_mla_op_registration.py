@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm custom op schema tests for AITER MLA decode.
 
-``opcheck`` verifies that the decode ops are registered and that their schemas
+`opcheck` verifies that the decode ops are registered and that their schemas
 and fake implementations are consistent with the real kernels: fake-tensor
-support for torch.compile tracing and ``mutates_args=["o"]`` in-place output
+support for torch.compile tracing and `mutates_args=["o"]` in-place output
 aliasing.
 """
 
@@ -55,11 +55,11 @@ def test_gather_kv_b_proj_op_schema() -> None:
 
 @torch.inference_mode()
 def test_mla_decode_fwd_op_schema() -> None:
-    """Opcheck validates registration, schema, fake-tensor, and ``o`` aliasing.
+    """Opcheck validates registration, schema, fake-tensor, and `o` aliasing.
 
     A single opcheck call covers that the op is registered/callable, that its
     fake implementation matches the real op (torch.compile tracing), and that
-    the ``mutates_args=["o"]`` in-place output aliasing is declared correctly.
+    the `mutates_args=["o"]` in-place output aliasing is declared correctly.
     """
     _require_aiter()
     # Import ensures the custom op is registered.
