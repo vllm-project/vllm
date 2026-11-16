@@ -635,6 +635,28 @@ def test_same_width_integer_copy_is_a_byte_copy(sent, held):
     assert dest.dtype == sent
 
 
+@pytest.mark.parametrize(
+    "sent,held",
+    [
+        (BF16, torch.float8_e4m3fn),
+        (torch.float8_e4m3fn, BF16),
+        (torch.float8_e5m2, torch.float8_e4m3fn),
+    ],
+    ids=str,
+)
+def test_float8_value_cast_is_direct(sent, held):
+    """A copy-time cast into or out of a float8 value format is direct: the
+    planned copy into a destination in the parameter's dtype converts by
+    value, as the loader's copy_ did."""
+    name = "layer.weight"
+    make, _ = _single(copy_weight_, shape=(8,), dtype=held)
+    _, plan = _check_plan_equals_cold_start(make, {name: ((8,), sent)})
+    (write,) = plan.entries[name].writes
+    assert write.dtype == held
+    ((_, dest),) = plan.get_dest(name)
+    assert dest.dtype == held
+
+
 def test_tensors_sharing_one_storage():
     """Two checkpoint tensors on one storage: each write lands in its own
     tensor, whichever tensor names the storage."""
