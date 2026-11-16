@@ -96,6 +96,7 @@ def _run_engine_core_handshake(
             get_scheduler_cls=lambda: _FakeScheduler,
             enable_chunked_prefill=False,
             async_scheduling=False,
+            prefill_schedule_interval=1,
         ),
         speculative_config=None,
         ec_transfer_config=None,

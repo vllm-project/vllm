@@ -11,11 +11,14 @@ from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
     from ray import serve as ray_serve
+except ImportError:
+    ray_serve = None
+
+try:
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
-    ray_serve = None
 import regex as re
 
 
