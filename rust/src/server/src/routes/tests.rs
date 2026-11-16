@@ -5088,7 +5088,7 @@ async fn generate_expands_content_parts_after_features() {
             let features = request.mm_features.as_ref().expect("multimodal features");
             let identifiers: Vec<_> =
                 features.iter().map(|feature| feature.identifier.as_str()).collect();
-            assert_eq!(identifiers, ["image-1", "image-2"]);
+            assert_eq!(identifiers, ["uuid:image-1", "uuid:image-2"]);
             assert!(features.iter().all(|feature| feature.data.is_some()));
         },
         Arc::new(FakeChatBackend::with_multimodal_model_info(
