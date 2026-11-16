@@ -29,6 +29,10 @@ def init_speculator(
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if getattr(speculative_config, "remote_draft", None) is not None:
+        from vllm.v1.worker.gpu.spec_decode.remote import RemoteSpeculator
+
+        return RemoteSpeculator(vllm_config, device)
     speculator_config = speculative_config.speculator_config
     qualname = speculator_config.speculator_class
     if qualname is None:

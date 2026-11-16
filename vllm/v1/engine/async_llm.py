@@ -470,6 +470,7 @@ class AsyncLLM(EngineClient):
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
+            self.input_processor.validate_resumable(prompt.resumable)
             logger.warning_once(
                 "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
                 "is deprecated and will be removed in the future. You should "
@@ -615,6 +616,7 @@ class AsyncLLM(EngineClient):
         kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
         self._validate_resumable_request()
+        self.input_processor.validate_resumable(True)
         self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
