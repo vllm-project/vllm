@@ -452,9 +452,11 @@ def test_a_stuck_transfer_is_never_reported_and_stops_the_engine(events):
     worker, t = _mirror_worker(client)
     try:
         assert _store(worker, t, 5, 0, 1)
-        _wait_for(lambda: client.stopped)
+        # The worker stops the client before it records the stuck transfer,
+        # so poll get_finished() itself: it must raise, never report job 5.
         with pytest.raises(RuntimeError, match="may still land"):
-            worker.get_finished()
+            _finished(worker)
+        assert client.stopped
     finally:
         worker.shutdown()
     # Its GPU memory may still be written, so it stays registered.
