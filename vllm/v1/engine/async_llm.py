@@ -56,9 +56,9 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import (
     CheckpointState,
-    EngineCoreHashRequest,
     EngineCoreRequest,
     PauseMode,
+    PrefixHashConfig,
 )
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -1291,10 +1291,8 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
-    async def hash_requests(self, requests: list[EngineCoreRequest]) -> dict[str, Any]:
-        return await self.engine_core.hash_requests_async(
-            [EngineCoreHashRequest.from_request(request) for request in requests]
-        )
+    def get_prefix_hash_config(self) -> PrefixHashConfig | None:
+        return self.engine_core.get_prefix_hash_config()
 
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""

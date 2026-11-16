@@ -45,12 +45,12 @@ from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     CheckpointState,
     EEPNotificationType,
-    EngineCoreHashRequest,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
+    PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -381,9 +381,7 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
-    async def hash_requests_async(
-        self, requests: list[EngineCoreHashRequest]
-    ) -> dict[str, Any]:
+    def get_prefix_hash_config(self) -> PrefixHashConfig | None:
         raise NotImplementedError
 
     async def handle_fault(
@@ -658,6 +656,7 @@ class MPClient(EngineCoreClient):
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
+        self._prefix_hash_configs: dict[int, PrefixHashConfig | None] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -905,6 +904,9 @@ class MPClient(EngineCoreClient):
         )
         if response is None:
             return
+        self._prefix_hash_configs[response.data_parallel_rank] = (
+            response.prefix_hash_config
+        )
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -964,6 +966,17 @@ class MPClient(EngineCoreClient):
                     setattr(self, attribute, address)
                 else:
                     assert address == existing_address
+
+    def get_prefix_hash_config(self) -> PrefixHashConfig | None:
+        self.ensure_alive()
+        configs = [
+            self._prefix_hash_configs.get(rank) for rank in self.engine_ranks_managed
+        ]
+        if not configs or any(config is None for config in configs):
+            return None
+        if any(config != configs[0] for config in configs):
+            raise ValueError("Engines have different prefix hash configurations")
+        return configs[0]
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
@@ -1359,12 +1372,6 @@ class AsyncMPClient(MPClient):
                 f"Engines returned different {method} results: {results}"
             )
         return results[0]
-
-    async def hash_requests_async(
-        self, requests: list[EngineCoreHashRequest]
-    ) -> dict[str, Any]:
-        # A shared-port DP endpoint must return hashes valid on every rank.
-        return await self.call_utility_consensus_async("hash_requests", requests)
 
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity

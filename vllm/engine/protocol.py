@@ -19,7 +19,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import CheckpointState, EngineCoreRequest
+from vllm.v1.engine import CheckpointState, EngineCoreRequest, PrefixHashConfig
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -319,8 +319,8 @@ class EngineClient(ABC):
         """Get supported tasks."""
         raise NotImplementedError
 
-    async def hash_requests(self, requests: list[EngineCoreRequest]) -> dict[str, Any]:
-        """Return engine-native prefix hashes and resolved cache geometry."""
+    def get_prefix_hash_config(self) -> PrefixHashConfig | None:
+        """Return the initialized hash configuration shared by the engines."""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(

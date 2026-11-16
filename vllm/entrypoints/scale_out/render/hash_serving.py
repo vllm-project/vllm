@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -13,8 +15,11 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateReque
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import EngineInput, mm_input, tokens_input
 from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import BlockHash, get_request_block_hasher
+from vllm.v1.request import Request as EngineRequest
 
-from .hash_protocol import HashResponse, HashTokensRequest
+from .hash_protocol import HashGroup, HashPrompt, HashResponse, HashTokensRequest
 from .serving import ServingRender
 
 
@@ -24,7 +29,7 @@ async def hash_request(
     renderer: ServingRender,
     engine: EngineClient,
 ) -> HashResponse | ErrorResponse:
-    """Render a request and hash its prompts using the running engine."""
+    """Render and hash prompts locally with the engine's initialized settings."""
     if isinstance(request, CompletionRequest) and request.prompt_embeds is not None:
         return renderer.create_error_response("The hash endpoint requires token IDs")
     if isinstance(request, ChatCompletionRequest):
@@ -56,9 +61,21 @@ async def hash_request(
             "Enable prefix caching to use the hash endpoint"
         )
 
+    config = engine.get_prefix_hash_config()
+    if config is None or config.kv_cache_groups is None:
+        return renderer.create_error_response(
+            "The engines must provide compatible prefix hash metadata"
+        )
+    block_hasher = get_request_block_hasher(
+        config.hash_block_size,
+        get_hash_fn_by_name(config.hash_algo),
+        config.num_lookahead_tokens,
+        none_hash=BlockHash(config.none_hash),
+    )
+
     lora_request = renderer._maybe_get_adapters(request, supports_default_mm_loras=True)
     rendered = result if isinstance(result, list) else [result]
-    core_requests = []
+    prompts = []
     for prompt in rendered:
         engine_input: EngineInput
         if features := prompt.features:
@@ -76,15 +93,28 @@ async def hash_request(
             engine_input = tokens_input(
                 prompt_token_ids=prompt.token_ids, cache_salt=prompt.cache_salt
             )
-        core_requests.append(
-            engine.input_processor.process_inputs(
-                prompt.request_id,
-                engine_input,
-                prompt.sampling_params,
-                supported_tasks=("generate",),
-                lora_request=lora_request,
+        core_request = engine.input_processor.process_inputs(
+            prompt.request_id,
+            engine_input,
+            prompt.sampling_params,
+            supported_tasks=("generate",),
+            lora_request=lora_request,
+        )
+        hashed = await asyncio.to_thread(
+            EngineRequest.from_engine_core_request, core_request, block_hasher
+        )
+        prompts.append(
+            HashPrompt(
+                num_tokens=hashed.num_prompt_tokens,
+                block_hashes=[h.hex() for h in hashed.block_hashes],
             )
         )
 
-    hashes = await engine.hash_requests(core_requests)
-    return HashResponse(model=renderer.models.base_model_paths[0].name, **hashes)
+    return HashResponse(
+        model=renderer.models.base_model_paths[0].name,
+        hash_algorithm=config.hash_algo,
+        hash_block_size=config.hash_block_size,
+        num_hash_lookahead_tokens=config.num_lookahead_tokens,
+        groups=[HashGroup.model_validate(group) for group in config.kv_cache_groups],
+        prompts=prompts,
+    )

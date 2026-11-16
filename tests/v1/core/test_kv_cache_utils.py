@@ -1113,6 +1113,54 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     assert to_event_extra_keys(None) is None
 
 
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, xxhash])
+@pytest.mark.parametrize("lookahead", [0, 1, 2])
+def test_frontend_block_hasher_uses_engine_seed_without_changing_local_seed(
+    hash_fn, lookahead, monkeypatch
+):
+    from vllm.v1.engine import EngineCoreRequest
+
+    core_request = EngineCoreRequest(
+        request_id="hash",
+        prompt_token_ids=list(range(20)),
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier="adapter:image-a",
+                mm_position=PlaceholderRange(offset=3, length=11),
+            )
+        ],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=LoRARequest("adapter", 1, "/adapter"),
+        cache_salt="tenant-a",
+        data_parallel_rank=None,
+    )
+    monkeypatch.setenv("PYTHONHASHSEED", "11")
+    init_none_hash(hash_fn)
+    engine_seed = kv_cache_utils.NONE_HASH
+    engine_request = Request.from_engine_core_request(
+        core_request, get_request_block_hasher(4, hash_fn, lookahead)
+    )
+
+    monkeypatch.setenv("PYTHONHASHSEED", "22")
+    init_none_hash(hash_fn)
+    local_seed = kv_cache_utils.NONE_HASH
+    frontend_request = Request.from_engine_core_request(
+        core_request,
+        get_request_block_hasher(4, hash_fn, lookahead, none_hash=engine_seed),
+    )
+    local_request = Request.from_engine_core_request(
+        core_request, get_request_block_hasher(4, hash_fn, lookahead)
+    )
+    assert len(frontend_request.block_hashes) >= 4
+    assert frontend_request.block_hashes == engine_request.block_hashes
+    assert frontend_request.block_hashes != local_request.block_hashes
+    assert local_seed == kv_cache_utils.NONE_HASH
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
     parent_block_hash = BlockHash(b"123")

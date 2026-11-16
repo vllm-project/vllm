@@ -102,7 +102,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
         engine._initialize_kv_caches(config)
 
 
-def _make_dcp_manager() -> KVCacheManager:
+def _make_engine_core_with_dcp_manager() -> EngineCore:
     mla_spec = MLAAttentionSpec(
         block_size=BASE_BLOCK_SIZE,
         num_kv_heads=1,
@@ -130,16 +130,8 @@ def _make_dcp_manager() -> KVCacheManager:
         scheduler_block_size=BASE_BLOCK_SIZE * DCP_WORLD_SIZE,
         hash_block_size=BASE_BLOCK_SIZE,
         dcp_world_size=DCP_WORLD_SIZE,
-        enable_kv_cache_events=True,
     )
-    return manager
-
-
-def _make_engine_core_with_dcp_manager() -> EngineCore:
-    manager = _make_dcp_manager()
-    scheduler = SimpleNamespace(
-        kv_cache_config=manager.kv_cache_config, kv_cache_manager=manager
-    )
+    scheduler = SimpleNamespace(kv_cache_config=config, kv_cache_manager=manager)
     engine_core = object.__new__(EngineCore)
     engine_core.scheduler = scheduler
     return engine_core
@@ -158,83 +150,3 @@ def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
     assert [item["block_size"] for item in metadata] == [
         manager.block_size for manager in managers
     ]
-
-
-@pytest.mark.parametrize("lookahead", [0, 1])
-@pytest.mark.parametrize("salt", [None, "tenant-a"])
-@pytest.mark.parametrize("wire", [False, True])
-@pytest.mark.parametrize("multimodal", [False, True])
-def test_hash_requests_transport_preserves_kv_event_hashes(
-    lookahead, salt, wire, multimodal
-):
-    import msgspec
-
-    from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-    from vllm.sampling_params import SamplingParams
-    from vllm.utils.hashing import sha256
-    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-    from vllm.v1.engine import (
-        EngineCoreHashRequest,
-        EngineCoreRequest,
-    )
-    from vllm.v1.request import Request
-
-    manager = _make_dcp_manager()
-    init_none_hash(sha256)
-    block_hasher = get_request_block_hasher(BASE_BLOCK_SIZE, sha256, lookahead)
-    core_request = EngineCoreRequest(
-        request_id="hash-only",
-        prompt_token_ids=list(range(BASE_BLOCK_SIZE * DCP_WORLD_SIZE + 1)),
-        mm_features=[
-            MultiModalFeatureSpec(
-                data=None,
-                modality="image",
-                identifier="adapter:image-a",
-                mm_position=PlaceholderRange(offset=100, length=BASE_BLOCK_SIZE * 2),
-            )
-        ]
-        if multimodal
-        else None,
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        arrival_time=0,
-        lora_request=LoRARequest("adapter", 1, "/adapter") if multimodal else None,
-        cache_salt=salt,
-        data_parallel_rank=None,
-    )
-    expected = Request.from_engine_core_request(core_request, block_hasher).block_hashes
-    transport = EngineCoreHashRequest.from_request(core_request)
-    if wire:
-        transport = msgspec.convert(
-            msgspec.msgpack.decode(msgspec.msgpack.encode(transport)),
-            type=EngineCoreHashRequest,
-        )
-    hashed = Request(
-        request_id="hash",
-        prompt_token_ids=transport.prompt_token_ids,
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        mm_features=transport.mm_features,
-        lora_request=transport.lora_request,
-        cache_salt=transport.cache_salt,
-        block_hasher=block_hasher,
-    )
-    assert hashed.block_hashes == expected
-
-    from vllm.distributed.kv_events import BlockStored
-    from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-
-    generation = Request.from_engine_core_request(core_request, block_hasher)
-    assert (
-        manager.allocate_slots(generation, BASE_BLOCK_SIZE * DCP_WORLD_SIZE) is not None
-    )
-    stores = [
-        event for event in manager.take_events() if isinstance(event, BlockStored)
-    ]
-    assert stores
-    for event in stores:
-        assert all(
-            h in [maybe_convert_block_hash(value) for value in expected]
-            for h in event.block_hashes
-        )

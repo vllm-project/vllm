@@ -39,8 +39,11 @@ chain, starting at that stride minus one. Group block sizes include DCP scaling.
 Partial cache checkpoints may use intermediate hashes from the same chain.
 
 Hashes include the engine's seed, LoRA identity, cache salt, multimodal
-identifiers and positions, and configured lookahead. With multiple DP engines
-behind an API server, all ranks must agree on the response. Use compatible
+identifiers and positions, and configured lookahead. The frontend uses vLLM's
+shared request hasher with the initialized `PrefixHashConfig` received from the
+engine at startup, including its exact first-parent hash and cache-group geometry.
+With multiple DP engines behind an API server, all ranks must supply the same
+hash configuration and geometry. Use compatible
 hash settings across replicas, including a shared `PYTHONHASHSEED` when using
 non-cryptographic algorithms. Different versions or serving configurations can
 produce different hashes. Consumers must use the metadata in each response.
@@ -56,6 +59,6 @@ consumer's replay or resynchronization policy.
 
 The endpoint supports decoder-only OpenAI chat, completions, and token inputs.
 It does not support prompt embeddings, stateful Responses, Anthropic requests,
-or raw `content_parts` on token inputs. The hash RPC executes in the engine
-process and adds preprocessing and IPC work; measure its end-to-end cost for
-the intended workload.
+or raw `content_parts` on token inputs. Hashing runs in a frontend thread without
+a per-request engine RPC. Measure its preprocessing and hashing cost for the
+intended workload.

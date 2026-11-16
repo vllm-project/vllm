@@ -61,7 +61,13 @@ def hash_publisher_config():
 
 @pytest.fixture(
     scope="module",
-    params=[("sha256", "0"), ("sha256", "1"), ("sha256_cbor", "0")],
+    params=[
+        ("sha256", "0"),
+        ("sha256", "1"),
+        ("sha256_cbor", "0"),
+        ("xxhash", "0"),
+    ],
+    ids=["sha256-bytes", "sha256-integers", "sha256-cbor-bytes", "xxhash-bytes"],
 )
 def hash_server(request, hash_publisher_config):
     hash_algorithm, integer_events = request.param

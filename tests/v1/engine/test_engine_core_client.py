@@ -455,6 +455,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
 
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
+    client._prefix_hash_configs = {}
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -516,6 +517,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
 
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
+    client._prefix_hash_configs = {}
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -1591,6 +1593,7 @@ def test_apply_ready_response_retains_kv_event_sources():
 
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
+    client._prefix_hash_configs = {}
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
