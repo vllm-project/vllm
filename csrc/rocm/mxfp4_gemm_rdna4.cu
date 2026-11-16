@@ -92,13 +92,14 @@ __device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
 // ---------------------------------------------------------------------------
 // WM x WN waves per block, each wave owning one 16x16 WMMA tile, so the block
 // tile is (16*WM) x (16*WN). WM=WN=1 is the original single-wave kernel.
-template <typename T, int WM, int WN>
+template <typename T, int WM, int WN, bool KSPLIT>
 __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
                                           const float* __restrict__ ascale,
                                           const uint32_t* __restrict__ b_q,
                                           const uint8_t* __restrict__ b_scales,
                                           T* __restrict__ c, int M, int N,
-                                          int K) {
+                                          int K, float* __restrict__ c_f32,
+                                          int k_per_split) {
   const int wave = threadIdx.x >> 5;
   const int m_tile = blockIdx.y * (16 * WM) + 16 * (wave / WN);
   const int n_tile = blockIdx.x * (16 * WN) + 16 * (wave % WN);
@@ -116,7 +117,12 @@ __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
   v8f32 acc = {0, 0, 0, 0, 0, 0, 0, 0};
 
   // One iteration per E8M0 group (32 K) = two 16-wide WMMA steps.
-  for (int k_g = 0; k_g < K; k_g += kGroup) {
+  // K-split: block z owns [k_begin, k_end). Host picks k_per_split as a
+  // multiple of kGroup; the last split absorbs any remainder.
+  const int k_begin = KSPLIT ? (int)blockIdx.z * k_per_split : 0;
+  const int k_end =
+      KSPLIT ? ((blockIdx.z == gridDim.z - 1) ? K : k_begin + k_per_split) : K;
+  for (int k_g = k_begin; k_g < k_end; k_g += kGroup) {
     v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
   #pragma unroll
     for (int s = 0; s < 2; s++) {
@@ -151,16 +157,25 @@ __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
   for (int i = 0; i < 8; i++) {
     const int m_row = m_tile + 8 * hi + i;
     if (m_row >= M) continue;
-    c[(size_t)m_row * N + n_col] = from_f<T>(acc[i] * ascale[m_row]);
+    // Per-token scale distributes over the K sum, so apply it before the
+    // split reduction. gridDim.z > 1 reduces into a zeroed fp32 workspace via
+    // native global_atomic_add_f32 (no CAS). gfx12 has packed f16/bf16
+    // atomics too, but this lane owns one n and 8 m rows, so a packed pair
+    // would need a lane shuffle plus an odd-N tail path.
+    const float v = acc[i] * ascale[m_row];
+    if constexpr (KSPLIT)
+      unsafeAtomicAdd(c_f32 + (size_t)m_row * N + n_col, v);
+    else
+      c[(size_t)m_row * N + n_col] = from_f<T>(v);
   }
 }
 
 #else  // non-RDNA4 device pass: keep symbols so the TU links everywhere.
 
-template <typename T, int WM, int WN>
+template <typename T, int WM, int WN, bool KSPLIT>
 __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t*, const float*,
                                           const uint32_t*, const uint8_t*, T*,
-                                          int, int, int) {}
+                                          int, int, int, float*, int) {}
 
 #endif  // __HIP__MXFP4_RDNA4__
 
@@ -226,6 +241,41 @@ inline int tile_cfg_override() {
   return v;
 }
 
+template <typename T>
+__global__ void f32_to_t(const float* __restrict__ src, T* __restrict__ dst,
+                         size_t n) {
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+       i += (size_t)gridDim.x * blockDim.x)
+    dst[i] = from_f<T>(src[i]);
+}
+
+// VLLM_MXFP4_RDNA4_KSPLIT=n forces n splits (clamped so each split keeps at
+// least one E8M0 group). Unset / 0 picks by occupancy.
+inline int ksplit_override() {
+  static const int v = [] {
+    const char* e = std::getenv("VLLM_MXFP4_RDNA4_KSPLIT");
+    return e ? atoi(e) : 0;
+  }();
+  return v;
+}
+
+// K-split is off by default. Measured on gfx1201 (K=N=4096): at M=16 the
+// kernel takes ~71us whether it runs 256 waves over all of K or 1024 waves
+// over K/4, so the skinny-M floor is not serial-K latency and splitting only
+// adds the workspace zero, atomics and convert pass (M=32: 73 -> 93us). Kept
+// behind VLLM_MXFP4_RDNA4_KSPLIT for experiments; the non-split instantiation
+// is unchanged code.
+inline int choose_ksplit(int M, int N, int K, int WM, int WN) {
+  (void)M;
+  (void)N;
+  (void)WM;
+  (void)WN;
+  const int max_by_k = K / kGroup;
+  const int ov = ksplit_override();
+  if (ov > 1) return ov < max_by_k ? ov : max_by_k;
+  return 1;
+}
+
 }  // namespace mxfp4_rdna4
 }  // namespace vllm
 
@@ -262,10 +312,29 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
 
 #define LAUNCH_TILED(TT, WM, WN)                                               \
   do {                                                                         \
+    const int splits = choose_ksplit(M, N, K, WM, WN);                         \
+    const int k_per = (splits > 1) ? ((K / splits) / kGroup) * kGroup : K;     \
     dim3 grd((N + 16 * (WN) - 1) / (16 * (WN)),                                \
-             (M + 16 * (WM) - 1) / (16 * (WM)));                               \
-    gemm_mxfp4_wmma_fp8_tiled<TT, WM, WN>                                      \
-        <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K); \
+             (M + 16 * (WM) - 1) / (16 * (WM)), splits);                       \
+    torch::Tensor ws;                                                          \
+    float* wsp = nullptr;                                                      \
+    if (splits > 1) {                                                          \
+      ws = torch::zeros({M, N}, a.options().dtype(torch::kFloat32));           \
+      wsp = ws.data_ptr<float>();                                              \
+    }                                                                          \
+    if (splits > 1)                                                            \
+      gemm_mxfp4_wmma_fp8_tiled<TT, WM, WN, true>                              \
+          <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N,   \
+                                                 K, wsp, k_per);               \
+    else                                                                       \
+      gemm_mxfp4_wmma_fp8_tiled<TT, WM, WN, false>                             \
+          <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N,   \
+                                                 K, wsp, k_per);               \
+    if (splits > 1) {                                                          \
+      const size_t n_el = (size_t)M * N;                                       \
+      f32_to_t<TT>                                                             \
+          <<<(unsigned)((n_el + 255) / 256), 256, 0, stream>>>(wsp, cp, n_el); \
+    }                                                                          \
   } while (0)
 
 #define DISPATCH(T, TT)                                                   \
