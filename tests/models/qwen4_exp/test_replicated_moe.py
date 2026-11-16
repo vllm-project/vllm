@@ -313,11 +313,14 @@ def _check_dual_layout() -> None:
 
 
 def _check_decode_guard_reads_tp_shards() -> None:
-    reason = "routed experts at TP size 1 (the kernels read TP2 shards)"
+    # Whole experts are read only at the checkpoint's intermediate (640); this
+    # model's is 256.
+    refused = "routed experts at TP size 1, intermediate 256"
     dual = _build(_make_config(monokernel=True, **FLAG))
     one_layout = _build(_make_config(**FLAG))
-    assert reason not in guards._layer_reasons(dual)
-    assert reason in guards._layer_reasons(one_layout)
+    dual_reasons = guards._layer_reasons(dual)
+    assert not any(r.startswith("routed experts at TP size") for r in dual_reasons)
+    assert any(r.startswith(refused) for r in guards._layer_reasons(one_layout))
 
 
 def _check_separate_shared_expert_refused() -> None:
@@ -371,7 +374,8 @@ def test_dual_layout_keeps_shards_and_runs_whole_experts() -> None:
 
 def test_specialized_decode_guard_refuses_whole_experts() -> None:
     """The kernels sum the TP ranks' partial outputs: whole experts in
-    `mlp.experts` would be summed twice."""
+    `mlp.experts` are read at each rank's share, which the kernels' builds
+    locate at the checkpoint's intermediate only."""
     mp.spawn(
         _run, args=(get_open_port(), _check_decode_guard_reads_tp_shards), nprocs=2
     )

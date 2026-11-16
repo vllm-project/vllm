@@ -79,7 +79,9 @@ class LayerBuild:
     stats: bool = False  # the input state came from vLLM: compute its rrms first
     qkvz_shuffled: bool = False  # in_proj_qkvz on AITER's ASM FP4 GEMM layout
     out_shuffled: bool = False  # out_proj likewise
-    rip: int = 384  # the experts' padded intermediate rows a rank
+    # the experts' intermediate rows: a TP shard's padded, or MOE_INTER for whole
+    # experts (a rank's share read in place, ``runtime.guards.expert_slices``)
+    rip: int = 384
     hc_eps: float = 1e-6
     gdn_eps: float = 1e-6
     trace: bool = False  # CTA 0 stamps the clock at every phase end (``phase_names``)
@@ -126,6 +128,7 @@ ABI = KernelAbi(
         "w13s",
         "w2",
         "w2s",
+        "w2s_g0",
         "peers",
         "rank",
         "epoch",
@@ -331,6 +334,7 @@ def build(key: LayerBuild):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
+        w2s_g0: Int32,
         peers: Int64,
         rank: Int32,
         epoch: Int64,
@@ -449,7 +453,7 @@ def build(key: LayerBuild):
             return issued if tiled.resident(S) else pre_down
 
         def mlp_half(pending):
-            mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
+            mw = moe.Weights(w_gate, w13, w13s, w2, w2s, w2s_g0)
             pre = moe.prefetch(g, shape, mw)  # in flight through the mix
             router_w = (moe.router_weights(w_gate), moe.router_plan())
             routed = mix(
@@ -590,6 +594,7 @@ def build(key: LayerBuild):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
+        w2s_g0: Int32,
         peers: Int64,
         rank: Int32,
         epoch: Int64,
@@ -638,6 +643,7 @@ def build(key: LayerBuild):
             w13s,
             w2,
             w2s,
+            w2s_g0,
             peers,
             rank,
             epoch,

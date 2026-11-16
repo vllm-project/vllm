@@ -53,7 +53,7 @@ def shuffle_scale(sc):
     rows, cols = sc.shape
     pad = (cols + 7) // 8 * 8
     if pad != cols:
-        sc = torch.cat([sc, torch.full((rows, pad - cols), 127, dtype=torch.uint8)], 1)
+        sc = torch.cat([sc, sc.new_full((rows, pad - cols), 127)], 1)
     return (
         sc.view(rows // 32, 2, 16, pad // 8, 2, 4)
         .permute(0, 3, 5, 2, 4, 1)

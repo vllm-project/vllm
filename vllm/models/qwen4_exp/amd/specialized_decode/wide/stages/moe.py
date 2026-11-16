@@ -16,8 +16,10 @@ MoE whose units stream one expert's weights each.
   MFMA, `silu(gate) * up` requantized to MXFP4 in LDS, down, and one f32
   partial a (row, slot) to `part`. The experts are vLLM's tensors in place
   (`AITER_MXFP4_MXFP4`: `shuffle_weight(16, 16)` codes, `e8m0_shuffle`
-  scales; each of gate and up padded from `RI` to `rip` rows, the down
-  projection's K likewise); the padded rows are skipped.
+  scales): TP shards, each of gate and up padded from `RI` to `rip` rows and
+  the down projection's K likewise (the padded rows are skipped), or whole
+  experts (`rip` = `MOE_INTER`), of which a rank reads its `RI` rows and K
+  columns in place (`share_groups`).
 - `combine`: a wave a TP exchange line, `y = sum_j w_j part_j` in slot
   order, rounded to bf16 and pushed to every rank.
 """
@@ -61,6 +63,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
     E_ALL,
     EXPERTS,
     HIDDEN,
+    MOE_INTER,
     RI,
     SLOTS,
     THREADS,
@@ -92,8 +95,8 @@ def i32(v):
 
 
 class Shape:
-    """A step's MoE sizes: `rows` tokens, `rip` the experts' padded
-    intermediate rows a rank (the weights' layout)."""
+    """A step's MoE sizes: `rows` tokens, `rip` the experts' intermediate
+    rows in the weights' layout (a TP shard's padded, or `MOE_INTER`)."""
 
     def __init__(self, rows: int, rip: int):
         self.rows, self.rip = rows, rip
@@ -108,13 +111,15 @@ class Shape:
         self.w13_bytes = 2 * rip * self.w13_row_bytes  # an expert's gate+up codes
         self.w13_scale_cols = (HIDDEN // 32 + 7) // 8 * 8
         self.w13_scale_bytes = 2 * rip * self.w13_scale_cols
+        # the scale rows from a rank's first gate row to its last up row
+        self.w13_share_scale_bytes = (rip + RI) * self.w13_scale_cols
         self.w2_row_bytes = rip // 2
         self.w2_bytes = HIDDEN * self.w2_row_bytes
         self.w2_scale_cols = (rip // 32 + 7) // 8 * 8
         self.w2_scale_bytes = HIDDEN * self.w2_scale_cols
-        self.down_steps = -(
-            -RI // 128
-        )  # K steps of the down projection (the rest is padding)
+        # K steps of the down projection; the rest is a shard's padding, or the
+        # other rank's share of whole experts
+        self.down_steps = -(-RI // 128)
 
 
 @dataclass(frozen=True)
@@ -429,7 +434,21 @@ def pieces(n):
 
 @traced
 def experts(
-    g, s: Shape, lds, route_buf, x4, x4s, w13, w13s, w2, w2s, part, part2, flags, tag
+    g,
+    s: Shape,
+    lds,
+    route_buf,
+    x4,
+    x4s,
+    w13,
+    w13s,
+    w2,
+    w2s,
+    w2s_g0,
+    part,
+    part2,
+    flags,
+    tag,
 ):
     """Build the schedule, then every piece of it (CTA `bid`: pieces `p, p
     + BLOCKS, ..` from its slot `p`): the whole units, then the split
@@ -459,6 +478,7 @@ def experts(
             us,
             db,
             ds,
+            w2s_g0,
             start,
             count,
             part,
@@ -508,9 +528,47 @@ def pipelined(steps: int, depth: int, issue, compute):
         compute(k, ring.pop(0))
 
 
+def share_groups(g0, lane):
+    """A lane's down-projection scale words in a build of whole experts
+    (`Shape.rip` = `MOE_INTER`), which reads a rank's share in place: the
+    lane's K group `4 k + lane // 16` of the share is group `c = g0 + 4 k +
+    lane // 16` of the whole tensor (`g0`: the share's first group,
+    `runtime.guards.expert_slices`), which `e8m0_shuffle` keeps in word `(R
+    * tiles + c // 8) * 64 + (c % 4) * 16 + row % 16` of 32-row block `R`, at
+    byte pair `(c // 4) % 2`. Returns (the word's lane part, `c0 = g0 + lane
+    // 16`: step `k` reads column block `(c0 + 4 k) // 8`, the shift for
+    `swap_pairs`: 16 where the byte pair is not the shard's `k % 2` that
+    `opsel_a` selects, else 0). With `g0` 0 these are the shard's words."""
+    c0 = g0 + lane // TILE
+    return (c0 % 4) * TILE + lane % TILE, c0, ((c0 // 4) % 2) * 16
+
+
+def swap_pairs(w, shift):
+    """`w` with its 16-bit halves swapped at `shift` 16, as is at 0. The
+    mask: `>>` is arithmetic on i32, and a sign-filled byte would be 0xFF,
+    the E8M0 NaN."""
+    return (w << shift) | ((w >> shift) & 0xFFFF)
+
+
 @traced
 def unit(
-    g, s, lds, x4, x4s, ub, us, db, ds, start, count, part, part2, flags, tag, half
+    g,
+    s,
+    lds,
+    x4,
+    x4s,
+    ub,
+    us,
+    db,
+    ds,
+    w2s_g0,
+    start,
+    count,
+    part,
+    part2,
+    flags,
+    tag,
+    half,
 ):
     """One (expert, <= 16 tokens) unit, or one half of it (`half` 1, 2; 0 the
     whole unit): gate/up -> silu * up -> MXFP4 -> down -> f32 partials of
@@ -534,6 +592,13 @@ def unit(
     even_base = (base_tile % 2) == 0
     accs = [zeros(4) for _ in range(2 * UP_TILES)]
     scales = {}
+    # a wave loads every scale pair; a half's last ones feed only tiles it does
+    # not store. Of whole experts, rank 1's reach up to two 32-row blocks past
+    # an expert's (the last expert's: past the tensor), so they are bounded by
+    # the rank's share and read zeros past it, without a request
+    span = None
+    if const_expr(s.rip == MOE_INTER):
+        span = s.w13_share_scale_bytes
 
     def tile_of(t):
         return base_tile + (t % UP_TILES) + (t // UP_TILES) * rip_tiles
@@ -551,7 +616,11 @@ def unit(
                 for pair in range_constexpr((UP_TILES + 1) // 2):
                     tp = base_tile // 2 + proj * (rip_tiles // 2) + pair
                     scales[proj, pair, k // 2] = ld(
-                        us, (tp * scale_tiles + k // 2) * 64 + lane, fx.Int32, cm=CM_NT
+                        us,
+                        (tp * scale_tiles + k // 2) * 64 + lane,
+                        fx.Int32,
+                        cm=CM_NT,
+                        nbytes=span,
                     )
         q = 4 * k + group
         xb = lds_ld(lds.x + row * (HIDDEN // 8) + q * 4, 4)
@@ -609,15 +678,23 @@ def unit(
         r = i32(4 * qd) + group
         dest.append((r < count, _assignment(lds.index, s, start, count, r)))
     out = (half == 2).select(fx.Int64(part2), fx.Int64(part))
+    share = None
+    if const_expr(s.rip == MOE_INTER):
+        share = share_groups(w2s_g0, lane)
     for blk in range(i32(0), i32(DOWN_TILES // DOWN_BLOCK), i32(1)):
-        down_block(g, s, lds, db, ds, out, wave, lane, dest, blk, xb, xc, group_live)
+        down_block(
+            g, s, lds, db, ds, share, out, wave, lane, dest, blk, xb, xc, group_live
+        )
     fx.barrier()
     if (half == 2) & (g.tid < count):
         st(flags, _assignment(lds.index, s, start, count, g.tid), tag, CM_DEV)
 
 
 @traced
-def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc, group_live):
+def down_block(
+    g, s, lds, db, ds, share, part, wave, lane, dest, blk, xb, xc, group_live
+):
+    """`share`: `share_groups`' in a build of whole experts, else None."""
     first = wave * DOWN_TILES + blk * DOWN_BLOCK
     partials = [zeros(4) for _ in range(DOWN_BLOCK)]
     scale_tiles = s.w2_scale_cols // 8
@@ -627,18 +704,26 @@ def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc, group_liv
             ((first + t) * (TILE * s.w2_row_bytes) + 1024 * k + 16 * lane) // 4
             for t in range(DOWN_BLOCK)
         ]
-        # a lane's K group past RI (the padding) or outside the half is not read
+        # a lane's K group past RI or outside the half is not read: a shard's
+        # padding; of whole experts the other rank's share (rank 0) or up to
+        # 512 bytes into the next 16-row tile, past the last expert's end at
+        # its last tile (rank 1)
         q = 4 * k + lane // TILE
         live = (q < AGROUPS) & group_live(q)
         weights = [
             ld(db, a, fx.Int32, 4, cm=CM_NT, nbytes=s.w2_bytes, mask=live) for a in at
         ]
+        if const_expr(share is None):
+            cblock, word = k // 2, lane
+        else:
+            word, c0, _ = share
+            cblock = (c0 + 4 * k) // 8
         return (
             weights,
             [
                 ld(
                     ds,
-                    ((first // 2 + p) * scale_tiles + k // 2) * 64 + lane,
+                    ((first // 2 + p) * scale_tiles + cblock) * 64 + word,
                     fx.Int32,
                     cm=CM_NT,
                 )
@@ -648,6 +733,8 @@ def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc, group_liv
 
     def compute(k, loaded):
         weights, scales = loaded
+        if const_expr(share is not None):
+            scales = [swap_pairs(w, share[2]) for w in scales]
         for t in range_constexpr(DOWN_BLOCK):
             partials[t] = mfma_f4(
                 weights[t],
@@ -793,15 +880,18 @@ def small(rows: int) -> bool:
 
 class Weights(TraceInvariant):
     """A layer's MoE weights (byte addresses): the router gate, the experts'
-    gate/up and down codes and scales (the shared expert is expert EXPERTS)."""
+    gate/up and down codes and scales (the shared expert is expert EXPERTS),
+    and `w2s_g0`, the first K group of the down projection's scales a build
+    of whole experts reads (`share_groups`)."""
 
-    def __init__(self, w_gate, w13, w13s, w2, w2s):
+    def __init__(self, w_gate, w13, w13s, w2, w2s, w2s_g0):
         self.w_gate, self.w13, self.w13s = (
             fx.Int64(w_gate),
             fx.Int64(w13),
             fx.Int64(w13s),
         )
         self.w2, self.w2s = fx.Int64(w2), fx.Int64(w2s)
+        self.w2s_g0 = fx.Int32(w2s_g0)
 
 
 class Bufs(TraceInvariant):
@@ -960,6 +1050,7 @@ def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, pre=None)
         w.w13s,
         w.w2,
         w.w2s,
+        w.w2s_g0,
         b.mpart,
         b.mpart2,
         b.split,
@@ -1461,7 +1552,9 @@ def _down_unit(g, s, lds, i):
 
 def _down_weights(g, s, lds, w, i):
     """Unit `i`'s down weights of output tile `bid` (every K step; K past
-    RI is padding) and their scale words."""
+    RI is not read, as in `down_block`) and two scale words: column blocks 0
+    and 1, or in a build of whole experts the lane's first two
+    (`share_groups`, `_share_scales`)."""
     tile, lane = g.bid, g.lane
     live, expert, _, _ = _down_unit(g, s, lds, i)
     db = w.w2 + fx.Int64(expert) * fx.Int64(s.w2_bytes)
@@ -1472,18 +1565,36 @@ def _down_weights(g, s, lds, w, i):
         at = (tile * (TILE * s.w2_row_bytes) + 1024 * k + 16 * lane) // 4
         weights.append(ld(db, at, fx.Int32, 4, cm=CM_NT, nbytes=s.w2_bytes, mask=on))
     scale_tiles = s.w2_scale_cols // 8
+    first, word = 0, lane
+    if const_expr(s.rip == MOE_INTER):
+        word, c0, _ = share_groups(w.w2s_g0, lane)
+        first = c0 // 8
     codes = [
         ld(
             ds,
-            ((tile // 2) * scale_tiles + k) * 64 + lane,
+            ((tile // 2) * scale_tiles + (first + c)) * 64 + word,
             fx.Int32,
             cm=CM_NT,
             nbytes=s.w2_scale_bytes,
             mask=live,
         )
-        for k in range(-(-s.down_steps // 2))
+        for c in range(2)
     ]
     return weights + codes
+
+
+# a share's K steps of the down projection read two column blocks of scales
+assert -(-RI // 128) == 3
+
+
+def _share_scales(codes, share):
+    """Each K step's scale word of `_down_weights`' two in a build of whole
+    experts: step `k` reads column block `(c0 + 4 k) // 8`, the first block
+    at step 0, the second at step 2 and at step 1 where `c0 % 8 >= 4`; its
+    byte pairs swapped into the shard's places (`swap_pairs`)."""
+    _, c0, shift = share
+    words = [codes[0], ((c0 % 8) >= 4).select(codes[1], codes[0]), codes[1]]
+    return [swap_pairs(word, shift) for word in words]
 
 
 def _down_acts(g, s, lds, i):
@@ -1527,6 +1638,9 @@ def down_units(g, s, lds, w, pending):
     group = lane // TILE
     odd = g.bid % 2
     units = _wave_units(s)
+    share = None
+    if const_expr(s.rip == MOE_INTER):
+        share = share_groups(w.w2s_g0, lane)
 
     def issue(i):
         return _down_weights(g, s, lds, w, i), _down_acts(g, s, lds, i)
@@ -1538,9 +1652,12 @@ def down_units(g, s, lds, w, pending):
             sched_barrier()
         loaded, (xb, xc, a, count) = ring.pop(0)
         weights, codes = loaded[: s.down_steps], loaded[s.down_steps :]
+        steps = [codes[k // 2] for k in range(s.down_steps)]
+        if const_expr(share is not None):
+            steps = _share_scales(codes, share)
         acc = zeros(4)
         for k in range_constexpr(s.down_steps):
-            sa = (codes[k // 2] >> (odd * 8)) & 0x00FF00FF
+            sa = (steps[k] >> (odd * 8)) & 0x00FF00FF
             acc = mfma_f4(weights[k], xb[k], acc, sa, xc[k], opsel_a=2 * (k % 2))
         if lane % TILE < count:
             lds_st(lds.contrib + a * TILE + group * 4, acc.bitcast(fx.Int32))

@@ -10,7 +10,7 @@ import torch
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime import NAME
 from vllm.models.qwen4_exp.amd.specialized_decode.wide import layout as L
-from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import moe, qsa
 
 FP4 = (torch.uint8, torch.float4_e2m1fn_x2)
 
@@ -80,6 +80,33 @@ def experts_rip(mlp) -> int:
     return mlp.experts.routed_experts.w13_weight.shape[1] // 2
 
 
+def expert_slices(mlp) -> list[dict[str, int]] | None:
+    """Where each TP rank's share of the routed experts starts in the layer's
+    expert tensors, as the kernels' arguments (`Launcher`): byte offsets added
+    to `w13`, `w13s` and `w2`, and `w2s_g0`, the share's first K group of the
+    down projection's scales (`wide.stages.moe.share_groups`). TP shards
+    start at 0. Whole experts (`--enable-hc-sp-replicated-moe`, read by a
+    build at their full intermediate) start at the rank's `RI` rows of gate
+    and up (whole 32-row scale blocks) and `RI` columns of down (whole 32-wide
+    K groups, a 16-row tile's in order at 16 x 16 bytes each). None for any
+    other layout."""
+    tp, rip = mlp.experts.moe_config.tp_size, experts_rip(mlp)
+    if tp == L.TP:
+        return [dict(w13=0, w13s=0, w2=0, w2s_g0=0)] * L.TP
+    if tp != 1 or rip != L.MOE_INTER:
+        return None
+    s = moe.Shape(1, rip)
+    return [
+        dict(
+            w13=r * L.RI * s.w13_row_bytes,
+            w13s=r * L.RI * s.w13_scale_cols,
+            w2=r * (L.RI // 2) * moe.TILE,
+            w2s_g0=r * L.RI // 32,
+        )
+        for r in range(L.TP)
+    ]
+
+
 def _compact(idx: list[int]) -> str:
     """[0, 1, 2, 5] -> '0-2, 5'."""
     runs: list[list[int]] = []
@@ -106,16 +133,16 @@ def _layer_reasons(layer) -> list[str]:
         out.append("the shared expert not fused")
     else:
         ex = mlp.experts.routed_experts
-        tp = mlp.experts.moe_config.tp_size
-        if tp != L.TP:
-            # the kernels read this rank's share of every expert and sum the
-            # TP ranks' partial outputs: whole experts on each rank (as
-            # --enable-hc-sp-replicated-moe builds them) would be summed twice
-            out.append(
-                f"routed experts at TP size {tp} (the kernels read TP{L.TP} shards)"
-            )
         backend = getattr(ex.quant_method, "mxfp4_backend", None)
         rip = ex.w13_weight.shape[1] // 2
+        if expert_slices(mlp) is None:
+            # the kernels read this rank's share of every expert and sum the
+            # TP ranks' partial outputs
+            out.append(
+                f"routed experts at TP size {mlp.experts.moe_config.tp_size}, "
+                f"intermediate {rip} (the kernels read TP{L.TP} shards or whole "
+                f"experts at {L.MOE_INTER})"
+            )
         if backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
             out.append(f"routed experts on {backend}, not AITER_MXFP4_MXFP4")
         elif not getattr(ex.w13_weight, "is_shuffled", False):

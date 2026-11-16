@@ -20,6 +20,7 @@ from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
+    expert_slices,
     experts_rip,
     gdn_states,
     mxfp4_shuffled,
@@ -127,15 +128,19 @@ class Launcher:
         a = _unused()
         mlp = layer.mlp
         ex = mlp.experts.routed_experts
+        shares = expert_slices(mlp)
+        assert shares is not None  # model_reasons refused the other layouts
+        share = shares[self.rank]
         a |= _hc_args(layer.attn_hyper_connection, "a")
         a |= _hc_args(layer.mlp_hyper_connection, "m")
         a |= {
             "scratch": self.scratch,
             "w_gate": router_gate(mlp),
-            "w13": ex.w13_weight,
-            "w13s": ex.w13_weight_scale,
-            "w2": ex.w2_weight,
+            "w13": ex.w13_weight.data_ptr() + share["w13"],
+            "w13s": ex.w13_weight_scale.data_ptr() + share["w13s"],
+            "w2": ex.w2_weight.data_ptr() + share["w2"],
             "w2s": ex.w2_weight_scale,
+            "w2s_g0": share["w2s_g0"],
             "peers": self.peer_table,
             "rank": self.rank,
             "epoch": self.epoch,

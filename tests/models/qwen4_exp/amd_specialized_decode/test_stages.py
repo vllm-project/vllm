@@ -1079,10 +1079,10 @@ def _check_gated_delta_net(harness, rows, pads, out):
 RIP = 384  # the padded intermediate of a TP2 rank (320 real)
 
 
-def _moe_kernel(rows, codec="bf16"):
+def _moe_kernel(rows, codec="bf16", rip=RIP):
     import flydsl.compiler as flyc
     import flydsl.expr as fx
-    from flydsl.expr.typing import Int64
+    from flydsl.expr.typing import Int32, Int64
 
     default_stream = fx.Stream(None)
 
@@ -1099,8 +1099,10 @@ def _moe_kernel(rows, codec="bf16"):
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import moe, tiled
 
-    digest = source_digest()  # FlyDSL does not hash the stages' sources
-    shape = moe.Shape(rows, RIP)
+    # every build parameter in the JIT cache key; FlyDSL does not hash the
+    # stages' sources
+    keyed = (rows, codec, rip, source_digest())
+    shape = moe.Shape(rows, rip)
     MoeLds = moe.lds_struct(shape)
 
     @fx.struct
@@ -1116,7 +1118,7 @@ def _moe_kernel(rows, codec="bf16"):
     class Smem:
         word: fx.Array[fx.Int32, 4, 16]
 
-    @flyc.kernel(name=f"t_moe_{rows}_{codec}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(name=f"t_moe_{rows}_{codec}_r{rip}", known_block_size=[THREADS, 1, 1])
     def kern(
         x: Int64,
         w_gate: Int64,
@@ -1124,6 +1126,7 @@ def _moe_kernel(rows, codec="bf16"):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
+        w2s_g0: Int32,
         part: Int64,
         route: Int64,
         x4: Int64,
@@ -1138,7 +1141,7 @@ def _moe_kernel(rows, codec="bf16"):
         folds: Int64,
         health: Int64,
     ):
-        _ = digest
+        _ = keyed
         tid, bid = fx.thread_idx.x, fx.block_idx.x
         alloc = fx.SharedAllocator()
         sm = alloc.allocate(Smem).peek()
@@ -1159,7 +1162,7 @@ def _moe_kernel(rows, codec="bf16"):
             gemm,
             ph.moe.peek(),
             x,
-            moe.Weights(w_gate, w13, w13s, w2, w2s),
+            moe.Weights(w_gate, w13, w13s, w2, w2s, w2s_g0),
             moe.Bufs(part, route, x4, x4s, mpart, mpart2, flags),
             ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows, codec),
             lambda name, between=None: grid_sync(g, between),
@@ -1174,6 +1177,7 @@ def _moe_kernel(rows, codec="bf16"):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
+        w2s_g0: Int32,
         part: Int64,
         route: Int64,
         x4: Int64,
@@ -1189,7 +1193,7 @@ def _moe_kernel(rows, codec="bf16"):
         health: Int64,
         stream: fx.Stream = default_stream,
     ):
-        _ = digest
+        _ = keyed
         kern(
             x,
             w_gate,
@@ -1197,6 +1201,7 @@ def _moe_kernel(rows, codec="bf16"):
             w13s,
             w2,
             w2s,
+            w2s_g0,
             part,
             route,
             x4,
@@ -1354,6 +1359,7 @@ def test_moe(harness, rows, routing, codec):
     harness.mbox_t.zero_()
     _moe_kernel(rows, codec)(
         *[d[n].data_ptr() for n in ("x", "w_gate", "w13", "w13s", "w2", "w2s")],
+        0,
         part.data_ptr(),
         route.data_ptr(),
         x4.data_ptr(),
@@ -1525,6 +1531,7 @@ def test_moe_small(harness, small_moe_weights, rows, routing, codec):
         x.cuda().data_ptr(),
         w_gate.cuda().data_ptr(),
         *[dev[n].data_ptr() for n in ("w13", "w13s", "w2", "w2s")],
+        0,
         part.data_ptr(),
         route.data_ptr(),
         x4.data_ptr(),
@@ -1569,6 +1576,141 @@ def test_moe_small(harness, small_moe_weights, rows, routing, codec):
         assert err.median().item() < 5e-3
         assert err.max().item() < 5e-2
     assert (flags != 0).sum().item() == 0  # no split marks on this path
+
+
+@pytest.fixture(scope="module")
+def whole_experts():
+    """Whole experts as `--enable-hc-sp-replicated-moe` loads them (TP size 1,
+    intermediate `MOE_INTER`) and each rank's TP2 shard of the same tensors
+    as vLLM loads it (padded to `RIP` rows with zero codes and the 0x01
+    scales of `quark_moe.py`'s `torch.ones`), shuffled as AITER does
+    (`reference.shuffle_data`, `shuffle_scale`) on the GPU. The scale codes,
+    0x78-0x87, cross a byte's sign bit."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        E_ALL,
+        HIDDEN,
+        MOE_INTER,
+        RI,
+    )
+
+    gen = torch.Generator(device="cuda").manual_seed(11)
+
+    def rand(lo, hi, *shape):
+        return torch.randint(
+            lo, hi, shape, generator=gen, dtype=torch.uint8, device="cuda"
+        )
+
+    def shuffled(w13, w13s, w2, w2s):
+        def scales(s):
+            return shuffle_scale(s.flatten(0, 1)).view(*s.shape[:2], -1)
+
+        return shuffle_data(w13), scales(w13s), shuffle_data(w2), scales(w2s)
+
+    w13 = rand(0, 256, E_ALL, 2 * MOE_INTER, HIDDEN // 2)
+    w13s = rand(0x78, 0x88, E_ALL, 2 * MOE_INTER, HIDDEN // 32)
+    w2 = rand(0, 256, E_ALL, HIDDEN, MOE_INTER // 2)
+    w2s = rand(0x78, 0x88, E_ALL, HIDDEN, MOE_INTER // 32)
+    shards = []
+    for r in range(2):
+        s13 = w13.new_zeros(E_ALL, 2 * RIP, HIDDEN // 2)
+        s13s = w13s.new_ones(E_ALL, 2 * RIP, HIDDEN // 32)
+        for h in range(2):  # gate, up
+            src = slice(h * MOE_INTER + r * RI, h * MOE_INTER + (r + 1) * RI)
+            s13[:, h * RIP : h * RIP + RI] = w13[:, src]
+            s13s[:, h * RIP : h * RIP + RI] = w13s[:, src]
+        s2 = w2.new_zeros(E_ALL, HIDDEN, RIP // 2)
+        s2s = w2s.new_ones(E_ALL, HIDDEN, RIP // 32)
+        s2[..., : RI // 2] = w2[..., r * RI // 2 : (r + 1) * RI // 2]
+        s2s[..., : RI // 32] = w2s[..., r * RI // 32 : (r + 1) * RI // 32]
+        shards.append(shuffled(s13, s13s, s2, s2s))
+    return shuffled(w13, w13s, w2, w2s), shards
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize(
+    "rows, routing",
+    [(1, "random"), (8, "random"), (12, "hot"), (32, "hot")]
+    + [(128, "skewed"), (192, "random")],
+)
+def test_moe_reads_rank_share_of_whole_experts(
+    harness, whole_experts, rows, routing, rank
+):
+    """`--enable-hc-sp-replicated-moe` with `--monokernel`: the build at
+    `MOE_INTER` reads rank `rank`'s share of whole experts at its
+    `expert_slices` (the down projection's scales remapped a lane in the
+    kernel) and gives bit-identical routes, partials, split marks and exchange
+    lines to the TP2 build on that rank's shard of the same tensors, on the
+    small path and the expert-major one (split units: 32 hot, 128 skewed)."""
+    from types import SimpleNamespace as NS
+
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
+        expert_slices,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        E_ALL,
+        HIDDEN,
+        MOE_INTER,
+        SLOTS,
+        TOPK,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import moe
+
+    gen = torch.Generator().manual_seed(rows)
+    if routing == "random":
+        x = torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16)
+        w_gate = (torch.randn(E_ALL, HIDDEN, generator=gen) * 0.05).to(torch.bfloat16)
+    elif routing == "hot":
+        x, w_gate = _routed_inputs(gen, rows, [list(range(TOPK))] * rows)
+    else:
+        x, w_gate = _routed_inputs(gen, rows, _skewed_picks(rows, gen))
+    x, w_gate = x.cuda(), w_gate.cuda()
+    whole, shards = whole_experts
+    w13 = torch.empty(0, 2 * MOE_INTER, 0)  # experts_rip reads its shape
+    mlp = NS(experts=NS(moe_config=NS(tp_size=1), routed_experts=NS(w13_weight=w13)))
+    shares = expert_slices(mlp)
+    assert shares is not None
+    share = shares[rank]
+
+    def run(rip, weights, at):
+        out = dict(
+            part=torch.zeros(moe.router_plan().partial_words(rows), device="cuda"),
+            route=torch.zeros(2 * rows * SLOTS, dtype=torch.int32, device="cuda"),
+            x4=torch.zeros(rows, HIDDEN // 8, dtype=torch.int32, device="cuda"),
+            x4s=torch.zeros(rows, HIDDEN // 32, dtype=torch.int32, device="cuda"),
+            mpart=torch.zeros(rows * SLOTS, HIDDEN, device="cuda"),
+            mpart2=torch.zeros(rows * SLOTS, HIDDEN, device="cuda"),
+            flags=torch.zeros(rows * SLOTS, dtype=torch.int32, device="cuda"),
+        )
+        harness.mbox_t.zero_()
+        w13, w13s, w2, w2s = weights
+        _moe_kernel(rows, "bf16", rip)(
+            x.data_ptr(),
+            w_gate.data_ptr(),
+            w13.data_ptr() + at["w13"],
+            w13s.data_ptr() + at["w13s"],
+            w2.data_ptr() + at["w2"],
+            w2s.data_ptr(),
+            at["w2s_g0"],
+            *[t.data_ptr() for t in out.values()],
+            harness.mbox,
+            harness.epoch.data_ptr(),
+            *harness.sync_args(),
+            torch.cuda.current_stream(),
+        )
+        torch.accelerator.synchronize()
+        assert harness.health[0].item() == 0
+        return out | {"lines": harness.exchange_y(rows, 2).clone()}
+
+    want = run(RIP, shards[rank], dict(w13=0, w13s=0, w2=0, w2s_g0=0))
+    got = run(MOE_INTER, whole, share)
+    y = want["lines"].float()
+    assert torch.isfinite(y).all() and (y != 0).float().mean().item() > 0.99
+    if not moe.small(rows) and routing != "random":
+        assert (want["flags"] != 0).any()  # split units ran
+    for name, value in want.items():
+        # by bytes: on the small path `mpart` holds MXFP4 code words, some of
+        # them NaN as f32
+        assert torch.equal(got[name].view(torch.uint8), value.view(torch.uint8)), name
 
 
 def test_decode_widths_take_every_capture_size():
