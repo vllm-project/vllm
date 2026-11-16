@@ -170,7 +170,7 @@ __global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t* __restrict__ aq,
   }
 }
 
-template <typename T, int WM, int WN, bool KSPLIT>
+template <typename T, int WM, int WN, int TM, int TN, bool KSPLIT>
 __global__ void __launch_bounds__(32 * WM * WN)
     gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
                               const float* __restrict__ ascale,
@@ -178,19 +178,20 @@ __global__ void __launch_bounds__(32 * WM * WN)
                               const uint8_t* __restrict__ b_scales,
                               T* __restrict__ c, int M, int N, int K,
                               float* __restrict__ c_f32, int k_per_split) {
-  // Block tile (16*WM) x (16*WN); each wave owns one 16x16 WMMA tile.
+  // LDS variant, after the gfx11 GPTQ/MXFP4 tiled kernels: WM x WN waves per
+  // block, each wave owning a TM x TN grid of 16x16 WMMA tiles (TM=TN=2 is
+  // their 32x32-per-wave shape), so a group costs 2*TM*TN WMMAs per barrier
+  // instead of 2 and the barrier is amortised.
   //
-  // The packed B words of one 32-wide E8M0 group (4 words per column) are
-  // loaded and decoded ONCE per block and staged in LDS, so the WM waves that
-  // share an N column no longer each re-decode it. LDS layout is
-  // [octet][n] -> 8 E4M3 bytes: the decode threads write consecutive n and the
-  // WMMA B-fragment reads (lane -> n, octet = 2*step + half) are 8-byte loads
-  // over consecutive n, so both sides are bank-conflict free without padding.
-  //
-  // Two LDS buffers: group g+1's global loads (B words, A fragments, E8M0)
-  // are issued before group g's WMMAs and decoded into the other buffer after
-  // them, with one __syncthreads per group covering both hazards.
-  constexpr int BN = 16 * WN;
+  // The packed B words of one 32-wide E8M0 group (4 per column) are loaded
+  // and decoded ONCE per block into LDS as [octet][n] -> 8 E4M3 bytes; decode
+  // threads write consecutive n and the WMMA fragment reads (lane -> n,
+  // octet = 2*step + half) are 8-byte loads over consecutive n, so both sides
+  // are bank-conflict free without padding. Two buffers: group g+1's global
+  // loads are issued before group g's WMMAs and decoded into the other buffer
+  // after them, one __syncthreads per group covering both hazards.
+  constexpr int BM = 16 * WM * TM;
+  constexpr int BN = 16 * WN * TN;
   constexpr int NT = 32 * WM * WN;
   constexpr int WORDS = (BN * 4 + NT - 1) / NT;  // B words per thread / group
 
@@ -200,17 +201,26 @@ __global__ void __launch_bounds__(32 * WM * WN)
   const int lo = lane & 15;  // A: row | B: col | acc: N index
   const int hi = lane >> 4;  // which half of the 16-wide K step
   const int bn0 = blockIdx.x * BN;
-  const int m_tile = blockIdx.y * (16 * WM) + 16 * (wave / WN);
-  const int n_tile = bn0 + 16 * (wave % WN);
-  const int n_loc =
-      16 * (wave % WN) + lo;  // this lane's column inside the block
-  // No per-wave early return: every thread takes part in the block barriers
-  // and the shared decode. Out-of-range work is masked instead.
-  const bool tile_ok = (m_tile < M) && (n_tile < N);
-  const int n_col = n_tile + lo;
-  const int a_row = m_tile + lo;
-  const bool a_ok = tile_ok && a_row < M;
-  const bool n_ok = tile_ok && n_col < N;
+  const int wm_base = blockIdx.y * BM + 16 * TM * (wave / WN);
+  const int wn_loc = 16 * TN * (wave % WN);  // wave's first column in block
+  const int wn_base = bn0 + wn_loc;
+
+  // No per-wave early return: every thread joins the block barriers and the
+  // shared decode; out-of-range work is masked.
+  int a_row[TM];
+  bool a_ok[TM];
+  #pragma unroll
+  for (int tm = 0; tm < TM; tm++) {
+    a_row[tm] = wm_base + 16 * tm + lo;
+    a_ok[tm] = a_row[tm] < M;
+  }
+  int n_col[TN];
+  bool n_ok[TN];
+  #pragma unroll
+  for (int tn = 0; tn < TN; tn++) {
+    n_col[tn] = wn_base + 16 * tn + lo;
+    n_ok[tn] = n_col[tn] < N;
+  }
 
   __shared__ uint2 b_lds[2][4][BN];
 
@@ -220,8 +230,8 @@ __global__ void __launch_bounds__(32 * WM * WN)
   const int ngroups = (k_end - k_begin) / kGroup;
 
   uint32_t qa_nx[WORDS];
-  v2i32 a_nx[2];
-  float wsc_nx = 0.0f;
+  v2i32 a_nx[TM][2];
+  float wsc_nx[TN];
 
   auto load_group = [&](int g) {
     const int k_g = k_begin + g * kGroup;
@@ -237,16 +247,22 @@ __global__ void __launch_bounds__(32 * WM * WN)
       qa_nx[w] = v;
     }
   #pragma unroll
-    for (int s = 0; s < 2; s++) {
-      v2i32 af = {0, 0};
-      if (a_ok)
-        __builtin_memcpy(&af, aq + (size_t)a_row * K + k_g + 16 * s + 8 * hi,
-                         8);
-      a_nx[s] = af;
+    for (int tm = 0; tm < TM; tm++) {
+  #pragma unroll
+      for (int st = 0; st < 2; st++) {
+        v2i32 af = {0, 0};
+        if (a_ok[tm])
+          __builtin_memcpy(
+              &af, aq + (size_t)a_row[tm] * K + k_g + 16 * st + 8 * hi, 8);
+        a_nx[tm][st] = af;
+      }
     }
-    wsc_nx =
-        n_ok ? mxfp4_e8m0_to_f32(b_scales[(size_t)(k_g / kGroup) * N + n_col])
-             : 0.0f;
+  #pragma unroll
+    for (int tn = 0; tn < TN; tn++)
+      wsc_nx[tn] = n_ok[tn]
+                       ? mxfp4_e8m0_to_f32(
+                             b_scales[(size_t)(k_g / kGroup) * N + n_col[tn]])
+                       : 0.0f;
   };
   auto store_group = [&](int buf) {
   #pragma unroll
@@ -261,16 +277,24 @@ __global__ void __launch_bounds__(32 * WM * WN)
     }
   };
 
-  v8f32 acc = {0, 0, 0, 0, 0, 0, 0, 0};
-  v2i32 a_cur[2] = {{0, 0}, {0, 0}};
-  float wsc_cur = 0.0f;
+  v8f32 acc[TM][TN];
+  #pragma unroll
+  for (int tm = 0; tm < TM; tm++)
+  #pragma unroll
+    for (int tn = 0; tn < TN; tn++) acc[tm][tn] = {0, 0, 0, 0, 0, 0, 0, 0};
+  v2i32 a_cur[TM][2];
+  float wsc_cur[TN];
 
   if (ngroups > 0) {
     load_group(0);
     store_group(0);
-    a_cur[0] = a_nx[0];
-    a_cur[1] = a_nx[1];
-    wsc_cur = wsc_nx;
+  #pragma unroll
+    for (int tm = 0; tm < TM; tm++) {
+      a_cur[tm][0] = a_nx[tm][0];
+      a_cur[tm][1] = a_nx[tm][1];
+    }
+  #pragma unroll
+    for (int tn = 0; tn < TN; tn++) wsc_cur[tn] = wsc_nx[tn];
   }
   __syncthreads();
 
@@ -279,49 +303,72 @@ __global__ void __launch_bounds__(32 * WM * WN)
     const bool has_next = (g + 1 < ngroups);
     if (has_next) load_group(g + 1);  // in flight during this group's WMMAs
 
-    v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
+    v8f32 grp[TM][TN];
   #pragma unroll
-    for (int s = 0; s < 2; s++) {
-      const uint2 bw = b_lds[buf][2 * s + hi][n_loc];
-      v2i32 bf;
-      bf[0] = (int)bw.x;
-      bf[1] = (int)bw.y;
-      grp = wmma_fp8(a_cur[s], bf, grp);
+    for (int tm = 0; tm < TM; tm++)
+  #pragma unroll
+      for (int tn = 0; tn < TN; tn++) grp[tm][tn] = {0, 0, 0, 0, 0, 0, 0, 0};
+  #pragma unroll
+    for (int st = 0; st < 2; st++) {
+  #pragma unroll
+      for (int tn = 0; tn < TN; tn++) {
+        const uint2 bw = b_lds[buf][2 * st + hi][wn_loc + 16 * tn + lo];
+        v2i32 bf;
+        bf[0] = (int)bw.x;
+        bf[1] = (int)bw.y;
+  #pragma unroll
+        for (int tm = 0; tm < TM; tm++)
+          grp[tm][tn] = wmma_fp8(a_cur[tm][st], bf, grp[tm][tn]);
+      }
     }
-    // E8M0 is constant across the group and across this lane's 8 outputs,
-    // because the accumulator's N index is fixed per lane.
+    // E8M0 is constant across the group and across a lane's 8 outputs of a
+    // tile, because the accumulator's N index is fixed per lane.
   #pragma unroll
-    for (int i = 0; i < 8; i++) acc[i] = fmaf(grp[i], wsc_cur, acc[i]);
+    for (int tm = 0; tm < TM; tm++)
+  #pragma unroll
+      for (int tn = 0; tn < TN; tn++)
+  #pragma unroll
+        for (int i = 0; i < 8; i++)
+          acc[tm][tn][i] = fmaf(grp[tm][tn][i], wsc_cur[tn], acc[tm][tn][i]);
 
     if (has_next) {
       store_group(buf ^ 1);
-      a_cur[0] = a_nx[0];
-      a_cur[1] = a_nx[1];
-      wsc_cur = wsc_nx;
+  #pragma unroll
+      for (int tm = 0; tm < TM; tm++) {
+        a_cur[tm][0] = a_nx[tm][0];
+        a_cur[tm][1] = a_nx[tm][1];
+      }
+  #pragma unroll
+      for (int tn = 0; tn < TN; tn++) wsc_cur[tn] = wsc_nx[tn];
     }
     __syncthreads();
   }
 
-  if (!n_ok) return;  // past the last barrier, so returning here is safe
-  // gfx12 accumulator: lane -> n = lo, slot i -> m = 8*hi + i.
+  // Past the last barrier. gfx12 accumulator: lane -> n = lo, slot i -> m =
+  // 8*hi + i. Per-token scale distributes over the K sum, so it is applied
+  // before the split reduction (native global_atomic_add_f32, no CAS).
   #pragma unroll
-  for (int i = 0; i < 8; i++) {
-    const int m_row = m_tile + 8 * hi + i;
-    if (m_row >= M) continue;
-    // Per-token scale distributes over the K sum, so apply it before the
-    // split reduction. gridDim.z > 1 reduces into a zeroed fp32 workspace via
-    // native global_atomic_add_f32 (no CAS).
-    const float v = acc[i] * ascale[m_row];
-    if constexpr (KSPLIT)
-      unsafeAtomicAdd(c_f32 + (size_t)m_row * N + n_col, v);
-    else
-      c[(size_t)m_row * N + n_col] = from_f<T>(v);
+  for (int tn = 0; tn < TN; tn++) {
+    if (!n_ok[tn]) continue;
+  #pragma unroll
+    for (int tm = 0; tm < TM; tm++) {
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int m_row = wm_base + 16 * tm + 8 * hi + i;
+        if (m_row >= M) continue;
+        const float v = acc[tm][tn][i] * ascale[m_row];
+        if constexpr (KSPLIT)
+          unsafeAtomicAdd(c_f32 + (size_t)m_row * N + n_col[tn], v);
+        else
+          c[(size_t)m_row * N + n_col[tn]] = from_f<T>(v);
+      }
+    }
   }
 }
 
 #else  // non-RDNA4 device pass: keep symbols so the TU links everywhere.
 
-template <typename T, int WM, int WN, bool KSPLIT>
+template <typename T, int WM, int WN, int TM, int TN, bool KSPLIT>
 __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t*, const float*,
                                           const uint32_t*, const uint8_t*, T*,
                                           int, int, int, float*, int) {}
@@ -450,6 +497,120 @@ inline int choose_ksplit(int M, int N, int K, int WM, int WN) {
 }  // namespace mxfp4_rdna4
 }  // namespace vllm
 
+template <typename TT>
+void launch_wmma(const uint8_t* aqp, const float* asp, const uint32_t* bq,
+                 const uint8_t* bs, TT* cp, int M, int N, int K,
+                 const torch::Tensor& a, cudaStream_t stream) {
+  using namespace vllm::mxfp4_rdna4;
+  // Tile configs (VLLM_MXFP4_RDNA4_TILE): 1 16x16/1w, 2 32x32/4w, 3 64x32/8w
+  // (one 16x16 tile per wave; LDS or direct by use_lds_kernel), 4 64x64/4w,
+  // 5 128x64/8w (32x32 per wave, LDS only), 6 32x16/2w (LDS only).
+  int cfg = tile_cfg_override();
+  if (cfg == 0) cfg = 1;
+  int WMv = 1, WNv = 1, TMv = 1, TNv = 1;
+  bool lds = use_lds_kernel(M);
+  switch (cfg) {
+    case 2:
+      WMv = 2;
+      WNv = 2;
+      break;
+    case 3:
+      WMv = 4;
+      WNv = 2;
+      break;
+    case 4:
+      WMv = 2;
+      WNv = 2;
+      TMv = 2;
+      TNv = 2;
+      lds = true;
+      break;
+    case 5:
+      WMv = 4;
+      WNv = 2;
+      TMv = 2;
+      TNv = 2;
+      lds = true;
+      break;
+    case 6:
+      WMv = 2;
+      WNv = 1;
+      lds = true;
+      break;
+    default:
+      break;
+  }
+  const int splits = choose_ksplit(M, N, K, WMv, WNv);
+  const int k_per = (splits > 1) ? ((K / splits) / kGroup) * kGroup : K;
+  const int BM = 16 * WMv * TMv, BN = 16 * WNv * TNv;
+  dim3 grd((N + BN - 1) / BN, (M + BM - 1) / BM, splits);
+  const int nthreads = 32 * WMv * WNv;
+  torch::Tensor ws;
+  float* wsp = nullptr;
+  if (splits > 1) {
+    ws = torch::zeros({M, N}, a.options().dtype(torch::kFloat32));
+    wsp = ws.data_ptr<float>();
+  }
+#define L_LDS(WM_, WN_, TM_, TN_)                                            \
+  do {                                                                       \
+    if (splits > 1)                                                          \
+      gemm_mxfp4_wmma_fp8_tiled<TT, WM_, WN_, TM_, TN_, true>                \
+          <<<grd, nthreads, 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K, wsp, \
+                                         k_per);                             \
+    else                                                                     \
+      gemm_mxfp4_wmma_fp8_tiled<TT, WM_, WN_, TM_, TN_, false>               \
+          <<<grd, nthreads, 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K, wsp, \
+                                         k_per);                             \
+  } while (0)
+#define L_DIR(WM_, WN_)                                                      \
+  do {                                                                       \
+    if (splits > 1)                                                          \
+      gemm_mxfp4_wmma_fp8_direct<TT, WM_, WN_, true>                         \
+          <<<grd, nthreads, 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K, wsp, \
+                                         k_per);                             \
+    else                                                                     \
+      gemm_mxfp4_wmma_fp8_direct<TT, WM_, WN_, false>                        \
+          <<<grd, nthreads, 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K, wsp, \
+                                         k_per);                             \
+  } while (0)
+  switch (cfg) {
+    case 2:
+      if (lds)
+        L_LDS(2, 2, 1, 1);
+      else
+        L_DIR(2, 2);
+      break;
+    case 3:
+      if (lds)
+        L_LDS(4, 2, 1, 1);
+      else
+        L_DIR(4, 2);
+      break;
+    case 4:
+      L_LDS(2, 2, 2, 2);
+      break;
+    case 5:
+      L_LDS(4, 2, 2, 2);
+      break;
+    case 6:
+      L_LDS(2, 1, 1, 1);
+      break;
+    default:
+      if (lds)
+        L_LDS(1, 1, 1, 1);
+      else
+        L_DIR(1, 1);
+      break;
+  }
+#undef L_LDS
+#undef L_DIR
+  if (splits > 1) {
+    const size_t n_el = (size_t)M * N;
+    f32_to_t<TT>
+        <<<(unsigned)((n_el + 255) / 256), 256, 0, stream>>>(wsp, cp, n_el);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Torch entry point
 // ---------------------------------------------------------------------------
@@ -481,58 +642,18 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
   const auto* bq = reinterpret_cast<const uint32_t*>(b_q.data_ptr());
   const auto* bs = reinterpret_cast<const uint8_t*>(b_scales.data_ptr());
 
-#define LAUNCH_ONE(KERN, TT, WM, WN, SPLIT)                      \
-  KERN<TT, WM, WN, SPLIT><<<grd, 32 * (WM) * (WN), 0, stream>>>( \
-      aqp, asp, bq, bs, cp, M, N, K, wsp, k_per)
-
-#define LAUNCH_TILED(TT, WM, WN)                                               \
-  do {                                                                         \
-    const int splits = choose_ksplit(M, N, K, WM, WN);                         \
-    const int k_per = (splits > 1) ? ((K / splits) / kGroup) * kGroup : K;     \
-    dim3 grd((N + 16 * (WN) - 1) / (16 * (WN)),                                \
-             (M + 16 * (WM) - 1) / (16 * (WM)), splits);                       \
-    torch::Tensor ws;                                                          \
-    float* wsp = nullptr;                                                      \
-    if (splits > 1) {                                                          \
-      ws = torch::zeros({M, N}, a.options().dtype(torch::kFloat32));           \
-      wsp = ws.data_ptr<float>();                                              \
-    }                                                                          \
-    const bool lds = use_lds_kernel(M);                                        \
-    if (lds && splits > 1)                                                     \
-      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_tiled, TT, WM, WN, true);                 \
-    else if (lds)                                                              \
-      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_tiled, TT, WM, WN, false);                \
-    else if (splits > 1)                                                       \
-      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_direct, TT, WM, WN, true);                \
-    else                                                                       \
-      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_direct, TT, WM, WN, false);               \
-    if (splits > 1) {                                                          \
-      const size_t n_el = (size_t)M * N;                                       \
-      f32_to_t<TT>                                                             \
-          <<<(unsigned)((n_el + 255) / 256), 256, 0, stream>>>(wsp, cp, n_el); \
-    }                                                                          \
-  } while (0)
-
-#define DISPATCH(T, TT)                                                   \
-  if (M <= kGemvMaxM) {                                                   \
-    dim3 blk(32, 4);                                                      \
-    dim3 grd((N + 3) / 4);                                                \
-    gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(             \
-        reinterpret_cast<const TT*>(a.data_ptr()), bq, bs,                \
-        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                    \
-  } else {                                                                \
-    const auto* aqp = reinterpret_cast<const uint8_t*>(a_fp8.data_ptr()); \
-    const auto* asp = reinterpret_cast<const float*>(a_scale.data_ptr()); \
-    auto* cp = reinterpret_cast<TT*>(c.data_ptr());                       \
-    int cfg = tile_cfg_override();                                        \
-    if (cfg == 0) cfg = (M >= 256) ? 3 : ((M >= 32) ? 2 : 1);             \
-    if (cfg == 3) {                                                       \
-      LAUNCH_TILED(TT, 4, 2);                                             \
-    } else if (cfg == 2) {                                                \
-      LAUNCH_TILED(TT, 2, 2);                                             \
-    } else {                                                              \
-      LAUNCH_TILED(TT, 1, 1);                                             \
-    }                                                                     \
+#define DISPATCH(T, TT)                                                     \
+  if (M <= kGemvMaxM) {                                                     \
+    dim3 blk(32, 4);                                                        \
+    dim3 grd((N + 3) / 4);                                                  \
+    gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(               \
+        reinterpret_cast<const TT*>(a.data_ptr()), bq, bs,                  \
+        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                      \
+  } else {                                                                  \
+    launch_wmma<TT>(reinterpret_cast<const uint8_t*>(a_fp8.data_ptr()),     \
+                    reinterpret_cast<const float*>(a_scale.data_ptr()), bq, \
+                    bs, reinterpret_cast<TT*>(c.data_ptr()), M, N, K, a,    \
+                    stream);                                                \
   }
 
   if (a.scalar_type() == at::kHalf) {
@@ -541,8 +662,6 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
     DISPATCH(bf16_t, __hip_bfloat16)
   }
 #undef DISPATCH
-#undef LAUNCH_TILED
-#undef LAUNCH_ONE
 
   return c;
 }
