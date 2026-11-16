@@ -284,6 +284,7 @@ def _stash(worker, s):
 
 def _replay(worker):
     """Each captured sparse layer's FFN half, native and fused, on every rank."""
+    from vllm.distributed import tensor_model_parallel_all_reduce
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
         fused_allreduce_gemma_rms_norm,
@@ -307,11 +308,16 @@ def _replay(worker):
         for s, caps in worker._ffn_caps.items():
             for i, (hidden, residual, part) in caps.items():
                 layer = layers[i]
-                _, residual = layer.input_layernorm(hidden, residual)
+                # The native model defers each FFN all-reduce into the next
+                # input norm: finish it there, and reduce this FFN's output
+                # the way the fused launch returns it.
+                _, residual = layer.forward_input_norm(hidden, residual)
                 x, want_res = fused_allreduce_gemma_rms_norm(
                     part, residual, layer.post_attention_layernorm
                 )
                 want = layer.block_sparse_moe(x)
+                if layer.ffn_all_reduce_deferred:
+                    want = tensor_model_parallel_all_reduce(want)
                 slots = torch.arange(s, dtype=torch.int64, device=part.device)
                 got, got_res = executor.runner(part, residual, weights[i], slots)
                 results[(s, i)] = (*_metrics(got, want), torch.equal(got_res, want_res))

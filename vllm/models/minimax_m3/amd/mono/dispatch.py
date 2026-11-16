@@ -54,8 +54,9 @@ def _separate_shared_ok(layers) -> bool:
     )
 
 
-def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
-    """Why this deployment cannot use the kernels at all, or None."""
+def deployment_refusal(vllm_config: VllmConfig) -> str | None:
+    """The config-only part of `_config_refusal`, which the model also needs
+    before its layers exist (mono kernels expect reduced FFN outputs)."""
     pc = vllm_config.parallel_config
     cc = vllm_config.cache_config
     cg = vllm_config.compilation_config.cudagraph_mode
@@ -71,6 +72,19 @@ def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
         (cc.block_size == SPARSE_BLOCK, f"block size {cc.block_size}"),
         (max_len <= MAX_CONTEXT, f"max_model_len {max_len} > {MAX_CONTEXT}"),
         (cg is None or not cg.requires_piecewise_compilation(), "piecewise cudagraph"),
+    )
+    for ok, why in checks:
+        if not ok:
+            return why
+    return None
+
+
+def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
+    """Why this deployment cannot use the kernels at all, or None."""
+    why = deployment_refusal(vllm_config)
+    if why is not None:
+        return why
+    checks = (
         (
             getattr(model, "is_fused_shared_expert_enabled", False)
             or _separate_shared_ok(model.layers),
