@@ -256,7 +256,7 @@ async def test_features_with_content_parts(client, test_image, cached):
         )
         turn1.raise_for_status()
         old_features = {
-            "mm_hashes": {"image": ["old"]},
+            "mm_hashes": {"image": ["uuid:old"]},
             "mm_placeholders": {"image": [old]},
         }
     else:
