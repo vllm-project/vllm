@@ -9,8 +9,8 @@ selections, padding rows, page and table edges, positions past a row's count,
 the operand checks, CUDA graph replay, and the executor's swap of the QSA
 layers' implementation (`runtime/qsa.py`), which takes the row attention in
 launches of `MIN_CTAS` CTAs and more and the stock kernels below, and whose
-output without stock's zero fill is bitwise stock's in padding rows and past
-the step's rows (with the stock kernels, in every row)."""
+output without a fill of the step's rows is bitwise stock's in padding rows
+(with the stock kernels, in every step row) and zero past the step's rows."""
 
 from types import SimpleNamespace
 
@@ -283,12 +283,10 @@ def test_unsupported_names_output_and_gate_layouts():
 
 def test_row_impl_writes_every_output():
     """`DecodeQsaImpl.forward` with the row attention runs the kernel on a
-    BF16 cache without stock's zero fill of the step's rows: its output does
-    not depend on what the
-    buffer held (the 0.0 buffer is the former zero fill), padding rows
-    (request -1, count 0 or no usable position) and the rows past the step's
-    are bitwise what the stock forward leaves, and an FP8 cache goes to the
-    stock implementation."""
+    BF16 cache without a fill of the step's rows: its output does not depend
+    on what the buffer held, padding rows (request -1, count 0 or no usable
+    position) are bitwise what the stock forward writes, the rows past the
+    step's are zero, and an FP8 cache goes to the stock implementation."""
     case = Case(ROWS, seed=5)
     case.edges()
     q, k, v, indices, table, t2r = case.operands()
@@ -320,7 +318,7 @@ def test_row_impl_writes_every_output():
         output_gate=case.gate[:rows],
     )
     assert torch.equal(outputs[0][:rows], expected.view(torch.int16))
-    # The stock forward (zero fill, then the Triton kernels) on the same step.
+    # The stock forward (the Triton kernels, no fill) on the same step.
     reference = torch.full_like(query, float("nan"))
     Qwen4ExpQSAImpl.forward(
         SimpleNamespace(head_size=DIM, kv_cache_dtype="auto"),  # type: ignore[arg-type]
@@ -339,8 +337,8 @@ def test_row_impl_writes_every_output():
         if int(t2r[row]) < 0 or not ref[row].float().abs().sum()
     ]
     assert 2 in padding and 3 in padding
+    assert torch.equal(outputs[0][padding], reference[padding])
     for part in (padding, slice(rows, None)):
-        assert torch.equal(outputs[0][part], reference[part])
         assert not outputs[0][part].any()  # +0.0 everywhere
     fp8 = case.kv_cache.view(torch.uint8)[..., : 2 * DIM]
     impl.forward(layer, query, fp8, metadata, output, **kwargs)
@@ -350,12 +348,12 @@ def test_row_impl_writes_every_output():
 @pytest.mark.parametrize("rows", [8, 64, 300])
 def test_stock_kernels_without_the_fill(rows):
     """`DecodeQsaImpl.forward` below `MIN_CTAS` runs the stock kernels
-    without stock's zero fill of the step's rows, yet whatever the buffer held
-    (NaN, -1 or the former zero fill) its output is bitwise the stock
-    forward's (the fill, then the kernels) in every row: padding rows (request
-    -1, count 0 or no usable position) and the rows past the step's included.
-    On GB300 8 and 64 rows take the split-K kernel and its merge and 300 rows
-    one split; other GPUs may split all three (stock's split choice)."""
+    without a fill of the step's rows, yet whatever the buffer held (NaN, -1
+    or zero) its step rows are bitwise the stock forward's, padding rows
+    (request -1, count 0 or no usable position) included, and it zeroes the
+    rows past the step's (stock leaves them as they were). On GB300 8 and 64
+    rows take the split-K kernel and its merge and 300 rows one split; other
+    GPUs may split all three (stock's split choice)."""
     case = Case(rows, seed=11)
     case.edges()
     q, k, v, indices, table, t2r = case.operands()
@@ -382,6 +380,8 @@ def test_stock_kernels_without_the_fill(rows):
     for fill in (float("nan"), -1.0, 0.0):
         output = torch.full_like(query, fill)
         impl.forward(layer, query, case.kv_cache, metadata, output, **kwargs)
-        assert torch.equal(output.view(torch.int16), reference)
+        output = output.view(torch.int16)
+        assert torch.equal(output[:step], reference[:step])
+        assert not output[step:].any()
     assert stock.forwards == 0
-    assert not reference[2:4].any() and not reference[step:].any()
+    assert not reference[2:4].any()
