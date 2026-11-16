@@ -415,7 +415,9 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     async for chunk in stream:
         index = chunk.choices[0].index
         text = chunk.choices[0].text
-        chunks[index].append(text)
+        # The last chunk of a sample may carry only the finish_reason (Rust).
+        if text or chunk.choices[0].finish_reason is None:
+            chunks[index].append(text)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     # Assert `n` completions with correct finish reasons
