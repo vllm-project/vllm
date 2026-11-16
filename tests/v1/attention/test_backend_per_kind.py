@@ -92,11 +92,13 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
         head_size=128,
         head_size_v=128,
         layer_name="layer.0",
+        is_draft_layer=True,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=primary_block_size, skip_page_size_padded=None
-        )
+        ),
+        speculative_config=None,
     )
     sw_config = Attention.get_kv_cache_config(layer, vllm_config)
     assert sw_config is not None
