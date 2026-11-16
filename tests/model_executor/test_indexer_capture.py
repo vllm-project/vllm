@@ -168,6 +168,33 @@ def test_rocm_monokernel_rejects_indexer_replay_before_loading_layers(capture_co
         MonoDecodeLayer.create(None, capture_config)
 
 
+def test_cpu_attention_rejects_indexer_capture_before_building_layers(
+    capture_config, monkeypatch
+):
+    from vllm.models.deepseek_v4.cpu.cpu_sparse import (
+        DeepseekV4Attention,
+        DeepseekV4CPUAttention,
+    )
+
+    built = []
+
+    def build(attention, *args, **kwargs):
+        torch.nn.Module.__init__(attention)
+        attention.compressor = attention.indexer = None
+        built.append(attention)
+
+    monkeypatch.setattr(DeepseekV4Attention, "__init__", build)
+    monkeypatch.setattr(
+        DeepseekV4CPUAttention,
+        "_wrap_wo_a_process_weights_after_loading",
+        lambda attention: None,
+    )
+    capture_config.aux_output_config.enable_return_indexer_topk = True
+    with pytest.raises(ValueError, match="on CPU does not support"):
+        DeepseekV4CPUAttention(capture_config, "model.layers.2.self_attn")
+    assert built == []
+
+
 def test_cpu_attention_rejects_indexer_capture(capture_config):
     from vllm.models.deepseek_v4.cpu.cpu_sparse import DeepseekV4CPUAttention
 
