@@ -449,7 +449,19 @@ class _MegaMoEModel(torch.nn.Module):
             )
 
 
-@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+@requires_sm90_mega_moe_on_sm90
+@pytest.mark.parametrize(
+    "weight_format",
+    [
+        pytest.param(
+            MEGA_MOE_MXFP4,
+            marks=pytest.mark.skipif(
+                is_sm90, reason="SM90 repacks MXFP4 shards in the loader"
+            ),
+        ),
+        MEGA_MOE_NVFP4,
+    ],
+)
 def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
     monkeypatch, weight_format
 ):
@@ -513,6 +525,7 @@ def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
     assert_matches_cold_start(model, seed=2)
 
 
+@requires_sm90_mega_moe_on_sm90
 @pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
 def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
     weight_format,
