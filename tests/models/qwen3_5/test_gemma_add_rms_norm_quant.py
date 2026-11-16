@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.5 Gemma add-RMSNorm + input quant vs the unfused production chain
-(flashinfer gemma norm, then scaled_fp8_quant / scaled_fp4_quant), plus the
-unquantized `gemma_add_rms_norm` (pre-SM80 fallback) vs a naive fp32
-reference."""
+(flashinfer gemma norm, then static or per-token scaled_fp8_quant /
+scaled_fp4_quant), plus the unquantized `gemma_add_rms_norm` (pre-SM80
+fallback) vs a naive fp32 reference."""
 
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -51,11 +57,15 @@ def _swizzled_sf_rows(sf: torch.Tensor, m: int, h: int) -> torch.Tensor:
     not current_platform.has_device_capability(100),
     reason="fused Gemma norm + FP8/NVFP4 quant targets SM100+",
 )
-@pytest.mark.parametrize("nvfp4", [False, True])
+@pytest.mark.parametrize(
+    "key",
+    [kFp8StaticTensorSym, kFp8DynamicTokenSym, kNvfp4Dynamic],
+    ids=["fp8", "fp8_token", "nvfp4"],
+)
 @pytest.mark.parametrize("has_residual", [True, False])
 @torch.inference_mode()
 def test_gemma_add_rms_norm_quant_matches_chain(
-    H: int, num_tokens: int, nvfp4: bool, has_residual: bool
+    H: int, num_tokens: int, key: QuantKey, has_residual: bool
 ):
     from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
@@ -63,6 +73,8 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         gemma_add_rms_norm_quant,
     )
 
+    nvfp4 = key == kNvfp4Dynamic
+    per_token = key == kFp8DynamicTokenSym
     g = torch.Generator(device="cuda").manual_seed(num_tokens)
     # Checkpoint-like Gemma weights: (1 + w) from ~0 (w near -1) to 3.5.
     w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).bfloat16()
@@ -70,8 +82,9 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     x = torch.randn(num_tokens, H, generator=g, device="cuda").bfloat16()
     residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).bfloat16()
     residual[:, 7] *= 50  # outlier channel
-    # FP8: static input scale. NVFP4: global scale (input_global_scale_inv).
-    scale = torch.tensor([1 / 0.0013 if nvfp4 else 0.11], device="cuda")
+    # FP8: static input scale, or None for per-token. NVFP4: global scale
+    # (input_global_scale_inv).
+    scale = None if per_token else torch.tensor([1 / 0.0013 if nvfp4 else 0.11]).cuda()
 
     ref_res = residual.clone()
     if has_residual:
@@ -83,13 +96,15 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         ref_q, ref_sf = ops.scaled_fp4_quant(
             ref_y, scale, True, backend="flashinfer-cutedsl"
         )
+    elif per_token:
+        ref_q, ref_sf = ops.scaled_fp8_quant(ref_y, use_per_token_if_dynamic=True)
     else:
         ref_q, _ = ops.scaled_fp8_quant(ref_y, scale, group_shape=(-1, -1))
 
     x_in = x.clone()
     res = residual.clone()
     q, sf, y = gemma_add_rms_norm_quant(
-        x_in, res if has_residual else None, w, 1e-6, scale, nvfp4, write_y=True
+        x_in, res if has_residual else None, w, 1e-6, scale, key, write_y=True
     )
 
     torch.testing.assert_close(x_in, x, rtol=0, atol=0)
@@ -105,6 +120,12 @@ def test_gemma_add_rms_norm_quant_matches_chain(
             ref_sf, num_tokens, H
         )
         assert sf_mismatch.float().mean().item() <= 1e-4
+    elif per_token:
+        # Rows whose normed values match the chain get the same scale and codes.
+        same_row = (y == ref_y).all(dim=-1)
+        assert (sf[same_row] == ref_sf[same_row]).all()
+        dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
+        assert (dist[same_row] == 0).all()
     else:
         assert sf is scale
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()

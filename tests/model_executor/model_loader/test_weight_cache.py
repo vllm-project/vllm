@@ -201,7 +201,7 @@ def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibl
             psutil.wait_procs(children, timeout=10)
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model: str
     prompts: list[str]
@@ -466,6 +466,41 @@ def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
     """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
+
+
+COMPRESSED_BLOCK_FP8_CASE = ModelCase(
+    model="RedHatAI/Qwen3-0.6B-FP8-BLOCK",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        revision="5def00c475640c0527e3a7067b1a26b94decefb5",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "5def00c475640c0527e3a7067b1a26b94decefb5",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="Compressed-tensors block FP8 CUTLASS weight cache requires SM90+",
+)
+def test_ipc_cache_compressed_block_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_BLOCK_FP8_CASE, tmp_path)
 
 
 NVFP4_CASE = ModelCase(

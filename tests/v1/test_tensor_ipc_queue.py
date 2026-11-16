@@ -83,7 +83,7 @@ def _cleanup_processes(processes: list[BaseProcess]) -> list[str]:
     return failures
 
 
-@dataclass
+@dataclass(slots=True)
 # Use a typed container so the test covers the real vLLM path where tensor IPC
 # handles are encoded and decoded as fields nested inside larger msgpack payloads.
 class TensorEnvelope:
@@ -758,7 +758,7 @@ def test_ipc_disabled_mode():
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiTensorMessage:
     """Message with multiple tensors to test multi-tensor IPC."""
 
