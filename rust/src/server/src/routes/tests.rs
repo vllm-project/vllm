@@ -824,7 +824,6 @@ fn test_render_state(
         model: "backend-model".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
-        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::new(backend, None, None)
             .with_parser_selections(tool_call_parser, reasoning_parser),
@@ -2283,7 +2282,6 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             model: "glm-test".into(),
             served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
-            max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
@@ -13055,6 +13053,7 @@ async fn n_limit_follows_max_n_sequences_option() {
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
             ApiServerOptions {
                 max_n_sequences: 2,
+                enable_scale_out: true,
                 ..Default::default()
             },
         ),
@@ -13074,16 +13073,8 @@ async fn n_limit_follows_max_n_sequences_option() {
         assert_eq!(json["error"]["param"], "n", "{uri} {body}");
     }
 
-    let backend = Arc::new(FakeChatBackend::new());
-    let mut render_app = build_render_router(Arc::new(RenderState {
-        model: "backend-model".to_string(),
-        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
-        max_model_len: Some(128),
-        max_n_sequences: 2,
-        text: TextRequestProcessor::new(backend.clone(), 128),
-        chat: ChatRequestProcessor::new(backend, None, None),
-        lora_modules: Vec::new(),
-    }));
+    // Render leaves the limit to `/inference/v1/generate`, which fans out the
+    // samples: the rendered request carries `n` as asked and generate rejects it.
     for (uri, body) in [
         (
             "/v1/chat/completions/render",
@@ -13091,11 +13082,15 @@ async fn n_limit_follows_max_n_sequences_option() {
         ),
         ("/v1/completions/render", json!({"prompt": "hello", "n": 3})),
     ] {
-        let mut body = body;
-        body["model"] = json!("render-model");
-        let (status, json) = post_json(&mut render_app, uri, body.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
-        assert_eq!(json["error"]["message"], expected_message, "{uri} {body}");
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::OK, "{uri} {json}");
+        // Completions render answers with a list of requests.
+        let rendered = json.as_array().map_or(&json, |requests| &requests[0]).clone();
+        assert_eq!(rendered["sampling_params"]["n"], 3, "{uri} {json}");
+        let (status, json) = post_json(&mut app, "/inference/v1/generate", rendered).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {json}");
+        assert_eq!(json["error"]["message"], expected_message, "{uri} {json}");
+        assert_eq!(json["error"]["param"], "n", "{uri} {json}");
     }
 }
 

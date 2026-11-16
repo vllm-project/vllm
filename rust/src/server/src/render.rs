@@ -46,8 +46,6 @@ pub struct RenderConfig {
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
-    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
-    pub max_n_sequences: i64,
     pub host: String,
     pub port: u16,
     /// Port for the gRPC Render service on `host`; `None` disables gRPC.
@@ -108,8 +106,6 @@ pub(crate) struct RenderState {
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
-    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
-    pub(crate) max_n_sequences: i64,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
     pub(crate) lora_modules: Vec<LoraModulePath>,
@@ -127,8 +123,6 @@ impl RenderState {
 pub(crate) trait RenderContext: Send + Sync + 'static {
     fn chat_processor(&self) -> &ChatRequestProcessor;
     fn text_processor(&self) -> &TextRequestProcessor;
-    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
-    fn max_n_sequences(&self) -> i64;
     /// Resolve the requested model against the served models and LoRA adapters.
     fn resolve_model(
         &self,
@@ -145,10 +139,6 @@ impl RenderContext for AppState {
         self.chat.text().request_processor()
     }
 
-    fn max_n_sequences(&self) -> i64 {
-        self.api_server_options.max_n_sequences
-    }
-
     async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
         self.resolve_model_with_loras(model).await
     }
@@ -161,10 +151,6 @@ impl RenderContext for RenderState {
 
     fn text_processor(&self) -> &TextRequestProcessor {
         &self.text
-    }
-
-    fn max_n_sequences(&self) -> i64 {
-        self.max_n_sequences
     }
 
     /// Accept LoRA adapter names as the model, like Python. Rendering does not
@@ -253,7 +239,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
-        max_n_sequences: config.max_n_sequences,
         text,
         chat,
         lora_modules: config.lora_modules.clone(),
@@ -424,7 +409,6 @@ mod tests {
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 skip_model_name_validation: false,
-                max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 grpc_port: None,

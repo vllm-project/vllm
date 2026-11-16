@@ -25,8 +25,8 @@ use crate::routes::inference::generate::{
     validate_request_compat as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
@@ -186,8 +186,6 @@ pub(crate) async fn render_chat<S: RenderContext>(
     });
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
-    // Lowering has checked that `n` is at least 1.
-    validate_n_limit(n.unwrap_or(1), state.max_n_sequences())?;
     validate_max_output_tokens(
         "max_completion_tokens",
         chat_request.sampling_params.max_tokens,
@@ -235,8 +233,6 @@ pub(crate) async fn render_completion<S: RenderContext>(
         request_context,
         state.text_processor(),
     )?;
-    // Lowering has checked that `n` is at least 1.
-    validate_n_limit(n.unwrap_or(1), state.max_n_sequences())?;
     validate_max_output_tokens(
         "max_tokens",
         text_request.sampling_params.max_tokens,
