@@ -6,7 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import EPLBConfig, VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -43,9 +43,19 @@ class DFlashSpeculator(DraftModelSpeculator):
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         vllm_config = copy.copy(vllm_config)
+        # Draft prefill runs without PCP. A target whose EP group exists only
+        # through PCP must not pass EPLB or redundant experts to this draft.
+        # Build the draft config atomically so validation sees a consistent pair.
+        draft_enable_eplb = parallel_config.enable_eplb and (
+            parallel_config.tensor_parallel_size * parallel_config.data_parallel_size > 1
+        )
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
+            enable_eplb=draft_enable_eplb,
+            eplb_config=(
+                parallel_config.eplb_config if draft_enable_eplb else EPLBConfig()
+            ),
             decode_context_parallel_size=(
                 parallel_config.decode_context_parallel_size
                 if speculative_config.draft_model_config.use_mla
