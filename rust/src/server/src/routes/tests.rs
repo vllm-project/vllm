@@ -1181,10 +1181,8 @@ async fn generate_rejects_content_parts_with_features() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
-    const ROUTES: [&str; 7] = [
+    const ROUTES: [&str; 5] = [
         "/inference/v1/abort_requests",
-        "/v1/chat/completions/render",
-        "/v1/completions/render",
         "/v1/messages/render",
         "/v1/responses/render",
         "/v1/chat/completions/derender",
@@ -1503,6 +1501,122 @@ fn add_lora_script(
             check(args[0].as_array().expect("lora request tuple"));
             send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
         })
+    }
+}
+
+/// With scale-out enabled, the engine-backed server renders chat and
+/// completions with its own processors, so the engine's context window bounds
+/// the output budget; with scale-out disabled both routes answer 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_routes_follow_scale_out_gate() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    let mut enabled = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+    let (status, json) = post_json(
+        &mut enabled,
+        "/v1/chat/completions/render",
+        json!({
+            "request_id": "chat",
+            "messages": [{"role": "user", "content": "hello"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["request_id"], "chatcmpl-chat");
+    assert_eq!(json["model"], "model");
+    assert!(!json["token_ids"].as_array().expect("token IDs").is_empty());
+
+    let (status, json) = post_json(
+        &mut enabled,
+        "/v1/completions/render",
+        json!({"request_id": "completion", "prompt": "hello"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let [request] = json.as_array().expect("generate requests").as_slice() else {
+        panic!("expected one generate request: {json}");
+    };
+    assert_eq!(request["request_id"], "cmpl-completion");
+    assert_eq!(request["model"], "model");
+
+    let (status, json) = post_json(
+        &mut enabled,
+        "/v1/completions/render",
+        json!({"prompt": "hello", "max_tokens": DEFAULT_MOCK_MAX_MODEL_LEN + 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["param"], "max_tokens");
+
+    let disabled = build_router_with_gates(state, RouteGates::default());
+    for uri in ["/v1/chat/completions/render", "/v1/completions/render"] {
+        let response = disabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+/// Like `/inference/v1/generate`, the engine-backed render routes resolve the
+/// model against the loaded LoRA adapters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_accepts_loaded_lora_adapter() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(true, |_| {})).await;
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    state.load_static_lora(&module).await.expect("load static lora");
+    let mut app = build_router_with_gates(
+        state,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    for (model, expected) in [("alice", StatusCode::OK), ("bob", StatusCode::NOT_FOUND)] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        )
+        .await;
+        assert_eq!(status, expected, "{model}: {json}");
+        if status == StatusCode::OK {
+            assert_eq!(json["model"], model);
+        }
     }
 }
 

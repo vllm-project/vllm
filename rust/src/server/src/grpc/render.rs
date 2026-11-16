@@ -145,7 +145,8 @@ async fn render_chat(
 /// Reject a model that is neither served nor a LoRA adapter. An empty name
 /// selects the default model.
 async fn check_model(state: &impl RenderContext, model: &str) -> Result<(), Status> {
-    if model.is_empty() || state.is_served_model(model).await {
+    let resolution = state.resolve_model(Some(model)).await;
+    if resolution.model_names.accepts(Some(model)) {
         Ok(())
     } else {
         Err(Status::not_found(format!("model `{model}` not found")))

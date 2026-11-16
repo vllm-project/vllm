@@ -21,7 +21,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
-use crate::lora::check_lora_module;
+use crate::lora::{LoraModelResolution, check_lora_module};
 use crate::model_names::ServedModelNames;
 use crate::state::AppState;
 use crate::{
@@ -127,8 +127,13 @@ impl RenderState {
 pub(crate) trait RenderContext: Send + Sync + 'static {
     fn chat_processor(&self) -> &ChatRequestProcessor;
     fn text_processor(&self) -> &TextRequestProcessor;
-    /// Whether `model` names a served model or LoRA adapter.
-    fn is_served_model(&self, model: &str) -> impl Future<Output = bool> + Send;
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    fn max_n_sequences(&self) -> i64;
+    /// Resolve the requested model against the served models and LoRA adapters.
+    fn resolve_model(
+        &self,
+        model: Option<&str>,
+    ) -> impl Future<Output = LoraModelResolution> + Send;
 }
 
 impl RenderContext for AppState {
@@ -140,9 +145,12 @@ impl RenderContext for AppState {
         self.chat.text().request_processor()
     }
 
-    async fn is_served_model(&self, model: &str) -> bool {
-        let resolution = self.resolve_model_with_loras(Some(model)).await;
-        resolution.model_names.accepts(Some(model))
+    fn max_n_sequences(&self) -> i64 {
+        self.api_server_options.max_n_sequences
+    }
+
+    async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
+        self.resolve_model_with_loras(model).await
     }
 }
 
@@ -155,8 +163,18 @@ impl RenderContext for RenderState {
         &self.text
     }
 
-    async fn is_served_model(&self, model: &str) -> bool {
-        self.model_names().accepts(Some(model))
+    fn max_n_sequences(&self) -> i64 {
+        self.max_n_sequences
+    }
+
+    /// Accept LoRA adapter names as the model, like Python. Rendering does not
+    /// use the adapter, so no LoRA request is resolved; the adapter name is
+    /// passed through as the generate request's model.
+    async fn resolve_model(&self, _model: Option<&str>) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: self.model_names(),
+            lora_request: None,
+        }
     }
 }
 
