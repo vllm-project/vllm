@@ -992,6 +992,24 @@ class TestCountReasoningTokens:
         )
         assert (reasoning, content) == ("Think", "Answer")
 
+    def test_does_not_leak_analysis_channel_into_following_final_message(
+        self,
+        harmony_parser,
+    ):
+        analysis_message = (
+            "<|start|>assistant<|channel|>analysis<|message|>thinking<|end|>"
+        )
+        final_message = "<|start|>assistant<|channel|>final<|message|>answer<|end|>"
+
+        analysis_tokens = encode_output(analysis_message)
+        combined_tokens = encode_output(analysis_message + final_message)
+
+        expected = harmony_parser.count_reasoning_tokens(analysis_tokens)
+        actual = harmony_parser.count_reasoning_tokens(combined_tokens)
+
+        assert expected > 0
+        assert actual == expected
+
 
 class TestAdjustRequest:
     REQUEST_TEXT = "Hello"
