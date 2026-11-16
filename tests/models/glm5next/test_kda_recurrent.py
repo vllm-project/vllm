@@ -266,16 +266,21 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+# Local heads of GLM-5.3-Flash's 64 at tensor parallel 1, 2, 4 and 8.
+@pytest.mark.parametrize("heads", [64, 32, 16, 8])
 @pytest.mark.parametrize("dim_first", [False, True])
 @torch.inference_mode()
-def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_first):
+def test_aiter_decode_route_follows_replayed_step(
+    dist_init, monkeypatch, dim_first, heads
+):
     """AITER's single-launch decode kernel runs on plain decode steps only.
 
     Breakable PIECEWISE graphs replay `_forward` against each step's metadata,
     so the route is chosen there. Capture on an all-decode batch, then replay a
-    mixed step (stock chain) and a decode step (one fused launch); a route fixed
-    in `forward` fails one of the two. The reference is a layer built without
-    AITER, with the same weights and caches, in the same conv-state layout.
+    mixed step (Triton kernels) and a decode step (one AITER launch); a route
+    fixed in `forward` fails one of the two. The reference is a layer built
+    without AITER, with the same weights and caches, in the same conv-state
+    layout.
     """
     from transformers import Glm5NextTextConfig
 
@@ -291,10 +296,9 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
 
     set_random_seed(0)
     device = torch.device("cuda")
-    # 32 heads: one rank's share of GLM-5.3-Flash's 64 at tensor parallel 2. With
-    # hidden_size = heads * D, o_proj can be the identity, so the layer output is
-    # the normed core output the tolerances below are set for.
-    heads, max_tokens, num_slots = 32, 64, 80
+    # With hidden_size = heads * D, o_proj can be the identity, so the layer
+    # output is the normed core output the tolerances below are set for.
+    max_tokens, num_slots = 64, 80
     hidden_size = heads * D
     config = Glm5NextTextConfig(
         hidden_size=hidden_size,
@@ -312,7 +316,9 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
             set_default_torch_dtype(torch.bfloat16),
             torch.device(device),
         ):
-            for index, (name, use_aiter) in enumerate((("stock", "0"), ("fused", "1"))):
+            for index, (name, use_aiter) in enumerate(
+                (("triton", "0"), ("aiter", "1"))
+            ):
                 with monkeypatch.context() as env:
                     env.setenv("VLLM_ROCM_USE_AITER", use_aiter)
                     rocm_aiter_ops.refresh_env_variables()
@@ -326,8 +332,8 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
     finally:
         rocm_aiter_ops.refresh_env_variables()
 
-    stock = layers["stock"]
-    for name, param in stock.named_parameters():
+    triton_layer = layers["triton"]
+    for name, param in triton_layer.named_parameters():
         if name.endswith("conv1d.weight"):
             param.normal_(0, 0.5)
         elif name == "A_log":
@@ -340,15 +346,15 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
             param.copy_(torch.eye(hidden_size))
         else:  # Input projections.
             param.normal_(0, param.shape[1] ** -0.5)
-    layers["fused"].load_state_dict(stock.state_dict())
+    layers["aiter"].load_state_dict(triton_layer.state_dict())
     # load_state_dict skips the weight loaders and the non-persistent decode
     # conv weight; vLLM's loaders end with this hook.
     for layer in layers.values():
         layer.process_weights_after_loading()
     # get_state_shape orients the conv state by the process-wide layout: (dim,
     # state_len) per slot when dim-first (DS), else (state_len, dim) (SD).
-    conv_shape, state_shape = stock.get_state_shape()
-    if stock._conv_state_dim_first != dim_first:
+    conv_shape, state_shape = triton_layer.get_state_shape()
+    if triton_layer._conv_state_dim_first != dim_first:
         conv_shape = conv_shape[::-1]
     for layer in layers.values():
         layer._conv_state_dim_first = dim_first
@@ -425,7 +431,7 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
         graphs[name] = (capture, static_hidden, output)
 
     def replay(name: str, step_metadata: GDNAttentionMetadata, hidden: torch.Tensor):
-        """The outputs, caches and fused launches of one replay of graph `name`
+        """The outputs, caches and AITER launches of one replay of graph `name`
         from the saved caches."""
         capture, static_hidden, output = graphs[name]
         launches.clear()
@@ -439,41 +445,42 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
         conv, recurrent = (cache.clone() for cache in layers[name].kv_cache)
         return output[:num_tokens].clone(), conv, recurrent, launches[:]
 
-    # The fused kernel keeps outputs in fp32 where the stock chain rounds to bf16:
+    # AITER's kernel keeps outputs in fp32 where the Triton kernels round to bf16:
     # 2 bf16 ulp of the largest value. State rtol is Kimi-K3's spec-decode one, as
-    # one of these 41.9M elements reaches 3.8e-3, past its packed-decode 2e-3.
-    fused_rtol = 2 * torch.finfo(torch.bfloat16).eps
-    fused_state_tol = {"atol": 2e-3, "rtol": 3e-2}
-    # (query lengths, expected fused launches (rows each), output rtol, state tol)
+    # at 32 heads one of the 41.9M state elements reaches 3.8e-3, past its
+    # packed-decode 2e-3.
+    aiter_rtol = 2 * torch.finfo(torch.bfloat16).eps
+    aiter_state_tol = {"atol": 2e-3, "rtol": 3e-2}
+    # (query lengths, expected AITER launches (rows each), output rtol, state tol)
     steps: list[tuple[list[int], list[int], float, dict[str, float]]] = [
-        ([1, 1, 50], [], 0, {"atol": 0, "rtol": 0}),  # Mixed: stock, bit for bit.
-        ([1, 1, 1], [3], fused_rtol, fused_state_tol),  # Decode: one fused launch.
+        ([1, 1, 50], [], 0, {"atol": 0, "rtol": 0}),  # Mixed: Triton, bit for bit.
+        ([1, 1, 1], [3], aiter_rtol, aiter_state_tol),  # Decode: one AITER launch.
     ]
     for query_lens, expected_launches, rtol, state_tol in steps:
         step_metadata = metadata(query_lens)
         hidden = torch.randn(max_tokens, hidden_size, device=device).bfloat16()
         torch.accelerator.synchronize()
-        stock_out, stock_conv, stock_state, stock_launches = replay(
-            "stock", step_metadata, hidden
+        triton_out, triton_conv, triton_state, triton_launches = replay(
+            "triton", step_metadata, hidden
         )
-        fused_out, fused_conv, fused_state, fused_launches = replay(
-            "fused", step_metadata, hidden
+        aiter_out, aiter_conv, aiter_state, aiter_launches = replay(
+            "aiter", step_metadata, hidden
         )
 
-        assert stock_launches == []
-        assert fused_launches == expected_launches, (
-            f"{query_lens}: fused launches (rows each) {fused_launches}"
+        assert triton_launches == []
+        assert aiter_launches == expected_launches, (
+            f"{query_lens}: AITER launches (rows each) {aiter_launches}"
         )
         # The requests own slots 1..len(query_lens); every other slot is as saved.
         untouched = torch.ones(num_slots, dtype=torch.bool, device=device)
         untouched[1 : len(query_lens) + 1] = False
-        for cache, saved in zip((fused_conv, fused_state), saved_caches):
+        for cache, saved in zip((aiter_conv, aiter_state), saved_caches):
             assert torch.equal(cache[untouched], saved[untouched])
         torch.testing.assert_close(
-            fused_out, stock_out, rtol=rtol, atol=rtol * stock_out.abs().max().item()
+            aiter_out, triton_out, rtol=rtol, atol=rtol * triton_out.abs().max().item()
         )
-        torch.testing.assert_close(fused_state, stock_state, **state_tol)
-        torch.testing.assert_close(fused_conv, stock_conv, rtol=0, atol=0)
+        torch.testing.assert_close(aiter_state, triton_state, **state_tol)
+        torch.testing.assert_close(aiter_conv, triton_conv, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

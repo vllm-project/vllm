@@ -173,19 +173,25 @@ def _resolve_kda_decode_backend(
     head_dim: int,
     conv_size: int,
     num_spec: int,
+    input_dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
     recurrent_state_dtype: torch.dtype,
     lower_bound: float | None,
 ) -> str:
-    """Pick the decode path: `aiter` (AITER's single-launch Gluon kernel for the
-    conv update, recurrence and gated RMSNorm) or `stock` (separate launches).
-    `backend` comes from `additional_config.kda_decode_backend`; only `auto` can
-    pick `aiter`. Without a lower bound the stock kernel falls back to -5.0
-    while AITER switches to the unbounded gate, so that config keeps the stock
-    chain."""
+    """Pick the decode kernels: `aiter` (AITER's single-launch Gluon kernel for
+    the conv update, recurrence and gated RMSNorm) or `triton` (the Triton conv
+    update and recurrence, then the norm). `backend` comes from
+    `additional_config.kda_decode_backend`; only `auto` picks `aiter`, in the
+    configuration AITER tests: bfloat16 activations and conv state, an fp32
+    recurrent state, head_dim 128, a width-4 conv and no spec decode. Without a
+    lower bound the Triton kernel falls back to -5.0 while AITER switches to the
+    unbounded gate, so that config keeps `triton`."""
     if backend not in ("auto", "native", "flashinfer", "triton"):
         raise ValueError(f"Unsupported KDA decode backend: {backend}")
-    eligible = (
+    use_aiter = (
         backend == "auto"
+        and input_dtype == torch.bfloat16
+        and conv_state_dtype == torch.bfloat16
         and recurrent_state_dtype == torch.float32
         and head_dim == 128
         and conv_size == 4
@@ -193,7 +199,7 @@ def _resolve_kda_decode_backend(
         and num_spec == 0
         and bool(rocm_aiter_ops.is_kda_gluon_decode_available())
     )
-    return "aiter" if eligible else "stock"
+    return "aiter" if use_aiter else "triton"
 
 
 def _fused_qkv_conv1d(
@@ -284,7 +290,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.local_projection_size = divide(projection_size, self.tp_size)
 
         _, recurrent_state_shape = self.get_state_shape()
-        _, recurrent_state_dtype = self.get_state_dtype()
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         scatter_states.register_warmup(
             state_shape=recurrent_state_shape,
             state_dtype=recurrent_state_dtype,
@@ -333,18 +339,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.conv1d",
         )
         additional_config = vllm_config.additional_config
-        decode_backend = _resolve_kda_decode_backend(
+        self.kda_decode_backend = _resolve_kda_decode_backend(
             additional_config.get("kda_decode_backend", "auto")
             if isinstance(additional_config, dict)
             else "auto",
             self.head_dim,
             self.conv_size,
             self.num_spec,
+            vllm_config.model_config.dtype,
+            conv_state_dtype,
             recurrent_state_dtype,
             config.linear_lower_bound,
         )
-        self._use_aiter_decode = decode_backend == "aiter"
-        if self._use_aiter_decode:
+        if self.kda_decode_backend == "aiter":
             logger.info_once("GLM-5.3-Flash KDA decode: AITER single-launch kernel.")
         self._register_decode_conv1d_weight()
 
@@ -464,7 +471,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         `load_weights` outside the reload lifecycle.
         """
         decode_conv1d_weight = None
-        if self._use_aiter_decode:
+        if self.kda_decode_backend == "aiter":
             weight = self.conv1d.weight
             decode_conv1d_weight = torch.empty(
                 3,
@@ -610,9 +617,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
         # AITER's single-launch decode applies the gated RMSNorm in-kernel, so an
-        # eligible layer hands the norm to _forward. The route is chosen there
-        # per step: breakable PIECEWISE graphs replay _forward, not this function.
-        fuse_gated_norm = self._use_aiter_decode
+        # `aiter` layer hands the norm to _forward. The route is chosen there per
+        # step: breakable PIECEWISE graphs replay _forward, not this function.
+        fuse_gated_norm = self.kda_decode_backend == "aiter"
         # Call the decorated eager break directly so host-side prefill branches
         # are not captured by PIECEWISE CUDA graphs.
         self._forward(
@@ -700,7 +707,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             # One launch for the conv update, recurrence and gated RMSNorm
             # (`g2` is passed only without spec decode). The [N, 1] indices: the
             # block-table column can be strided, which the flat form rejects.
-            assert self._use_aiter_decode
+            assert self.kda_decode_backend == "aiter"
             assert non_spec_state_indices_tensor is not None
             assert self.decode_conv1d_weight is not None
             state_indices = non_spec_state_indices_tensor[:num_decodes].unsqueeze(1)
@@ -969,9 +976,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     0, :num_actual_tokens
                 ]
 
-        # A layer with the fused decode hands g2 over on every step, but only a
-        # plain-decode step takes the fused launch above, which applies the norm
-        # itself; a step with a prefill runs the stock chain and leaves it to
-        # this line.
+        # forward cannot tell a plain-decode step from one with a prefill (a
+        # breakable PIECEWISE graph replays it as captured), so an `aiter` layer
+        # leaves the norm to _forward on every step. Only a plain-decode step
+        # takes the fused launch above, which norms in-kernel; a step with a
+        # prefill runs the Triton kernels and norms here.
         if g2 is not None:
             core_attn_out.copy_(self.o_norm(core_attn_out, g2))

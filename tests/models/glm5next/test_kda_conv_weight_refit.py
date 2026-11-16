@@ -151,10 +151,10 @@ def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
     layer = _decode_layer(conv1d)
     layer.conv_size = KERNEL
     layer.o_norm = SimpleNamespace(weight=None, eps=1e-6)
-    layer._use_aiter_decode = True
+    layer.kda_decode_backend = "aiter"
     layer._register_decode_conv1d_weight()
-    # vLLM's loaders and the layerwise reload call its
-    # process_weights_after_loading only if this holds.
+    # The layerwise reload processes deferred attention layers after every
+    # other layer, so this hook runs after conv1d's weight is restored.
     assert is_deferred_attention_layer(layer)
     data_ptr = layer.decode_conv1d_weight.data_ptr()
     _patch_one_decode_step(monkeypatch, layer)
