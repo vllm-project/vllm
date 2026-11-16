@@ -27,6 +27,7 @@ or just on the low or high end.
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
+| [GELU(tanh)+Mul + Quant](#gelutanhmul-quantization-manual-fusion)              | n/a (manual)                 | GELU (tanh)+Mul activation → FP8 static quant  | Always (manual path)           | TBD                | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
 | [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
 
@@ -249,6 +250,7 @@ Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusio
 Supported quantization scheme/hardware combinations:
 
 - FP8 static per-tensor: CUDA & HIP kernel
+- FP8 static per-tensor with a gated GELU (tanh) activation: CUDA kernel, manual fusion path only
 - FP8 dynamic per-group (128/64): CUDA kernel (sm89+, not active when DeepGemm is used on sm100+)
 - NVFP4 dynamic: CUDA sm100+ only with FlashInfer
 - FP8 per-token-group (128): ROCm AITER only
@@ -258,7 +260,29 @@ Supported quantization scheme/hardware combinations:
 - Pass: [`vllm/compilation/passes/fusion/act_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/act_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
 - CUDA/HIP kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
+- Manual act+quant fusion registry: [`vllm/model_executor/layers/fusion/fused_act_quant.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fusion/fused_act_quant.py)
 - Fused SiLU+Mul+BlockQuant kernel: [`csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
+
+### GELU(tanh)+Mul + Quantization (manual fusion)
+
+!!! info
+    This is not a `PassConfig` pass. The fusion is applied in the model forward by
+    `maybe_fused_act_quant`, so it is active at every optimization level -- including
+    `compilation_config.mode = "NONE"` -- and does not consume a `fuse_act_quant` budget.
+
+**What it fuses.** Fuses the `gelu_tanh_and_mul` gate-up projection activation with the
+downstream linear's static FP8 per-tensor input quantization into a single kernel,
+avoiding materialization of the bf16 post-activation tensor.
+
+Supported quantization scheme/hardware combinations:
+
+- FP8 static per-tensor: CUDA kernel
+
+**Code locations.**
+
+- Kernel: [`csrc/quantization/activation_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/activation_kernels.cu)
+- Manual act+quant fusion registry: [`vllm/model_executor/layers/fusion/fused_act_quant.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fusion/fused_act_quant.py)
+- Wired into [`Gemma2MLP`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/gemma2.py) and [`Gemma4MLP`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/gemma4.py)
 
 ### RMSNorm + Padding (`fuse_act_padding`)
 
