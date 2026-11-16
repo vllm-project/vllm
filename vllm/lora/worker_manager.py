@@ -142,7 +142,8 @@ class WorkerLoRAManager:
         self._dp_prepared = None
         for request in extra_requests or ():
             with gpu_sync_allowed():
-                self._load_adapter(request)
+                lora = self._load_adapter(request)
+                self._adapter_manager._create_merged_loras_inplace(lora)
         loaded = {}
         for old, new in zip(self._dp_slots, slots):
             if new is not None and (
