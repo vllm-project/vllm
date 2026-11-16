@@ -482,6 +482,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
 
 
 class Qwen3_5Model(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
     # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
@@ -596,7 +598,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             if residual is not None:
                 residual = sequence_parallel_chunk(residual)
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -617,7 +623,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
                 packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
                 hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         if self.mlp_output_is_partial:
             # The last layer's MLP/MoE output is an un-reduced TP partial;
@@ -718,7 +728,7 @@ class Qwen3_5ForCausalLMBase(
         return self.model.embed_input_ids(input_ids)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
+        self.model._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)

@@ -1,10 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import Qwen3_5TextConfig
 
+from vllm.config import (
+    CompilationConfig,
+    DeviceConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import parallel_state
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
@@ -22,6 +33,119 @@ from vllm.v1.worker.gpu.spec_decode.extract_hidden_states_config import (
     ExtractHiddenStatesSpeculatorConfig,
 )
 from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+
+
+def _check_qwen3_5_aux_layout(rank, model_path, taps, implementation):
+    from vllm.model_executor.models import qwen3_5
+    from vllm.models.qwen3_5.nvidia import model as nvidia_qwen3_5
+
+    model_cls = (
+        nvidia_qwen3_5.Qwen3_5ForCausalLM
+        if implementation == "nvidia"
+        else qwen3_5.Qwen3_5ForCausalLM
+    )
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=model_path,
+            skip_tokenizer_init=True,
+            dtype="float32",
+            max_model_len=32,
+            enforce_eager=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2, distributed_executor_backend="mp"
+        ),
+        compilation_config=CompilationConfig(mode=0),
+    )
+    try:
+        with set_current_vllm_config(config):
+            parallel_state.init_distributed_environment(
+                world_size=2,
+                rank=rank,
+                local_rank=rank,
+                backend="gloo",
+                distributed_init_method=f"file://{model_path}/store",
+                timeout=timedelta(seconds=60),
+            )
+            parallel_state.initialize_model_parallel(1, 2, backend="gloo")
+            target = model_cls(vllm_config=config)
+            verify_supports_aux_hidden_states_over_pp(target, "dflash")
+            target.set_aux_hidden_state_layers(())
+            assert target.model.aux_hidden_state_slot_keys() == ((), ())
+            assert target.model.pack_local_aux_hidden_states([]) == {}
+            target.set_aux_hidden_state_layers(taps)
+            model = target.model
+            expected = tuple(sorted(set(taps)))
+            assert model.aux_hidden_state_layers == expected
+            assert (model.start_layer, model.end_layer) == (rank * 2, rank * 2 + 2)
+            upstream = tuple(
+                f"aux_hidden_states_{i}"
+                for i, tap in enumerate(expected)
+                if rank == 1 and tap <= 2
+            )
+            local = tuple(
+                f"aux_hidden_states_{i}"
+                for i, tap in enumerate(expected)
+                if rank == 0 and tap <= 2
+            )
+            assert model.aux_hidden_state_slot_keys() == (upstream, local)
+            reserve_aux_intermediate_tensor_slots(target)
+            buffers = target.make_empty_intermediate_tensors(2, torch.float32, "cpu")
+            assert set(buffers.tensors) == {"hidden_states", "residual", *upstream}
+            for key in upstream:
+                assert buffers[key].shape == (2, 128)
+    finally:
+        parallel_state.cleanup_dist_env_and_memory()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("implementation", ["legacy", "nvidia"])
+@pytest.mark.parametrize("taps", [(0, 2, 4), (4, 0, 2, 4), (0, 1, 2)])
+def test_qwen3_5_declares_and_configures_aux_hidden_state_pp(
+    tmp_path, taps, implementation
+):
+    """Real PP2 constructors must configure boundary and upstream-only tap slots."""
+    Qwen3_5TextConfig(
+        architectures=["Qwen3_5ForCausalLM"],
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        linear_key_head_dim=64,
+        linear_value_head_dim=64,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        layer_types=["linear_attention", "full_attention"] * 2,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+    context = torch.multiprocessing.spawn(
+        _check_qwen3_5_aux_layout,
+        args=(str(tmp_path), taps, implementation),
+        nprocs=2,
+        join=False,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not context.join(timeout=1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Qwen3.5 auxiliary-layout workers timed out")
+    finally:
+        for process in context.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in context.processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+            if process.is_alive():
+                raise RuntimeError(
+                    f"Failed to stop auxiliary-layout worker {process.pid}"
+                )
 
 
 @pytest.mark.parametrize(

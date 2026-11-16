@@ -40,6 +40,23 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## Qwen3.5 DFlash with Pipeline Parallelism
+
+Qwen3.5 supports DFlash speculative decoding with pipeline parallelism. The target model packs auxiliary hidden states on each pipeline stage, and the model runner assembles them for the draft model on the final stage. Pipeline parallelism is opt-in; the default pipeline parallel size is one.
+
+For a two-GPU configuration, select a matching target and draft checkpoint and set `--pipeline-parallel-size 2`:
+
+```bash
+vllm serve Qwen/Qwen3.5-4B \
+    --pipeline-parallel-size 2 \
+    --tensor-parallel-size 1 \
+    --distributed-executor-backend mp \
+    --max-model-len 2048 \
+    --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.5-4B-DFlash","num_speculative_tokens":15}'
+```
+
+Allow memory on the final pipeline stage for both its target-model layers and the draft model. Memory requirements and performance depend on the hardware and workload; pipeline-parallel support does not guarantee a speculative-decoding speedup. [Adaptive verification](adaptive_verification.md) does not support pipeline parallelism.
+
 ## Custom Speculators (Experimental)
 
 You can plug in your own speculator by registering it as a speculative method

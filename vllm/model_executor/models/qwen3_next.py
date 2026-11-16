@@ -733,7 +733,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             if residual is not None:
                 residual = sequence_parallel_chunk(residual)
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -754,7 +758,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
                 hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         if self.use_sequence_parallel:
