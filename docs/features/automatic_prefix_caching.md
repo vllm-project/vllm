@@ -15,6 +15,12 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 ## Hybrid Mamba models
 
+In `--mamba-cache-mode align`, Qwen GDN can export internal prefill checkpoints
+with FlashInfer and with Triton/FLA on CUDA, allowing prefills to cross cache
+boundaries in one step. Triton checkpoint offsets must be multiples of 64.
+All Mamba layers must support checkpoints; otherwise the scheduler splits the
+prefill. An unsplit prefill can delay other requests' decode steps.
+
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
 
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
