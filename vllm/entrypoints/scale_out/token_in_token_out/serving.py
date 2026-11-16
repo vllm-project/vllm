@@ -261,6 +261,15 @@ class ServingTokens(GenerateBaseServing):
                 "because detokenization is disabled. Check stop strings on "
                 "the coordinator, or use stop_token_ids."
             )
+        if sampling_params.bad_words and not self.has_tokenizer:
+            # bad_words are tokenized in the input processor, which skips
+            # them without a tokenizer, so they would silently never apply.
+            return self.create_error_response(
+                "sampling_params.bad_words requires a tokenizer, but this "
+                "server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Send the request to a server that "
+                "loads a tokenizer, or remove bad_words."
+            )
         if request.output_mode != "tokens" and not self.has_tokenizer:
             # The no-op detokenizer returns "", so without this check the
             # request would succeed with empty text.
