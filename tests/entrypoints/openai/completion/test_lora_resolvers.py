@@ -295,7 +295,7 @@ async def test_resolve_lora_cancelled_during_add_lora():
     await asyncio.wait_for(started.wait(), timeout=2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=2)
 
     assert first.calls == 1
     assert second.calls == 0
