@@ -17,6 +17,10 @@ use tracing::info;
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const MIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Engine flags whose values the startup log must not show, like Python's
+/// `_SENSITIVE_ARG_FIELDS` (`vllm/entrypoints/common/startup.py`).
+const SENSITIVE_FLAGS: [&str; 3] = ["--api-key", "--hf-token", "--watermark-config"];
+
 /// Allocate one ephemeral TCP port for the managed headless-engine handshake on
 /// the given host.
 pub fn allocate_handshake_port(host: &str) -> Result<u16> {
@@ -91,6 +95,31 @@ impl ManagedEngineConfig {
     }
 }
 
+/// A copy of `command` for logging, with the values of [`SENSITIVE_FLAGS`]
+/// replaced by `***`.
+fn redacted_for_log(command: &StdCommand) -> StdCommand {
+    let is_sensitive = |flag: &str| SENSITIVE_FLAGS.contains(&flag.replace('_', "-").as_str());
+    let mut redacted = StdCommand::new(command.get_program());
+    let mut redact_next = false;
+    for arg in command.get_args() {
+        let arg = arg.to_string_lossy();
+        let arg = match arg.split_once('=') {
+            Some((flag, _)) if is_sensitive(flag) => format!("{flag}=***"),
+            // A bare flag (`--hf-token` without a token) is followed by the next flag.
+            _ if redact_next && !arg.starts_with('-') => "***".to_string(),
+            _ => arg.into_owned(),
+        };
+        redact_next = is_sensitive(&arg);
+        redacted.arg(arg);
+    }
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            redacted.env(key, value);
+        }
+    }
+    redacted
+}
+
 /// RAII-style handle for one managed Python headless engine subprocess.
 #[derive(Clone)]
 pub struct ManagedEngineHandle {
@@ -105,7 +134,7 @@ impl ManagedEngineHandle {
         let command = config.to_command();
         info!(
             handshake_address = %config.handshake_address(),
-            ?command,
+            command = ?redacted_for_log(&command),
             "starting managed Python headless engine"
         );
 
@@ -244,6 +273,7 @@ mod tests {
 
     use super::{
         MIN_SHUTDOWN_TIMEOUT, ManagedEngineConfig, ManagedEngineHandle, allocate_handshake_port,
+        redacted_for_log,
     };
 
     #[test]
@@ -306,6 +336,32 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&envs);
+    }
+
+    #[test]
+    fn startup_log_redacts_sensitive_engine_args() {
+        let config = ManagedEngineConfig {
+            python: "python3".to_string(),
+            model: "Qwen/Qwen3-0.6B".to_string(),
+            handshake_host: "127.0.0.1".to_string(),
+            handshake_port: 62100,
+            data_parallel_size: 1,
+            client_handshake_address: None,
+            python_args: [
+                "--hf-token",
+                "hf_secret",
+                "--api_key=sk-secret",
+                "--hf-token",
+                "--dtype",
+                "float16",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        };
+        let command = config.to_command();
+        assert!(format!("{command:?}").contains("hf_secret"));
+
+        expect![[r#"VLLM_USE_RUST_FRONTEND="1" "python3" "-m" "vllm.entrypoints.cli.main" "serve" "Qwen/Qwen3-0.6B" "--headless" "--data-parallel-address" "127.0.0.1" "--data-parallel-rpc-port" "62100" "--data-parallel-size" "1" "--hf-token" "***" "--api_key=***" "--hf-token" "--dtype" "float16""#]].assert_eq(&format!("{:?}", redacted_for_log(&command)));
     }
 
     #[test]
