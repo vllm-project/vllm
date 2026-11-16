@@ -125,7 +125,7 @@ _STRUCTURED_SERVER_PARAM = pytest.param(("auto", "openai"), id="structured")
 _DEFAULT_SERVER_PARAM = pytest.param(("auto", None), id="structured-default")
 
 
-@pytest.fixture(scope="module", params=_SERVER_PARAMS)
+@pytest.fixture(scope="module")
 def server(request, tmp_path_factory):
     backend, content_format = request.param
     source_template = (
@@ -161,6 +161,7 @@ def server(request, tmp_path_factory):
         yield remote_server, backend
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_str(
     server: tuple[RemoteOpenAIServer, str],
@@ -184,6 +185,7 @@ async def test_score_api_queries_str_documents_str(
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "text_vs_text")
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_text_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -207,6 +209,7 @@ async def test_score_api_queries_str_documents_text_content(
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "text_vs_text")
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -230,6 +233,7 @@ async def test_score_api_queries_str_documents_image_url_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image")
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_base64_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -281,6 +285,7 @@ async def test_score_api_queries_str_documents_image_url_plus_text_content(
     )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
@@ -317,6 +322,7 @@ async def test_score_api_queries_str_documents_list(
     )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_rerank_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
@@ -370,6 +376,7 @@ async def test_rerank_api_queries_str_documents_list(
     )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_list_documents_list(
     server: tuple[RemoteOpenAIServer, str],
@@ -412,6 +419,7 @@ INSTRUCTION = (
 )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_instruction_field(
     server: tuple[RemoteOpenAIServer, str],
@@ -447,6 +455,7 @@ async def test_score_api_instruction_field(
     assert instruction_score.usage.prompt_tokens > default_score.usage.prompt_tokens
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_rerank_api_instruction_field(
     server: tuple[RemoteOpenAIServer, str],
@@ -490,6 +499,7 @@ async def test_rerank_api_instruction_field(
     assert instruction_rerank.usage.prompt_tokens > default_rerank.usage.prompt_tokens
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     server: tuple[RemoteOpenAIServer, str],
