@@ -322,7 +322,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         mm_config = self.model_config.multimodal_config
         if (
             mm_config is not None
-            and mm_config.enable_mm_embeds
+            and mm_config.is_mm_embeds_enabled(input_modality)
             and mm_config.get_limit_per_prompt(input_modality) == 0
             and original_modality.endswith("_embeds")
         ):
