@@ -279,18 +279,31 @@ impl UnifiedParser for MuseUnifiedParser {
 /// Map an emitted ATEM invoke name back to a registered tool name.
 ///
 /// The Muse Glimmer template lists a registered bare name `NAME` as the
-/// namespace recipient `"NAME.*"`, so the model may call it as `NAME.NAME`.
-/// Collapse only that doubled form, and only when `NAME` is registered and the
-/// emitted name is not: matching on the trailing segment alone could dispatch
-/// `weather.get` to a registered `calendar.get`.
+/// namespace recipient `"NAME.*"`, so the model may call it as `NAME.NAME`, or
+/// fill the `*` with a parameter, a verb or nothing (`NAME.city`, `NAME.`).
+/// Collapse to `NAME` only when `NAME` is registered and the emitted name is
+/// not; for a suffix other than `NAME`, also only when no registered name lives
+/// under `NAME.`, since the suffix may then mean a missing sibling. Matching on
+/// the trailing segment alone could dispatch `weather.get` to a registered
+/// `calendar.get`. Same rule as the Python `MuseToolParser._normalize_name`.
 fn normalize_tool_name(name: String, tool_names: &HashSet<String>) -> String {
     if tool_names.contains(&name) {
         return name;
     }
-    match name.split_once('.') {
-        Some((head, tail)) if head == tail && tool_names.contains(head) => head.to_string(),
-        _ => name,
+    let Some((head, tail)) = name.split_once('.') else {
+        return name;
+    };
+    // Python never registers an empty name, so an emitted `.x` stays as-is.
+    let has_sibling = || {
+        tool_names
+            .iter()
+            .any(|n| n.strip_prefix(head).is_some_and(|r| r.starts_with('.')))
+    };
+    if !head.is_empty() && tool_names.contains(head) && (head == tail || !has_sibling()) {
+        tracing::debug!(emitted = %name, mapped = head, "muse: mapped emitted tool name");
+        return head.to_string();
     }
+    name
 }
 
 /// Parse one Muse event from buffered streaming input.
@@ -1179,7 +1192,19 @@ mod tests {
 
     #[test]
     fn muse_collapses_doubled_namespace_tool_name() {
-        let tools = ["get_weather", "calendar.get"].map(|name| Tool {
+        let tools = [
+            "get_weather",
+            "calendar.get",
+            "Bash",
+            "Read",
+            "Glob",
+            "forecast",
+            "forecast.daily",
+            "Edit",
+            "Edit.Edit",
+            "",
+        ]
+        .map(|name| Tool {
             name: name.to_string(),
             description: None,
             parameters: json!({"type": "object"}),
@@ -1187,15 +1212,26 @@ mod tests {
             defer_loading: None,
         });
         let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
-        let text = format!(
-            " to=get_weather.get_weather{MESSAGE}{}",
-            atem(&[
-                ("get_weather.get_weather", &[][..]),
-                ("calendar.get", &[][..]),
-                ("weather.get", &[][..]),
-                ("calendar.calendar", &[][..]),
-            ])
-        );
+        let emitted = [
+            "get_weather.get_weather",
+            "calendar.get",
+            "weather.get",
+            "calendar.calendar",
+            // A bare tool with any other suffix collapses too...
+            "Bash.command",
+            "Read.read",
+            "Bash.execute",
+            "Glob.",
+            // ...unless a registered sibling may be what the suffix names.
+            "forecast.weekly",
+            "forecast.forecast",
+            "forecast.daily",
+            // An exact match wins over collapsing the doubled form.
+            "Edit.Edit",
+            ".x",
+        ];
+        let invokes: Vec<_> = emitted.iter().map(|name| (*name, &[][..])).collect();
+        let text = format!(" to=get_weather.get_weather{MESSAGE}{}", atem(&invokes));
 
         let output = parser.parse_complete(&text).unwrap();
 
@@ -1206,9 +1242,40 @@ mod tests {
                 "get_weather",
                 "calendar.get",
                 "weather.get",
-                "calendar.calendar"
+                "calendar.calendar",
+                "Bash",
+                "Read",
+                "Bash",
+                "Glob",
+                "forecast.weekly",
+                "forecast",
+                "forecast.daily",
+                "Edit.Edit",
+                ".x",
             ]
         );
+    }
+
+    #[test]
+    fn muse_collapsed_tool_name_uses_its_parameter_types() {
+        let tools = [Tool {
+            name: "Bash".to_string(),
+            description: None,
+            parameters: json!({"type": "object", "properties": {
+                "command": {"type": "string"}, "n": {"type": "integer"}}}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let text = format!(
+            " to=Bash.command{MESSAGE}{}",
+            atem(&[("Bash.command", &[("command", "007"), ("n", "7")][..])])
+        );
+
+        let calls = parser.parse_complete(&text).unwrap().calls();
+
+        assert_eq!(calls[0].name.as_deref(), Some("Bash"));
+        assert_eq!(calls[0].arguments, r#"{"command": "007", "n": 7}"#);
     }
 
     #[test]
