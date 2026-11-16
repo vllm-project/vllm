@@ -268,14 +268,16 @@ def test_bf16_round_and_pack(lib):
 def _fp8_domain(fnuz):
     """Every E4M3 magnitude and every midpoint between neighbours, each with
     its f32 neighbours, both signs; past the range up to inf; 2^20 random."""
-    dt = torch.float8_e4m3fnuz if fnuz else torch.float8_e4m3fn
-    vals = torch.arange(0, 127, dtype=torch.uint8).view(dt).double().to(DEV)
-    mids = (vals[1:] + vals[:-1]) / 2
-    x = torch.cat([vals, mids, torch.tensor([464.0, 480, 1e6, 3e38], device=DEV)])
-    x = _neighbours(x.float())
-    rnd = _log_uniform(1 << 20, -14, 10, _gen(0))
-    x = torch.cat([x, -x, rnd, torch.tensor([math.inf, -math.inf], device=DEV)])
-    return torch.cat([x, x.new_tensor([1e-40, -1e-40])])
+    fp8_dtype = torch.float8_e4m3fnuz if fnuz else torch.float8_e4m3fn
+    codes = torch.arange(0, 127, dtype=torch.uint8).view(fp8_dtype)
+    magnitudes = codes.double().to(DEV)
+    midpoints = (magnitudes[1:] + magnitudes[:-1]) / 2
+    past_max = torch.tensor([464.0, 480, 1e6, 3e38], device=DEV)
+    values = _neighbours(torch.cat([magnitudes, midpoints, past_max]).float())
+    random_values = _log_uniform(1 << 20, -14, 10, _gen(0))
+    infinities = torch.tensor([math.inf, -math.inf], device=DEV)
+    values = torch.cat([values, -values, random_values, infinities])
+    return torch.cat([values, values.new_tensor([1e-40, -1e-40])])
 
 
 @pytest.mark.parametrize("lib", _libs("fp8_pack4", "clamp_fp8"))
@@ -284,21 +286,25 @@ def test_fp8_clamp_and_pack(lib):
     (FNUZ with a maximum of 224 where the library targets gfx942)."""
     clamp, pack = _fn(lib, "clamp_fp8"), _fn(lib, "fp8_pack4")
     fnuz = _gfx942(lib)
-    x = _fp8_domain(fnuz)
-    x = torch.cat([x, x.new_zeros(-x.numel() % 4)])
+    values = _fp8_domain(fnuz)
+    values = torch.cat([values, values.new_zeros(-values.numel() % 4)])
     got = _run(
         f"fp8_{lib}",
-        lambda *w: [pack(*[clamp(f32(v)) for v in w])],
+        lambda *words: [pack(*[clamp(f32(w)) for w in words])],
         1,
-        *x.view(-1, 4).T,
+        *values.view(-1, 4).T,
     )
-    dt = torch.float8_e4m3fnuz if fnuz else torch.float8_e4m3fn
-    ref = R.to_e4m3_rne(x, fnuz).to(dt).view(torch.uint8)
-    _assert_equal(got.view(torch.uint8).flatten(), ref, "fp8", x)
+    fp8_dtype = torch.float8_e4m3fnuz if fnuz else torch.float8_e4m3fn
+    ref = R.to_e4m3_rne(values, fnuz).to(fp8_dtype).view(torch.uint8)
+    _assert_equal(got.view(torch.uint8).flatten(), ref, "fp8", values)
     fmax = 224.0 if fnuz else 448.0
-    q = x.double().abs() / (2.0**-10 if fnuz else 2.0**-9)
-    assert ((q == q.floor() + 0.5) & (q < 8)).any()
-    assert (x.abs() > fmax).any() and (ref.view(dt).double().abs() == fmax).any()
+    # In units of the smallest subnormal, so `.5` is a tie the RNE has to
+    # break and `< 8` keeps it inside the subnormal range.
+    subnormal_ulps = values.double().abs() / (2.0**-10 if fnuz else 2.0**-9)
+    ties = subnormal_ulps == subnormal_ulps.floor() + 0.5
+    assert (ties & (subnormal_ulps < 8)).any()
+    assert (values.abs() > fmax).any()
+    assert (ref.view(fp8_dtype).double().abs() == fmax).any()
 
 
 # ---------------------------------------------------------------- scale codes
@@ -407,7 +413,7 @@ def test_ocp_to_fnuz(lib):
 def _e2m1_bytes(codes):
     """E2M1 values of the 8 nibbles of int32 words, low nibble first."""
     nib = (codes.long()[:, None] >> (4 * torch.arange(8, device=DEV))) & 0xF
-    return R.E2M1.to(DEV)[nib]
+    return R.E2M1_VALUES.to(DEV)[nib]
 
 
 @pytest.mark.parametrize("lib", _libs("fp4x8_fnuz"))
