@@ -38,8 +38,8 @@ class QuantizeMethodBase(ABC):
 
     supports_pre_processed_weights: bool = False
     """
-    Whether ``process_weights_after_loading`` supports running under
-    ``weights_already_processed``. Methods must skip tensor transforms in
+    Whether `process_weights_after_loading` supports running under
+    `weights_already_processed`. Methods must skip tensor transforms in
     that mode; the loader driver rejects methods that do not declare support.
     """
 
@@ -68,10 +68,10 @@ class QuantizeMethodBase(ABC):
 
     # Not required functions
     def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
-        """Tie ``layer``'s weight to ``embed_tokens``' weight.
+        """Tie `layer`'s weight to `embed_tokens`' weight.
 
         The default shares the weight tensor, which is the standard behavior for
-        tied word embeddings and matches what ``ParallelLMHead.tie_weights`` did
+        tied word embeddings and matches what `ParallelLMHead.tie_weights` did
         directly before quantization methods became responsible for it.
         Quantization methods that need special weight handling (e.g. repacked
         weights) override this.
@@ -97,7 +97,7 @@ class QuantizeMethodBase(ABC):
 
         Returns:
             The dequantized weight for linear layers. For MoE layers, an
-            iterator of ``(experts, w13, w2)`` over groups of experts.
+            iterator of `(experts, w13, w2)` over groups of experts.
 
         """
         raise NotImplementedError(
@@ -326,13 +326,20 @@ def resolve_quant_method(
         OnlineMoEMethodBase,
     )
     from vllm.model_executor.layers.quantization.online.requantization import (
-        requantization_source_scope,
+        skip_checkpoint_backend_selection,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        UnquantizedEmbeddingMethod,
     )
 
     online_config = quant_config.online_quantization_config
-    # Online quantization currently supports only LinearBase and RoutedExperts.
-    # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-    is_online_supported_layer = isinstance(layer, (LinearBase, RoutedExperts))
+    # Online quantization supports LinearBase, RoutedExperts, and a
+    # ParallelLMHead selected by quantization_config.targets. Embeddings keep
+    # their checkpoint quantization method.
+    is_online_supported_layer = isinstance(
+        layer, (LinearBase, RoutedExperts, ParallelLMHead)
+    )
 
     online_target = None
     target_spec = None
@@ -345,11 +352,14 @@ def resolve_quant_method(
             )
             target_spec = target[3] if target is not None else None
 
-    # The checkpoint method of requantized experts is only a dequantization source.
+    # With an online target, the checkpoint method is never used for compute: it
+    # is either a dequantization source or discarded in favour of the online
+    # method (all paths below return the online method or raise). It therefore
+    # needs no kernel backend, which the oracles skip in this scope.
     with (
         (
-            requantization_source_scope()
-            if online_target is not None and isinstance(layer, RoutedExperts)
+            skip_checkpoint_backend_selection()
+            if online_target is not None
             else nullcontext()
         ),
         layer_target_spec_scope(target_spec if online_target is None else None),
@@ -361,12 +371,35 @@ def resolve_quant_method(
         # No online configuration: retain the checkpoint method.
         return base_quant_method
     if not is_online_supported_layer:
-        # Online quantization only supports linear and routed MoE layers.
         return base_quant_method
 
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
     )
+
+    if isinstance(layer, ParallelLMHead) and online_target is not None:
+        unquantized = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        if base_quant_method is not None and not isinstance(
+            base_quant_method, unquantized
+        ):
+            # TODO: online re-quantization of a checkpoint-quantized lm_head,
+            # like the linear layers in #59062.
+            raise NotImplementedError(
+                f"{prefix} is already quantized in the checkpoint "
+                f"({type(base_quant_method).__name__}); online re-quantization "
+                "of the lm_head is not supported, remove it from "
+                "quantization_config.targets."
+            )
+        from vllm.config import get_current_vllm_config
+
+        model_config = get_current_vllm_config().model_config
+        if getattr(model_config, "convert_type", None) == "classify":
+            # The seq-cls adapters read `lm_head.weight` rows by token id.
+            raise NotImplementedError(
+                f"{prefix}: online quantization of the lm_head is not "
+                "supported for models converted to sequence classification."
+            )
+        return online_config.get_quant_method(layer, prefix)
 
     if checkpoint_is_quantized:
         if online_target is None:

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class BaseCohereCommandReasoningParser(ReasoningParser):
     """Expose is_reasoning_end for the structured-output engine.
     Everything else runs in
-    :class:`vllm.parser.cohere_command.CohereCommandParser`.
+    `vllm.parser.cohere_command.CohereCommandParser`.
     """
 
     melody_preset: ClassVar[str]

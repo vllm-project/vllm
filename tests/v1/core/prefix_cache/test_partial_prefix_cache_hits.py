@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
@@ -25,13 +26,15 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_cache_hit_alignment_tokens,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    SlidingWindowSpec,
     get_mamba_prefill_checkpoint_position,
 )
 
@@ -105,12 +108,14 @@ def make_full_mamba_manager(
     num_prefill_checkpoint_blocks: int = 0,
     num_hash_lookahead_tokens: int = 0,
 ):
-    mamba_group = KVCacheGroupSpec(
+    mamba_group = new_kv_cache_group(
         ["mamba"],
         MambaSpec(
             block_size=mamba_block_size,
             shapes=(1, 1),
             dtypes=(torch.float32,),
+        ),
+        MambaManager.config(
             mamba_cache_mode="align",
             num_speculative_blocks=num_speculative_blocks,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
@@ -123,9 +128,9 @@ def make_full_mamba_manager(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=full_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -375,23 +380,23 @@ def test_hybrid_mamba_align_partial_hash_hit():
         num_blocks=20,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -446,12 +451,12 @@ def test_hybrid_mamba_align_partial_hash_hit():
 def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
     """An EAGLE group must not re-floor what partial hash hits leaves un-floored.
 
-    ``cache_blocks`` decides once how far a request may be registered, and with
+    `cache_blocks` decides once how far a request may be registered, and with
     fine-grained partial hash hits that bound is the raw token count. The EAGLE
     branch then re-derives its own bound for the lookahead block; if it rounds
-    down to ``scheduler_block_size`` again, everything between the last aligned
-    boundary and the tail stops being registered -- ``(n % scheduler_block_size)
-    - manager.block_size`` tokens per call, which is most of a segment whenever
+    down to `scheduler_block_size` again, everything between the last aligned
+    boundary and the tail stops being registered -- `(n % scheduler_block_size)
+    - manager.block_size` tokens per call, which is most of a segment whenever
     the group's own block is much smaller than the scheduler block.
     """
     hash_block_size = 2
@@ -460,23 +465,23 @@ def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
         num_blocks=40,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -524,23 +529,23 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -781,7 +786,7 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
 
 @pytest.mark.parametrize("prompt_len", [120, 104, 96])
 def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
-    """At the default match unit the hybrid coordinator hands ``cache_blocks``
+    """At the default match unit the hybrid coordinator hands `cache_blocks`
     a block-aligned token count, which is below the prompt length whenever the
     prompt is not block-aligned. The prompt-end checkpoint is the replay
     boundary and must stay published under retention_interval=0; only a
@@ -908,6 +913,95 @@ def test_hash_aligned_query_end_uses_regular_partial_tail():
     assert cached[0].block_hash_num_tokens == 14
 
 
+@pytest.mark.parametrize("case", ["local", "local_junction", "external"])
+def test_mid_block_resume_running_past_block_end_does_not_cache_it(case):
+    """A prefill chunk that resumes inside a Mamba block and runs past its end
+    leaves that block at the resume state, so it must not get the full-block
+    hash (nor be offered to a connector as the block-end state)."""
+    hash_block_size, mamba_block_size, mamba_group = 16, 64, 1
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=128,
+        num_prefill_checkpoint_blocks=1,
+    )
+    # "local_junction": default sparse retention, where block 1 is retained
+    # because 128 is the shared-prefix junction left by a sibling.
+    manager.coordinator.retention_interval = 0 if case == "local_junction" else None
+    scheduler = SimpleNamespace(
+        block_size=mamba_block_size,
+        cache_config=SimpleNamespace(block_size=mamba_block_size),
+        hash_block_size=hash_block_size,
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
+        mamba_partial_cache_hit=True,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=True,
+        mamba_prefill_checkpoint_alignment=16,
+    )
+    tokens = list(range(1000, 1300))
+
+    def prefill(request_id, prompt, num_external=0):
+        request = make_request(request_id, prompt, hash_block_size, sha256)
+        computed, num_hit, junction = manager.get_computed_blocks(request)
+        request.shared_prefix_boundary = junction
+        start = num_hit + num_external
+        num_new = Scheduler._mamba_block_aligned_split(
+            scheduler, request, len(prompt) - start, num_hit, num_external
+        )
+        chunks = [(start, num_new)]
+        assert (
+            manager.allocate_slots(
+                request,
+                num_new,
+                num_hit,
+                computed,
+                num_external_computed_tokens=num_external,
+            )
+            is not None
+        )
+        request.num_computed_tokens = start + num_new
+        while request.num_computed_tokens < len(prompt):
+            manager.new_step_starts()
+            start = request.num_computed_tokens
+            num_new = Scheduler._mamba_block_aligned_split(
+                scheduler, request, len(prompt) - start
+            )
+            chunks.append((start, num_new))
+            assert manager.allocate_slots(request, num_new) is not None
+            request.num_computed_tokens = start + num_new
+        manager.new_step_starts()
+        return request, num_hit, chunks
+
+    if case == "local_junction":
+        manager.free(prefill("sibling", tokens[:130] + [7] * 40)[0])
+    if case != "external":
+        manager.free(prefill("owner", tokens[:100])[0])  # caches state@96
+    drain_boundary_state_offloads(manager)
+
+    # Resume at 96, inside block 1 = [64, 128). With an internal checkpoint
+    # column past the resume block, the split runs [96, 230) in one step.
+    resume, num_hit, chunks = prefill(
+        "resume", tokens[:230], num_external=96 if case == "external" else 0
+    )
+    assert num_hit == (0 if case == "external" else 96)
+    assert chunks == [(96, 134)]
+    resumed_block = manager.get_blocks("resume").blocks[mamba_group][1]
+    offloads = drain_boundary_state_offloads(manager).get("resume", [])
+    manager.free(resume)
+    manager.new_step_starts()
+
+    assert resumed_block.block_hash_num_tokens != 128
+    assert (mamba_group, resumed_block.block_id, 128) not in offloads
+    probe = make_request("probe", tokens[:128] + [9] * 16, hash_block_size, sha256)
+    _, num_hit, _ = manager.get_computed_blocks(probe)
+    assert num_hit == (0 if case == "external" else 96)
+
+
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
     first continuation does not need another Mamba block."""
@@ -917,23 +1011,23 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -989,21 +1083,23 @@ def test_boundary_state_offloads_returns_cow_target():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
+                ),
+                MambaManager.config(
                     mamba_cache_mode="align",
                     num_prefill_checkpoint_blocks=1,
                 ),
@@ -1066,23 +1162,23 @@ def test_finished_partial_tail_uses_table_source_once():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1175,23 +1271,23 @@ def test_boundary_state_offload_dropped_when_request_freed_before_drain():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1222,23 +1318,23 @@ def test_boundary_state_offloads_block_aligned_prompt():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1275,23 +1371,23 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=2 * hash_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1330,23 +1426,23 @@ def test_truncate_computed_blocks_allows_short_mamba_group_only():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=2 * hash_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1393,23 +1489,23 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1473,23 +1569,23 @@ def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1532,23 +1628,23 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1606,23 +1702,23 @@ def test_hybrid_partial_hit_cow_target_starts_uncached():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1689,23 +1785,23 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1763,23 +1859,23 @@ def test_cow_retained_blocks_returned_for_release():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -1855,7 +1951,7 @@ def test_full_attention_eagle_drops_one_hash_unit():
     pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     req = make_request("0", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
@@ -1866,7 +1962,8 @@ def test_full_attention_eagle_drops_one_hash_unit():
             max_length=8,
             kv_cache_group_ids=[0],
             block_pool=pool,
-            kv_cache_spec=spec,
+            block_size=spec.block_size,
+            manager_config=FullAttentionManager.config(),
             drop_eagle_block=drop_eagle_block,
             alignment_tokens=hash_block_size,
         )
@@ -1929,23 +2026,23 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -2029,23 +2126,23 @@ def test_mamba_partial_tail_hits_below_eagle_proof_boundary():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -2087,7 +2184,7 @@ def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary():
     """Without a prefix-match unit there is no partial tail, so the only
     checkpoint comes from the retention mask. A prompt ending just past its
     last block boundary pinned that checkpoint where eagle can never resume,
-    so under ``retention_interval=0`` the reachable block was masked out and
+    so under `retention_interval=0` the reachable block was masked out and
     the next turn missed entirely.
     """
     block_size = 4
@@ -2095,23 +2192,23 @@ def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary():
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
         prefix_cache_retention_interval=0,
@@ -2160,33 +2257,33 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
         num_blocks=64,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_draft"],
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=sliding_window_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
-                    sliding_window=sliding_window_block_size,
                 ),
+                SlidingWindowManager.config(sliding_window=sliding_window_block_size),
                 is_eagle_group=True,
             ),
         ],
@@ -2231,36 +2328,36 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
     hash_block_size = 2
     mamba_block_size = 4 * hash_block_size
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["full"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=hash_block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["mamba"],
             MambaSpec(
                 block_size=mamba_block_size,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
             ),
+            MambaManager.config(mamba_cache_mode="align"),
         ),
     ]
     if with_sliding_window:
         kv_cache_groups.append(
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=2 * hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
-                    sliding_window=2 * hash_block_size,
                 ),
+                SlidingWindowManager.config(sliding_window=2 * hash_block_size),
             )
         )
     kv_cache_config = KVCacheConfig(
@@ -2296,32 +2393,33 @@ def test_opted_out_scratch_group_keeps_partial_hash_hits():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=mamba_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["tail"],
-                CircularBufferSpec(
+                AttentionSpec(
                     block_size=mamba_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CircularBufferManager.config(),
             ),
         ],
     )
@@ -2353,32 +2451,33 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
         num_blocks=24,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=cache_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=cache_block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["tail"],
-                CircularBufferSpec(
+                AttentionSpec(
                     block_size=kpool_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CircularBufferManager.config(),
             ),
         ],
     )
@@ -2563,23 +2662,23 @@ def _snapshot_offload_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
@@ -2661,7 +2760,7 @@ def test_snapshot_handoff_dense_default_retention():
 
 
 def _run_chunked_prefill(manager, req, chunk_size, num_chunks):
-    """Prefill ``req`` one ``chunk_size`` chunk per scheduler step, yielding the
+    """Prefill `req` one `chunk_size` chunk per scheduler step, yielding the
     boundary-state hand-offs offered (and claimed) at each step."""
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
     for step in range(num_chunks):
@@ -2686,9 +2785,9 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
             num_blocks=200,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["full"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -2696,14 +2795,14 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
                     ),
                 ),
                 *(
-                    KVCacheGroupSpec(
+                    new_kv_cache_group(
                         [f"mamba{i}"],
                         MambaSpec(
                             block_size=block_size,
                             shapes=(1, 1),
                             dtypes=(torch.float32,),
-                            mamba_cache_mode="align",
                         ),
+                        MambaManager.config(mamba_cache_mode="align"),
                     )
                     for i in range(num_mamba_groups)
                 ),
@@ -2723,7 +2822,7 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
 
 def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     """The core offers every committed boundary, including past
-    ``num_prompt_tokens``. A resumed request re-prefills its generated tokens
+    `num_prompt_tokens`. A resumed request re-prefills its generated tokens
     and every group re-saves them, so filtering on the original prompt length
     would silently strip the mamba key for boundaries full attention still
     stores; only the connector knows where its save window ends."""
@@ -2769,7 +2868,7 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
 def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
     """With hash_block_size == mamba block size (no fine-grained matching), the
     hybrid coordinator caches the final chunk only up to its last full block,
-    so the managers see ``num_tokens < num_prompt_tokens`` there too. The
+    so the managers see `num_tokens < num_prompt_tokens` there too. The
     prompt-end checkpoint must still be published under retention_interval=0,
     otherwise the next request that extends this prompt misses the prefix.
     """
