@@ -4,7 +4,7 @@ import weakref
 
 import pytest
 
-from vllm import LLM, EmbeddingOutput
+from vllm import LLM, EmbeddingRequestOutput
 
 from ..basic.test_encode_vision import EMBED_DIM, _conversation
 
@@ -32,6 +32,8 @@ def test_chat_vision(llm: LLM):
     outputs = llm.embed(_conversation(), use_tqdm=False)
 
     assert len(outputs) == 1
-    assert outputs[0].finished
-    assert isinstance(outputs[0], EmbeddingOutput)
-    assert len(outputs[0].outputs.embedding) == EMBED_DIM
+    output = outputs[0]
+
+    assert output.finished
+    assert isinstance(output, EmbeddingRequestOutput)
+    assert len(output.outputs.embedding) == EMBED_DIM
