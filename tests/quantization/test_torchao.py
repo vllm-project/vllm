@@ -92,10 +92,12 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
     on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
     reason="requires torchao>=0.18.0 on gfx950",
 )
-def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
-    """Testing online quantization, load_weights integration point,
-    with config dict serialized to json string
-    """
+def test_online_quant_config_dict_json(
+    vllm_runner, enable_pickle, monkeypatch, caplog_vllm
+):
+    """Load a JSON TorchAO config and warn once only for standalone reloads."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    warning = "model.load_weights() is deprecated"
     torch._dynamo.reset()
     model_name = "facebook/opt-125m"
 
@@ -122,6 +124,10 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
+        assert warning not in caplog_vllm.text
+        llm.llm.collective_rpc("reload_weights")
+        assert warning not in caplog_vllm.text
+
         load_config = llm.llm.llm_engine.vllm_config.load_config
         model_config = llm.llm.llm_engine.vllm_config.model_config
 
@@ -131,10 +137,14 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
             weights_iterator = model_loader.get_all_weights(model_config, model)
             model.load_weights(weights_iterator)
 
-        llm.apply_model(load_weights)
+        for _ in range(2):
+            llm.apply_model(load_weights)
+            assert caplog_vllm.text.count(warning) == 1
 
-        reload_output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
-        assert output[0][0] == reload_output[0][0]
+            reload_output = llm.generate_greedy(
+                ["The capital of France is"], max_tokens=4
+            )
+            assert output[0][0] == reload_output[0][0]
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")

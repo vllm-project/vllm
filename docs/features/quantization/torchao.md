@@ -41,3 +41,13 @@ You can quantize your own huggingface model with torchao, e.g. [transformers](ht
     ```
 
 Alternatively, you can use the [TorchAO Quantization space](https://huggingface.co/spaces/medmekk/TorchAO_Quantization) for quantizing models with a simple UI.
+
+## Reloading weights
+
+Reloading an already loaded TorchAO-quantized model through standalone
+`model.load_weights(weights)` is deprecated and logs a one-time warning.
+Use `llm.collective_rpc("reload_weights")` to reload from the configured checkpoint,
+or pass `kwargs={"weights_path": "/path/to/checkpoint"}` to reload from another path.
+For training updates transferred directly from a trainer, use a
+[weight-transfer engine](../../training/weight_transfer/README.md).
+Initial loading and the supported reload path are unchanged.

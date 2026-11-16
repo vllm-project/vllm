@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 import torch
 
 from vllm.config import ModelConfig
+from vllm.logger import init_logger
 
 from .layerwise import (
     finalize_layerwise_processing,
@@ -21,6 +22,8 @@ __all__ = ["set_torchao_reload_attrs", "support_quantized_model_reload_from_hp_w
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
+
+logger = init_logger(__name__)
 
 
 def set_torchao_reload_attrs(model: torch.nn.Module, model_config: ModelConfig):
@@ -51,6 +54,11 @@ def support_quantized_model_reload_from_hp_weights(
         if not getattr(model, "_do_torchao_reload", False):
             return original_load_weights(self, *args, **kwargs)
 
+        logger.warning_once(
+            "Reloading TorchAO-quantized models through standalone "
+            "model.load_weights() is deprecated. Use "
+            'llm.collective_rpc("reload_weights") or a weight-transfer engine.'
+        )
         initialize_layerwise_reload(model)
         loaded_weights = original_load_weights(self, *args, **kwargs)
         finalize_layerwise_processing(model, model._model_config)
