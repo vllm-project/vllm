@@ -988,10 +988,11 @@ async def benchmark(
         warmup_outputs = await asyncio.gather(
             *(warmup_limited_request_func(salted=True) for _ in range(num_warmups))
         )
-        if all(_rejects_cache_salt(output) for output in warmup_outputs):
+        rejected = [output for output in warmup_outputs if _rejects_cache_salt(output)]
+        if rejected and not any(output.success for output in warmup_outputs):
             print(
-                f"WARNING: the server rejected all {num_warmups} warmup requests "
-                f"(HTTP {warmup_outputs[0].status_code}); "
+                f"WARNING: no warmup request succeeded and the server rejected "
+                f"{len(rejected)} of them (HTTP {rejected[0].status_code}); "
                 "retrying without cache_salt."
             )
             if warmup_pbar is not None:
@@ -1839,8 +1840,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         default=0,
         help="Number of warmup requests. Each resends the first request with a "
         "unique cache_salt, so warmups do not prime the prefix cache for the "
-        "run; if the server rejects all of them (HTTP 400 or 422), they are "
-        "retried without it.",
+        "run; if none succeeds and the server rejects any (HTTP 400 or 422), "
+        "they are retried without it.",
     )
     parser.add_argument(
         "--profile",

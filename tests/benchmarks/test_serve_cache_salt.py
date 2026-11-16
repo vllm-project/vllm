@@ -84,6 +84,16 @@ def test_transient_ready_check_error_keeps_cache_salt():
     assert salted == [True, True, True, True, False]
 
 
+def test_rejected_cache_salt_falls_back_despite_transient_error():
+    salted = asyncio.run(
+        _salted_requests(
+            lambda n, has_salt: (503 if n == 3 else 400) if has_salt else 200
+        )
+    )
+    # ready check (400) + unsalted, warmups (503, 400) + 2 unsalted, measured request
+    assert salted == [True, False, True, True, False, False, False]
+
+
 def test_rejected_cache_salt_falls_back_to_unsalted():
     salted = asyncio.run(_salted_requests(lambda _, has_salt: 400 if has_salt else 200))
     # ready check (400) + unsalted, 2 warmups (400) + 2 unsalted, measured request
