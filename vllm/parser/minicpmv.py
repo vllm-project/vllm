@@ -28,7 +28,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
+from vllm.parser.qwen3 import CHATML_TURN_BOUNDARIES, Qwen3Parser, qwen3_config
 
 if TYPE_CHECKING:
     from vllm.entrypoints.generate.base.protocol import FunctionCall
@@ -50,7 +50,9 @@ def minicpmv_config(thinking: bool) -> ParserEngineConfig:
     `<tool_call>` output is parsed whether or not thinking is enabled.
     """
     name = "minicpmv" if thinking else "minicpmv_no_thinking"
-    base = qwen3_config(thinking=thinking, name=name)
+    base = qwen3_config(
+        thinking=thinking, name=name, turn_boundary_tokens=CHATML_TURN_BOUNDARIES
+    )
 
     transitions = dict(base.transitions)
     if not thinking:
