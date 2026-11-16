@@ -4,9 +4,8 @@
 #
 # This file contains code copied from the ROCm/aiter project
 # (aiter/ops/flydsl/sparse_mla.py @ a61e02c26a3915011e85b103574c25d457890825).
-# The original source code was licensed under the MIT license. It is carried
-# in-tree so a stock aiter build still gets the kernel; only the imports and
-# this header differ from the original.
+# The original source code was licensed under the MIT license. It has since
+# been extended in-tree (the many-head kernel for more than 16 heads).
 
 """FlyDSL sparse MLA forward on the fp8_ds_mla cache (gfx950).
 
@@ -19,7 +18,7 @@ a call is in that slice; ``rocm_aiter_ops`` routes it here when
 
 The 96 gathered heads of Kimi-K3.1's DCP branch (decode, and query-gather
 prefill once its index stream is packed, i.e. without has_invalid) run on the
-many-head kernel of ``flydsl_sparse_mla_mh_gfx950``, which gathers each KV tile
+many-head kernel of ``flydsl_sparse_mla_gfx950``, which gathers each KV tile
 once for all heads; ``rocm_aiter_ops`` routes those only with
 ``VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H=1``.
 """
@@ -33,10 +32,8 @@ from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla_gfx950 import (
     MAX_HEADS,
     QK_ROPE_HEAD_DIM,
     RECORD_BYTES,
-    build_sparse_mla_fp8ds_module,
-)
-from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla_mh_gfx950 import (
     build_sparse_mla_fp8ds_mh_module,
+    build_sparse_mla_fp8ds_module,
 )
 from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
@@ -56,12 +53,12 @@ _MAX_INDICES = 1 << 29
 # Head counts the many-head kernel serves (Kimi-K3.1: 12 local heads x DCP 8).
 MH_HEADS = (96,)
 
-# Many-head configs (hg, tt, ns, waves_per_eu), MI355X, ~128-512 keys per row:
+# Many-head configs (hg, waves_per_eu), MI355X, ~128-512 keys per row:
 # one 96-head workgroup per row (12 waves) fills 176-256 rows best; below and
 # above that, three 32-head workgroups per row (4 waves, 2 per CU) do (more
 # workgroups in flight for few rows, a better tail past 256).
-_MH_ROW_WG = (6, 32, 2, 3)
-_MH_SPLIT_WG = (2, 32, 2, 2)
+_MH_ROW_WG = (6, 3)
+_MH_SPLIT_WG = (2, 2)
 
 
 @functools.cache
@@ -71,7 +68,7 @@ def _get_launcher(num_heads, has_invalid, return_lse):
 
 @functools.cache
 def _get_mh_launcher(num_heads, config, return_lse):
-    return build_sparse_mla_fp8ds_mh_module(num_heads, *config, return_lse)
+    return build_sparse_mla_fp8ds_mh_module(num_heads, return_lse, *config)
 
 
 def _mh_config(num_tokens, num_heads):
