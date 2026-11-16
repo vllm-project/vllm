@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -26,6 +26,11 @@ from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
 )
+
+if TYPE_CHECKING:
+    # Annotations only: Mooncake's ElasticBuffer follows the same API, and
+    # its prepare/finalize subclasses this class without deep_ep installed.
+    import deep_ep
 
 
 def _quantize_before_dispatch(
@@ -109,7 +114,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
-        buffer: deep_ep.ElasticBuffer,
+        buffer: "deep_ep.ElasticBuffer",
         num_dispatchers: int,
         dp_size: int,
         rank_expert_offset: int,
@@ -250,7 +255,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def _receiver(
         self,
-        event: deep_ep.EventOverlap,
+        event: "deep_ep.EventOverlap",
         has_scales: bool,
         recv_x: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
         recv_topk_idx: torch.Tensor | None,
@@ -500,13 +505,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # DBO drives its own hook/receiver schedule; keep the combine
         # synchronous there (the receiver then only performs the copy).
         combine_async = do_async and not dbo_enabled()
-        combined_x, _, event = self.buffer.combine(
-            x=fused_expert_output,
-            handle=handle,
-            topk_weights=None,
-            async_with_compute_stream=combine_async,
-            allocate_on_comm_stream=combine_async,
-        )
+        combined_x, _, event = self._combine(fused_expert_output, handle, combine_async)
 
         if do_async:
             # The combine ran on DeepEP's comm stream; the modular kernel
@@ -522,6 +521,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             output.copy_(combined_x, non_blocking=True)
             return None
+
+    def _combine(self, x: torch.Tensor, handle, combine_async: bool):
+        return self.buffer.combine(
+            x=x,
+            handle=handle,
+            topk_weights=None,
+            async_with_compute_stream=combine_async,
+            allocate_on_comm_stream=combine_async,
+        )
 
     def finalize_async(
         self,

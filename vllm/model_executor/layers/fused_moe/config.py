@@ -1162,6 +1162,10 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
 
     @property
+    def use_mooncake_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mooncake"
+
+    @property
     def use_moonep_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "moonep"
 
@@ -1505,7 +1509,7 @@ class FusedMoEConfig:
             or self.moe_backend == "batched_triton"
         ):
             return FusedMoEActivationFormat.BatchedExperts
-        elif conf.use_deepep_v2_kernels:
+        elif conf.use_deepep_v2_kernels or conf.use_mooncake_kernels:
             return FusedMoEActivationFormat.PaddedStandard
         else:
             return FusedMoEActivationFormat.Standard
@@ -1679,6 +1683,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.moe_parallel_config.use_deepep_v2_kernels
+
+    @property
+    def use_mooncake_kernels(self):
+        return self.moe_parallel_config.use_mooncake_kernels
 
     @property
     def use_moonep_kernels(self):

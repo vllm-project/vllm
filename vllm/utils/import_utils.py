@@ -519,6 +519,11 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
 
 
+def has_mooncake_ep() -> bool:
+    """Whether Mooncake EP with `ElasticBuffer` is available."""
+    return _has_module("mooncake") and _has_module("mooncake.mooncake_elastic_buffer")
+
+
 def has_nixl_ep() -> bool:
     """Whether the optional `nixl_ep` package is available."""
     return _has_module("nixl_ep")
