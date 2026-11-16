@@ -1,58 +1,76 @@
 # Aux Outputs for RL
 
-An RL trainer recomputes the logprobs of tokens an inference engine sampled. Some of what the engine computed along the way cannot be recomputed by the trainer and has to be shipped with the rollout:
+An RL trainer recomputes the logprobs of the tokens an inference engine sampled. Some values the engine computed on the way cannot be recomputed by the trainer, or only at a high cost, and have to be shipped with the rollout:
 
 - the experts each MoE layer routed every position to (R3, routing replay);
-- sparse-attention indexer selections;
-- top-k logprobs and the sampling support set;
-- the hidden state before `lm_head`, for full-vocabulary distillation.
+- the selections of a sparse-attention indexer;
+- the final hidden states;
+- the top-k next-token logprobs, for example of a teacher scoring long prompts.
 
-This folder specifies how vLLM delivers these "aux outputs" to the trainer at frontier scale, and records the evidence behind it.
+This folder specifies how vLLM delivers these **aux outputs** for long multi-turn RL rollouts through a shared object store, and records the evidence behind the design. The user-facing guide is [Routed Experts Return](../../training/routed_experts.md#sessions-delivering-rows-through-a-shared-object-store).
 
-Terms used below: **R3 off** is the engine with no aux output requested, the baseline of every overhead number. **P-S** ("pool as session cache") is the store-mode design the protocol specifies. **c1** is an engine-local block-row cache, allocated and evicted with the KV, used by inline mode. **`hash~<tag>`** names a trajectory's own copy of a block that another trajectory of the session stored at a different weight version (protocol §5).
+## Terms
 
-Read in this order:
+- **Position.** Position `p` processes token `p` and produces the logits for token `p + 1`. A sequence of `L` tokens has aux outputs for positions `[0, L - 1)`; its rows are those positions' outputs.
+- **Session.** A set of requests that may share KV and objects: one agent rollout, one GRPO group, one tree of forks. A request joins a session with `aux_session`.
+- **Hash block.** The unit of vLLM's prefix-cache block hashes.
+- **Object.** An immutable entry in a shared Mooncake store holding the rows of a span of positions of one session, one array per enabled output. A full object covers one KV block of the full-attention KV cache group (a whole number of hash blocks); a tail object covers the positions after a request's last full object. With pipeline parallelism each stage stores its own part in its own object.
+- **Weight version.** A string the RL framework sets on the engine at every weight update (`update_weight_version`); `default` before the first call.
+- **Segment.** A pair `[start, version]`: positions from `start` up to the next segment's start carry that weight version.
+
+## The design in short
+
+1. **The weight version is part of the block hash.** A session request carries per-segment cache salts: the hash of every hash block includes the versions of its positions, next to its tokens. Block hashes chain, so a hash names the tokens and versions of the whole prefix.
+2. **The session and the key prefix are part of the cache salt.** Only requests of one session, under one key prefix, compute or hit that session's KV.
+3. **Every KV connector keyed by block hashes follows without connector code.** KV stored in any tier or on any replica is found only by a request that states the same tokens and versions.
+4. **An object is named by a block hash.** A full object's key is `<prefix>/<session>/<hash of the block's last hash block>`. The same name means the same tokens at the same versions and, with batch invariance, the same rows. The store keeps the first object written under a name.
+5. **The client carries the versions between turns.** Each response returns `aux_version_segments`. The client sends them with the session's next request; the engine salts the covered prompt positions with them and later positions with the current version.
+6. **What a request computes is named by the version that computes it.** When a waiting request is scheduled, every position it will compute, from its prefix-cache hit or its loaded KV on, is salted with the current version. Names of positions it reuses stay as stated.
+7. **The response lists keys, not rows.** A finished request returns the keys of the objects covering all its positions, in order. The trainer reads them from the store and releases the session by key pattern after the engine has paused.
+8. **The remaining limits are documented, not counted.** A running request keeps the names it was scheduled with, so a few cases name a recomputed position with another version than the computing one ([protocol §12](protocol.md#12-limits)). The engine does not detect or report them.
+
+## Requirements
+
+- Batch invariance: the same tokens at the same weight versions give bitwise identical outputs regardless of batch, chunking, or prefix-cache hit (#62365).
+- Replicas that share KV stores or the object pool hash identically: the same hash algorithm (`sha256`, or the same `PYTHONHASHSEED`), hash block size and look-ahead. Replicas that share the object pool also use the same pipeline-parallel size and enabled outputs.
+- Prefix caching on, a plain full-attention KV cache group, hits on KV block boundaries, at most one hash look-ahead token, no prefix replay. The engine refuses to start otherwise.
+- KV connectors store the blocks that decoding completes (for `MooncakeStoreConnector`, `save_decode_cache: true`).
+- The object pool does not share a Mooncake master with a KV store that is reset.
+
+## PR stack
+
+The stack lands on the `rl/aux-output` branch:
+
+| # | Layer | Content |
+| --- | --- | --- |
+| 1 | Per-segment cache salts (generic) | `cache_salt_segments: list[(start, salt)]` on `EngineCoreRequest` and `Request`; `Request.add_cache_salt_segment`. A hash block's extra keys include the segments overlapping it, with starts relative to the block. Requests without segments hash as before. |
+| 2 | Session objects | `aux_session` and `aux_version_segments`; the session salt; salts at admission, at weight updates and when a waiting request is scheduled; full and tail objects; per-stage objects under pipeline parallelism; `aux_output_keys` and `aux_version_segments` in the response; the Mooncake object store, `read_aux_rows` and `aux_session_pattern`; writes drained at every pause; startup checks. |
+| 3 | Indexer on the DeepSeek V4 CPU backend | Rejects indexer top-k capture there: that attention path does not capture selections. |
+| 4 | Hidden states | `enable_return_hidden_states`: field `hidden_states` of session objects. |
+| 5 | Top-k logprobs | `return_topk_logprobs = k`: fields `topk_token_ids` and `topk_logprobs` of session objects, computed only for session rows, in bounded chunks. |
+| 6 | Objects without routed experts | `object_key_prefix` with any enabled output, so dense models can deliver hidden states and top-k logprobs. |
+
+Fixes from review sit on top of each layer as their own commits. One KV connector change belongs to layer 2: the offloading connector derives its offload keys again from the first chunk whose block hash changed.
+
+Deferred: a vocab-parallel top-k path that avoids gathering full-vocabulary logits.
+
+Later:
+
+- **Prefill/decode disaggregation.** The prefill's segments travel in `kv_transfer_params`.
+- **Rust frontend.** It returns `aux_output_keys` and `aux_version_segments` but does not accept `aux_session`; it must apply the salts before it hashes.
+
+## Documents
 
 | Document | Contents |
-|---|---|
-| [Scenarios](scenarios.md) | Sizing: bytes per token, pools, bandwidth and object counts, from a single node to frontier scale. §1 (the two scenarios) and §8 (constraints on the design) are enough for a first read |
-| [Protocol](protocol.md) | What a row is, the invariants, and what the engine, the store, the driver and the trainer each do, event by event; inline mode for small scale |
-| [Consumer contract](consumer.md) | What a trainer gets from `read_sample`, what each field and failure means, and what the trainer must do |
-| [Experiments](experiments.md) | Measurements on DeepSeek-V4.1-Flash: capacity, correctness per design, overhead, scale, the store, and the correctness hardening |
-| [Design space](design_space.md) | The alternatives for each mechanism, why the protocol picks what it picks, and what was not adopted |
-
-## The requirement, from first principles
-
-The trainer replays a row to reproduce the computation that produced a sampled token. So for every position of a trajectory, the right row is the one from **the computation whose result the trajectory actually used**: the forward that produced the KV the later tokens attended to, or that sampled the next token. Everything else follows:
-
-1. **First computation wins, per trajectory.** A position is often computed more than once: the next turn re-prefills an unfinished block, a preempted request recomputes, speculative verification and a later prefill overlap. Only the first computation fed the trajectory, so it is the one delivered; recomputations never overwrite it.
-2. **Rows carry their weight version.** Trajectories span many weight updates. The manifest lists, per position range, the version of the weights that computed the delivered rows.
-3. **Same-version rows are interchangeable; different versions are not.** Under the train-inference consistent build (#62365), every computation of the same tokens at the same weight version is bitwise identical, so GRPO siblings and forks can share one stored copy of a block. A computation at another version is a different row and is never substituted.
-4. **Requested means delivered, or the request fails.** If a request asks for an aux output, the trainer can read every row; if the store cannot keep them, the request fails with an error instead of delivering part of it. A row is never silently replaced by a different computation.
-5. **Freed once used.** Rows are stored per session and deleted as soon as the session is consumed.
-
-## Conclusions
-
-- **Delivery is block-wise and session-scoped.** Each full KV block is written when it fills, to `<job>/<session>/<block_hash>`; at request end a tail and a manifest are written, and only then is the response sent. Release writes a marker, force-removes the session prefix, waits for the writers and removes again (protocol §8); one removal took 0.2–1 ms with small pools (experiments X4/X5) and 36–74 ms at 200K keys, since it scans the whole store.
-- **The delivery pool doubles as the session's prefix cache (P-S).** A prefix hit is allowed only up to what the session already published, so rows for hits are always in the pool and store mode needs no engine-side row cache. Cross-session hits (shared system prompts) are truncated: each session computes a shared prefix once itself.
-- **Inline mode for small scale.** Rows come back with each completion, `[aux_start, rows)` per turn, with no store, session or trajectory. Rows for prefix hits come from c1, per replica and lost on restart; an evicted block is recomputed, which costs time, not correctness. Any output can be returned this way; the current build returns R3 only, and delivers the indexer, hidden states and top-k through the store (protocol §12).
-- **Objects live on the store's local SSD; memory is a cache.** Each Mooncake holder offloads evicted objects to its own NVMe directory, so a listed row is never lost and the store's memory no longer has to hold every session in flight. The driver admits sessions by free disk, releases with force removal, and aborts the step when a holder dies or puts stop landing. At 512 sessions × 14.6K context, an 8 GB memory segment over SSD ran 1–2% slower than a 96 GB pinned pool (eight same-node pairs, median +1.3%), with nothing missing (experiments: aux objects on SSD). Offload at put time lost 3% of 100K test objects silently and is not used. Without SSD, objects are pinned and admission follows the pool size.
-- **Engine events need explicit handling, and each was found and fixed by test.** Preemption, in-flight weight updates (pause and resume on the same KV, or pause and `reset_prefix_cache`), write failures, prefix hits that end mid-block, forks, and speculative decoding each break a naive implementation; the protocol lists what the engine does in each case.
-- **Sizes on DeepSeek-V4.1-Flash.** R3 480 B/token. Indexer 16 KB raw; after 20-bit packing and zstd, 2.5–3.6 KB up to 128K context and ~5.6 KB at 512K. Top-k logprobs at k = 128: 1 KB per generated token (int32 id + fp32 logprob). Hidden states 16 KB per generated token, stored exactly as the LM head's float32 input.
-- **Top-k logprobs go through the store, like hidden states.** Chunked per request, read back as `[generated length, 128]`. On the bounded-replay build with partial capture, k = 128 through the store took 1,202.4 s against 1,236.3 s without top-k on the one-node 14.6K workload (same node; no measurable cost); the sampled token was in the stored top-128 for 99.3% of rows, and its stored logprob equals the inline one exactly. Returning k = 128 in the response through vLLM's frontend instead made rollouts 46.8% longer on the same build and workload, which is why top-k is delivered only through the store (experiments: top-k logprobs).
-- **At scale.** 512K context, 108 turns, 13 replicas on one shared Mooncake pool over RDMA: 0 missing and 0 wrong of 3.48e8 rows (experiments: scale, first run). That run was made on the bounded-replay build, before the hardening, with fp8 hidden states rather than exact float32. Every hop is far below its NIC and memory ceilings. The one slow hop was decoding the indexer with numpy on the trainer's CPU, at 110–210 MB/s. Decoding belongs on the GPU where replay runs, in position ranges, or on the CPU when the GPU has no room: one 512K request's indexer is about 8 GiB decoded, and the experiments' checkers decode on the CPU above 100,000 rows (protocol §7).
-- **Full depth on models with sliding-window layers.** On DeepSeek-V4.1, layers past 20 attend through a sliding window that vLLM by default replays on each request's trailing rows only. Exact rows at every position under that replay cost about 41% of throughput at the top scenario. Aux capture therefore runs at full depth: replay off, every new row through all 40 layers, and the window KV prefix-cached as snapshots at prompt end and decode end (protocol §6.11). Every cell is then exact and the delivery path has no layer-specific logic. On one node at 14.6K context (512 sessions × 16 turns), full depth took 58–62% less time than bounded replay in every arm, R3 off included, with every row delivered. The regression suite (groups, forks, interior forks, forced preemption, compaction, write-failure injection) matched every row against its trajectory's own first computation, 0 wrong of about 16M rows, and the same-version differences seen under bounded replay are gone (experiments: full-depth regressions); decode-end snapshots took another 10.5% off. Against R3 off on the same full-depth engine (same script, node and flags; only the arm differs), all outputs took 25–27% longer; that cost is not yet broken down, and a per-output breakdown at full depth is queued. Full depth requires append-only histories for multi-turn reuse, and the decode-end snapshot does not yet support speculative decoding.
-- **Capture off the output path.** The cost of the indexer and hidden states was not their bytes but per-request capture work done under the output path's lock on the writing TP rank, which starved that rank's GPU; capture now runs on its own thread behind one ordered queue (protocol §6.9). The top-scenario numbers predate full depth. They were measured on the earlier bounded-replay build with partial capture, which full depth replaces: there all outputs cost 4.0% and all but the indexer 2.1% over R3 off (512K, 51 sessions per replica, 5 replicas, two interleaved rounds; experiments: top scenario). A single top run varies by about 2 points, so only interleaved repeats resolve one change. Full depth has not yet been run at the top scenario.
+| --- | --- |
+| [Protocol](protocol.md) | Configuration, request and response fields, how names are formed and when, what the engine writes, weight updates, reset, pause and release, requirements and limits |
+| [Consumer contract](consumer.md) | How a trainer reads objects, what each field holds, and what it must do |
+| [Design space](design_space.md) | The alternatives for each decision and why this one |
+| [Scenarios](scenarios.md) | Sizing: bytes per position, KV tier capacity, object pool, object counts |
+| [Experiments](experiments.md) | Validation results, open items, and earlier measurements |
 
 ## Status
 
-The delivery path runs as an overlay on a vLLM build (commit `da8922bf0f`) with Mooncake `0.3.13.post1`. The code as run in the experiments, with its drivers and tests, is on the branch `rl/aux-output-impl` of the author's vLLM fork, under `tools/rl_aux_output/`: the connector and worker modules, the store writer and the trainer-side reader (`oc_reader.py`), the hidden-state and top-k capture hooks, the decode-end sliding-window snapshot patch, and the experiment drivers and tests. It is a snapshot, not yet split into reviewable changes.
+All six layers are on the branch. Requests without `aux_session` keep the inline behavior: routed experts and indexer selections returned in the response. Validation of the full stack is tracked in [experiments](experiments.md); the runs on the current branch are pending.
 
-**Enabling it in this build.**
-
-- The overlay replaces `vllm/distributed/aux_output_connector/{connector,worker,oc_common}.py` and `vllm/v1/worker/gpu/model_runner.py`, and needs Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
-- Engine argument `enable_return_routed_experts=True` (`vllm.config.AuxOutputConfig`) turns aux capture on. Its `max_bytes` is the capacity of the engine-local row cache c1, by default derived from the KV capacity. With nothing else set, R3 is returned inline.
-- Store delivery is switched on by environment variables, not by a config field: `OC_MC_MASTER=<host:port>` (the Mooncake master; unset means inline only); `OC_DESIGN=ps` for P-S (default `c1`); `OC_EXTRA=1` for the indexer and hidden states (`OC_EXTRA_IDX=0` or `OC_EXTRA_HID=0` drops one); `OC_EXTRA_TOPK=1` with `OC_TOPK=<k>` for top-k; `OC_MC_SSD_PATH` for the SSD offload directory.
-- Per request the overlay reads `SamplingParams(routed_experts_prompt_start=<aux_start>, extra_args={"oc_session": ..., "oc_traj": ..., ...})`, plus the parent for a fork's first request. The protocol's `aux_session`, `aux_trajectory`, `aux_parent` and `aux_start` are the intended API names for these (protocol §3).
-
-Next: the split into pull requests, with full-depth capture (protocol §6.11) as the design. Partial capture, the earlier build on which the top-scenario and host-work numbers above were measured, is not carried over; removing its code has started. Related RFCs: #64380 (delivery protocol); #64383 (R3 as a KV-cache layer) was not adopted, see [Design Space](design_space.md).
+RFC #64380 described an earlier protocol (manifests, per-trajectory copies, a writer-side version ledger). This folder replaces it.

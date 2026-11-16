@@ -1,144 +1,124 @@
 # Sizing Scenarios
 
-Two scenarios bound the design: a single-node setup and a frontier-scale agentic RL run. All numbers assume batch invariance (BI) is on. Sizes come from model configs and formulas; assumptions are marked. The last section replaces the per-token sizes with measurements on DeepSeek-V4.1-Flash.
+Two scenarios bound the design: a single-node setup and a frontier-scale agentic RL run. Sizes come from model configs and formulas; assumptions are marked. Section 9 gives per-position sizes for DeepSeek-V4.1-Flash.
+
+A session request stores the rows of every position it computes, in full objects and one tail ([protocol §5](protocol.md#5-objects)), and a later turn reuses the objects of the positions it hits. All per-trajectory and per-pool numbers below therefore scale with positions, not with generated tokens. Every enabled field is stored at every position.
 
 ## 1. Scenarios
 
 | | Single node | Frontier scale |
-|---|---|---|
+| --- | --- | --- |
 | Model | Qwen3-30B-A3B | a ~500B-A23B MoE (49 MoE layers, 256 experts, 1M context) |
 | Workload | GRPO, short multi-turn agents | long-horizon agents with sub-agent forks |
 | Mean / max context | 16K / 32K (assumed) | 200K (assumed) / 1M |
-| Share of generated tokens | 50% (assumed) | 10%; multi-turn agents are prefill-dominated (assumed) |
 | Trajectories in flight (cluster) | 256 (assumed) | ≈110,000 (public report) |
 | In flight per replica | 32 (8 engines) | ≈51 (110,000 ÷ 2,160 replicas) |
 | Staleness | 0 to a few steps | up to ~107 weight versions (~1 day) |
 | Weight-sync interval | every step | ≈807 s (86,400 s ÷ 107) |
-| Inference | 1 node × 8 H200, 8 engines (TP1) | ≈2,160 GB300 nodes, one replica each (assumed) |
-| Training | colocated | ≈465 GB300 nodes (inference : training ≈ 4.65 : 1) |
+| Inference | 1 node × 8 GPUs, 8 engines (TP1) | ≈2,160 nodes, one replica each (assumed) |
+| Training | colocated | ≈465 nodes (inference : training ≈ 4.65 : 1) |
 | Completion rate | — | ≈41 trajectories/s |
 
-By Little's law, a frontier-scale trajectory lives ≈110,000 ÷ 41.3 ≈ 2,660 s and spans about 3 weight updates.
+By Little's law a frontier-scale trajectory lives ≈110,000 ÷ 41.3 ≈ 2,660 s and spans about 3 weight updates. A session's segments grow by at most one entry per update it spans.
 
 ## 2. Bytes per position and per trajectory
 
-| Output | Positions recorded | Per position | 16K trajectory | 200K trajectory | 1M trajectory |
-|---|---|---|---|---|---|
-| R3 | all | 384 B / 392 B (MoE layers × top-k × 1 B) | 6.3 MB | 80 MB | 411 MB |
-| top-k 128 | generated only | 1 KB (128 × (int32 id + fp32 logprob)) | 8.4 MB | 21 MB | 107 MB |
-| top-p mask (≤ 256 ids) | generated only | ≤ 1 KB | 8.4 MB | 21 MB | 107 MB |
-| indexer, 12 layers × 2048 | all | 96 KiB | 1.6 GB | 20 GB | 103 GB |
-| indexer, 61 layers × 2048 | all | 488 KiB | 8.2 GB | 102 GB | 524 GB |
+| Output | Per position | 16K trajectory | 200K trajectory | 1M trajectory |
+| --- | --- | --- | --- | --- |
+| R3 (MoE layers × top-k × 1 B) | 392 B | 6.3 MB | 80 MB | 411 MB |
+| top-k logprobs, k = 128 (int32 id + fp32 logprob) | 1 KB | 17 MB | 210 MB | 1.07 GB |
+| indexer, 12 layers × 2048, int32 | 96 KiB | 1.6 GB | 20 GB | 103 GB |
+| indexer, 61 layers × 2048, int32 | 488 KiB | 8.2 GB | 102 GB | 524 GB |
+| hidden states | `hidden_size` × dtype bytes | | | |
 
-Top-k is sized at k = 128, the value the protocol uses. The two indexer rows assume a model of the same size with a DSA-style indexer. Bounding the top-p mask at 256 ids requires `top_k ≤ 256` at sampling time.
+The two indexer rows assume a model of the frontier size with a DSA-style indexer. Hidden states depend on the model: 8 KB per position at `hidden_size` 4096 in bfloat16, 16 KB in float32 (section 9).
 
-## 3. Cache segment as a KV layer: host memory
+Reuse across turns keeps these numbers per trajectory rather than per turn: a turn writes only positions no earlier turn of the session wrote under the same name. Rewriting the full context every turn would write about 2 GB of R3 for a 200K, 50-turn trajectory, 25× the 80 MB above.
 
-Only outputs recorded at every position need a cache segment (R3, indexer); top-k and mask cover generated positions, which are never prefix hits. The cache segment's token capacity equals the full-attention KV capacity.
+## 3. KV tier capacity across weight updates
 
-| Output | Single node, per engine (589K tokens) | Single node, per node (8 engines) | Frontier, per replica (12.8M tokens) | Ratio to KV (single node / frontier) |
-|---|---|---|---|---|
-| R3 | 0.23 GB | 1.8 GB | 5.0 GB | 0.39% / 1.06% |
-| indexer, 12 layers | 58 GB | 463 GB | 1.26 TB | 100% / 267% |
-| indexer, 61 layers | 294 GB | 2.35 TB | 6.4 TB | 508% / 1356% |
+When GPU memory is released at a weight update, the GPU prefix cache is empty afterwards. A session continues on its stored KV only if a KV connector tier holds it, including the blocks that decoding completed. When the tier has lost it, the next turn computes the prefix again with the new weights and writes it again under new names ([protocol §7](protocol.md#7-prefix-cache-hits-and-kv-connectors)). The names stay true, but the recompute costs time and the second copy costs pool space:
 
-At frontier scale each replica has ≈51 × 200K ≈ 10.4M live tokens, 81% of its 12.8M capacity. R3's cache segment is cheap; an uncompressed indexer cache segment exceeds host memory.
+```text
+tier capacity per replica ≥ live session positions per replica × KV bytes per position
+```
 
-## 4. Delivery store
+At frontier scale each replica has ≈51 × 200K ≈ 10.4M live positions, 81% of an assumed GPU KV capacity of 12.8M positions. The tiers must hold all of it at every update to avoid recomputing it. Sessions that move between replicas need a KV store shared by the replicas, or the new replica computes the prefix again.
 
-The store holds every session in flight until release. With objects on each holder's local SSD (protocol §9), that space is disk, and memory is a cache sized for puts in flight (8 GB was enough at 512 sessions × 14.6K context). Without SSD, it is pinned memory, and the pool has to be the in-flight bytes ÷ 0.75. The columns below give the in-flight bytes and that ÷ 0.75 store size; with SSD, read the store columns as disk per node.
+## 4. Object pool
 
-| Output | Single node: in flight | Single node: store | Frontier: per node in flight | Frontier: cluster in flight | Frontier: per-node store (512K start / 1M bound) |
-|---|---|---|---|---|---|
-| R3 | 1.6 GB | 4.3 GB | 4.1 GB | 8.8 TB | 14 / 28 GB |
-| top-k 128 | 2.1 GB | 5.6 GB | 1.1 GB | 2.3 TB | 3.6 / 7.3 GB |
-| top-p mask | 2.1 GB | 5.6 GB | 1.1 GB | 2.3 TB | 3.6 / 7.3 GB |
-| indexer, 12 layers | 206 GB | 1.1 TB | 1.0 TB | 2.2 PB | 3.5 / 7.0 TB |
-| indexer, 61 layers | 1.0 TB | 5.6 TB | 5.2 TB | 11.3 PB | 18 / 36 TB |
+Objects are hard-pinned and stay until the consumer releases them, so the pool holds every object of every live session, plus headroom. A session is released after a pause that follows its last request ([protocol §10](protocol.md#10-pause-and-release)), so it occupies the pool for up to one weight-sync interval after it ends. An earlier implementation sized pinned pools at in-flight bytes ÷ 0.75.
 
-R3, top-k and the mask fit in host memory even at frontier scale. The indexer does not: at terabytes per node it only fits on disk, which is what makes the SSD store the default rather than an option.
+| Output | Single node: in flight | Frontier: per replica in flight | Frontier: cluster in flight |
+| --- | --- | --- | --- |
+| R3 | 1.6 GB | 4.1 GB | 8.8 TB |
+| top-k 128 | 4.2 GB | 11 GB | 23 TB |
+| indexer, 12 layers | — | 1.0 TB | 2.2 PB |
+| indexer, 61 layers | — | 5.2 TB | 11.3 PB |
 
-Deduplication across turns is mandatory at frontier scale. Rewriting the full context every turn would write ~2 GB of R3 for a 200K, 50-turn trajectory, 25× the deduplicated 80 MB.
+The single-node model has no indexer. Tails add one object per request, about half a block of positions on average. Prefixes computed again after a KV loss (section 3) add a second copy under new names. R3 and top-k fit in host memory at frontier scale; an uncompressed indexer or hidden states at every position need pool nodes sized in terabytes per replica. Enable only the outputs the trainer uses.
 
-## 5. Write traffic and object counts (frontier scale)
+## 5. Object counts and write rate (frontier scale)
 
-| Output | Cluster bandwidth | Per inference node | Object (16-position block) | Live objects (cluster) |
-|---|---|---|---|---|
-| R3 | 3.3 GB/s | 1.5 MB/s | 6.3 KB | 1.4B |
-| top-k 128 | 0.87 GB/s | 0.4 MB/s | 16 KB | 141M |
-| top-p mask | 0.87 GB/s | 0.4 MB/s | 16 KB | 141M |
-| indexer, 12 layers | 831 GB/s | 385 MB/s | 1.6 MB | 1.4B |
-| indexer, 61 layers | 4.2 TB/s | 1.96 GB/s | 8.0 MB | 1.4B |
+The cluster computes about 8.4M new positions per second (41 trajectories/s × 200K).
 
-Bandwidth is not the constraint for R3, top-k or mask. Object count is:
-- 16-position objects mean ~530K objects/s across the cluster. A single Mooncake master's rate at this scale was not measured in these experiments.
-- Larger blocks (64–256 tokens: 4–16× fewer objects), one object per block holding every output kind, and batched puts reduce the rate.
+| Output | Cluster bandwidth | Per inference node |
+| --- | --- | --- |
+| R3 | 3.3 GB/s | 1.5 MB/s |
+| top-k 128 | 8.6 GB/s | 4.0 MB/s |
+| indexer, 12 layers | 831 GB/s | 385 MB/s |
+| indexer, 61 layers | 4.2 TB/s | 1.96 GB/s |
+
+All enabled outputs of a block share one object, so the object count depends only on the block size `B` of the full-attention KV cache group, times the pipeline-parallel size:
+
+| `B` | Objects/s, cluster | Objects/s, per replica | Live objects, cluster |
+| --- | --- | --- | --- |
+| 16 | ≈530K | ≈240 | 1.4B |
+| 256 | ≈33K | ≈15 | ≈88M |
+
+Plus one tail object per request. Bandwidth is not the constraint for R3 or top-k; at small block sizes the object rate is. A single Mooncake master's rate at this scale has not been measured.
+
+The writes queued on a replica bound how long a pause waits for them: at most `2 × max_num_seqs` batches, written at the rates above.
 
 ## 6. Training side: reads per step
 
-A frontier-scale step consumes ≈33K trajectories (41/s × 807 s) across ≈465 training nodes. With pipeline parallelism, each stage reads only its own layers of R3 and indexer; top-k and mask are read by the last stage only.
+A frontier-scale step consumes ≈33K trajectories (41/s × 807 s) across ≈465 training nodes; each node reads the objects of its share.
 
 | Output | Single node: per step | Frontier: per training node per step |
-|---|---|---|
+| --- | --- | --- |
 | R3 | 3.2 GB | 5.8 GB |
-| top-k 128 | 4.3 GB | 1.5 GB |
-| top-p mask | 4.3 GB | 1.5 GB |
-| indexer, 12 layers | 825 GB | 1.4 TB |
-| indexer, 61 layers | 4.2 TB | 7.3 TB |
+| top-k 128 | 8.6 GB | 15 GB |
+| indexer, 12 layers | — | 1.4 TB |
+| indexer, 61 layers | — | 7.3 TB |
 
 ## 7. Recomputing in-flight work at weight sync
 
-```
-per-replica in-flight tokens × 2 × 23B active params / (4 GPUs × 5 PFLOPS FP8 × 40% MFU)
+```text
+per-replica in-flight positions × 2 × 23B active params / (4 GPUs × 5 PFLOPS FP8 × 40% MFU)
 = 51 × 200K × 46 GFLOP / 8 PFLOPS ≈ 60 s
 ```
 
-That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier-scale runs therefore keep generating across weight versions rather than recomputing in-flight requests at every update, and prefix hits on blocks computed by an older version are normal. vLLM supports both ways to apply an update. `pause_generation(mode="keep", clear_cache=False)` keeps every cached block, so the next turn of a trajectory hits the KV its earlier turns computed; every run in the experiments applied updates this way. With `clear_cache=True` the update resets the GPU prefix cache (protocol §6.6): the old KV then survives only in a KV offload tier, which the reset keeps unless `reset_connector=True`, and the next turn loads its context from the tier if the tier still holds it, else recomputes it (experiments E0).
+That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier-scale runs therefore keep generating across weight versions on their stored KV rather than recomputing at every update, and hits on KV computed with an older version are normal. This is why versions are part of the names and why the client carries them between turns.
 
 ## 8. Constraints on the design
 
-- **R3 and top-k share one protocol.** At frontier scale R3 is 4.1 GB and top-k 1.1 GB in flight per node, with stores of 14–28 GB and 3.6–7.3 GB. Top-k needs no cache segment.
-- **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 up to 128K context and about 12× at 512K (section 10), and fits the same store. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
-- **Deduplication is mandatory and must be scoped to the session.** Rewriting the full context every turn would write ~25× more R3. Sharing across sessions would need reference counting for little gain.
-- **Release is per session, not per generation.** A trajectory lives ~2,660 s and spans ~3 weight updates (and up to ~107 versions of staleness), so prefix hits on blocks computed by an older version are normal. Rows must therefore carry their weight version, and a computation at another version is never interchangeable with the stored one.
-- **Weight updates happen with requests in flight.** Recomputing in-flight work at every update costs ~7% of each interval (section 7), so the engine pauses and resumes without recomputing: running requests continue on their KV, and cached prefixes stay cached. A deployment may still reset the prefix cache at an update; the delivery path must survive either without losing or replacing rows.
+- **Versions must travel with the KV, everywhere.** A trajectory spans ~3 updates and may be ~107 versions stale. Its prefix KV survives updates only in connector tiers, on this replica or another, so the version has to be part of what every tier uses as a key: the block hash.
+- **Reuse is mandatory and scoped to the session.** Rewriting the full context every turn writes ~25× more. Sharing across sessions would need reference counts for little gain.
+- **KV tiers are sized for throughput.** Losing a live session's prefix KV recomputes it and stores it twice (section 3).
+- **The pool holds every live object.** Objects are pinned until release; size the pool for the enabled outputs at every position (section 4).
+- **Object rate, not bandwidth, limits R3 and top-k** at small block sizes (section 5).
 
-## 9. Scenario coverage vs. existing systems
+## 9. DeepSeek-V4.1-Flash
 
-Compared with the SGLang output store and Miles (which reject several of these configurations at startup), the protocol explicitly handles:
-- multimodal prompts: positions counted on the engine-side expanded sequence, and image hashes included in the prefix hash;
-- multiple policies or LoRAs sharing an engine: a new session per policy and in-flight caps per policy;
-- streaming responses: references are returned in the final chunk;
-- chat-message APIs: the engine-side `prompt_token_ids` are returned;
-- tool-observation positions: explicit fill values, so an empty support set never yields NaN losses;
-- training-step retry and checkpoint rollback: release only after the step commits, and regenerate after a rollback;
-- offline saving of rollouts: read inline first;
-- MoE backends that bypass top-k: reject R3 at startup;
-- routers that drop unknown fields: a missing `aux` is an error;
-- requests aborted while queued: they produce an empty set of rows;
-- leak checks at job end: a sweep that reports the count.
+Model (public config): 40 layers + 3 MTP layers; 384 experts, top-6; 8 indexer source layers, top-512; `hidden_size` 4096.
 
-## 10. DeepSeek-V4.1-Flash, measured
+| Output | Per position | 200K trajectory | Frontier: per replica in flight (≈10.4M positions) |
+| --- | --- | --- | --- |
+| R3 (40 × 6 × uint16) | 480 B | 96 MB | 5.0 GB |
+| top-k 128 | 1 KB | 205 MB | 10.6 GB |
+| hidden states, bfloat16 | 8 KB | 1.6 GB | 85 GB |
+| indexer, int32 (8 × 512) | 16 KB | 3.3 GB | 170 GB |
 
-Model (public config):
-- 40 layers + 3 MTP layers;
-- 384 experts, top-6;
-- 8 indexer source layers, top-512.
-
-Setup: TP4 + EP4, BI on. The frontier column keeps the workload from section 1 and swaps in DeepSeek-V4.1-Flash per-token sizes.
-
-| Output | Positions | Per position | 200K trajectory | Frontier: per replica in flight (≈10.4M positions) | Frontier: per-replica pool (÷0.75) |
-|---|---|---|---|---|---|
-| R3 | all | 480 B (40 × 6 × uint16) | 96 MB | 5.0 GB | 6.7 GB |
-| top-k 128 | generated | 1 KB | 20 MB | 1.1 GB | 1.4 GB |
-| hidden (`lm_head` input, float32) | generated | 16 KB | 328 MB | 16.6 GB | 22 GB |
-| indexer, raw (8 × 512 × int32) | all | 16 KB | 3.3 GB | 170 GB | 227 GB |
-| indexer, 20-bit + zstd, contexts up to 128K (measured) | all | 2.5–3.6 KB | 0.5–0.7 GB | 26–37 GB | 35–50 GB |
-| indexer, 20-bit + zstd, 512K context (measured) | all | ~5.6 KB | 1.1 GB | 58 GB | 78 GB |
-
-- **KV capacity, measured.** A TP4 engine at 0.65 GPU memory utilization holds 3.39M tokens.
-  - R3 as a block-row cache (or KV layer): ≈1.6 GB per engine, ~1% of the KV.
-  - Indexer: ≈54 GB raw; compressed ≈10 GB at contexts up to 128K and ≈19 GB at 512K.
-- **Indexer compression.** Selections are bitwise reproducible under BI. zstd gains less as contexts grow, because the selected positions spread over the whole sequence: compressed, the indexer is 5–7× R3 up to 128K and about 12× at 512K. The frontier mean of 200K lies between the two rows; size stores with the 512K row. Either way it fits in the same delivery store.
-- **Hidden states.** Delivered exactly, the trainer's `lm_head` reproduces vLLM's distribution up to its own matmul (logprob error max 7.8e-4). The behavior logprob must still come from the inline per-token logprob, because recomputed logits are not bitwise equal.
-- **Top-k logprobs.** k = 128 at generated positions, 1 KB per generated token, delivered through the store in chunks like hidden states. Through the store they had no measurable cost on the one-node 14.6K workload; returned in the response through vLLM's frontend instead, they made rollouts 46.8% longer (experiments: top-k logprobs).
+- **KV capacity** (measured). A TP4 engine at 0.65 GPU memory utilization holds 3.39M positions, about a third of the frontier per-replica live positions. The rest must be in tiers at every update (section 3).
+- **Indexer compression** (earlier implementation, not in the stack): 20-bit packing plus zstd gave 2.5–3.6 KB per position up to 128K context and about 5.6 KB at 512K. Selections spread over the whole sequence at long contexts, so zstd gains less there.
+- **Hidden states** (earlier implementation): logprobs recomputed from them had an error of at most 7.8e-4, from the trainer's own matmul. The behavior logprob must still come from the inline sampled logprob.

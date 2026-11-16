@@ -1,137 +1,109 @@
 # Design Space
 
-The [protocol](protocol.md) is one point in this space. This page lays out each decision, the alternatives, and why the protocol picks what it picks. Measurements are in [experiments](experiments.md); sizes in [scenarios](scenarios.md).
+The [protocol](protocol.md) is one point in this space. This page lists each decision, the alternatives, and why the protocol picks what it picks. Sizes are in [scenarios](scenarios.md), measurements in [experiments](experiments.md).
 
-## Two segments
+## What the trainer needs
 
-A row has to exist for two different reasons:
+For every position of a trajectory the trainer needs the aux outputs of the computation the trajectory used: the forward that produced the KV later tokens attended to, or that sampled the next token. Three facts shape the design:
 
-- **Cache segment.** For positions served by a prefix-cache hit, the rows must exist as long as the KV they belong to. Only outputs recorded at every position need one (R3, indexer, and hidden states or top-k when a teacher scores a student's tokens as prompt; that case is needed by design but not built, protocol §13).
-- **Delivery segment.** From the moment rows are computed until the trainer has consumed them. Every output needs one.
+- **Positions are computed more than once.** The next turn computes again what the cache did not keep; a preempted request recomputes; siblings compute the same prompt.
+- **Trajectories span weight updates.** At frontier scale a trajectory lives through several updates and may be up to ~100 versions stale ([scenarios §1](scenarios.md#1-scenarios)). A prefix computed with one version is reused by later turns computed with another.
+- **KV leaves the GPU.** RL frameworks often release GPU memory at every update, so the KV of a session's prefix survives only in KV connector tiers, on this replica or another.
 
-| Output | Positions | Cache segment? | Bytes/token (DeepSeek-V4.1-Flash) | Can the trainer recompute it? |
-|---|---|---|---|---|
-| R3 | all | yes | 480 B | no, it must match the rollout's routing |
-| top-k (k = 128) + mask | generated | no | 1 KB + ≤ 1 KB | no, it is the sampling-time distribution |
-| indexer | all | yes | 16 KB raw; compressed 2.5–3.6 KB up to 128K context, ~5.6 KB at 512K | only under BI with the same weights |
-| hidden | generated (teacher prompt positions: not built) | in the teacher case | 16 KB float32 (exact) | no |
+So the question is: when a request reuses KV, how does it find the aux outputs of the computation that produced that KV, whatever tier or replica the KV came from; and when it computes a position, how is that computation named?
 
-## Cache segment: where rows for prefix hits come from
-
-Which hits need a cache segment in RL:
-
-1. **The next turn of the same trajectory.** The rows were already delivered by the previous turn.
-2. **Forks and tree search.** The parent's rows sit in the delivery pool until the session is released.
-3. **GRPO siblings.** Same session, so the same as 2.
-4. **Across sessions** (a shared system prompt). Only these need a separate cache.
+## Where the weight version lives
 
 | Option | Approach | Assessment |
-|---|---|---|
-| C0 | No cache; cap hits at `aux_start` and recompute | Loses prefix sharing: every turn recomputes the context it could have hit; creates second computations |
-| C1 | Engine-local block-row cache allocated and evicted with the KV; blocks missing from the session written at request end | Exact; ~1% of the KV for R3 on DeepSeek-V4.1-Flash; ~54 GB raw for the indexer per engine |
-| C2 | R3 as an extra KV-cache layer | "KV hit ⇒ rows present" across KV tiers including offload; 0.21% of KV capacity; needs a host group with one slot per token. Not adopted: cannot hold the indexer (~10 KB/token) or hidden states, and still needs a separate delivery path |
-| C3 | Store keyed by global block hash (#57968) | One copy, but per-batch release loses rows still shared, and pool pressure drops them |
-| C6 | **The delivery pool doubles as the session's cache**: a hit is allowed only up to what the session already published | **Chosen.** No extra memory, works for the indexer too. Cases 1–3 are covered; case 4 is truncated, so each session computes a shared prefix once itself |
+| --- | --- | --- |
+| V1 | Version in the object key (`<hash>@<version>`), stamped when the step that completes the block runs | The key does not follow the KV: the KV cache does not know versions, so a hit on KV computed with one version lists the key of whichever version the bookkeeping recorded. Mixed-version blocks and siblings across an update need extra rules. Built and replaced. |
+| V2 | Version ledger next to the KV: per block and per KV cache group, in the scheduler and at the offloading connector's boundary | Correct for the GPU cache and one tier layout of one connector, but needs code in every connector and cuts hits wherever groups disagree. Built, reviewed and replaced: it could not cover every connector without wrapping each one. |
+| V3 | **Version in the block hash**, through per-segment cache salts | **Chosen.** Every connector keyed by block hashes stores and finds KV by (tokens, versions) with no connector code. The object name is the block hash, so the KV and the object share one name by construction. |
 
-## Write granularity
+Per-segment cache salts are generic: a request carries `(start, salt)` pairs and each hash block includes the pairs overlapping it, with starts relative to the block. Requests without segments hash as before, so the change is invisible outside sessions.
 
-| Option | Approach | Assessment |
-|---|---|---|
-| W0 | Everything at request end | A write spike, the response waits, unbounded host memory |
-| W1 | **Each full KV block when it fills** | **Chosen** for KV-following outputs |
-| W2 | N blocks per object | Fewer objects, rows stay longer in host memory; an option if the object rate limits |
-| W3 | **Chunks of generated positions** | **Chosen** for top-k, mask and hidden |
+## Who states the versions of a prompt
 
-## Keys and sharing
+| Option | Assessment |
+| --- | --- |
+| The engine, from its own record of which version computed each block | Needs the record on every replica and in every tier: back to V2. |
+| The engine, always the current version | A prompt computed before an update would never be hit after it: every turn after an update computes its whole context again. |
+| **The client, from the previous response** | **Chosen.** The engine returns `aux_version_segments` with each response; the client sends them with the next request. The engine keeps no state across requests, and a session can move between replicas. |
 
-| Option | Key | Sharing | Release |
-|---|---|---|---|
-| K1 | per request | within a trajectory, client bookkeeping | per batch |
-| K2 | **per session: `<session>/<block_hash>`** | **within a session** | **delete the session prefix** |
-| K3 | global block hash | across sessions | needs reference counting |
+The client's statement decides only what the request can hit. Everything the request computes is named by the engine with the version that computes it (next section). Stale or edited segments are therefore safe: positions after the first divergence miss the cache and take the current version. An earlier plan to verify the segments against a hash in their closing entry is no longer needed.
 
-K2 is chosen. Sharing across sessions is worth ~0.24 GB per node for R3, not worth reference counting.
+## When names are fixed
 
-**Sharing inside a session.** A block hash names tokens, not a computation. Two trajectories of one session can compute the same tokens differently in two ways:
+A block is hashed as soon as its tokens exist, and connectors keep or look up the hashes they see. Hashes are therefore changed only at points where no connector holds them for positions the request is about to compute:
 
-- **Same weight version.** Under the train-inference consistent build these computations are bitwise identical, so one copy serves all trajectories; the protocol relies on that build. On DeepSeek-V4.1-Flash with bounded replay, a GRPO group's siblings prefilling the same prompt in different chunks differed in ~40% of the rows of the affected blocks. At full depth the same regressions match the reference with 0 wrong rows: the difference came from bounded replay's replayed rows, not from same-version computations (experiments: finding on same-version rows).
-- **Different weight version.** A trajectory computing the same tokens after a weight update has different rows, and its sampling used them. Sharing the earlier copy would deliver another version's routing. The trajectory keeps its own copy.
+- **Admission.** The client's coverage is rounded down to an object boundary before the prompt's last token, so a covered object is never partly covered. Later positions get the current version.
+- **Update.** A new version applies from the first position that is neither computed nor hashed. Hashed blocks are not touched while a request runs.
+- **Scheduling from the waiting state.** Just before a waiting request is scheduled (at admission after the prefix-cache lookup, after a preemption, after an asynchronous KV load), every position it will compute is salted with the current version, from the first segment that states another version. Hashes before the hit stay, so everything taken from the lookup remains valid; connectors that derive state from the hashes see the change at their next update.
 
-| Option | What a trajectory reads for a shared hash | Assessment |
-|---|---|---|
-| S0 | the session's first copy, always | Wrong across versions |
-| S1 | its own computation, always (one copy per trajectory) | Correct, but stores identical rows many times under the consistent build |
-| S2 | **the first copy if same version, otherwise its own** | **Chosen.** One copy per version |
+This rule replaced two narrower ones. Cutting the hashes back at preemption ran before the lookup and did not cover a request whose prefix had been evicted, tiers that were cleared, or KV loaded while the version changed. Salting at the lookup instead covers every case where a waiting request computes a position, with one check per scheduling and a rehash only when a stated version is not current.
 
-Within one trajectory the rule is simpler: the first computation wins, and any recompute of a block the trajectory already holds is dropped.
+What remains is a running request: its positions hashed before an update and computed after it keep the earlier version. Rewriting the hashes of a running request would invalidate keys that connectors already used for stores in flight. That is the documented limit.
 
-## Weight versions
+## Session scope
 
-Rows are labelled with the version of the forward that computed them, stamped when the forward is prepared (a weight update can land between prepare and commit). The manifest lists segments `[start, version]`; for shared blocks the segments come from the stored object's record, so the label always describes the bytes the reader gets. Deleting by generation is not an option: trajectories span many versions (~107 at frontier scale).
+| Option | Sharing | Release |
+| --- | --- | --- |
+| Global block hash | across sessions | needs reference counts across sessions |
+| **Session and key prefix in the cache salt and in the key** | **within a session** | **delete the session's objects** |
 
-## Failure policy
+The session is chosen. A shared system prompt is computed once per session, a small cost against reference counting across sessions. With the session in the salt, the session's KV in any tier was computed by a request of the session, which wrote the object under the same name: no ledger of what a session published is needed. The key prefix is in the salt too, so a session name reused under a new prefix (a new deployment start) cannot hit KV whose objects belong to the old prefix.
 
-| Event | Option | Assessment |
-|---|---|---|
-| Memory full | drop rows / fail the request / block / **offload to SSD** | **Offload** on eviction (never at put, which loses objects), with sessions admitted by free disk; without SSD, pin, admit by pool size and **block** writers when the pool is full |
-| Holder dies or disk fails | restart and continue / **abort the step** | A dead holder's objects are listed but unreadable, and a failing disk makes every put fail: **abort** on holder death or when puts stop landing |
-| Any write fails | report the missing rows / substitute a later recompute / **fail the request** | A recompute can be of another version and its label would be wrong. Reporting missing rows would keep the rest of the request but needs per-row bookkeeping in the writer and the reader, for failures that are rare. The request **fails** as a whole: an **error marker per request** in place of its manifest (a session-wide marker would fail every sibling), and the reader fails any request whose manifest lists an object that does not exist |
-| Preemption | finish the request / **stash and resume** | Finishing loses rows computed before the preemption: **stash** |
-| KV-load rewind | crash / **mark invalid from the rewind point** | Rows computed on invalid KV are reported, never delivered |
+## Object granularity
 
-## Data path and tiers
+- **One object per full-attention KV block.** Session hits end on KV block boundaries, so a hit always covers whole objects. All enabled outputs go into one object, so the object count does not grow with the number of outputs. With pipeline parallelism each stage writes its part to its own object under the same name plus a stage suffix.
+- **Tail as its own object.** The positions after the last full object are stored as one object named by a hash of the previous block, the tokens and their extra keys under a tail tag. Tails of different branches, lengths or versions never collide. Returning tail rows inline instead would move aux values through the frontend and the client; with the tail in the store the response carries keys only.
 
-- GPU → host → background put: the current path. With R3 as a KV layer, rows are already on the host when a block fills. GPU staging → RDMA put is the candidate for the indexer.
-- **Store: local SSD under a memory cache (adopted).** Each Mooncake holder's segment is a memory cache over its own NVMe directory, with offload on eviction, for every output. Pinned host memory alone was the earlier design; it caps in-flight sessions at a fraction of host memory and cannot hold the indexer at frontier scale (scenarios §4). Offload at put time, the other offload mode, evicts objects before their disk write completes and was rejected (experiments: aux objects on SSD).
-- A shared-filesystem copy-out once a trajectory finishes would survive checkpoint restore; it is not needed for delivery and is not built.
+## Write policy
 
-## Encodings
+| Option | Assessment |
+| --- | --- |
+| Overwrite on every recompute | Can replace the rows a trajectory used with a later computation's. |
+| **Immutable objects, first write kept** | **Chosen.** Under batch invariance a second computation under the same name has the same rows. A write to an existing key succeeds, and Mooncake keeps one object per key, never a mix. |
+| Per-trajectory copies when versions differ | Needed only when names do not carry versions; obsolete with V3. |
 
-- R3: uint16 ids (384 experts); 9-bit packing would save 7 of 16 bits (44%).
-- Top-k: int32 ids plus fp32 logprobs, k = 128: 1 KB per generated token, through the store in generated chunks (W3); returned in the response through vLLM's frontend instead it cost 46.8% of rollout time, so aux delivers top-k only through the store. Narrower fields (17-bit ids, bf16 logprobs) would about halve it and are not used. Mask: CSR.
-- Indexer: 20-bit packing plus zstd, 4.6–6.7× up to 128K context and ~2.9× at 512K; packing on the GPU, zstd on the host. The codec in use stores each cell's ascending positions as deltas split into byte planes before zstd (experiments X6).
-- Hidden: the exact `lm_head` input, uncompressed.
-- Every field carries a codec name.
+**Failures.** A failed put is logged and stops the engine at its next step or pause. Retry machinery, error markers per request and readers that tell partial samples apart were part of the earlier protocol and are not carried over: a full pool is a sizing error, and a stopped engine makes it visible.
 
-## Hidden states for full-vocabulary distillation
+## Store
 
-- Take the `lm_head` input: after the final hyper-connection merge and the final norm.
-- With speculative decoding a request has one logits row per verified position; capture all logits rows of the batch with per-request offsets and keep the accepted ones.
-- Training side: multiply by the teacher's `lm_head` sharded by vocabulary across TP; never gather full logits on one rank.
+- **Mooncake, standalone store mode, hard-pinned objects.** Objects outlive the writing and reading clients and are never evicted. The pool is sized for every object written between two releases ([scenarios §4](scenarios.md#4-object-pool)).
+- **SSD offload of objects** was measured with an earlier implementation (offload on eviction worked; offload at put lost objects silently, see [experiments](experiments.md#mooncake-behavior)). Hard-pinned objects are never evicted and therefore never offloaded, so the protocol does not use it.
+- **Separate masters.** A KV store that is reset with `remove_all(force=True)` would also remove objects on a shared master.
+
+## Release
+
+| Option | Assessment |
+| --- | --- |
+| By the keys responses listed | Misses objects no final response lists: blocks a request hashed when it stopped, aborted requests, the objects of other pipeline stages. |
+| Reference counts or a per-session ledger in the engine | Engine state across requests and replicas, for a fact the trainer already knows. |
+| **By session key pattern, after a pause** | **Chosen.** `aux_session_pattern` matches every object of a session on every stage. A completed pause writes every object of the requests that stopped before it, so a release after a pause removes the whole session. |
+
+The pause is a point every RL loop already has at each weight update. Making it drain the writers costs microseconds when nothing is queued and otherwise the time to write what is queued, bounded by the writer queue. Alternatives that give the consumer a per-session count of pending writes would need a new engine API and a polling loop; the pause needs neither.
+
+## Weight updates and KV capacity
+
+Recomputing every in-flight context at every update costs about 7% of each update interval at frontier scale ([scenarios §7](scenarios.md#7-recomputing-in-flight-work-at-weight-sync)). Sessions therefore continue across updates on their stored KV. With GPU memory released at each update, that KV must survive in connector tiers, including the blocks that decoding completes. When it does not, the request computes the prefix again under the current version and writes new objects: the names stay true, and the cost is compute and pool space. KV capacity is a performance requirement of the deployment.
 
 ## Models with sliding-window layers
 
-On DeepSeek-V4.1 layers past 20 attend through a 128-row sliding window, and vLLM by default runs them on a request's trailing rows only ("bounded replay", protocol §6.11). Cells of those layers are then exact only near each step's end.
+On DeepSeek-V4-class models the sliding-window layers can run with prefix replay: on a hit, the window is recomputed over each request's trailing positions. Aux outputs of those layers are then exact only near each step's end. Delivering exact outputs at every position under replay forces every new position through the replay stages. With an earlier implementation that cost about 41% of throughput at the top scenario, and turning replay off took 58–62% less time on a one-node 14.6K-context workload ([experiments](experiments.md#engine-findings-that-still-apply)). The engine therefore refuses sessions with prefix replay; the window KV is prefix-cached as snapshots instead.
 
-| Option | Approach | Assessment |
-|---|---|---|
-| B0 | Bounded replay, every new row forced through the replay stages | Exact, but costs about 41% of throughput at the top scenario |
-| B1 | Bounded replay with partial capture: deliver only the deep cells sampled tokens depend on | Not adopted (below) |
-| B2 | **Full depth**: bounded replay off, sliding-window KV prefix-cached as snapshots at prompt end and decode end | **Chosen.** Every cell exact, no layer-specific delivery logic; 58–63% less time than bounded replay at 14.6K context |
+## Fields
 
-## The five designs compared
-
-All five share the delivery segment (W1/W3, K2, admission by free disk, session release) and differ in the cache segment. The X4/X5 comparison predates the SSD store and ran with a fixed pool and an in-flight cap.
-
-| Design | Cache segment | Result |
-|---|---|---|
-| c1 | C1 | exact |
-| c0 | C0 | exact with "first computation wins"; loses prefix sharing |
-| P-S | C6 | exact with "first computation wins"; the design hardened and run at scale |
-| P-B | C2 | exact with "first computation wins" |
-| P-A | C3 | rows identical to c1; release semantics unresolved for shared blocks |
-
-| Failure | c1 / c0 / P-S / P-B | P-A |
-|---|---|---|
-| Delivery memory full | offload to SSD, admission by free disk (without SSD: pinned, admission by pool size, writers block); nothing dropped | cache and delivery are one copy: neither evictable nor deletable |
-| Writer process dies | only that process's undelivered rows; the trajectory is regenerated | every engine sharing the prefix loses them |
-| Trainer done | delete the session | shared blocks need reference counting |
+- **Routed experts**: logical expert ids per MoE layer, uncompressed.
+- **Indexer top-k**: `int32` selections per indexer source layer, exactly as captured. An earlier implementation packed them to 20 bits and compressed them with zstd (4.6–6.7× up to 128K context, ~2.9× at 512K); a codec is a possible follow-up. Indexer capture requires a pipeline-parallel size of 1 and is rejected on the DeepSeek V4 CPU backend.
+- **Hidden states**: what the forward pass returns, stored only by the last stage. With an earlier implementation, logprobs recomputed from them had an error of at most 7.8e-4; the behavior logprob still comes from the inline sampled logprob. Rejected with `kv_sharing_fast_prefill`, which gives wrong hidden states for prompt positions.
+- **Top-k logprobs**: at every position, so that a teacher can score long multi-turn prompts incrementally; `prompt_logprobs` disables prefix-cache hits, object fields keep them. Computed only for session rows, from the full logits in chunks bounded like `prompt_logprobs` (at most 1024 rows, and at most 64Mi / (k + 1) rows), with headroom left outside the memory profile. Returning top-k through vLLM's per-token logprobs frontend instead made rollouts 46.8% longer at k = 128 with an earlier implementation. Rejected with LoRA and with `kv_sharing_fast_prefill`. A vocab-parallel path that avoids gathering full-vocabulary logits is deferred.
+- **Without routed experts.** Hidden states and top-k logprobs need no MoE: with any enabled output, objects carry only the enabled fields, so a dense teacher can deliver top-k logprobs.
 
 ## Not adopted
 
-- **Write at request end and hard-pin forever** (the SGLang output-store approach). Its good parts are kept: failing the request on write errors, self-describing references, the engine deleting undeliverable objects, codecs, pre-registered read buffers.
-- **Distributed reference counting:** the driver already knows when a session is consumed.
-- **Engine-side admission:** the engine cannot tell a new trajectory from the next turn of an old one; blocking the latter deadlocks.
-- **Per-field keys:** 3–5× more master operations; range reads within one object do the same.
-- **Partial capture** (B1). It kept bounded replay and delivered, per request, only the cells of layers 20 and up that some sampled token depends on (the `1 + (39 − L) × 127` rows before it at layer `L`), as cone patches overlaid by the reader; every other deep cell was a no-replay sentinel the trainer routed itself. It was built, hardened and run at the top scenario, and replaced for three reasons. Its cost was the replay itself: bounded replay reruns the window layers in eager steps on every prefix hit and new prompt, and turning it off cut even the run without R3 from 1,030 to 394 s. It was complex: patch lists clipped per request and inherited by forks, per-cell versions, needed-cell accounting in the reader, and two review rounds of fixes, with open limits for forks after a regeneration and for KV loads that restore the window. And full depth, which delivers every cell exactly with none of that, took 58–63% less time than bounded replay with partial capture on the same workload (experiments: full depth).
-- **Recomputing to fill gaps:** recomputation is never a substitute for the first computation (different versions, different chunking, invalid KV).
+- **R3 as a KV cache layer** (#64383). Routed experts would ride along with the KV through every tier. Every connector would have to move the extra layer, it cannot hold the indexer or hidden states at reasonable cost, and the trainer still needs a separate delivery path.
+- **Storing rows by KV slot.** Rows keyed by the GPU slot of the KV are lost when KV moves to a tier or another replica, or when GPU memory is released at an update: exactly the cases this design is for.
+- **Manifests, trajectories and per-trajectory copies.** The earlier protocol tracked which computation each trajectory saw and wrote a manifest per request. With versions in the names, a name identifies the computation, and a list of keys replaces the manifest.
+- **Partial capture with prefix replay** (delivering only the deep cells sampled tokens depend on). Replaced by running without prefix replay.
+- **Counters and warnings for stale names.** Not built; the remaining limits are documented.

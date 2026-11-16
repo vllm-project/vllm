@@ -1,73 +1,90 @@
-# Reading aux outputs in the trainer
+# Reading Aux Outputs in the Trainer
 
-The reader library is the one supported way to read a rollout's aux outputs from the store. It is `oc_reader.py` under `tools/rl_aux_output/` on the implementation branch (README, Status). It depends on numpy and zstandard; `ml_dtypes` is optional and only needed to get bf16 hidden states as numbers.
+This page is the contract between the engine and the trainer for session requests. How the engine names and writes objects is in the [protocol](protocol.md).
 
-It is for store mode; inline mode returns R3 rows with each completion (protocol §12). It reads manifests of the full-depth build only: a manifest from the earlier partial-capture build is rejected as a failed sample (`error` names it). This contract covers R3, the indexer and hidden states. Top-k logprobs are stored like hidden states (protocol §1); their reader support is part of the implementation branch and returns, per request, `[generated length, 128]` int32 ids and `[generated length, 128]` fp32 logprobs for positions `[hidden_start, n_rows)`. The sampling mask is not in the reader.
+## What the rollout keeps
+
+For every request of a session, keep from the final output:
+
+- `prompt_token_ids` (the engine-side prompt) and the generated token ids;
+- `aux_output_keys`;
+- `aux_version_segments`, to send with the session's next request and to label positions with their weight version;
+- the inline logprob of each sampled token, which is the behavior logprob.
+
+A training sequence of `L` tokens is read with the keys of the request whose tokens it is: they cover positions `[0, L - 1)`. For a multi-turn trajectory trained as one sequence that is the last turn. A sequence that is a shorter prefix (one turn, one segment of a compacted rollout) is read with its own request's keys. Every request's keys stay readable until the session is released.
+
+## Reading
 
 ```python
-sample = read_sample(get, manifest_key, n_rows, want=("r3", "indexer", "hidden"), strict=False,
-                     exists=None, store=None)
+from vllm.distributed.aux_output_connector import object_store
+
+store = object_store.MooncakeAuxObjectStore.create()  # uses MOONCAKE_CONFIG_PATH
+rows = object_store.read_aux_rows(store, keys, "routed_experts", pipeline_parallel_size)
 ```
 
-| Argument | Meaning |
-|---|---|
-| `get(key) -> bytes or None` | Your store client's get. Return `None` (or empty bytes) for an absent key. |
-| `exists`, `store` | The existence check for every object the manifest lists, in one batched call: `exists(keys) -> list` (1/True = present) if given, else `batch_is_exist` of the store `get` is bound to, else `store=` (its `batch_is_exist`, or `is_exist` per key). Objects are never downloaded to test existence; with none of these `read_sample` raises `ValueError`. |
-| `manifest_key` | The `aux.manifest.key` of the response. Object keys come from the manifest's `key_prefix` and `tail_key` (older manifests: derived from this key, which then must not have `/` in the request id). |
-| `n_rows` | `L - 1` for a sample of `L` tokens (prompt + generated). The manifest can cover more rows (async scheduling, truncated drafts); they are cut off. |
-| `want` | The outputs you requested. A wanted output the manifest lacks is reported missing. |
-| `manifest` | Optional: the manifest already fetched (dict or bytes). |
-| `strict` | Raise `ReadError` instead of returning a failed or incomplete sample. With `strict=False` nothing in the stored data raises; it is reported in the sample. |
+`read_aux_rows(store, keys, field, pipeline_parallel_size=1, timeout_s=60.0)` reads the objects of `keys` in order and concatenates one field. With pipeline parallelism each key names one object per stage: routed experts are concatenated over the stages in stage order, and a field that only the last stage holds (hidden states, top-k logprobs) is read from that stage. Pass the engine's pipeline-parallel size.
 
-Read the manifest of the request whose tokens you train on. For a multi-turn trajectory trained as one sequence that is the last turn: its manifest covers every row from 0. A training sequence that is a shorter prefix (one turn, one segment of a compacted rollout) is read with its own request's manifest (protocol §7).
+Writes are asynchronous, so an object can still be in flight when the response arrives: the reader waits up to `timeout_s` in total, then raises `BlockObjectStoreError`. It raises the same error when no stage of an object holds the field, for example a field the engine did not enable.
 
-## What you get back
+Create the store client in a process that does not start an engine afterwards. A Mooncake client created before the engine breaks CUDA initialization in the engine's workers.
 
-All arrays have `n_rows` rows; row `p` is position `p` (the position that produces the logits for token `p + 1`).
+## Fields
 
-| Field | Type | Meaning |
-|---|---|---|
-| `ok` | bool | No error and every `missing.counts` entry is 0. |
-| `error` | str or None | The request failed. Its manifest is absent (with an error marker: `error marker: ...`), or an object the manifest lists is absent (`listed object absent: <key>`) or malformed (an unknown codec, a header or size that does not fit the field). A failed store write fails the whole request; the sample is never delivered in part. A marker beside a manifest whose listed objects all exist is stale: it is ignored, and `stale_marker` is True. On error all arrays are `None`. |
-| `missing.counts` | dict | Rows not delivered for reasons other than a failed request, per cause: `rows_short` (the manifest covers fewer than `n_rows` rows), `invalid_rows` (rows from the manifest's `invalid_from`, protocol §6.8), `r3_field` / `indexer_field` / `hidden_field` (a wanted output the manifest lacks), and rows that fail the R3 sanity check. |
-| `missing.rows` | bool `[n]` | Rows some wanted output did not deliver. |
-| `r3` | `[n, layers, k]` uint | Expert ids to replay, every MoE layer. Rows in `missing.rows` hold `r3_no_replay` (dtype max, 65535 for uint16). With one-byte ids 255 is a valid id: go by the mask, never by the value. |
-| `r3_replay_mask` | bool `[n, layers]` | True on every cell of a delivered row, False on rows in `missing.rows`. |
-| `indexer` | int32 `[n, idx_layers, topk]` | Top-k indices to replay, in engine order: ascending positions, `-1` pads last. `-1` is a pad entry inside a delivered cell; `-2` fills rows in `missing.rows`. |
-| `indexer_layers` | list | Model layer of each indexer slot. |
-| `indexer_replay_mask` | bool `[n, idx_layers]` | As for R3. |
-| `hidden` | `[m, d]` | The `lm_head` input for positions `hidden_start + i`. Codec `raw`: the exact stored values in the manifest's dtype, float32 on DeepSeek-V4.1-Flash; for bf16 without `ml_dtypes` installed, uint16 bit patterns (view them as bfloat16 in torch). |
-| `hidden_start` | int | First position with a hidden row: `P - 1` of this request. |
-| `weight_version` | int64 `[n]` | Weight version of each row, from the manifest's segments; `-1` = unknown. |
-| `version_unknown`, `version_unknown_count` | bool `[n]`, int | Delivered rows whose weight version is unknown. They stay replayable and do not make `ok` False. |
+All arrays have one row per position; row `p` belongs to position `p`, the position that produces the logits for token `p + 1`.
+
+| Field | Shape and type | Notes |
+| --- | --- | --- |
+| `routed_experts` | `[L - 1, MoE layers, experts per token]`, `uint8` up to 256 experts, else `uint16` | Logical expert ids. |
+| `indexer_topk` | `[L - 1, indexer source layers, index_topk]`, `int32` | The selections exactly as captured: order, padding and invalid ids are preserved. DeepSeek V4 indices address the compressed KV cache, not token positions. See [Indexer Replay](../../training/indexer_replay.md). |
+| `hidden_states` | `[L - 1, hidden_size]`, model dtype | What the forward pass returns; for most models the input of the LM head. NumPy has no bfloat16, so a bfloat16 model's rows are `int16` bit patterns: `torch.from_numpy(rows).view(torch.bfloat16)`. |
+| `topk_token_ids` | `[L - 1, k]`, `int32` | The `k` most likely next tokens, from the model's logits before any sampling parameter. |
+| `topk_logprobs` | `[L - 1, k]`, `float32` | Their log-softmax values, in the same order. |
+
+Logits recomputed from `hidden_states` are close to the engine's but not bitwise equal, so the behavior logprob comes from the inline sampled logprob, not from the hidden states or the top-k fields.
+
+## Weight versions
+
+`aux_version_segments` gives the weight version of every position below its closing entry `[end, null]`: segment `[start, v]` covers positions from `start` to the next segment's start. Positions from `end` on are in the tail object; their versions are not in the segments. For generated tokens the response's `weight_versions` spans give the version that sampled each token.
+
+The versions are the ones the object names state. Positions the request reused carry the versions of the computation that produced their KV; positions it computed carry the version that computed them. They differ only in the documented limits ([protocol §12](protocol.md#12-limits)).
 
 ## Guarantees
 
-- Every cell of a delivered row holds the value of the first computation of that position in the trajectory, at every layer, labelled with the row's weight version. Nothing is substituted, padded or guessed.
-- A request whose store writes failed, or whose listed objects are absent or malformed, is reported through `error`, never as a partial sample.
-- Every other row that was not delivered is in `missing.rows`, with a cause in `missing.counts`. On those rows every replay mask is False and the data holds the sentinel.
-- Replayed R3 cells pass the sanity check (distinct ids, no sentinel for ids wider than one byte, no all-zero row); a row that fails is in `missing.rows`.
-- Codecs are validated strictly; nothing is decoded on a guess. Indexer objects must carry the manifest's codec tag. Hidden states must name codec `raw`, and every chunk is checked against the field's dtype and row width before any size is computed from it. An unknown codec or a mismatch fails the request.
-- Decoded indexer cells are byte-identical to the engine's: ascending positions, `-1` pads last.
+- Each listed object holds the rows of the computation whose KV the request used for those positions, named with the tokens and weight versions of that computation, within the limits.
+- Rows are stored as the engine computed them; nothing is padded, substituted or recomputed by the reader.
+- The keys of one response cover `[0, num_tokens - 1)` without gaps.
+- After every engine that served a session has completed a pause, every object of the session's stopped requests is in the store.
 
 ## What the trainer must do
 
-1. **Failed or incomplete sample.** If `not sample.ok`, drop the sample. Reads fail collectively: all ranks all-reduce a success flag and retry or skip the step together (protocol §7).
-2. **Replay.** Replay every cell of a delivered row. For R3, compare expert sets; where the set is unchanged keep your own ids and weights. Hook replay where the model computes routing. Never gather at the sentinel.
-3. **Versions.** Rows of different versions are not interchangeable. Use `weight_version` for staleness weighting or filtering. Rows in `version_unknown` can still be replayed, but their version must not feed importance weights or freshness filters: treat them as stale (worst-case version) or drop them from any version-dependent term.
-4. **Hidden states** cover only this request's generated positions `[hidden_start, n_rows)`. For earlier turns read their own manifests. The rows are the exact `lm_head` input and can feed the LM head directly. Do not recompute the behavior logprob from them; use the inline sampled logprob.
-5. **Release** the session (`<job>/<session>/`) after the step commits.
+1. **Missing objects.** If `read_aux_rows` raises, drop the sample or retry. When ranks read in a collective step, agree on the outcome across ranks before continuing.
+2. **Replay.** Truncate to the training sequence's `L - 1` positions. Hook R3 replay where the model computes routing; some MoE implementations call the routing function directly and bypass a router-level hook.
+3. **Behavior logprob.** Use the inline sampled logprob.
+4. **Versions.** Positions of different versions are not interchangeable. Use the versions for staleness weighting or filtering.
+5. **Release.** Delete a session with `aux_session_pattern` after every request of the session has been read, the training step has committed, and the engines have completed a pause since its last request stopped, for example the pause of the next weight update ([protocol §10](protocol.md#10-pause-and-release)). Never send another request with a released session name.
 
 ## Example
 
 ```python
-from oc_reader import read_sample
+import numpy as np
+import torch
+from vllm.distributed.aux_output_connector import object_store
+from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
 
-def load(client, ref, tokens):
-    s = read_sample(client.get, ref["key"], len(tokens) - 1, want=("r3", "indexer"))
-    if not s.ok:
-        return None                     # caller all-reduces and skips/retries together
-    r3 = torch.from_numpy(s.r3.astype(np.int64))
-    idx = torch.from_numpy(s.indexer)
-    return r3, idx, torch.from_numpy(s.weight_version)
+
+def load(store, out, tokens, pipeline_parallel_size=1):
+    n = len(tokens) - 1
+    try:
+        r3 = object_store.read_aux_rows(
+            store, out.aux_output_keys, "routed_experts", pipeline_parallel_size
+        )
+    except BlockObjectStoreError:
+        return None  # caller agrees across ranks and skips or retries together
+    return torch.from_numpy(r3[:n].astype(np.int64))
+
+
+def release(client, object_key_prefix, session):
+    client.remove_by_regex(
+        object_store.aux_session_pattern(object_key_prefix, session), True
+    )
 ```
