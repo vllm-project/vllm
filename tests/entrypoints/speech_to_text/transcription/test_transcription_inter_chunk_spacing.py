@@ -10,21 +10,34 @@ Integration-style tests exercise `OpenAIServingTranscription` streaming and
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import UploadFile
+from starlette.requests import ClientDisconnect
+from transformers import (
+    AutoProcessor,
+    MossTranscribeDiarizeConfig,
+    ProcessorMixin,
+    WhisperFeatureExtractor,
+)
 
 from vllm.config import ModelConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.speech_to_text.base.serving import (
     SpeechToTextBaseServing,
     asr_inter_chunk_separator,
+)
+from vllm.entrypoints.speech_to_text.transcription.api_router import (
+    _DiarizedStreamingResponse,
 )
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
@@ -149,7 +162,7 @@ class _StubTranscriptionModel:
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config) -> str:
         return text
 
     @classmethod
@@ -159,11 +172,16 @@ class _StubTranscriptionModel:
         return StreamingTranscriptionPostProcessor
 
 
-def _request_output(text: str, finish_reason: str | None = "stop") -> RequestOutput:
+def _request_output(
+    text: str,
+    finish_reason: str | None = "stop",
+    *,
+    prompt_token_ids: list[int] | None = None,
+) -> RequestOutput:
     return RequestOutput(
         request_id="rid",
         prompt=None,
-        prompt_token_ids=None,
+        prompt_token_ids=prompt_token_ids,
         prompt_logprobs=None,
         outputs=[
             CompletionOutput(
@@ -395,3 +413,176 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
         assert not isinstance(out_zh, ErrorResponse)
         assert isinstance(out_zh, TranscriptionResponse)
         assert out_zh.text == "你好世界"
+
+
+@pytest.fixture
+def diarized_stream_serving(tmp_path, monkeypatch, request):
+    class Processor(ProcessorMixin):
+        def __init__(self):
+            self.feature_extractor = WhisperFeatureExtractor(truncation=False)
+            self.audio_merge_size = 4
+            self.tokenizer = self
+
+        def encode(self, text, *, add_special_tokens):
+            return [1, 2] if text == "[S01]Alpha [S02]Beta" else []
+
+        def decode(self, input_ids, *, return_format):
+            if return_format != "parsed" or input_ids != [[1, 2]]:
+                return [""]
+            return [[{"Start": 0, "End": 2, "Speaker": 1, "Content": "Alpha Beta"}]]
+
+    class EngineBoundary:
+        renderer = None
+        input_processor = None
+
+        def __init__(self, model_config):
+            self.model_config = model_config
+
+    architecture = getattr(
+        request, "param", "MossTranscribeDiarizeForConditionalGeneration"
+    )
+    MossTranscribeDiarizeConfig(architectures=[architecture]).save_pretrained(tmp_path)
+    monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *a, **kw: Processor())
+    engine = EngineBoundary(ModelConfig(model=str(tmp_path)))
+    models = OpenAIServingModels(
+        engine, [BaseModelPath(name="moss", model_path=str(tmp_path))]
+    )
+    serving = OpenAIServingTranscription(engine, models, request_logger=None)
+    try:
+        yield serving
+    finally:
+        serving.shutdown()
+
+
+def _diarized_stream(serving, *output_chunks):
+    return serving.diarized_stream_generator(
+        TranscriptionRequest(file=UploadFile(BytesIO()), stream=True),
+        list(output_chunks),
+        "test",
+        RequestResponseMetadata(request_id="test"),
+        1.0,
+        " ",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["error", "abort", "parser"])
+async def test_diarized_stream_closes_engine_before_error(
+    diarized_stream_serving, source
+):
+    """Preserve a completed segment and close generation before sending an error."""
+    closed = False
+
+    async def engine_outputs():
+        try:
+            for text, reason in (
+                ("[0][S01]Complete[1][2][S02]Second[3]", None),
+                (" incomplete[4][S03]", None) if source == "parser" else ("", source),
+            ):
+                yield _request_output(text, finish_reason=reason)
+        finally:
+            nonlocal closed
+            closed = True
+
+    outputs = engine_outputs()
+    stream = _diarized_stream(diarized_stream_serving, outputs)
+    try:
+        segment = json.loads((await anext(stream)).removeprefix("data: "))
+        assert segment["type"] == "transcript.text.segment"
+        assert segment["text"] == "Complete"
+        error = json.loads((await anext(stream)).removeprefix("data: "))
+        assert error["error"]["code"] == (400 if source == "parser" else 500)
+        assert closed
+        assert [event async for event in stream] == ["data: [DONE]\n\n"]
+    finally:
+        await stream.aclose()
+        await outputs.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "diarized_stream_serving", ["TransformersMultiModalForTranscription"], indirect=True
+)
+async def test_diarized_fallback_parses_raw_chunks_and_counts_usage(
+    diarized_stream_serving,
+):
+    async def engine_chunk(text, prompt_token_ids):
+        yield _request_output(text, prompt_token_ids=prompt_token_ids)
+
+    stream = _diarized_stream(
+        diarized_stream_serving,
+        engine_chunk("[S01]Alpha", [1]),
+        engine_chunk("[S02]Beta", [1, 2]),
+    )
+    segment, done, terminator = [event async for event in stream]
+    segment = json.loads(segment.removeprefix("data: "))
+    assert segment["type"] == "transcript.text.segment"
+    assert segment["text"] == "Alpha Beta"
+    assert segment["speaker"] == "1"
+    done = json.loads(done.removeprefix("data: "))
+    assert done["type"] == "transcript.text.done"
+    assert done["text"] == segment["text"]
+    assert done["usage"] == {
+        "type": "tokens",
+        "input_tokens": 3,
+        "output_tokens": 6,
+        "total_tokens": 9,
+    }
+    assert terminator == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_diarized_moss_usage_counts_expanded_prompt_once(diarized_stream_serving):
+    async def engine_outputs():
+        yield _request_output("[0][S01]Complete[1]", prompt_token_ids=[1] * 100)
+
+    stream = _diarized_stream(diarized_stream_serving, engine_outputs())
+    _, done, _ = [event async for event in stream]
+    assert json.loads(done.removeprefix("data: "))["usage"] == {
+        "type": "tokens",
+        "input_tokens": 100,
+        "output_tokens": 3,
+        "total_tokens": 103,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asgi_spec", ["2.3", "2.4"])
+async def test_diarized_response_closes_engine_on_disconnect(
+    diarized_stream_serving, asgi_spec
+):
+    body_started = asyncio.Event()
+    engine_closed = asyncio.Event()
+
+    async def engine_outputs():
+        try:
+            yield _request_output("[0][S01]Complete[1][2][S02]Pending", None)
+            await asyncio.Event().wait()
+        finally:
+            engine_closed.set()
+
+    async def receive():
+        await body_started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            body_started.set()
+            if asgi_spec == "2.4":
+                raise OSError("client disconnected during SSE send")
+            await asyncio.Event().wait()
+
+    stream = _diarized_stream(diarized_stream_serving, engine_outputs())
+    response = _DiarizedStreamingResponse(stream)
+    scope = {"type": "http", "asgi": {"spec_version": asgi_spec}}
+    try:
+        run_asgi = asyncio.wait_for(response(scope, receive, send), 5)
+        if asgi_spec == "2.4":
+            with pytest.raises(ClientDisconnect):
+                await run_asgi
+        else:
+            await run_asgi
+        assert body_started.is_set()
+        assert engine_closed.is_set()
+    finally:
+        await stream.aclose()

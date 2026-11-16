@@ -20,8 +20,15 @@ pub enum Error {
         token_count: usize,
         row_count: usize,
     },
-    #[error("routed experts for request `{request_id}` changed dtype or shape")]
-    RoutedExpertsShapeMismatch { request_id: String },
+    #[error("invalid auxiliary output rows")]
+    AuxOutputRows(#[from] vllm_engine_core_client::protocol::tensor::ArrayRowsError),
+    /// The request asks for prompt logprobs, which the engine does not compute,
+    /// for example under `--kv-sharing-fast-prefill`.
+    #[error(
+        "`{parameter}` is not supported: the engine does not compute prompt logprobs \
+         (for example, it runs with --kv-sharing-fast-prefill)"
+    )]
+    PromptLogprobsUnsupported { parameter: &'static str },
     /// The request uses a field this implementation does not carry out.
     #[error("`{field}` is not supported")]
     Unsupported { field: &'static str },

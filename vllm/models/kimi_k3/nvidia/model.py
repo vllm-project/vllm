@@ -1224,8 +1224,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
         if (
@@ -1323,7 +1321,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1704,7 +1701,7 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality in ("image", "image_embeds"):
             return "<|kimi_image_placeholder|>"
         raise ValueError(f"Unsupported modality: {modality}")
 
@@ -2050,6 +2047,10 @@ class KimiK3ForConditionalGeneration(
         return media_features
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        if (image_embeds := kwargs.get("image_embeds")) is not None:
+            assert isinstance(image_embeds, torch.Tensor)
+            num_tokens = cast(torch.Tensor, kwargs["image_num_tokens"])
+            return image_embeds.split(num_tokens.flatten().tolist())
         media_input = self._parse_and_validate_media_input(**kwargs)
         if media_input is None:
             return None

@@ -56,7 +56,7 @@ def test_generation_prompt_appends_hotwords(request_prompt, hotwords, expected):
 
 def test_parse_diarized_transcript_preserves_moss_segments():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]"
+        "[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]", None
     )
 
     assert [
@@ -70,7 +70,7 @@ def test_parse_diarized_transcript_preserves_moss_segments():
 
 def test_parse_diarized_transcript_preserves_overlapping_segments():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0][S01]First speaker[2][1][S02]Second speaker[3]"
+        "[0][S01]First speaker[2][1][S02]Second speaker[3]", None
     )
 
     assert [
@@ -84,7 +84,7 @@ def test_parse_diarized_transcript_preserves_overlapping_segments():
 
 def test_parse_diarized_transcript_preserves_numeric_text_markers():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0][S01]The [2024] report is ready.[4]"
+        "[0][S01]The [2024] report is ready.[4]", None
     )
 
     assert [segment.text for segment in segments] == ["The [2024] report is ready."]
@@ -92,7 +92,7 @@ def test_parse_diarized_transcript_preserves_numeric_text_markers():
 
 def test_parse_diarized_transcript_ignores_whitespace_between_segments():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0][S01]Hello[1]\n [2][S02]Hi[3]"
+        "[0][S01]Hello[1]\n [2][S02]Hi[3]", None
     )
 
     assert [(segment.start, segment.end, segment.text) for segment in segments] == [
@@ -103,7 +103,7 @@ def test_parse_diarized_transcript_ignores_whitespace_between_segments():
 
 def test_parse_diarized_transcript_ignores_noise_before_a_segment():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "noise [bad][0.1][S01]Hello[0.9]"
+        "noise [bad][0.1][S01]Hello[0.9]", None
     )
 
     assert [(segment.start, segment.end, segment.text) for segment in segments] == [
@@ -113,7 +113,7 @@ def test_parse_diarized_transcript_ignores_noise_before_a_segment():
 
 def test_parse_diarized_transcript_preserves_timestamps_before_the_end():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[2][S01]The earlier timestamp is [1] not the end[3]"
+        "[2][S01]The earlier timestamp is [1] not the end[3]", None
     )
 
     assert [segment.text for segment in segments] == [
@@ -123,7 +123,7 @@ def test_parse_diarized_transcript_preserves_timestamps_before_the_end():
 
 def test_parse_diarized_transcript_skips_empty_segments():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0][S01][1][2][S02]Complete[3]"
+        "[0][S01][1][2][S02]Complete[3]", None
     )
 
     assert [(segment.speaker, segment.text) for segment in segments] == [
@@ -133,7 +133,7 @@ def test_parse_diarized_transcript_skips_empty_segments():
 
 def test_parse_diarized_transcript_fails_closed_for_incomplete_output():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0][S01]Complete[1][2][S02]Incomplete"
+        "[0][S01]Complete[1][2][S02]Incomplete", None
     )
 
     assert segments == []
@@ -141,7 +141,7 @@ def test_parse_diarized_transcript_fails_closed_for_incomplete_output():
 
 def test_parse_diarized_transcript_fails_closed_for_trailing_text():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0][S01]Complete[1] trailing text"
+        "[0][S01]Complete[1] trailing text", None
     )
 
     assert segments == []
@@ -150,7 +150,7 @@ def test_parse_diarized_transcript_fails_closed_for_trailing_text():
 def test_parse_diarized_transcript_preserves_overlong_timestamp_markers():
     marker = f"[{'1' * 33}]"
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        f"[0][S01]Value {marker}[1]"
+        f"[0][S01]Value {marker}[1]", None
     )
 
     assert [segment.text for segment in segments] == [f"Value {marker}"]
@@ -160,7 +160,7 @@ def _streaming_parser():
     model_cls = cast(
         type[SupportsTranscription], MossTranscribeDiarizeForConditionalGeneration
     )
-    return model_cls.get_streaming_diarized_parser_cls()(model_cls)
+    return model_cls.get_streaming_diarized_parser_cls()(model_cls, None)
 
 
 def test_streaming_parser_sends_a_segment_once_the_next_one_starts():
@@ -198,7 +198,9 @@ def test_streaming_parser_output_does_not_depend_on_delta_boundaries(text):
     segments += parser.process_delta("", finished=True)
 
     assert segments == (
-        MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(text)
+        MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
+            text, None
+        )
     )
 
 
@@ -209,4 +211,18 @@ def test_streaming_parser_fails_closed_after_sending_complete_segments():
 
     assert [s.text for s in sent] == ["Complete"]
     with pytest.raises(ValueError):
-        parser.process_delta("", finished=True)
+        list(parser.process_delta("", finished=True))
+
+
+@pytest.mark.parametrize("coalesced", [False, True])
+def test_streaming_parser_preserves_complete_prefix_before_malformed_segment(coalesced):
+    parser = _streaming_parser()
+    transcript = "[0][S01]Complete[1][2][S02]No timestamp[3][S03]Later[4]"
+    deltas = [transcript] if coalesced else list(transcript)
+
+    segments = []
+    with pytest.raises(ValueError, match="valid diarized transcript"):
+        for delta in deltas:
+            segments.extend(parser.process_delta(delta, finished=False))
+
+    assert [segment.text for segment in segments] == ["Complete"]

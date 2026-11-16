@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import aclosing
 
 from fastapi import Request
 
@@ -8,8 +9,8 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import DiarizedTranscriptionSegment
 from vllm.outputs import RequestOutput
 
 from ...serve.engine.protocol import ErrorResponse, UsageInfo
@@ -119,14 +120,12 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
     ) -> AsyncGenerator[str, None]:
         """Stream `diarized_json` as `transcript.text.segment` events, then a
         `transcript.text.done` event."""
-        parser = self.model_cls.get_streaming_diarized_parser_cls()(self.model_cls)
         segment_texts: list[str] = []
         num_prompt_tokens = 0
         completion_tokens = 0
 
-        def to_events(segments: list[DiarizedTranscriptionSegment]) -> str:
-            lines = []
-            for segment in segments:
+        def events_for_delta(text: str, *, finished: bool = False) -> Iterator[str]:
+            for segment in parser.process_delta(text, finished=finished):
                 event = TranscriptionDiarizedSegment(
                     id=f"seg_{len(segment_texts)}",
                     start=segment.start,
@@ -135,38 +134,36 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
                     speaker=segment.speaker,
                 )
                 segment_texts.append(segment.text)
-                lines.append(f"data: {event.model_dump_json()}\n\n")
-            return "".join(lines)
+                yield f"data: {event.model_dump_json()}\n\n"
 
         try:
+            parser = self.model_cls.get_streaming_diarized_parser_cls()(
+                self.model_cls, self.model_config
+            )
             for index, chunk_generator in enumerate(result_generator):
-                # Match the non-streaming path, which joins chunk texts.
-                if index > 0 and (
-                    events := to_events(parser.process_delta(separator, finished=False))
-                ):
-                    yield events
-                post_processor = self.streaming_post_processor_cls()
-                async for res in chunk_generator:
-                    if res.prompt_token_ids is not None:
-                        num_prompt_tokens = len(res.prompt_token_ids)
-                        if audio_tokens := self.model_cls.get_num_audio_tokens(
-                            audio_duration_s, self.asr_config, self.model_config
-                        ):
-                            num_prompt_tokens += audio_tokens
+                # Match the non-streaming path, which joins raw chunk texts.
+                if index > 0:
+                    for event in events_for_delta(separator):
+                        yield event
+                chunk_prompt_tokens = 0
+                async with aclosing(chunk_generator):
+                    async for res in chunk_generator:
+                        if res.prompt_token_ids is not None:
+                            # The decoder prompt already includes its audio positions.
+                            chunk_prompt_tokens = len(res.prompt_token_ids)
 
-                    assert len(res.outputs) == 1
-                    output = res.outputs[0]
-                    completion_tokens += len(output.token_ids)
-                    text_delta = post_processor.process_delta(
-                        output.text, output.finish_reason is not None
-                    )
-                    if events := to_events(
-                        parser.process_delta(text_delta, finished=False)
-                    ):
-                        yield events
+                        assert len(res.outputs) == 1
+                        output = res.outputs[0]
+                        self._raise_if_error(output.finish_reason, request_id)
+                        if output.finish_reason == "abort":
+                            raise GenerationError("Transcription generation aborted")
+                        completion_tokens += len(output.token_ids)
+                        for event in events_for_delta(output.text):
+                            yield event
+                num_prompt_tokens += chunk_prompt_tokens
 
-            if events := to_events(parser.process_delta("", finished=True)):
-                yield events
+            for event in events_for_delta("", finished=True):
+                yield event
 
             total_tokens = num_prompt_tokens + completion_tokens
             done = TranscriptionTextDoneEvent(
@@ -177,12 +174,12 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
                     total_tokens=total_tokens,
                 ),
             )
-            yield f"data: {done.model_dump_json()}\n\n"
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
             )
+            yield f"data: {done.model_dump_json()}\n\n"
         except Exception as e:
             logger.exception("Error in %s stream generator.", self.task_type)
             data = self.create_streaming_error_response(e)

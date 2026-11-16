@@ -11,7 +11,7 @@ The checkpoint layout is:
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
 import regex as re
@@ -95,16 +95,18 @@ class MossStreamingDiarizedParser(StreamingDiarizedTranscriptParser):
     """Parses `[start][Sxx]text[end]` output, sending each segment once the
     next segment's header has arrived."""
 
-    def __init__(self, model_cls: type[SupportsTranscription]) -> None:
-        super().__init__(model_cls)
+    def __init__(
+        self, model_cls: type[SupportsTranscription], model_config: ModelConfig
+    ) -> None:
+        super().__init__(model_cls, model_config)
         self._scan_pos = 0
         # (header start, header end, start time, speaker) of unsent segments.
         self._headers: list[tuple[int, int, float, str]] = []
-        self._num_segments = 0
+        self._emitted_segment = False
 
     def process_delta(
         self, text_delta: str, finished: bool
-    ) -> list[DiarizedTranscriptionSegment]:
+    ) -> Iterator[DiarizedTranscriptionSegment]:
         self._text += text_delta
         for match in _MOSS_DIARIZED_HEADER_RE.finditer(self._text, self._scan_pos):
             self._scan_pos = match.end()
@@ -116,7 +118,6 @@ class MossStreamingDiarizedParser(StreamingDiarizedTranscriptParser):
         # A segment's body runs up to the next header, so the last one stays
         # open until the output ends.
         num_final = len(self._headers) if finished else len(self._headers) - 1
-        segments: list[DiarizedTranscriptionSegment] = []
         for index in range(num_final):
             _, body_start, start, speaker = self._headers[index]
             body_end = (
@@ -132,17 +133,14 @@ class MossStreamingDiarizedParser(StreamingDiarizedTranscriptParser):
                     "Model output did not contain a valid diarized transcript"
                 )
             if segment_text := body[: end_match.start()].strip():
-                segments.append(
-                    DiarizedTranscriptionSegment(
-                        start=start, end=end, speaker=speaker, text=segment_text
-                    )
+                self._emitted_segment = True
+                yield DiarizedTranscriptionSegment(
+                    start=start, end=end, speaker=speaker, text=segment_text
                 )
 
         del self._headers[: max(num_final, 0)]
-        self._num_segments += len(segments)
-        if finished and self._num_segments == 0:
+        if finished and not self._emitted_segment:
             raise ValueError("Model output did not contain a valid diarized transcript")
-        return segments
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -686,6 +684,11 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'MOSS-Transcribe-Diarize only supports "transcribe", '
+                f"got {stt_params.task_type}"
+            )
         stt_config = stt_params.stt_config
         question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
         question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
@@ -704,14 +707,17 @@ class MossTranscribeDiarizeForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         return text.strip()
 
     @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+    def parse_diarized_transcript(
+        cls, text: str, model_config: ModelConfig
+    ) -> list[DiarizedTranscriptionSegment]:
         """Parse MOSS's canonical `[start][Sxx]text[end]` transcript."""
         try:
-            return MossStreamingDiarizedParser(cls).process_delta(text, finished=True)
+            parser = MossStreamingDiarizedParser(cls, model_config)
+            return list(parser.process_delta(text, finished=True))
         except ValueError:
             return []
 
