@@ -678,17 +678,37 @@ class InputProcessor:
         self, prompt_input: MultiModalInput, spans: list[tuple[int, int]]
     ) -> None:
         """Every multimodal item lies inside one span and is keyed on its
-        content. A span's items fit the encoder budget and cache, which are at
-        least --max-num-batched-tokens, like the span."""
+        content, and the items of a span fit the encoder cache together. Their
+        encoder budget is at least --max-num-batched-tokens, like the span, but
+        --encoder-cache-size can be smaller."""
+        # Distinct items per span, by content hash, with their embeddings.
+        span_items: list[dict[str, int]] = [{} for _ in spans]
         for modality, positions in prompt_input["mm_placeholders"].items():
-            for position in positions:
+            hashes = prompt_input["mm_hashes"][modality]
+            for position, mm_hash in zip(positions, hashes):
                 start, end = position.offset, position.offset + position.length
-                if not any(s <= start and end <= e for s, e in spans):
+                span = next(
+                    (i for i, (s, e) in enumerate(spans) if s <= start and end <= e),
+                    None,
+                )
+                if span is None:
                     raise VLLMValidationError(
                         f"A(n) {modality} item at tokens [{start}, {end}) does "
                         "not lie inside one bidirectional span.",
                         parameter="bidirectional_spans",
                     )
+                span_items[span][mm_hash] = position.get_num_embeds()
+        for (start, end), items in zip(spans, span_items):
+            # The scheduler encodes a span's items in the step that runs it.
+            if (num_embeds := sum(items.values())) > self.mm_encoder_cache_size:
+                raise VLLMValidationError(
+                    f"The multimodal items of bidirectional span [{start}, {end}) "
+                    f"have {num_embeds} embedding tokens, more than the "
+                    f"{self.mm_encoder_cache_size} the encoder cache holds. "
+                    "Increase --encoder-cache-size, or split the items across "
+                    "spans.",
+                    parameter="bidirectional_spans",
+                )
         if any(
             mm_hash.startswith(_MM_HASH_TAG_UUID)
             for hashes in prompt_input["mm_hashes"].values()

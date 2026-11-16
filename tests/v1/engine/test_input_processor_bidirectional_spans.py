@@ -4,6 +4,7 @@
 
 import asyncio
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -189,6 +190,69 @@ def test_server_set_spans_hold_each_multimodal_item_whole(processor):
     engine_input["bidirectional_spans"] = [(end, num_tokens)]
     with pytest.raises(VLLMValidationError, match="inside one bidirectional span"):
         process(processor, engine_input)
+
+
+def test_the_items_of_a_span_fit_the_encoder_cache_together():
+    """The scheduler encodes a span's items in the step that runs it, so they
+    must fit the encoder cache together. A cache that only takes one item at a
+    time would never fit them, and the request would hold the queue."""
+    spans = {**SPANS, "bidirectional_span_max_length": 8192}
+
+    def make(encoder_cache_size: int | None) -> InputProcessor:
+        return InputProcessor(
+            VllmConfig(
+                model_config=ModelConfig(
+                    MODEL,
+                    hf_overrides={"text_config": spans},
+                    max_model_len=8192,
+                    limit_mm_per_prompt={"image": 2, "audio": 0, "video": 0},
+                ),
+                scheduler_config=SchedulerConfig(
+                    max_model_len=8192,
+                    is_encoder_decoder=False,
+                    max_num_batched_tokens=8192,
+                    # vLLM raises it to the largest item.
+                    encoder_cache_size=encoder_cache_size,
+                ),
+            )
+        )
+
+    small, default = make(1), make(None)
+    rng = np.random.default_rng(0)
+    images = [
+        Image.fromarray(rng.integers(0, 256, (1536, 1536, 3), dtype=np.uint8))
+        for _ in range(2)
+    ]
+    renderer = small.renderer
+    (engine_input,) = renderer.render_cmpl(
+        [
+            parse_model_prompt(
+                small.model_config,
+                {
+                    "prompt": "<|image|><|image|> Compare the images.",
+                    "multi_modal_data": {"image": images},
+                },
+            )
+        ],
+        renderer.default_cmpl_tok_params,
+    )
+    positions = engine_input["mm_placeholders"]["image"]
+    num_embeds = sum(position.get_num_embeds() for position in positions)
+    assert max(p.get_num_embeds() for p in positions) <= small.mm_encoder_cache_size
+    assert small.mm_encoder_cache_size < num_embeds <= default.mm_encoder_cache_size
+    num_tokens = len(engine_input["prompt_token_ids"])
+    split = positions[1].offset
+
+    engine_input["bidirectional_spans"] = [(0, num_tokens)]
+    with pytest.raises(VLLMValidationError, match="--encoder-cache-size"):
+        process(small, engine_input)
+    assert process(default, engine_input).bidirectional_spans == [(0, num_tokens)]
+    # One item per span fits.
+    engine_input["bidirectional_spans"] = [(0, split), (split, num_tokens)]
+    assert process(small, engine_input).bidirectional_spans == [
+        (0, split),
+        (split, num_tokens),
+    ]
 
 
 def test_multimodal_prompts_can_be_causal(processor):

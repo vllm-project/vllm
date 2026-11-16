@@ -84,7 +84,7 @@ External KV connectors must load KV that is valid under a request's spans. vLLM 
 
 All of a span's uncomputed tokens run in one step, because each of them attends to the whole span. The scheduler never ends a prefill chunk inside a span: a chunk that would end inside one ends at its start, including when the encoder budget or cache cannot take an image of the span this step, and a request that has entered a span (after a prefix-cache hit that ends there) waits for a step with budget to finish it. A waiting request that cannot start its span keeps its place at the head of the queue, including under `--cache-aware-admission-window`, so that later requests do not keep taking the budget or encoder cache space it needs. A running request whose span waits for encoder cache space stops new admissions for the step. A running request that waits for the token budget does not, since later requests are scheduled after it. With spans close to the step budget, a waiting span request can hold the queue until the running batch leaves it enough budget. Chunked prefill stays on for the tokens outside spans.
 
-Each span must fit one step: at most `--max-num-batched-tokens` tokens, less the slots a speculative decoding method reserves, and at most `--max-num-scheduled-tokens` and `--long-prefill-token-threshold` when they are set. Longer spans are refused.
+Each span must fit one step: at most `--max-num-batched-tokens` tokens, less the slots a speculative decoding method reserves, and at most `--max-num-scheduled-tokens` and `--long-prefill-token-threshold` when they are set. Longer spans are refused, and so are spans whose multimodal items do not fit the encoder cache (`--encoder-cache-size`) together.
 
 ## Limitations
 
