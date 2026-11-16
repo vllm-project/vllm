@@ -803,7 +803,9 @@ def run_nvfp4_emulations(
     output_dtype = x.dtype
     group_size = 16
 
-    x_dq = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
+    x_2d = x.view(-1, x.shape[-1])
+    x_dq = ref_nvfp4_quant_dequant(x_2d, input_global_scale, block_size=group_size)
+    x_dq = x_dq.view(x.shape)
 
     # dequantize weight
     w_fp4 = weight.data.view(torch.uint8)

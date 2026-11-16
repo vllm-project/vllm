@@ -222,9 +222,10 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
+        output = rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, out_dtype
         )
+        return output.view(*output_shape[:-1], -1)
 
 
 class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -391,7 +392,8 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)
+        output = rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)
+        return output.view(*output_shape[:-1], -1)
 
 
 class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
