@@ -9,7 +9,6 @@ import ray
 import torch
 import torch.distributed as dist
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
@@ -805,10 +804,12 @@ def test_mnnvl_multimem_reduce_scatter_initializes_signals(monkeypatch):
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0x3080
 
 
-def _use_vllm_custom_allreduce(m: pytest.MonkeyPatch) -> None:
-    """On ROCm, AITER's CustomAllreduce would replace the one under test."""
-    m.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "0")
-    rocm_aiter_ops.refresh_env_variables()
+def _vllm_custom_allreduce(device: torch.device) -> car.CustomAllreduce:
+    """The TP group's vLLM CustomAllreduce. When AITER's all-reduce serves the
+    group on ROCm, the group has none, so build one on it directly."""
+    return get_tp_group().device_communicator.ca_comm or car.CustomAllreduce(
+        get_tp_group().cpu_group, device
+    )
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -822,7 +823,6 @@ def graph_allreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        _use_vllm_custom_allreduce(m)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -881,7 +881,6 @@ def eager_allreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        _use_vllm_custom_allreduce(m)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -893,7 +892,7 @@ def eager_allreduce(
         # communicate independently
         num_communication = rank // tp_size + 1
         sz = 1024
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = _vllm_custom_allreduce(device)
         inp = torch.ones(sz, dtype=torch.float32, device=device)
         out = inp
         for _ in range(num_communication):
@@ -921,13 +920,12 @@ def chunked_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", "1stage")
-        _use_vllm_custom_allreduce(m)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = _vllm_custom_allreduce(device)
 
         # Two full chunks plus a partial one.
         dtype = torch.bfloat16
@@ -1018,8 +1016,8 @@ def one_and_two_stage_allreduce(
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
-        fa = get_tp_group().device_communicator.ca_comm
-        assert fa is not None and not fa.disabled, "custom all-reduce is disabled"
+        fa = _vllm_custom_allreduce(device)
+        assert not fa.disabled, "custom all-reduce is disabled"
 
         # Sizes are counts of 16-byte packed elements. They straddle the
         # 512 KiB 1-stage/2-stage threshold, and all but one leave a remainder
