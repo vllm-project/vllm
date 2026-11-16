@@ -5650,6 +5650,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         runtime=SimpleNamespace(
             request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
+        all_context_pages_resident=False,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -5710,11 +5711,11 @@ def test_hisparse_fp8_prefill_gather_reads_resident_pages_like_the_plan():
     resident_block_table[0] = torch.tensor([4, 2, 6])
     torch.manual_seed(0)
     host_cache = torch.randint(
-        0, 256, (12, block_size, row_width), dtype=torch.uint8, device="cuda"
-    )
+        0, 256, (12, block_size, row_width), dtype=torch.uint8
+    ).pin_memory()
     resident_cache = torch.zeros((8, block_size, row_width), dtype=torch.uint8)
-    resident_cache = resident_cache.cuda()
     resident_cache[[3, 1, 4, 2, 6]] = host_cache[[5, 6, 7, 8, 9]]
+    resident_cache = resident_cache.cuda()
     plan = build_hisparse_prefill_staging_plan(
         source_block_table,
         torch.tensor(seq_lens, dtype=torch.int32, device="cuda"),
