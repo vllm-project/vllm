@@ -212,7 +212,7 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
     else:
         assert resolved == {
             name: full_layer(
-                customize_attention_spec(layers[name].get_attn_backend(), spec)
+                customize_attention_spec(layers[name].get_attn_backend(), spec, name)
             )
             for name, spec in specs.items()
         }
