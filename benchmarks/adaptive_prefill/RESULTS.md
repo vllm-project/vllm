@@ -18,6 +18,15 @@ the four new enabled/disabled and sync/async controller cases. Two existing
 structured-output tests bypass scheduler construction; their fixtures now
 explicitly initialize the optional controller to its disabled default.
 
+The extended run of `test_async_scheduler.py` and
+`test_priority_scheduler_random.py` also passed: **31 passed** in 803.91 seconds.
+This adds 12 randomized priority/preemption cases; its 19 async cases overlap the
+319-case run and must not be counted twice. The stress run fetched the missing
+Qwen2.5-VL model configuration online; no model weights or GPU execution were
+needed. The opt-in policy remains deliberately unsupported for priority mode;
+these stress cases check default-policy compatibility, not adaptive priority
+scheduling.
+
 Environment: Python 3.12.16, PyTorch 2.15.0+cpu, Triton CPU 3.8.0,
 Transformers 5.23.0 and pytest 9.2.0. PyTorch differs from the checkout's 2.14.0
 pin, so this is local CPU integration evidence, not a matching upstream CI image.
