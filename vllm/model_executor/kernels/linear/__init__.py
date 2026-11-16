@@ -200,6 +200,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterTritonPerTensorFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
@@ -381,6 +382,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         AiterFlyDSLMxfp8LinearKernel,
         AiterTritonMxfp8LinearKernel,
         AiterMxfp4LinearKernel,
@@ -492,6 +494,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -1055,6 +1058,14 @@ def init_mxfp8_linear_kernel(
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and platform is PlatformEnum.CUDA
+        and bmm_batch_size is None
+    ):
+        possible = prioritize_humming(possible)
+        possible = [k for k in possible if k.supports_batch_invariance()]
+
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(
         possible,
@@ -1514,6 +1525,7 @@ __all__ = [
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
+    "AiterTritonPerTensorFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",

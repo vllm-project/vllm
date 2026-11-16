@@ -14,8 +14,10 @@ import torch
 from vllm.model_executor.kernels.linear import (
     AiterFlyDSLMxfp8LinearKernel,
     AiterTritonMxfp8LinearKernel,
+    EmulationMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+    HummingMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
     RocmDotScaledMxfp8LinearKernel,
@@ -137,6 +139,46 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
     assert isinstance(kernel, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+
+
+@pytest.mark.parametrize(
+    ("capability", "linear_backend", "expected_kernel_cls"),
+    [
+        (80, "auto", EmulationMxfp8LinearKernel),
+        (90, "auto", HummingMxfp8LinearKernel),
+        (100, "auto", EmulationMxfp8LinearKernel),
+        (100, "flashinfer_cutedsl", EmulationMxfp8LinearKernel),
+    ],
+)
+def test_batch_invariance_selects_batch_invariant_kernel(
+    monkeypatch, capability, linear_backend, expected_kernel_cls
+):
+    """Marlin (SM80 default) and FlashInfer (SM100 default) tile by row count,
+    so VLLM_BATCH_INVARIANT must not select them, even when requested. SM90
+    must keep Humming, its default, instead of falling to Emulation."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with (
+        _patch_cuda_platform(capability),
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.utils.humming.priority."
+            "prefers_humming",
+            return_value=capability == 90,
+        ),
+        patch.object(
+            HummingMxfp8LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        # The real one probes the device through the Humming library.
+        patch.object(
+            HummingMxfp8LinearKernel, "executed_activation_key", return_value=None
+        ),
+    ):
+        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+
+    assert type(kernel) is expected_kernel_cls
 
 
 # (N, K) that the patched AITER config lookup reports as tuned.

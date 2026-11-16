@@ -29,7 +29,7 @@ from vllm.config import (
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     MambaManager,
@@ -244,28 +244,40 @@ def test_profile_run_creates_aux_output_connector_before_forward(
 
 
 @pytest.mark.parametrize(
-    "max_num_tokens,max_num_reqs,max_model_len,expected",
+    "max_num_tokens,max_num_reqs,max_model_len,spec,expected",
     [
         # max_num_batched_tokens > max_num_reqs * max_model_len, as after
         # auto-fit (first case) or when set explicitly (second case).
-        (2048, 1, 32, [32]),
-        (8192, 2, 2048, [2048, 2048]),
+        (2048, 1, 32, None, [32]),
+        (8192, 2, 2048, None, [2048, 2048]),
         # No cap applies, so the split is unchanged.
-        (2048, 4, 2048, [512] * 4),
-        (10, 4, 2048, [2, 2, 3, 3]),
+        (2048, 4, 2048, None, [512] * 4),
+        (10, 4, 2048, None, [2, 2, 3, 3]),
+        # Draft model (num_query_per_req, draft_slots): each request also
+        # reserves a draft slot, leaving one token per request.
+        (256, 256, 256, (1, 1), [1] * 128),
+        (256, 200, 256, (1, 1), [1] * 128),
+        # DFlash-style query rows with no draft slots.
+        (512, 512, 512, (4, 0), [4] * 128),
     ],
 )
-def test_dummy_run_requests_fit_in_max_model_len(
-    max_num_tokens, max_num_reqs, max_model_len, expected
+def test_dummy_run_requests_fit_in_budget(
+    max_num_tokens, max_num_reqs, max_model_len, spec, expected
 ):
-    """Block tables only fit max_model_len tokens per request, so a dummy
-    request must not be longer, or attention reads past the row."""
+    """Dummy requests must fit in max_model_len (the block table row) and,
+    with their draft slots, in max_num_batched_tokens."""
     scheduled = []
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_num_tokens = max_num_tokens
     runner.max_num_reqs = max_num_reqs
     runner.max_model_len = max_model_len
     runner.speculator = None
+    if spec is not None:
+        num_query_per_req, draft_slots = spec
+        runner.speculator = SimpleNamespace(num_query_per_req=num_query_per_req)
+        runner.speculative_config = SimpleNamespace(
+            max_num_new_slots_for_drafting=draft_slots
+        )
     runner.lora_config = None
     runner.is_first_pp_rank = True
     runner.is_last_pp_rank = False
@@ -747,3 +759,47 @@ def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
     assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
     torch.testing.assert_close(inputs_embeds[:5], expected)
     torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
+
+
+def test_speculator_request_hooks():
+    noop = lambda *args, **kwargs: None
+    slots: dict[str, int] = {}
+    events: list[tuple[str, str]] = []
+
+    class RecordingSpeculator:
+        def add_request(self, req_index, new_req_data):
+            events.append(("add", new_req_data.req_id))
+
+        # A hook called after its slot is freed records nothing.
+        def on_requests_finished(self, req_ids):
+            events.extend(("finished", r) for r in req_ids if r in slots)
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculator = RecordingSpeculator()
+    runner.req_states = SimpleNamespace(
+        req_id_to_index=slots,
+        add_request=lambda req_id, **_: slots.setdefault(req_id, len(slots)),
+        remove_request=lambda req_id: slots.pop(req_id, None),
+        apply_staged_writes=noop,
+    )
+    runner.model_state = SimpleNamespace(
+        add_request=noop, remove_request=noop, apply_staged_writes=noop
+    )
+    runner.draft_tokens_handler = SimpleNamespace(discard=noop)
+    runner.block_tables = SimpleNamespace(append_block_ids=noop)
+    runner.lora_state = SimpleNamespace(add_request=noop, remove_request=noop)
+    runner.adaptive_verification = runner.pooling_runner = runner.pp_handler = None
+    runner.encoder_cache = runner.prompt_logprobs_worker = runner.sampler = None
+    runner.is_last_pp_rank = False
+
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_new_reqs = [
+        NewRequestData(r, [1], [], None, None, ([0],), 0, None, prefill_token_ids=[1])
+        for r in ("a", "b")
+    ]
+    runner.add_requests(scheduler_output)
+    scheduler_output.finished_req_ids = {"a"}
+    scheduler_output.preempted_req_ids = {"b"}
+    runner.finish_requests(scheduler_output)
+
+    assert events == [("add", "a"), ("add", "b"), ("finished", "a")]
