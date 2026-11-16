@@ -21,7 +21,7 @@ class _Experts(torch.nn.Module):
         self.loaded: dict[tuple[str, str, int], torch.Tensor] = {}
         for p in ("w13_", "w2_"):
             for n in ("weight", "weight_scale", "weight_scale_2"):
-                param = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+                param = torch.nn.Parameter(torch.empty(0, device="cuda"), False)
                 param.weight_loader = self._load
                 self.register_parameter(p + n, param)
         self.method = SimpleNamespace(process_weights_after_loading=lambda _: None)

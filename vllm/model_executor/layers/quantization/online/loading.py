@@ -8,9 +8,11 @@ from typing import Any
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.online import fp8 as online_fp8
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     _quantize_moe_weight_to_nvfp4,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 
@@ -52,9 +54,14 @@ def quantize_on_load(
     getattr(layer, name).weight_loader = loader
 
 
+def _quantize_fp8_per_channel(weight: torch.Tensor) -> tuple:
+    scale = online_fp8._fp8_channel_scale(weight_amax(weight, dim=-1, keepdim=True))
+    return online_fp8._fp8_quant_per_channel(weight, scale), scale
+
+
 def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
     """w1 and w3 of an expert share one global scale: the first waits."""
-    pending: dict[int, tuple[str, torch.Tensor]] = {}
+    pending: dict[int, tuple[str, torch.Tensor, torch.Event]] = {}
 
     def loader(load, param, loaded_weight, weight_name, shard_id, expert_id, **kw):
         if layer._map_global_expert_id_to_local_expert_id(expert_id) == -1:
@@ -64,9 +71,15 @@ def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
         if shard_id in ("w1", "w3") and layer.moe_config.is_act_and_mul:
             first = pending.pop(expert_id, None)
             if first is None or first[0] == shard_id:
-                pending[expert_id] = shards[0]
+                copied = torch.Event()
+                copied.record()
+                pending[expert_id] = (shard_id, weight, copied)
                 return True
-            shards.insert(0, first)
+            first_id, first_weight, copied = first
+            # held from another load, which may have run on another stream
+            copied.wait()
+            first_weight.record_stream(torch.accelerator.current_stream())
+            shards.insert(0, (first_id, first_weight))
         stacked = torch.cat([w for _, w in shards])[None]
         values, scales, scale_2 = _quantize_moe_weight_to_nvfp4(stacked)
         n = len(shards)
@@ -109,7 +122,9 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
     is_moe, moe = isinstance(layer, RoutedExperts), getattr(layer, "moe_config", None)
-    if spec.activation != default or not (is_moe or isinstance(layer, LinearBase)):
+    if spec.activation != default or spec.hadamard_size is not None:
+        return None
+    if not (is_moe or isinstance(layer, LinearBase)):
         return None
     weight, ckpt = spec.weight, modelopt.CkptCtx()
     block = weight == qu.kFp8Static128BlockSym
@@ -121,13 +136,13 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
         channel = QuantizationArgs(type="float", strategy="channel")
         token = QuantizationArgs(type="float", strategy="token", dynamic=True)
         method = ct_fp8.CompressedTensorsW8A8Fp8MoEMethod(channel, token, moe)
-        quantize = partial(ops.scaled_fp8_quant, use_per_token_if_dynamic=True)
+        quantize = _quantize_fp8_per_channel
     elif weight == qu.kFp8StaticChannelSym:
         token_spec = QuantSpec(weight=qu.kFp8StaticTokenSym, activation=spec.activation)
         method = modelopt.ModelOptLinearMethod(token_spec, ckpt)
 
         def quantize(w):  # its channel scales are 1-D
-            values, scales = ops.scaled_fp8_quant(w, use_per_token_if_dynamic=True)
+            values, scales = _quantize_fp8_per_channel(w)
             return values, scales.flatten()
 
     elif weight == qu.kMxfp8Static and is_moe:

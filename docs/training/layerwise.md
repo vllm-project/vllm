@@ -86,7 +86,7 @@ Direct reload raises an error for the following; use the default
 
 - Online quantization that is not in the table: `mxfp4` and `mxfp4_hadamard32`
   linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
-  lm_head, activation overrides, and re-quantization of checkpoint-quantized
+  lm_head, activation overrides, `hadamard_size`, and re-quantization of checkpoint-quantized
   layers.
 - gpt-oss models with any online quantization.
 - `torchao` quantization, Humming kernels, LoRA, weight offloading,

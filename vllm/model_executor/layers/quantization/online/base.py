@@ -500,7 +500,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         )
 
     def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str, requantize: bool = False
+        self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(type(layer), prefix)
@@ -515,11 +515,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
             assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
             default = getattr(quant_method_cls, "activation_quant_key", None)
-            if (
-                not requantize
-                and envs.VLLM_RELOAD_MODE == "direct"
-                and (method := checkpoint_method(layer, quant_spec, default))
-            ):
+            if envs.VLLM_RELOAD_MODE == "direct":
+                method = checkpoint_method(layer, quant_spec, default)
+                if method is None:
+                    raise NotImplementedError(
+                        f"{prefix}: online {quant_key_str} does not support "
+                        "VLLM_RELOAD_MODE=direct"
+                    )
                 return method
             kwargs = {}
             if quant_method_cls.accepts_activation_override:
