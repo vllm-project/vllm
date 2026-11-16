@@ -250,6 +250,28 @@ class SchedulerTransferTable:
         self._transition(record, SchedulerTransferState.FAILED, now=now)
         return True
 
+    def invalidate_local(self, now: float) -> None:
+        """Expire consumed local transfers after an encoder-cache reset.
+
+        READY and RESIDENT records have already been loaded, so
+        `ConsumerReservationManager.take()` has consumed their Worker
+        reservation. Leaving them in place would let a later request
+        treat a dead `transfer_id` as a remote cache hit. Unconsumed
+        AVAILABLE reservations stay Load-able. In-flight WAITING_EVENT
+        and LOADING records are left to the existing async flow; this
+        does not claim in-flight reset concurrency safety.
+        """
+        to_expire: list[SchedulerTransfer] = []
+        for transfer_id in list(self._active_ids):
+            record = self._records[transfer_id]
+            if record.state in {
+                SchedulerTransferState.READY,
+                SchedulerTransferState.RESIDENT,
+            }:
+                to_expire.append(record)
+        for record in to_expire:
+            self._transition(record, SchedulerTransferState.EXPIRED, now=now)
+
     def release_ready(self, mm_hash: str, now: float) -> None:
         ready = self.records_for_hash(mm_hash, (SchedulerTransferState.READY,))
         if ready:
