@@ -15,6 +15,7 @@ from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
+    HummingMxFp4LinearKernel,
     MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
@@ -257,6 +258,45 @@ def test_aiter_kernel_is_supported_requires_native_mx_support():
         is_supported, reason = AiterMxfp4LinearKernel.is_supported()
     assert not is_supported
     assert reason
+
+
+@pytest.mark.parametrize("linear_backend", ["auto", "marlin"])
+def test_batch_invariance_selects_batch_invariant_kernel(monkeypatch, linear_backend):
+    """FlashInfer (SM100 default) and Marlin tile by row count, so
+    VLLM_BATCH_INVARIANT must not select them, even when requested."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with (
+        patch("vllm.model_executor.kernels.linear.current_platform") as platform,
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
+        # Otherwise an SM90 host ranks Humming first without the filter.
+        patch(
+            "vllm.model_executor.layers.quantization.utils.humming.priority."
+            "prefers_humming",
+            return_value=False,
+        ),
+        patch.object(
+            FlashInferMxFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch.object(
+            MarlinMxFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch.object(
+            HummingMxFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        # The real one probes the device through the Humming library.
+        patch.object(
+            HummingMxFp4LinearKernel,
+            "executed_activation_key",
+            return_value=kMxfp4Dynamic,
+        ),
+    ):
+        platform._enum = PlatformEnum.CUDA
+        kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
+
+    assert type(kernel) is HummingMxFp4LinearKernel
 
 
 class OOTMxFp4LinearKernel(MxFp4LinearKernel):

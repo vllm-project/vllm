@@ -82,6 +82,11 @@ class MxFp4LinearKernel(ABC):
         """Return whether this kernel can handle *config*."""
         raise NotImplementedError
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the batch."""
+        return False
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Transform weights into the format required by this kernel.
