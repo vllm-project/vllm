@@ -8,7 +8,9 @@ from typing import Any
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils import nvfp4_emulation_utils as nv
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    _quantize_moe_weight_to_nvfp4,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 
@@ -44,42 +46,52 @@ def quantize_on_load(
     load = _load_quantized(layer, name, *scale_names)
 
     def loader(param, loaded_weight, *args, **kwargs):
-        weight = loaded_weight.to(param.device, layer.params_dtype)
+        weight = loaded_weight.to(param.device, layer.params_dtype).contiguous()
         return load(param, quantize(weight), *args, **kwargs)
 
     getattr(layer, name).weight_loader = loader
 
 
-def _quantize_nvfp4(weight: torch.Tensor, amax: torch.Tensor) -> tuple:
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    global_scale = nv.FLOAT4_E2M1_MAX * fp8_max / amax.float().clamp_min(1e-8)
-    values, scales = ops.scaled_fp4_quant(
-        weight.contiguous(), global_scale, is_sf_swizzled_layout=False
-    )
-    return values, scales, (1.0 / global_scale).reshape(1)
-
-
-def _nvfp4_on_load(layer: torch.nn.Module) -> None:
+def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
     """w1 and w3 of an expert share one global scale: the first waits."""
     pending: dict[int, tuple[str, torch.Tensor]] = {}
 
-    def loader(load, param, loaded_weight, name, shard_id, expert_id, **kw):
+    def loader(load, param, loaded_weight, weight_name, shard_id, expert_id, **kw):
+        if layer._map_global_expert_id_to_local_expert_id(expert_id) == -1:
+            return False
         weight = loaded_weight.to(param.device, layer.params_dtype, copy=True)
         shards = [(shard_id, weight)]
         if shard_id in ("w1", "w3") and layer.moe_config.is_act_and_mul:
-            if expert_id not in pending:
+            first = pending.pop(expert_id, None)
+            if first is None or first[0] == shard_id:
                 pending[expert_id] = shards[0]
                 return True
-            shards.insert(0, pending.pop(expert_id))
-        amax = max(w.abs().amax() for _, w in shards)
-        for shard, w in shards:
-            ret = load(param, _quantize_nvfp4(w, amax), name, shard, expert_id, **kw)
+            shards.insert(0, first)
+        stacked = torch.cat([w for _, w in shards])[None]
+        values, scales, scale_2 = _quantize_moe_weight_to_nvfp4(stacked)
+        n = len(shards)
+        for (shard, _), v, s in zip(shards, values[0].chunk(n), scales[0].chunk(n)):
+            ret = load(param, (v, s, scale_2), weight_name, shard, expert_id, **kw)
         return ret
 
     for p in ("w13_", "w2_"):
         names = (f"{p}weight", f"{p}weight_scale", f"{p}weight_scale_2")
         load = _load_quantized(layer, *names)
         getattr(layer, names[0]).weight_loader = partial(loader, load)
+
+    process = method.process_weights_after_loading
+
+    def process_weights_after_loading(layer: torch.nn.Module) -> None:
+        if pending:
+            experts = sorted(pending)
+            pending.clear()
+            raise RuntimeError(
+                f"{layer.layer_name}: NVFP4 experts {experts} got only one of "
+                "w1/w3; both must be loaded in the same update"
+            )
+        process(layer)
+
+    method.process_weights_after_loading = process_weights_after_loading
 
 
 def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
@@ -140,7 +152,7 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     def create_weights_quantized_on_load(layer, *args, **kwargs):
         create_weights(layer, *args, **kwargs)
         if weight == qu.kNvfp4Static:
-            return _nvfp4_on_load(layer)
+            return _nvfp4_on_load(layer, method)
         for p in ("w13_", "w2_") if is_moe else ("",):
             quantize_on_load(layer, f"{p}weight", quantize, f"{p}{scale}")
 

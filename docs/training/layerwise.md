@@ -79,7 +79,7 @@ their checkpoint names, through `reload_weights` or a checkpoint-format
 
 With NVFP4, the w1 and w3 (gate and up) weights of an expert share one global
 scale, so both must arrive in the same update: the first is held until the
-second arrives.
+second arrives, and an update that delivers only one of them fails.
 
 Direct reload raises an error for the following; use the default
 `VLLM_RELOAD_MODE=layerwise` for them instead:
@@ -88,6 +88,7 @@ Direct reload raises an error for the following; use the default
   linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
   lm_head, activation overrides, and re-quantization of checkpoint-quantized
   layers.
+- gpt-oss models with any online quantization.
 - `torchao` quantization, Humming kernels, LoRA, weight offloading,
   `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
 

@@ -342,8 +342,6 @@ class GptOssRoutedExperts(RoutedExperts):
 
         if weight_name.endswith("_bias"):
             self._load_expert_bias(expert_data, loaded_weight, shard_id)
-        elif getattr(self, "quantizes_on_load", False):  # noqa: SIM114
-            self._load_packed_expert(expert_data, loaded_weight, weight_name, shard_id)
         elif weight_dtype in (
             "gpt_oss_mxfp4",
             "mxfp4",
@@ -1318,6 +1316,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
         return True
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # its expert loading writes BF16 into the experts outside their loaders
+        if any(getattr(m, "quantizes_on_load", False) for m in self.modules()):
+            raise NotImplementedError(
+                "gpt-oss does not support online quantization with "
+                "VLLM_RELOAD_MODE=direct"
+            )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
