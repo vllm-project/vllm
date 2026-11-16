@@ -330,15 +330,19 @@ class TestUnsent:
 
     def test_tensor_without_post_processing_keeps_its_bytes(self):
         # a frozen table the trainer does not send (Engram, an n-gram
-        # embedding): its module has no post-load processing, so a reload
-        # keeps its cold-start bytes; derived tensors read them as cold start
+        # embedding), kept by level 2 sleep: its module has no post-load
+        # processing, so a reload keeps its cold-start bytes
         model = _cold_start(_checkpoint())
-        model.attn.kv_b.weight.optional_in_update = True
         old = _checkpoint()
         new = _checkpoint(1.01)
         sent = {n: t for n, t in new.items() if n != "attn.kv_b.weight"}
         before = _state(model)
-        _reload(model, sent)
+        config = SimpleNamespace(
+            **vars(_MODEL_CONFIG), sleep_preserve_parameter_names=["attn.kv_b.*"]
+        )
+        begin_direct_reload(model)
+        model.load_weights(sent.items())
+        finish_direct_reload(model, config, _DEVICE)
         after = _state(model)
         _assert_same(after, before, names=["attn.kv_b.weight"], addresses=True)
         expected = dict(new, **{"attn.kv_b.weight": old["attn.kv_b.weight"]})

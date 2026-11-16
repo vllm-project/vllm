@@ -10,14 +10,15 @@ Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract: an update loads every parameter cold start loaded (as
-`model.load_weights` reports it), except those marked `optional_in_update`
-(a frozen table the trainer never sends, whose module has no PWAL). `finish`
+`model.load_weights` reports it), except those level 2 sleep preserves
+(`--sleep-preserve-parameter-names`: the update does not rewrite them). `finish`
 checks it before rerunning PWAL, which would otherwise reprocess the kept
 runtime bytes of a parameter the update left out. A `padding_fill_params()`
 parameter must also be delivered whole: `begin` zero-fills it.
 """
 
 from collections.abc import Iterator
+from fnmatch import fnmatchcase
 
 import torch
 
@@ -122,8 +123,9 @@ def mark_loaded(model: torch.nn.Module, name: str) -> None:
         names.add(name)
 
 
-def _check_update_complete(model: torch.nn.Module) -> None:
-    """Raise unless the update loaded every parameter cold start loaded.
+def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
+    """Raise unless the update loaded every parameter cold start loaded, except
+    those level 2 sleep preserves because the update does not rewrite them.
     ``load_weights`` reports parameter names, whatever checkpoint names fed
     them (fused or per-expert); a tied parameter counts under either name."""
     loaded = model.__dict__.pop("_loaded_params", None)
@@ -133,13 +135,14 @@ def _check_update_complete(model: torch.nn.Module) -> None:
     if required is None:  # cold start loaded nothing (dummy weights)
         model._required_params = loaded or None
         return
+    preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
     params = dict(model.named_parameters(remove_duplicate=False))
     delivered = {params.get(n, n) for n in loaded}
     missing = sorted(
         n
         for n in required
         if params.get(n, n) not in delivered
-        and not getattr(params.get(n), "optional_in_update", False)
+        and not any(fnmatchcase(n, p) for p in preserved)
     )
     if missing:
         raise RuntimeError(
@@ -314,7 +317,7 @@ def finish_direct_reload(
         raise RuntimeError(
             "direct reload: finish without a begin; start a new full update"
         )
-    _check_update_complete(model)
+    _check_update_complete(model, model_config)
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
 
