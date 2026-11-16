@@ -179,9 +179,10 @@ metadata and padded-layout checks to pass. Inactive cache slots remain
 protected. Unsupported or unproven geometry, metadata, wrappers and backends
 retain the original projection and convolution path.
 
-On SM121, supported ModelOpt NVFP4 weight-only Mamba2 input/output projections
-select Marlin locally before normal post-load weight packing, including shapes
-that have not been tuned and may be slower. Attention,
+On SM120 and SM121, supported ModelOpt NVFP4 weight-only Mamba2 input/output
+projections select Marlin locally before normal post-load weight packing,
+including shapes that have not been tuned and may be slower. The fused input
+projection and tuned output launch below apply only to GB10. Attention,
 other linears, MoE and the shared backend configuration are unchanged; only one
 weight pack is created. Unsupported codecs/dtypes, LoRA, batch-invariant mode
 and explicitly disabled Marlin kernels retain their configured owners.

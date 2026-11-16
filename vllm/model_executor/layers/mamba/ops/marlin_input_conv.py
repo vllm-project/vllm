@@ -3,6 +3,9 @@
 """GB10 Mamba projection ownership and specialized projection/conv launches."""
 
 import torch
+
+from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.model_executor.kernels.linear import is_supported_and_can_implement_kernel
 from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
@@ -27,9 +30,6 @@ from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
-from vllm import _custom_ops as ops
-from vllm import envs
-
 
 def select_mamba_marlin_ownership(layer, config) -> None:
     """Choose only Mamba2's projection kernels before normal weight packing.
@@ -46,7 +46,9 @@ def select_mamba_marlin_ownership(layer, config) -> None:
     ):
         return
     capability = current_platform.get_device_capability()
-    if capability is None or capability.to_int() != 121:
+    # SM120 (RTX PRO 6000 / RTX 50x0) and SM121 (GB10): stock Marlin matches
+    # b12x at decode sizes and is faster from 64 rows.
+    if capability is None or capability.to_int() not in (120, 121):
         return
     for projection in (layer.in_proj, layer.out_proj):
         method = projection.quant_method
@@ -64,7 +66,7 @@ def select_mamba_marlin_ownership(layer, config) -> None:
         ):
             continue
         supported, _ = is_supported_and_can_implement_kernel(
-            MarlinNvFp4LinearKernel, method.kernel.config, 121
+            MarlinNvFp4LinearKernel, method.kernel.config, capability.to_int()
         )
         if not supported:
             continue
