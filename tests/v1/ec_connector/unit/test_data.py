@@ -3,6 +3,7 @@
 """Tests for DataTransport ABC, NixlDataTransport and MoRIIODataTransport."""
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -203,6 +204,8 @@ _N = 8
 class _Status:
     def __init__(self, done: bool = True) -> None:
         self.done = done
+        # Completes the transfer when the transport waits for it (deregister()).
+        self.complete_on_wait = False
 
     def Succeeded(self) -> bool:
         return self.done
@@ -212,6 +215,11 @@ class _Status:
 
     def InProgress(self) -> bool:
         return not self.done
+
+    def WaitFor(self, timeout_ms: int) -> int:
+        if self.complete_on_wait:
+            self.done = True
+        return 0
 
 
 class _MemoryDesc:
@@ -307,16 +315,21 @@ class _FakeMori:
 
 @pytest.fixture
 def fake_mori(monkeypatch) -> _FakeMori:
+    """Stand in for the `mori.io` module, so the tests run without MoRI."""
     fake = _FakeMori()
-    monkeypatch.setattr(moriio_mod, "IOEngine", fake.IOEngine)
-    monkeypatch.setattr(moriio_mod, "IOEngineConfig", lambda host, port: None)
-    monkeypatch.setattr(moriio_mod, "BackendType", type("B", (), {"RDMA": 2}))
-    monkeypatch.setattr(moriio_mod, "PollCqMode", type("P", (), {"POLLING": 0}))
     monkeypatch.setattr(
-        moriio_mod, "RdmaBackendConfig", lambda *args, **kwargs: (args, kwargs)
+        moriio_mod,
+        "mori_io",
+        SimpleNamespace(
+            IOEngine=fake.IOEngine,
+            IOEngineConfig=lambda host, port: None,
+            BackendType=SimpleNamespace(RDMA=2),
+            PollCqMode=SimpleNamespace(POLLING=0),
+            RdmaBackendConfig=lambda *args, **kwargs: (args, kwargs),
+            EngineDesc=_EngineDesc,
+            MemoryDesc=_MemoryDesc,
+        ),
     )
-    monkeypatch.setattr(moriio_mod, "EngineDesc", _EngineDesc)
-    monkeypatch.setattr(moriio_mod, "MemoryDesc", _MemoryDesc)
     return fake
 
 
@@ -407,13 +420,83 @@ def test_remove_remote_peer_deregisters_engine_and_rejects_reads(fake_mori):
         agent = consumer.add_remote_peer(
             producer.get_agent_metadata(), producer.get_mem_descriptor()
         )
+        notify = consumer._peers[agent].notify
         consumer.remove_remote_peer(agent)
         assert agent not in fake_mori.remote_engines[consumer._engine.key]
+        assert notify.closed
         with pytest.raises(KeyError):
             consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
     finally:
         consumer.deregister()
         producer.deregister()
+
+
+def test_reregistering_restarted_producers_leaves_no_stale_sockets(fake_mori):
+    """Each producer restart advertises a new endpoint; old sockets must go."""
+    consumer = _transport("pf", 0)
+    producers = []
+    try:
+        sockets = []
+        for _ in range(3):
+            producer = _transport("enc", 1)
+            producers.append(producer)
+            agent = consumer.add_remote_peer(
+                producer.get_agent_metadata(), producer.get_mem_descriptor()
+            )
+            sockets.append(consumer._peers[agent].notify)
+            consumer.remove_remote_peer(agent)
+        assert consumer._peers == {}
+        assert all(sock.closed for sock in sockets)
+    finally:
+        consumer.deregister()
+        for producer in producers:
+            producer.deregister()
+
+
+def test_deregister_waits_for_parked_read_before_releasing_memory(fake_mori):
+    fake_mori.pending = True
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        handle = consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
+        consumer.release_xfer_handle(handle)
+        handle.status.complete_on_wait = True
+
+        consumer.deregister()
+
+        assert consumer._engine.key not in fake_mori.tensors
+        assert consumer._parked == []
+    finally:
+        producer.deregister()
+
+
+def test_deregister_keeps_region_registered_while_read_is_in_flight(fake_mori):
+    fake_mori.pending = True
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        handle = consumer.post_read([0], agent, [0], notif_msg=b"s:h1")
+        consumer.release_xfer_handle(handle)
+
+        consumer.deregister()
+
+        # The DMA may still target the region: registration and handle stay.
+        assert consumer._engine.key in fake_mori.tensors
+        assert consumer._parked == [handle]
+    finally:
+        producer.deregister()
+
+
+def test_rejects_region_above_validated_size(fake_mori, monkeypatch):
+    monkeypatch.setattr(moriio_mod, "_MAX_REGION_BYTES", _N * _BS - 1)
+    with pytest.raises(ValueError, match="ec_cpu_bytes up to"):
+        _transport("enc", 0)
 
 
 def test_scheduler_builds_moriio_transport_from_extra_config(fake_mori, monkeypatch):
