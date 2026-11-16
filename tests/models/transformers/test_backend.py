@@ -176,6 +176,30 @@ def test_compile_mm_encoder(
         pass
 
 
+def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
+    """EAGLE-3 runs on a composite VLM whose decoder records the aux hidden states."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    draft_config = AutoConfig.from_pretrained(model).text_config
+    draft_config.architectures = ["LlamaForCausalLMEagle3"]
+    draft_config.num_hidden_layers = 1
+    draft_config.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        model,
+        model_impl="transformers",
+        load_format="dummy",
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 1},
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "eagle3",
+            "model": str(tmp_path),
+            "num_speculative_tokens": 2,
+        },
+    ) as llm:
+        llm.generate_greedy(["Hello"], max_tokens=8)
+
+
 def test_infer_dynamic_arg_dims():
     """Only unannotated and (legacy) tensor arguments are dynamic."""
 
@@ -966,3 +990,26 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+def test_init_parameters_keeps_declared_dtype_and_requires_grad():
+    """Meta parameters materialize in their own dtype, as with `from_pretrained`,
+    and an integer parameter, which cannot require grad, does not fail."""
+    with torch.device("meta"):
+        module = nn.Module()
+        module.fp32 = nn.Parameter(torch.empty(2))
+        module.fp8 = nn.Parameter(
+            torch.empty(2, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        module.int8 = nn.Parameter(
+            torch.empty(2, dtype=torch.int8), requires_grad=False
+        )
+    stub = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+    )
+    Base.init_parameters(stub, module)
+
+    assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
+    assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
+    assert module.int8.dtype == torch.int8 and not module.int8.requires_grad

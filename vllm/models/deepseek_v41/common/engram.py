@@ -83,6 +83,10 @@ def _engram_lookup_thresholds(device: torch.device) -> tuple[int | None, int | N
     ):
         # Measured on GB200.
         return 36864, 4096
+    if current_platform.is_rocm():
+        # Measured on MI355X with a 94 GiB table: unsorted lookups from 49K rows
+        # take 4x longer than sorted ones; never inline.
+        return 32768, None
     # TODO: Add hand-tuned thresholds for other GPU families.
     return None, None
 

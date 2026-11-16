@@ -23,6 +23,7 @@ import torch
 from transformers import AutoModelForCausalLM
 from transformers.conversion_mapping import WeightTransform
 
+from vllm.distributed import in_single_pp_stage
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.offloader import BaseOffloader, NoopOffloader
 from vllm.sequence import IntermediateTensors
@@ -60,7 +61,8 @@ class MTPMixin(CausalMixin):
         # The proposer shares the target's LM head with the draft
         del mtp_model.shared_head
         # With PP, the last rank has no target embedding to share with the draft
-        if self.pp_group.world_size > 1:
+        self._tracks_own_embed = in_single_pp_stage()
+        if self._tracks_own_embed:
             mtp_model._keys_to_ignore_on_load_unexpected = [
                 r"layers\..*embed_tokens\.weight" if "embed_tokens" in k else k
                 for k in mtp_model._keys_to_ignore_on_load_unexpected
@@ -79,13 +81,6 @@ class MTPMixin(CausalMixin):
             if k.startswith("layers.*.")
         }
 
-    # The draft runs whole on the last PP rank
-    def pipeline_parallel(self):
-        pass
-
-    def _pp_indices(self) -> tuple[int, int]:
-        return 0, self.text_config.num_hidden_layers
-
     def _offloader(self) -> BaseOffloader:
         """Drafts are not offloaded, as with native drafts.
 
@@ -94,7 +89,7 @@ class MTPMixin(CausalMixin):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         embed_prefix = None
-        if self.pp_group.world_size > 1:
+        if self._tracks_own_embed:
             embed = self.model.get_input_embeddings()
             embed_prefix = next(n for n, m in self.named_modules() if m is embed) + "."
 
