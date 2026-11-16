@@ -1127,6 +1127,7 @@ def _session_requests(
     segments=None,
     stop_token_ids=None,
     hash_block_size=16,
+    prompt_logprobs=None,
 ):
     init_none_hash(sha256)
     params = SamplingParams(
@@ -1135,6 +1136,7 @@ def _session_requests(
         stop_token_ids=stop_token_ids,
         aux_session=session,
         aux_version_segments=segments,
+        prompt_logprobs=prompt_logprobs,
     )
     params.update_from_generation_config({}, EOS_TOKEN_ID)
     salted = SimpleNamespace(
@@ -1616,6 +1618,21 @@ def test_preempted_session_request_salts_the_object_it_computes_again():
     assert fresh.block_hashes == request.block_hashes
 
 
+def test_session_request_preempted_by_a_reset_takes_the_next_version():
+    engine = _tier_engine(hash_block_size=4, retention=16)
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 16, 20, hash_block_size=4)
+    engine.scheduler.add_request(request)
+    for _ in range(4):
+        engine.step(engine.schedule(), {"r": [0]})
+    assert engine.scheduler.reset_prefix_cache(reset_running_requests=True)
+    engine.set_version(2)
+    engine.run()
+    engine.close()
+    assert engine.num_loads > 0
+    assert engine.segments["r"] == [(0, "v1"), (16, "v2"), (32, None)]
+
+
 def test_preempted_session_request_keeps_its_hashes_at_the_same_version():
     engine = _tier_engine(connector=None, hash_block_size=4, retention=16)
     request, hashes = _preempt_at_an_object_boundary(engine, (1,) * 16)
@@ -1726,7 +1743,6 @@ def test_session_admission_rounds_client_segments_down_to_an_object():
         ["r"], 46, 1, segments=[(0, "v1"), (48, None)], hash_block_size=4
     )
     engine.scheduler.add_request(request)
-    engine.close(stale_names=True)
     assert request.cache_salt_segments == [(0, "v1"), (32, "v2")]
     fresh = Request(
         request_id="fresh",
@@ -1738,6 +1754,9 @@ def test_session_admission_rounds_client_segments_down_to_an_object():
         block_hasher=get_request_block_hasher(4, sha256),
     )
     assert fresh.block_hashes == request.block_hashes
+    engine.run()
+    engine.close()
+    assert engine.segments["r"] == [(0, "v2"), (32, None)]
 
 
 def test_session_object_of_two_hash_blocks_is_named_by_the_last():
@@ -1761,11 +1780,31 @@ def test_session_turn_reuses_the_offload_tier_across_a_weight_update(
     assert engine.scheduler.reset_prefix_cache(reset_connector=reset_connector)
     segments = engine.segments["first"] if with_segments else None
     _run_turn(engine, 2, "second", 72, segments=segments)
-    engine.close(stale_names=reset_connector)
+    engine.close()
+    reused = with_segments and not reset_connector
     assert engine.num_loads == expected_loads and engine.num_stores > 0
-    assert (engine.keys["second"][:2] == engine.keys["first"][:2]) == with_segments
-    expected = [(0, "v1"), (32, "v2")] if with_segments else [(0, "v2")]
+    assert (engine.keys["second"][:2] == engine.keys["first"][:2]) == reused
+    expected = [(0, "v1"), (32, "v2")] if reused else [(0, "v2")]
     assert engine.segments["second"] == [*expected, (64, None)]
+
+
+def test_session_turn_names_the_block_eagle_computes_again_by_its_version():
+    engine = _tier_engine(connector=None, sliding_window=None)
+    engine.scheduler.kv_cache_manager.coordinator.drop_eagle_group_ids = {0}
+    _run_turn(engine, 1, "first", 40, 9)
+    _run_turn(engine, 2, "second", 72, segments=engine.segments["first"])
+    engine.close()
+    assert engine.segments["first"] == [(0, "v1"), (48, None)]
+    assert engine.segments["second"] == [(0, "v1"), (32, "v2"), (64, None)]
+
+
+def test_session_turn_with_prompt_logprobs_names_its_prompt_by_its_version():
+    engine = _tier_engine()
+    _run_turn(engine, 1, "first")
+    segments = engine.segments["first"]
+    _run_turn(engine, 2, "second", 72, segments=segments, prompt_logprobs=1)
+    engine.close()
+    assert engine.segments["second"] == [(0, "v2"), (64, None)]
 
 
 @pytest.mark.parametrize("with_segments", [True, False], ids=["segments", "none"])
@@ -1833,7 +1872,7 @@ def test_session_request_salts_its_segments_then_the_current_version(
 @pytest.mark.parametrize(
     "num_tokens,num_steps,preempt,later_versions,expected",
     [
-        (40, 0, False, (), [(0, "v1"), (32, "v2"), (48, None)]),
+        (40, 0, False, (), [(0, "v2"), (48, None)]),
         (40, 2, False, (), [(0, "v1"), (41, "v2"), (48, None)]),
         (47, 1, False, (), [(0, "v1"), (48, None)]),
         (40, 2, True, (), [(0, "v1"), (32, "v2"), (48, None)]),
@@ -1864,7 +1903,7 @@ def test_weight_update_salts_what_a_session_request_has_not_hashed(
     for version in later_versions:
         engine.set_version(version)
     engine.run()
-    engine.close(stale_names=num_steps < 2)
+    engine.close(stale_names=num_steps == 1)
     assert engine.segments["r"] == expected
     fresh = Request(
         request_id="fresh",

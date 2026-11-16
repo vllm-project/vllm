@@ -356,6 +356,22 @@ class AuxOutputSchedulerConnector:
         num_hit = max(num_blocks * self._block_size, self._emit_start(request))
         return min(num_hit, request.num_tokens - 1)
 
+    def salt_from_hit(self, request: Request, num_hit: int) -> None:
+        """Salt the positions a session request computes, from its prefix-cache
+        hit on, with the current weight version."""
+        if self._session(request) is None:
+            return
+        segments = request.cache_salt_segments
+        ends = [start for start, _ in segments[1:]]
+        if any(
+            salt != self._weight_version and end > num_hit
+            for (_, salt), end in zip(segments, [*ends, request.num_tokens])
+        ):
+            hash_size = self._hash_block_size
+            del request.block_hashes[num_hit // hash_size :]
+            request.add_cache_salt_segment(num_hit, self._weight_version, hash_size)
+            request.update_block_hashes()
+
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
@@ -539,20 +555,6 @@ class AuxOutputSchedulerConnector:
                 request, num_computed
             )
             del self._sent_hash_counts[request_id]
-        if session and not request.is_finished():
-            hash_size = self._hash_block_size
-            version = self._weight_version
-            frontier = len(request.block_hashes) * hash_size
-            cut = min(frontier, num_computed) // self._block_size * self._block_size
-            segments = request.cache_salt_segments
-            ends = [start for start, _ in segments[1:]] + [frontier]
-            if any(
-                salt != version and start < frontier and end > cut
-                for (start, salt), end in zip(segments, ends)
-            ):
-                del request.block_hashes[cut // hash_size :]
-            request.add_cache_salt_segment(cut, version, hash_size)
-            request.update_block_hashes()
         computed_from = self._computed_from.pop(request_id, request.num_tokens)
         num_blocks = request.num_computed_tokens // self._block_size
         if self._session(request) is not None:
