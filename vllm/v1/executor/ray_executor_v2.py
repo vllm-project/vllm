@@ -49,7 +49,7 @@ else:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class RayWorkerHandle:
     """Handle for a Ray worker actor, compatible with MultiprocExecutor."""
 

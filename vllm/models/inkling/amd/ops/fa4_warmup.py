@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InklingFA4WarmupConfig:
     num_heads: int
     num_kv_heads: int

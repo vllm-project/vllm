@@ -71,7 +71,7 @@ class TieringOffloadingMetrics:
     DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
@@ -83,7 +83,7 @@ class TransferJob:
     submit_time: float = field(default_factory=time.monotonic)
 
 
-@dataclass
+@dataclass(slots=True)
 class JobResult:
     """Result of an async transfer job."""
 
