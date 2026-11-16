@@ -238,6 +238,16 @@ impl ArgumentsWriter {
         }
     }
 
+    /// Append raw text of the whole `arguments` JSON, for a format whose model
+    /// writes it as JSON.
+    pub(crate) fn push_raw_arguments(&mut self, text: &str) {
+        debug_assert!(
+            self.keys.is_empty() && self.open.is_none(),
+            "an argument is already written"
+        );
+        self.pending.extend_from_slice(text.as_bytes());
+    }
+
     /// End the object: `}`, or `{}` when no argument was written.
     pub(crate) fn finish(&mut self) {
         debug_assert!(self.open.is_none(), "an argument is still open");
