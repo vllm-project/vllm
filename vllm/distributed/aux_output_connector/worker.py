@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.model_executor.layers.indexer_capture import IndexerCapturer
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -57,7 +58,8 @@ class _WorkerRequestState:
     session: str | None = None
     block_hashes: list[bytes] = field(default_factory=list)
     staged: list[tuple[int, np.ndarray]] = field(default_factory=list)
-    tail: tuple[str, np.ndarray] | None = None
+    fields: dict[str, tuple[int, int, list[np.ndarray]]] = field(default_factory=dict)
+    tail: tuple[str, np.ndarray, dict[str, np.ndarray]] | None = None
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
     buffer_start: int = 0
@@ -84,6 +86,8 @@ class PendingAuxOutput:
     num_rejected: np.ndarray | None = None
     indexer_snapshot: torch.Tensor | None = None
     indexer: np.ndarray | None = None
+    fields_snapshot: dict[str, torch.Tensor] = field(default_factory=dict)
+    fields: dict[str, np.ndarray] = field(default_factory=dict)
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -101,6 +105,9 @@ class PendingAuxOutput:
             self.routed_experts = copy_rows(self.routed_experts_snapshot)
         if self.indexer_snapshot is not None:
             self.indexer = copy_rows(self.indexer_snapshot)
+        self.fields = {
+            name: copy_rows(rows) for name, rows in self.fields_snapshot.items()
+        }
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
         return self.connector.process_output(self)
@@ -108,6 +115,8 @@ class PendingAuxOutput:
 
 class AuxOutputWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
+
+    _return_hidden_states = False
 
     def __init__(
         self,
@@ -132,6 +141,9 @@ class AuxOutputWorkerConnector:
         except BaseException:
             self._close_capture()
             raise
+        self._return_hidden_states = (
+            vllm_config.aux_output_config.enable_return_hidden_states
+        )
         self._r3_shape: tuple[int, ...] = ()
         self._r3_dtype: np.dtype[Any] = np.dtype("uint8")
         self._r3_nbytes = 0
@@ -248,8 +260,14 @@ class AuxOutputWorkerConnector:
         }
         return {name: rows for name, rows in fields.items() if rows is not None}
 
-    def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
-        """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
+    def prepare_output(
+        self, input_batch: InputBatch, hidden_states: torch.Tensor | None = None
+    ) -> PendingAuxOutput | None:
+        """Snapshot one step's auxiliary tensors for asynchronous CPU transfer.
+
+        `hidden_states` are what the model's forward pass returned, one row per
+        query token, on the last pipeline stage.
+        """
         if self._buffer is None or self._step_metadata is None:
             return None
 
@@ -257,6 +275,19 @@ class AuxOutputWorkerConnector:
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
         snapshot = self._indexer.snapshot(num_rows) if self._indexer else None
+        fields: dict[str, torch.Tensor] = {}
+        sessions = {
+            request_id
+            for request_id in request_ids
+            if self._requests[request_id].session is not None
+        }
+        rows = session_rows(request_ids, query_start_loc, sessions)
+        if len(rows) and self._return_hidden_states and hidden_states is not None:
+            index = async_tensor_h2d(rows, hidden_states.device)
+            hidden = hidden_states.index_select(0, index)
+            if hidden.dtype == torch.bfloat16:
+                hidden = hidden.view(torch.int16)
+            fields["hidden_states"] = hidden
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
@@ -268,6 +299,7 @@ class AuxOutputWorkerConnector:
                 else None
             ),
             indexer_snapshot=snapshot,
+            fields_snapshot=fields,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -340,6 +372,7 @@ class AuxOutputWorkerConnector:
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
         outputs: dict[str, AuxRequestOutput] = {}
+        field_start = 0
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
@@ -381,6 +414,13 @@ class AuxOutputWorkerConnector:
                     "auxiliary output capture has an unbacked token gap"
                 )
                 capture_start = capture_cursor
+            if state.session is not None:
+                for name, values in pending.fields.items():
+                    first, _, chunks = state.fields.get(name, (capture_start, 0, []))
+                    chunk = values[field_start : field_start + len(rows)]
+                    chunks.append(chunk if len(chunk) == len(values) else chunk.copy())
+                    state.fields[name] = first, capture_start + len(rows), chunks
+                field_start += request_num_tokens
 
             skip = max(state.buffer_start - capture_start, 0)
 
@@ -553,7 +593,11 @@ class AuxOutputWorkerConnector:
         assert self._buffer is not None
         key, start, end = tail
         blocks = state.staged + state.pending_blocks
-        state.tail = key, self._buffer.read(request_id, start, end, blocks)
+        state.tail = (
+            key,
+            self._buffer.read(request_id, start, end, blocks),
+            SessionObjectWriter.field_rows(state, start, end),
+        )
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates.
@@ -666,6 +710,20 @@ class AuxOutputWorkerConnector:
                     self._requests.clear()
                     self._step_metadata = None
                     self._close_capture()
+
+
+def session_rows(
+    request_ids: Sequence[str],
+    query_start_loc: np.ndarray,
+    session_request_ids: set[str],
+) -> np.ndarray:
+    """Batch rows of the requests in `session_request_ids`."""
+    ranges = [
+        np.arange(query_start_loc[i], query_start_loc[i + 1])
+        for i, request_id in enumerate(request_ids)
+        if request_id in session_request_ids
+    ]
+    return np.concatenate(ranges) if ranges else np.empty(0, dtype=np.int64)
 
 
 def get_aux_output_connector(

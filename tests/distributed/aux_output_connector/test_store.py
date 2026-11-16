@@ -47,6 +47,7 @@ from vllm.distributed.aux_output_connector.store import (
 )
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
+    _WorkerRequestState,
 )
 from vllm.model_executor.layers.fused_moe import (
     routed_experts_capturer as capturer_module,
@@ -545,6 +546,7 @@ def _prepare_output(
     num_tokens=None,
     query_start_loc=None,
     indexer_rows=None,
+    hidden_states=None,
 ):
     if num_sampled is None:
         num_sampled = np.ones(len(request_ids), dtype=np.int32)
@@ -566,7 +568,8 @@ def _prepare_output(
             (np.zeros(1, dtype=np.int32), np.cumsum(num_tokens, dtype=np.int32))
         )
     pending = worker.prepare_output(
-        _input_batch(request_ids, np.asarray(token_starts), query_start_loc)
+        _input_batch(request_ids, np.asarray(token_starts), query_start_loc),
+        hidden_states,
     )
     assert pending is not None
     pending.enqueue_cpu_copy(num_sampled, num_rejected)
@@ -2818,7 +2821,9 @@ def _session_worker(store):
     return worker
 
 
-def _session_step(worker, rows, start, end, hashes, *, object_blocks=1):
+def _session_step(
+    worker, rows, start, end, hashes, *, object_blocks=1, hidden_states=None
+):
     step = _metadata(
         0, [_request_metadata("session", start, end - start, 0, hashes)], {}
     )
@@ -2831,7 +2836,8 @@ def _session_step(worker, rows, start, end, hashes, *, object_blocks=1):
         torch.from_numpy(rows[start:end])
     )
     pending = worker.prepare_output(
-        _input_batch(["session"], np.array([start]), np.array([0, end - start]))
+        _input_batch(["session"], np.array([start]), np.array([0, end - start])),
+        hidden_states,
     )
     pending.enqueue_cpu_copy(np.array([0]), np.array([0]))
     return pending
@@ -2983,3 +2989,190 @@ def test_session_objects_hold_each_field_per_pipeline_stage():
     assert client.writes == [[name] for name in aux_object_names([key], 2)]
     for name, rows in (("routed_experts", routed), ("indexer_topk", indexer)):
         np.testing.assert_array_equal(read_aux_rows(store, [key], name, 2), rows)
+
+
+@pytest.mark.parametrize(
+    "hashes,tail_start",
+    [(_HASHES[:1], _BLOCK_SIZE), ([], 0)],
+    ids=["after-an-object", "unhashed-block"],
+)
+def test_worker_writes_hidden_states_into_session_objects_and_the_tail(
+    hashes, tail_start
+):
+    client, store = fake_store()
+    worker = _session_worker(store)
+    worker._return_hidden_states = True
+    end = _BLOCK_SIZE + 3
+    rows = _position_rows(0, end)
+    hidden = torch.arange(2 * end, dtype=torch.float32).reshape(end, 2)
+    for start, stop, step_hashes in [(0, 2, []), (2, end, hashes)]:
+        pending = _session_step(
+            worker, rows, start, stop, step_hashes, hidden_states=hidden[start:stop]
+        )
+        worker.process_output(pending)
+    terminal = _metadata(0, [], {"session": []})
+    terminal.metadata.session_object_size = _BLOCK_SIZE
+    terminal.metadata.session_tails = {"session": ("job/s/tail/t", tail_start, end)}
+    _begin_step(worker, terminal)
+    worker.close()
+
+    keys = [f"job/s/{_HASHES[0].hex()}"] if tail_start else []
+    keys.append("job/s/tail/t")
+    np.testing.assert_array_equal(
+        read_aux_rows(store, keys, "hidden_states"), hidden.numpy()
+    )
+    np.testing.assert_array_equal(read_aux_rows(store, keys, "routed_experts"), rows)
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.bfloat16, torch.float32], ids=["bfloat16", "float32"]
+)
+def test_worker_snapshots_hidden_states_of_session_rows_only(dtype):
+    worker = _make_worker(2)
+    worker._return_hidden_states = True
+    step = _metadata(
+        0,
+        [
+            _request_metadata("plain", 0, 2, 0, []),
+            _request_metadata("session", 0, 3, 0, []),
+        ],
+        {},
+    )
+    step.metadata.sessions = {"session": "s"}
+    _begin_step(worker, step)
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = torch.zeros(
+        (5, *_SHAPE), dtype=torch.uint8
+    )
+    hidden_states = torch.randn(6, 4).to(dtype)
+    expected = hidden_states[2:5].clone()
+    pending = worker.prepare_output(
+        _input_batch(["plain", "session"], np.array([0, 0]), np.array([0, 2, 5])),
+        hidden_states,
+    )
+    hidden_states.zero_()
+    pending.enqueue_cpu_copy(np.array([0, 0]), np.array([0, 0]))
+    rows = torch.from_numpy(pending.fields["hidden_states"]).view(dtype)
+    assert torch.equal(rows, expected)
+    worker.close()
+
+
+def test_session_fields_follow_their_requests_in_a_batch():
+    client, store = fake_store()
+    worker = _make_worker(3, max_num_batched_tokens=16)
+    worker._object_writer = SessionObjectWriter(
+        store, key_prefix="job", max_pending_batches=4, fields=worker._object_fields
+    )
+    worker._return_hidden_states = True
+    step = _metadata(
+        0,
+        [
+            _request_metadata("a", 0, 5, 0, []),
+            _request_metadata("plain", 0, 3, 0, []),
+            _request_metadata("b", 0, 6, 0, []),
+        ],
+        {},
+    )
+    step.metadata.session_object_size = _BLOCK_SIZE
+    step.metadata.sessions = {"a": "s", "b": "t"}
+    lengths = {"a": 5, "plain": 3, "b": 6}
+    tags = {"a": 100, "plain": 200, "b": 300}
+    routed = np.concatenate([_position_rows(0, n) for n in lengths.values()])
+    hidden = torch.cat(
+        [torch.arange(n, dtype=torch.float32) + tags[r] for r, n in lengths.items()]
+    )[:, None]
+    pending = _prepare_output(
+        worker,
+        step,
+        routed,
+        list(lengths),
+        np.array([1, 0, 2]),
+        hidden_states=hidden,
+    )
+    worker.process_output(pending)
+    for request in ("a", "b"):
+        (staged,) = worker._requests[request].fields["hidden_states"][2]
+        assert not np.shares_memory(staged, pending.fields["hidden_states"])
+    pending.fields["hidden_states"][...] = -1
+    terminal = _metadata(0, [], {"a": _HASHES[:1], "plain": [], "b": _HASHES[1:2]})
+    terminal.metadata.session_object_size = _BLOCK_SIZE
+    _begin_step(worker, terminal)
+    worker.close()
+
+    for session, block_hash, tag in [("s", _HASHES[0], 100), ("t", _HASHES[1], 300)]:
+        key = f"job/{session}/{block_hash.hex()}"
+        rows = read_aux_rows(store, [key], "hidden_states")
+        assert rows.ravel().tolist() == [tag + p for p in range(_BLOCK_SIZE)]
+
+
+def test_session_fields_follow_rejected_speculative_rows():
+    client, store = fake_store()
+    worker = _session_worker(store)
+    worker._return_hidden_states = True
+    routed = _position_rows(0, 5)
+    hidden = torch.arange(5, dtype=torch.float32)[:, None]
+    for token_start, first, num_rejected, hashes in [
+        (0, 0, 4, []),
+        (5, 1, 3, []),
+        (6, 2, 0, _HASHES[:1]),
+    ]:
+        step = _metadata(
+            0,
+            [_request_metadata("request", token_start, 5 - first, 0, hashes)],
+            {},
+        )
+        step.metadata.session_object_size = _BLOCK_SIZE
+        if token_start == 0:
+            step.metadata.sessions = {"request": "s"}
+        pending = _prepare_output(
+            worker,
+            step,
+            routed[first:],
+            ["request"],
+            np.array([num_rejected]),
+            hidden_states=hidden[first:],
+        )
+        worker.process_output(pending)
+    terminal = _metadata(0, [], {"request": []})
+    terminal.metadata.session_object_size = _BLOCK_SIZE
+    terminal.metadata.session_tails = {"request": ("job/s/tail/t", _BLOCK_SIZE, 5)}
+    _begin_step(worker, terminal)
+    worker.close()
+
+    keys = [f"job/s/{_HASHES[0].hex()}", "job/s/tail/t"]
+    np.testing.assert_array_equal(read_aux_rows(store, keys, "routed_experts"), routed)
+    np.testing.assert_array_equal(
+        read_aux_rows(store, keys, "hidden_states"), hidden.numpy()
+    )
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [(0, 4), (0, 8), (2, 8)],
+    ids=["inside-a-chunk", "across-chunks", "after-skipped-rows"],
+)
+def test_session_fields_copy_only_the_rows_of_the_object(start, end):
+    chunks = [np.arange(6)[:, None], np.arange(6, 10)[:, None]]
+    state = _WorkerRequestState(session="s")
+    state.fields["hidden_states"] = (0, 10, list(chunks))
+    rows = SessionObjectWriter._take_fields(state, start, end)["hidden_states"]
+    assert rows.ravel().tolist() == list(range(start, end))
+    first, stop, rest = state.fields["hidden_states"]
+    assert (first, stop) == (end, 10)
+    assert np.concatenate(rest).ravel().tolist() == list(range(end, 10))
+    assert all(
+        any(np.shares_memory(piece, chunk) for chunk in chunks) for piece in rest
+    )
+
+
+def test_session_object_with_incomplete_field_rows_is_rejected():
+    writer = SessionObjectWriter(
+        fake_store()[1],
+        key_prefix="job",
+        max_pending_batches=4,
+        fields=lambda rows: {"routed_experts": rows},
+    )
+    state = _WorkerRequestState(session="s", block_hashes=_HASHES[:1])
+    state.fields["hidden_states"] = (1, 4, [np.zeros((3, 2), dtype=np.float32)])
+    with pytest.raises(AssertionError, match="incomplete"):
+        writer.add_blocks(state, [(0, _position_rows(0, _BLOCK_SIZE))], _BLOCK_SIZE)
+    writer.close()

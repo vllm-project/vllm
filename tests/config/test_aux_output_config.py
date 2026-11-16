@@ -177,3 +177,15 @@ def test_object_key_prefix_is_validated(kwargs, error):
         return
     with pytest.raises(ValueError, match=error):
         AuxOutputConfig(**kwargs)
+
+
+def test_hidden_states_require_object_key_prefix():
+    with pytest.raises(ValueError, match="requires object_key_prefix"):
+        AuxOutputConfig(
+            enable_return_routed_experts=True, enable_return_hidden_states=True
+        )
+    AuxOutputConfig(
+        enable_return_routed_experts=True,
+        enable_return_hidden_states=True,
+        object_key_prefix="run-1",
+    )

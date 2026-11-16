@@ -19,6 +19,11 @@ class AuxOutputConfig:
     enable_return_indexer_topk: bool = False
     """Capture and return sparse-attention index selections."""
 
+    enable_return_hidden_states: bool = False
+    """Store the hidden states the model's forward pass returns for every
+    computed position of session requests (`SamplingParams.aux_session`) in
+    their objects. Requires `object_key_prefix`."""
+
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or `None` to derive it from the KV cache capacity.
     Grows when every object is referenced.
@@ -32,6 +37,8 @@ class AuxOutputConfig:
     @model_validator(mode="after")
     def _check_object_key_prefix(self) -> Self:
         prefix = self.object_key_prefix
+        if prefix is None and self.enable_return_hidden_states:
+            raise ValueError("enable_return_hidden_states requires object_key_prefix.")
         if prefix is not None and not (self.enabled and prefix and "/" not in prefix):
             raise ValueError(
                 "object_key_prefix requires enable_return_routed_experts or "
@@ -49,6 +56,7 @@ class AuxOutputConfig:
         `ignored_factors` if it does not affect the computation graph.
         """
         ignored_factors = {
+            "enable_return_hidden_states",
             "max_bytes",
             "object_key_prefix",
         }

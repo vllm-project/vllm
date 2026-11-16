@@ -51,3 +51,17 @@ class TestReadAuxRows:
         store, keys = self._store([_rows(0, 4)])
         with pytest.raises(BlockObjectStoreError, match="'s/gone' is missing"):
             read_aux_rows(store, keys + ["s/gone"], "routed_experts", timeout_s=0.05)
+
+    def test_reads_a_field_from_the_stages_that_hold_it(self):
+        _, store = fake_store()
+        hidden = np.arange(8, dtype=np.float32).reshape(4, 2)
+        store.put_batch(
+            ["s/0/pp0", "s/0/pp1"],
+            [
+                save({"routed_experts": _rows(0, 4)}),
+                save({"routed_experts": _rows(0, 4), "hidden_states": hidden}),
+            ],
+        )
+        rows = read_aux_rows(store, ["s/0"], "hidden_states", 2)
+        np.testing.assert_array_equal(rows, hidden)
+        assert read_aux_rows(store, ["s/0"], "routed_experts", 2).shape == (4, 4, 3)

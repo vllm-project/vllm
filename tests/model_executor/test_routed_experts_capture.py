@@ -806,7 +806,9 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
 
     config = SimpleNamespace(
         aux_output_config=SimpleNamespace(
-            enable_return_routed_experts=True, enable_return_indexer_topk=False
+            enable_return_routed_experts=True,
+            enable_return_indexer_topk=False,
+            enable_return_hidden_states=False,
         ),
         kv_transfer_config=None,
         max_concurrent_batches=2,
@@ -859,6 +861,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
             max_bytes=None,
             enable_return_routed_experts=True,
             enable_return_indexer_topk=False,
+            enable_return_hidden_states=False,
             object_key_prefix=None,
         ),
         kv_transfer_config=None,

@@ -89,7 +89,8 @@ def read_aux_rows(
     """Concatenate `field` of the objects `keys`; wait up to `timeout_s` in
     total for objects that are still being written. With pipeline
     parallelism each key names one object per stage, whose layers are
-    concatenated in stage order."""
+    concatenated in stage order; a field that only some stages hold, such as
+    the hidden states of the last stage, is read from those."""
     deadline = time.monotonic() + timeout_s
     stages = []
     for name in aux_object_names(keys, pipeline_parallel_size):
@@ -99,9 +100,16 @@ def read_aux_rows(
                     f"auxiliary-output object {name!r} is missing after {timeout_s}s"
                 )
             time.sleep(0.05)
-        stages.append(load(data)[field])
+        stages.append(load(data).get(field))
     parts = [
-        np.concatenate(stages[start : start + pipeline_parallel_size], axis=1)
+        np.concatenate(
+            [
+                rows
+                for rows in stages[start : start + pipeline_parallel_size]
+                if rows is not None
+            ],
+            axis=1,
+        )
         for start in range(0, len(stages), pipeline_parallel_size)
     ]
     return np.concatenate(parts) if parts else np.empty(0)
