@@ -137,7 +137,7 @@ fn decode_token<T: Tokenizer + ?Sized>(
     token_id: u32,
 ) -> vllm_tokenizer::Result<String> {
     tokenizer.map_or(Ok(String::new()), |tokenizer| {
-        tokenizer.decode_token(token_id, false)
+        tokenizer.decode_token(token_id)
     })
 }
 
