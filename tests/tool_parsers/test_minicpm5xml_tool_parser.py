@@ -704,8 +704,7 @@ def test_extract_tool_calls_streaming_single(parser: ToolParser) -> None:
         _random_chunks(text, 1, 4),
         request,
     )
-    assert "Intro before." in reconstructor.other_content
-    assert "Outro after." in reconstructor.other_content
+    assert reconstructor.other_content == "Intro before.\n\nOutro after.\n"
     assert len(reconstructor.tool_calls) == 1
     assert reconstructor.tool_calls[0].function.name == "get_weather"
     assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
@@ -731,15 +730,144 @@ def test_extract_tool_calls_streaming_multiple(parser: ToolParser) -> None:
         _random_chunks(text, 1, 5),
         request,
     )
-    assert "Head" in reconstructor.other_content
-    assert "TXT" in reconstructor.other_content
-    assert "Tail" in reconstructor.other_content
+    assert reconstructor.other_content == "Head\n\nTXT\n\nTail\n"
     assert len(reconstructor.tool_calls) == 2
     assert json.loads(reconstructor.tool_calls[0].function.arguments)["city"] == "北京"
     assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
         "nums": [7, 8, 9],
         "exact": False,
     }
+
+
+@pytest.mark.parametrize("split_idx", range(1, len("<function")))
+def test_extract_tool_calls_streaming_split_function_tag(
+    parser: ToolParser, split_idx: int
+) -> None:
+    request = make_request(make_tools_weather())
+    tag = '<function name="get_weather"><param name="city">Paris</param></function>'
+    for prefix, expected_content in [
+        ("Intro before.\n", "Intro before.\n\nOutro."),
+        ("", "\nOutro."),
+    ]:
+        full = f"{prefix}{tag}\nOutro."
+        cut = len(prefix) + split_idx
+        chunks = [full[:cut], full[cut:]]
+        reconstructor = run_tool_extraction_streaming(
+            parser,
+            chunks,
+            request,
+        )
+        assert reconstructor.other_content == expected_content
+        assert len(reconstructor.tool_calls) == 1
+        assert reconstructor.tool_calls[0].function.name == "get_weather"
+        assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+            "city": "Paris"
+        }
+
+
+def test_extract_tool_calls_streaming_single_delta_prose_and_multi_block(
+    parser: ToolParser,
+) -> None:
+    tools = make_tools_weather() + make_tools_sum()
+    request = make_request(tools)
+
+    single_prose_and_call = (
+        "Intro before.\n"
+        '<function name="get_weather"><param name="city">Paris</param></function>\n'
+        "Outro."
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [single_prose_and_call],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "Intro before.\n\nOutro."
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Paris"
+    }
+
+    multi_block = (
+        "Head\n"
+        '<function name="get_weather"><param name="city">北京</param></function>\n'
+        "TXT\n"
+        '<function name="sum_values"><param name="nums">[7,8,9]</param>'
+        '<param name="exact">false</param></function>\n'
+        "Tail\n"
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [multi_block],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "Head\n\nTXT\n\nTail\n"
+    assert len(reconstructor.tool_calls) == 2
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "北京"
+    }
+    assert reconstructor.tool_calls[1].function.name == "sum_values"
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "nums": [7, 8, 9],
+        "exact": False,
+    }
+
+    bare_multi_block = (
+        '<function name="get_weather"><param name="city">Paris</param></function>\n'
+        '<function name="sum_values"><param name="nums">[1, 2]</param></function>'
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        [bare_multi_block],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "\n"
+    assert [tc.function.name for tc in reconstructor.tool_calls] == [
+        "get_weather",
+        "sum_values",
+    ]
+    assert [json.loads(tc.function.arguments) for tc in reconstructor.tool_calls] == [
+        {"city": "Paris"},
+        {"nums": [1, 2]},
+    ]
+
+
+def test_extract_tool_calls_streaming_partial_then_multi_block_with_trailing_split_tag(
+    parser: ToolParser,
+) -> None:
+    tools = make_tools_weather() + make_tools_sum()
+    request = make_request(tools)
+    chunks = [
+        '<function name="get_weather"><param name="city">Par',
+        (
+            "is</param></function>\n"
+            '<function name="sum_values"><param name="nums">[1, 2]</param></function>\n'
+            "Mid <fun"
+        ),
+        'ction name="get_weather"><param name="city">NYC</param></function>\nEnd.',
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        chunks,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert reconstructor.other_content == "\n\nMid \nEnd."
+    assert len(reconstructor.tool_calls) == 3
+    assert [tc.function.name for tc in reconstructor.tool_calls] == [
+        "get_weather",
+        "sum_values",
+        "get_weather",
+    ]
+    assert [json.loads(tc.function.arguments) for tc in reconstructor.tool_calls] == [
+        {"city": "Paris"},
+        {"nums": [1, 2]},
+        {"city": "NYC"},
+    ]
 
 
 def make_tools_write() -> list[ChatCompletionToolsParam]:
@@ -785,7 +913,6 @@ class TestParameterWhitespace:
             parser,
             chunks,
             request,
-            assert_one_tool_per_delta=False,
         )
 
         assert len(reconstructor.tool_calls) == 1

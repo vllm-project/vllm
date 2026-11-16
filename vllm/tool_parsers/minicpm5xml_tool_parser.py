@@ -616,6 +616,7 @@ class MiniCPM5XMLToolParser(ToolParser):
             self._parameter_types_cache.for_tools(request.tools),
         )
         if parsed is None:
+            self.current_tool_name_sent = False
             return DeltaMessage(content=block)
 
         args_json = json.dumps(parsed["parameters"], ensure_ascii=False)
@@ -717,73 +718,60 @@ class MiniCPM5XMLToolParser(ToolParser):
             if not previous_text:
                 self._reset_stream_state()
 
-            if self.tool_call_start_token not in current_text:
-                if self._processed_len < len(current_text):
-                    content = current_text[self._processed_len :]
-                    self._processed_len = len(current_text)
-                    return DeltaMessage(content=content) if content else None
-                return None
+            content_parts: list[str] = []
+            tool_calls: list[DeltaToolCall] = []
 
-            for match in _FUNC_BLOCK_REGEX.finditer(current_text):
-                if match.end() <= self._processed_len:
-                    continue
+            def _collect(delta: DeltaMessage | None) -> None:
+                if delta is None:
+                    return
+                if delta.content:
+                    content_parts.append(delta.content)
+                if delta.tool_calls:
+                    tool_calls.extend(delta.tool_calls)
 
+            for match in _FUNC_BLOCK_REGEX.finditer(current_text, self._processed_len):
                 if match.start() > self._processed_len:
-                    gap = current_text[self._processed_len : match.start()]
-                    self._processed_len = match.start()
-                    return DeltaMessage(content=gap) if gap else None
-
-                block = match.group(0)
-                delta = self._process_complete_block_streaming(block, request)
+                    content_parts.append(
+                        current_text[self._processed_len : match.start()]
+                    )
+                _collect(
+                    self._process_complete_block_streaming(match.group(0), request)
+                )
                 self._processed_len = match.end()
-                if delta is not None:
-                    return delta
 
             remainder = current_text[self._processed_len :]
-            if not remainder:
-                if (
-                    not delta_text
-                    and self.current_tool_id >= 0
-                    and not self.current_tool_name_sent
-                ):
-                    return DeltaMessage(content="")
-                return None
-
-            func_idx = remainder.find(self.tool_call_start_token)
-            if func_idx > 0:
-                gap = remainder[:func_idx]
-                self._processed_len += func_idx
-                return DeltaMessage(content=gap)
-
-            if func_idx == -1:
-                overlap = partial_tag_overlap(remainder, self.tool_call_start_token)
-                if overlap:
-                    return None
-                self._processed_len = len(current_text)
-                return DeltaMessage(content=remainder) if remainder else None
-
-            partial_block = remainder[func_idx:]
-            if self.tool_call_end_token in partial_block:
-                end_idx = partial_block.rfind(self.tool_call_end_token)
-                complete_block = partial_block[
-                    : end_idx + len(self.tool_call_end_token)
-                ]
-                delta = self._process_complete_block_streaming(complete_block, request)
-                self._processed_len += func_idx + len(complete_block)
-                if delta is not None:
-                    return delta
-                partial_block = partial_block[end_idx + len(self.tool_call_end_token) :]
-                if not partial_block.strip():
-                    return None
-                func_idx = partial_block.find(self.tool_call_start_token)
+            if remainder:
+                func_idx = remainder.find(self.tool_call_start_token)
                 if func_idx == -1:
-                    self._processed_len = len(current_text)
-                    if partial_block:
-                        return DeltaMessage(content=partial_block)
-                    return None
-                partial_block = partial_block[func_idx:]
+                    overlap = partial_tag_overlap(remainder, self.tool_call_start_token)
+                    safe_len = len(remainder) - overlap
+                    if safe_len > 0:
+                        content_parts.append(remainder[:safe_len])
+                        self._processed_len += safe_len
+                else:
+                    if func_idx > 0:
+                        content_parts.append(remainder[:func_idx])
+                        self._processed_len += func_idx
+                    _collect(
+                        self._process_partial_block_streaming(
+                            remainder[func_idx:], request
+                        )
+                    )
 
-            return self._process_partial_block_streaming(partial_block, request)
+            if content_parts or tool_calls:
+                return DeltaMessage(
+                    content="".join(content_parts) or None,
+                    tool_calls=tool_calls,
+                )
+
+            if (
+                not remainder
+                and not delta_text
+                and self.current_tool_id >= 0
+                and not self.current_tool_name_sent
+            ):
+                return DeltaMessage(content="")
+            return None
         except Exception:
             logger.exception(
                 "Error in MiniCPM5XMLToolParser.extract_tool_calls_streaming"
