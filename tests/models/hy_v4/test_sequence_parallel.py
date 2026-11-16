@@ -13,15 +13,25 @@ from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 
 def _check_ihc_rows(worker, min_tokens):
     from vllm.distributed import get_tensor_model_parallel_world_size
+    from vllm.forward_context import get_forward_context
+    from vllm.model_executor.layers.attention.sparse_mla_attention import (
+        SparseMLACommonMetadata,
+    )
 
     model = worker.model_runner.model.model
     world = get_tensor_model_parallel_world_size()
     worker.ihc_token_rows = []
     current_rows = 0
+    shardq_active = False
 
     def begin_layer(module, args):
-        nonlocal current_rows
+        nonlocal current_rows, shardq_active
         current_rows = args[0].shape[0]
+        metadata = get_forward_context().attn_metadata
+        assert isinstance(metadata, dict)
+        layer_metadata = metadata[module.self_attn.mla_attn.layer_name]
+        assert isinstance(layer_metadata, SparseMLACommonMetadata)
+        shardq_active = layer_metadata.shardq is not None
 
     def check_rows(module, args):
         expected = (
@@ -35,7 +45,7 @@ def _check_ihc_rows(worker, min_tokens):
             expected,
             args[0].shape[0],
         )
-        worker.ihc_token_rows.append((current_rows, expected))
+        worker.ihc_token_rows.append((current_rows, expected, shardq_active))
 
     for layer in model.layers:
         layer.register_forward_pre_hook(begin_layer)
@@ -47,7 +57,7 @@ def _check_ihc_rows(worker, min_tokens):
 def test_ihc_shards_rows_and_preserves_generation(
     vllm_runner, tmp_path, monkeypatch, enforce_eager
 ):
-    """Keep iHC rows local across odd chunks, shared indexers and replay."""
+    """Keep iHC rows local with ShardQ, odd chunks, shared indexers and replay."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = HYV4Config(
         vocab_size=1024,
@@ -62,6 +72,7 @@ def test_ihc_shards_rows_and_preserves_generation(
         n_shared_experts=1,
         num_experts_per_tok=2,
         index_n_heads=32,
+        index_topk=512,
         indexer_types=["full", "shared"],
         layer_types=["deepseek_sparse_attention"] * 2,
         max_position_embeddings=1024,
@@ -109,8 +120,9 @@ def test_ihc_shards_rows_and_preserves_generation(
                     lambda worker: worker.ihc_token_rows
                 )
                 assert all(
-                    any(full > local for full, local in rows) for rows in observed
-                )
+                    any(full > local and shardq for full, local, shardq in rows)
+                    for rows in observed
+                ), "iHC SP and attention ShardQ did not run together"
     check_logprobs_close(
         outputs_0_lst=[(list(r.token_ids), r.text, r.logprobs) for r in outputs[0]],
         outputs_1_lst=[(list(r.token_ids), r.text, r.logprobs) for r in outputs[1]],
