@@ -23,6 +23,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.request import KEEP_LAST_OUTPUT_TOKEN
 
 from ....utils import ROCM_ENGINE_KWARGS, create_new_process_for_each_test
 
@@ -230,7 +231,11 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
     # Lazy import to avoid CUDA-reinitialization error
     from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        extra_args={KEEP_LAST_OUTPUT_TOKEN: True},
+    )
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
     async def input_stream(audio_buffer):
@@ -264,9 +269,7 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
             sampling_params=sampling_params,
             request_id=request_id,
         ):
-            tokens = resp.outputs[0].token_ids[-1:]
-            output_tokens.extend(tokens)
-            await buffer.append_tokens(tokens)
+            output_tokens.extend(resp.outputs[0].token_ids[-1:])
 
         output_tokens_list.append(output_tokens)
 
@@ -305,12 +308,11 @@ async def test_voxtral_realtime_buffer_stops_at_max_model_len(tokenizer):
     )
     await buffer.append_audio(audio_enc.audios[0].audio_array)
     await buffer.append_audio(None)
-    # Unlimited feedback tokens so only the length cap can stop the stream.
-    await buffer.append_tokens([0] * max_model_len)
 
     n_tokens = 0
     async for prompt in buffer.get_input_stream():
-        n_tokens += len(prompt["prompt_token_ids"])
+        # Each tokenless chunk advances by the token kept from the last one.
+        n_tokens += len(prompt["prompt_token_ids"]) or 1
 
     assert len(audio_enc.tokens) < n_tokens < max_model_len
 
@@ -324,7 +326,11 @@ async def test_voxtral_realtime_generator_max_model_len(
     from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 
     max_model_len = async_engine.model_config.max_model_len
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        extra_args={KEEP_LAST_OUTPUT_TOKEN: True},
+    )
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
     async def input_stream(audio_buffer):
@@ -355,9 +361,7 @@ async def test_voxtral_realtime_generator_max_model_len(
         sampling_params=sampling_params,
         request_id="session-max-len",
     ):
-        tokens = resp.outputs[0].token_ids[-1:]
-        output_tokens.extend(tokens)
-        await buffer.append_tokens(tokens)
+        output_tokens.extend(resp.outputs[0].token_ids[-1:])
 
     assert resp.finished
     assert 0 < len(output_tokens) < max_model_len

@@ -55,7 +55,9 @@ def test_realtime_generation_preserves_watermarking(monkeypatch):
     connection = object.__new__(RealtimeConnection)
     connection.connection_id = "test"
     connection.serving = SimpleNamespace(
-        model_cls=SimpleNamespace(realtime_max_tokens=1),
+        model_cls=SimpleNamespace(
+            realtime_max_tokens=1, realtime_keep_last_output_token=False
+        ),
         engine_client=EngineClient(),
     )
     connection.audio_queue = asyncio.Queue()

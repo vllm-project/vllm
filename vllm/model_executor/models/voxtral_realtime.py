@@ -3,7 +3,7 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Iterator, Mapping
 
 import numpy as np
 import torch
@@ -158,11 +158,9 @@ class VoxtralRealtimeBuffer:
         # None signals the end
         self._audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self._leftover: np.ndarray | None = None
-        self._token_queue: asyncio.Queue[int] = asyncio.Queue()
+        self._prompt_tokens = prompt_tokens
 
         self._initial_end = len(prompt_tokens) * self._config.raw_audio_length_per_tok
-        for token in prompt_tokens:
-            self._token_queue.put_nowait(token)
 
     def _generate_frame_size_and_num_tokens(self) -> Iterator[tuple[int, int]]:
         streaming_step_size = self._ms_to_samples(1000 / self._config.frame_rate)
@@ -186,13 +184,12 @@ class VoxtralRealtimeBuffer:
     async def append_audio(self, audio_array: np.ndarray | None) -> None:
         await self._audio_queue.put(audio_array)
 
-    async def append_tokens(self, tokens: Iterable[int]) -> None:
-        for token in tokens:
-            await self._token_queue.put(token)
-
     async def get_input_stream(self) -> AsyncGenerator[TokensPrompt]:
         n_tokens = 0
         for frame_size, num_tokens in self._generate_frame_size_and_num_tokens():
+            # Later chunks carry only audio: each continues from the token
+            # sampled for the previous one.
+            next_tokens = self._prompt_tokens if n_tokens == 0 else []
             n_tokens += num_tokens
             if self._max_model_len is not None and n_tokens >= self._max_model_len:
                 logger.warning(
@@ -200,8 +197,6 @@ class VoxtralRealtimeBuffer:
                     self._max_model_len,
                 )
                 return
-
-            next_tokens = [await self._token_queue.get() for _ in range(num_tokens)]
 
             audio_arrays: list[np.ndarray] = (
                 [self._leftover] if self._leftover is not None else []
@@ -239,6 +234,7 @@ class VoxtralRealtimeBuffer:
 @support_torch_compile
 class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
+    realtime_keep_last_output_token = True
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
     skip_warmup_audio_preprocessing = True
@@ -300,22 +296,13 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             await buffer.append_audio(right_pad.audio_array)
             await buffer.append_audio(None)  # signal end
 
-        # Feed output tokens back into the buffer. Idle waits are normal here;
-        # request cleanup still cancels this task through the finally block.
-        async def feed_tokens():
-            while True:
-                all_outputs = await input_stream.get()
-                await buffer.append_tokens(all_outputs[-1:])
-
         audio_task = asyncio.create_task(feed_audio())
-        token_task = asyncio.create_task(feed_tokens())
 
         try:
             async for prompt in buffer.get_input_stream():
                 yield prompt
         finally:
             audio_task.cancel()
-            token_task.cancel()
 
     @property
     def audio_config(self):

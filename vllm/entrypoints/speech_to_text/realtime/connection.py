@@ -18,6 +18,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.v1.request import KEEP_LAST_OUTPUT_TOKEN
 
 from .protocol import (
     ErrorEvent,
@@ -202,7 +203,8 @@ class RealtimeConnection:
         2. Passes the streaming input generator to engine.generate()
         3. Streams transcription.delta events as text is generated
         4. Sends final transcription.done event with usage stats
-        5. Feeds generated token IDs back to input_stream for next iteration
+        5. Feeds generated token IDs back to input_stream for next iteration,
+           unless the model keeps them in the engine
         6. Cleans up the audio queue
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
@@ -216,11 +218,17 @@ class RealtimeConnection:
             # Create sampling params
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+            keep_last_output_token = (
+                self.serving.model_cls.realtime_keep_last_output_token
+            )
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
+                extra_args={KEEP_LAST_OUTPUT_TOKEN: True}
+                if keep_last_output_token
+                else None,
             )
 
             # Pass the streaming input generator to the engine
@@ -241,8 +249,9 @@ class RealtimeConnection:
                     delta = output.outputs[0].text
                     full_text += delta
 
-                    # append output to input
-                    input_stream.put_nowait(list(output.outputs[0].token_ids))
+                    if not keep_last_output_token:
+                        # append output to input
+                        input_stream.put_nowait(list(output.outputs[0].token_ids))
                     await self.send(TranscriptionDelta(delta=delta))
 
                     completion_tokens_len += len(output.outputs[0].token_ids)

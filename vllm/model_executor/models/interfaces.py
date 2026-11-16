@@ -1308,6 +1308,11 @@ class SupportsRealtime(Protocol):
     """Maximum tokens to generate per streaming audio segment.
     Override in subclasses based on the model's expected output length."""
 
+    realtime_keep_last_output_token: ClassVar[bool] = False
+    """Whether each audio segment continues from the last token sampled for the
+    previous one (see `KEEP_LAST_OUTPUT_TOKEN`). If so, output tokens are not
+    fed back through `input_stream`."""
+
     @classmethod
     def buffer_realtime_audio(
         cls,
