@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -40,7 +41,7 @@ def _make_offline_processor(monkeypatch: pytest.MonkeyPatch) -> PoolingIOProcess
     proc.renderer.default_cmpl_tok_params = TokenizeParams(max_total_tokens=None)
     proc.renderer.tokenizer = MagicMock()
     proc.chat_template = "engine_jinja"
-    proc.chat_template_content_format = "string"
+    cast(Any, proc).chat_template_content_format = "string"
     proc.trust_request_chat_template = True
     proc.template_kwargs = None
     proc.tool_dicts = None

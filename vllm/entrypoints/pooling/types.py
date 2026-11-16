@@ -97,7 +97,6 @@ ChatType: TypeAlias = list[ChatCompletionMessageParam]
 PoolingInput: TypeAlias = PromptType | ChatType
 
 
-@dataclass(kw_only=True)
 @dataclass(kw_only=True, slots=True)
 class ChunkedEmbeddingMetadata:
     prompt_index: int
@@ -150,8 +149,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     late_interaction_doc_keys: list[str] | None = None
 
 
-@dataclass(kw_only=True)
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
