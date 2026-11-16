@@ -371,7 +371,7 @@ class LlavaNextVideoForConditionalGeneration(
             )
 
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+            self.language_model.model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_video_input(
@@ -467,7 +467,7 @@ class LlavaNextVideoForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model(
+        hidden_states = self.language_model.model(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
