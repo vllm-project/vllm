@@ -236,13 +236,23 @@ Full tensors retain TP slice-send/all-gather. A field marked
 travels directly to the matching TP lane. Adjacent stages must use the same
 per-field layouts, TP ordering and padded token count. The schema does not
 perform a model's SP collectives or enable SP+PP for an unsupported model.
+At TP=1, SP fields use full-tensor receive padding rules.
 
 MRV2 shares per-field views across profiling, capture and execution. CUDA graph
 replay preserves each output field's captured shape and persistent addresses.
-SP-sharded bindings use NCCL when `VLLM_PP_TRANSPORT=auto`; forcing
-`copy_engine` is unsupported. SP bindings with ubatching/DBO are also unsupported.
+Transport selection is independent of the schema. Under `VLLM_PP_TRANSPORT=auto`,
+the copy-engine backend checks its own platform and parallelism requirements;
+if unavailable, tensor-dict communication uses the device process group
+(NCCL on CUDA, HCCL on Ascend). Forcing `copy_engine` reports unsupported
+configurations from that backend. SP bindings with ubatching/DBO are unsupported.
 Models without a schema retain full-tensor behavior, including arbitrary legacy
 intermediate keys and dtype-converting receive copies.
+
+Downstream workers that override PP communication must forward the schema's
+`send_all_gather_tensors` and `recv_all_gather_tensors` to the corresponding
+`GroupCoordinator` tensor-dict calls along with the TP group. Those calls use
+the platform's device process group; `VLLM_PP_TRANSPORT=nccl` bypasses copy-engine
+selection without changing an Ascend process group's HCCL backend.
 
 The NVIDIA DeepSeek V4 implementation declares its multi-stream hidden state
 with shape `(hc_mult, hidden_size)`. It retains its existing full-tensor PP

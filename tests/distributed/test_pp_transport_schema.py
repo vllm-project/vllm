@@ -170,8 +170,16 @@ def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field, 
     assert captures[1][sharded_field].shape == (1, *shape)
 
 
-def test_receive_preserves_padding_and_legacy_dtype_conversion():
-    transport = PPTransportSchema()
+@pytest.mark.parametrize("sequence_parallel", [None, False, True])
+def test_receive_preserves_padding_and_legacy_dtype_conversion(sequence_parallel):
+    specs = (
+        None
+        if sequence_parallel is None
+        else {
+            "residual": PPTransportTensorSpec((4,), sequence_parallel=sequence_parallel)
+        }
+    )
+    transport = PPTransportSchema(specs, tp_size=1)
     buffers = IntermediateTensors({"residual": torch.full((8, 4), -1.0)})
     received = IntermediateTensors(
         {"residual": torch.full((3, 4), 2.0, dtype=torch.float64)}
