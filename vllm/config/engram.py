@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from pydantic import Field, model_validator
-from typing_extensions import Self
+from pydantic import model_validator
 
-import vllm.envs as envs
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 if TYPE_CHECKING:
-    from vllm.config.load import LoadConfig
     from vllm.config.model import ModelConfig
     from vllm.config.parallel import ParallelConfig
 
@@ -21,10 +18,6 @@ _NGRAM_LAYER_FIELDS = {
     "Qwen4ExpForCausalLM": "ple_layer_ids",
     "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
 }
-
-
-def _default_cpu_offload() -> bool:
-    return envs.VLLM_PLE_CPU_OFFLOAD
 
 
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
@@ -41,31 +34,63 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
 class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
 
-    cpu_offload: bool = Field(default_factory=_default_cpu_offload)
-    """Store embedding weights in pinned CPU memory for UVA lookup.
-    Defaults to VLLM_PLE_CPU_OFFLOAD, which is enabled by default. An explicit
-    value takes precedence over the environment variable."""
+    cpu_offload: bool = True
+    """Store embedding weights in pinned CPU memory for UVA lookup."""
+
+    disk_offload: bool = False
+    """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
+    rows on the host instead of allocating the table. Takes precedence over
+    cpu_offload."""
 
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
 
-    dp_shared_memory: bool = False
+    dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
-    memory without per-step Engram DP collectives. Requires sufficient
-    /dev/shm capacity and a shared IPC namespace."""
+    memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
+    by FABRIC handle where supported, else /dev/shm (which then needs capacity
+    and a shared IPC namespace). Defaults to enabled whenever the other settings
+    allow it, falling back to per-replica tables when DP replicas are not
+    co-located on one node or the host cannot hold them."""
+
+    use_thp: bool = False
+    """Back private CPU-offloaded tables with transparent huge pages (best
+    effort, falls back to ordinary pinned pages). Prefaulting the tables at
+    startup takes longer. Requires cpu_offload without dp_shared_memory.
+    Always on for private tables on ROCm."""
+
+    peer_group_size: int = 0
+    """Split each GPU table's rows over this many GPUs of several engines in one
+    NVLink domain (the sum of their GPU counts); lookups read rows from the
+    owning GPU's HBM. Every engine passes the same value and `peer_group_store`.
+    Requires DeepSeek V4.1, CUDA FABRIC handles (an IMEX channel), tables in HBM,
+    TP=1 and PP=1."""
+
+    peer_group_store: str | None = None
+    """File through which a peer group's engines meet once at startup. Required
+    with `peer_group_size`: the same path for every engine, reachable by all of
+    them and fresh per launch (e.g. under a per-job directory)."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
+        if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
+            raise ValueError(
+                "use_thp requires cpu_offload=True and dp_shared_memory=False"
+            )
+        if (self.peer_group_size > 0) != (self.peer_group_store is not None):
+            raise ValueError(
+                "peer_group_size and peer_group_store must be set together"
+            )
+        if self.peer_group_size and self.cpu_offload:
+            raise ValueError("peer_group_size requires cpu_offload=False")
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
-        from vllm.platforms import current_platform
-
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -74,12 +99,30 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.is_cuda()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and CUDA."
+                "embeddings and non-empty n-gram layer ids."
+            )
+        if self.disk_offload:
+            from vllm.platforms import current_platform
+
+            if field != "ple_layer_ids" or not current_platform.is_cuda():
+                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+        # TODO: split Qwen4Exp's GPU tables over a peer group too; Engram models
+        # on NVL72 should all use one.
+        if self.peer_group_size and field != "engram_layer_ids":
+            raise ValueError("peer_group_size requires a DeepSeek V4.1 model")
+
+    def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
+        """Share host tables by default wherever the configuration permits."""
+        if self.dp_shared_memory is None:
+            self.dp_shared_memory = (
+                self.cpu_offload
+                and not self.use_thp
+                and parallel_config.data_parallel_size > 1
+                and not parallel_config.enable_elastic_ep
             )
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
@@ -97,18 +140,26 @@ class EngramConfig:
             raise ValueError(
                 "Engram embedding_across_dp is not supported with elastic EP yet."
             )
+        if self.disk_offload and parallel_config.enable_elastic_ep:
+            raise ValueError("disk_offload is not supported with elastic EP.")
+        if self.peer_group_size:
+            from vllm.platforms import current_platform
 
-    def verify_load_config(self, load_config: "LoadConfig") -> None:
-        """Shared tables require a loader that invokes parameter weight callbacks."""
-        if self.dp_shared_memory and load_config.load_format not in (
-            "auto",
-            "safetensors",
-            "pt",
-        ):
-            raise ValueError(
-                "dp_shared_memory requires load_format 'auto', "
-                f"'safetensors' or 'pt'; got {load_config.load_format!r}."
-            )
+            if (
+                not current_platform.is_cuda()
+                or parallel_config.tensor_parallel_size > 1
+                # Every GPU of the group must build the same tables.
+                or parallel_config.pipeline_parallel_size > 1
+                or parallel_config.enable_elastic_ep
+            ):
+                raise ValueError(
+                    "peer_group_size requires CUDA, TP=1, PP=1 and no elastic EP"
+                )
+            if self.peer_group_size < parallel_config.data_parallel_size:
+                raise ValueError(
+                    f"An Engram peer group of {self.peer_group_size} GPUs cannot "
+                    f"hold an engine of {parallel_config.data_parallel_size}"
+                )
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
@@ -117,6 +168,8 @@ class EngramConfig:
             size *= parallel_config.data_parallel_size
         return size
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Hash settings that affect embedding execution and graph structure."""
-        return hash_factors(get_hash_factors(self, set()))
+        # The store only matters at startup; a per-launch path must not
+        # invalidate the compile cache.
+        return get_compile_factors(self, {"peer_group_store"})

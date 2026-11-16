@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script contains:
+"""This script contains:
 1. test lora with speculative decoding for batch inference
 """
 
@@ -19,7 +18,7 @@ from ..utils import assert_request_outputs_match
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
-LORA_TEST_PROMPT_MAP["premjatin/qwen-linear-algebra-coder"] = """
+LORA_TEST_PROMPT_MAP["vllm-project/qwen-linear-algebra-coder"] = """
 ### INSTRUCTION:
 You are an AI assistant that generates Python code to solve linear
 algebra problems.
@@ -46,7 +45,7 @@ SEED = 42
             "eagle3",
             "Qwen/Qwen3-1.7B",
             "AngelSlim/Qwen3-1.7B_eagle3",
-            "premjatin/qwen-linear-algebra-coder",
+            "vllm-project/qwen-linear-algebra-coder",
             1,
         )
     ],
@@ -59,8 +58,7 @@ def test_batch_inference_correctness(
     model_setup: tuple[str, str, str, str, int],
     vllm_runner,
 ):
-    """
-    Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
+    """Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
     Should be the same and no failure when doing batch inference.
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """

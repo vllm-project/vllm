@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import LlamaConfig, TokenizersBackend
 
 from vllm import SamplingParams
+from vllm.config import ModelConfig
+from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.tokenizers.hf import get_cached_tokenizer
+from vllm.utils.diffusion import validate_diffusion_sampling_params
+from vllm.v1.engine.input_processor import InputProcessor
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20
     logits_processors: list | None = None
+    return_sampling_mask: bool = False
 
     def get_vocab_size(self) -> int:
         return 1024
@@ -51,6 +62,225 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"min_p": 0.1},
+        {"logit_bias": {0: 1.0}},
+        {"min_p": 0.05, "logit_bias": {1: -1.0}},
+    ],
+)
+def test_spec_decode_accepts_min_p_and_logit_bias(kwargs: dict):
+    """min_p and logit_bias are applied to target logits before rejection
+    sampling, so a speculative config must not reject the request."""
+    params = SamplingParams(**kwargs)
+    params.verify(MockModelConfig(), object(), None, None)
+
+
+def test_verify_leaves_logits_processors_to_admission():
+    """verify() is runner-agnostic; LP validation lives in the admission
+    layer, so an unimportable FQCN must not fail verify()."""
+    SamplingParams().verify(
+        MockModelConfig(logits_processors=["no.such:Cls"]), None, None, None
+    )
+
+
+def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
+    model_config = MockModelConfig(is_diffusion=True)
+    params.verify(model_config, None, None, None)
+    validate_diffusion_sampling_params(
+        params,
+        canvas_length=canvas_length,
+        vocab_size=model_config.get_vocab_size(),
+    )
+
+
+def test_diffusion_extra_args_are_validated_without_a_served_canvas():
+    # No --diffusion-config: the canvas is unknown, the ids are still checked
+    # and a read-only request is still normalised.
+    params = SamplingParams(
+        max_tokens=64,
+        extra_args={"diffusion_seed_canvas": [0, 1], "diffusion_read_only": True},
+    )
+    _verify_diffusion(params, canvas_length=None)
+    assert params.ignore_eos is True
+
+    bad = SamplingParams(extra_args={"diffusion_seed_canvas": [0, 10**9]})
+    with pytest.raises(VLLMValidationError, match="ids must be in"):
+        _verify_diffusion(bad, canvas_length=None)
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {},
+        {"diffusion_canvas_length": None},
+        {"diffusion_canvas_length": 4},
+        {"diffusion_canvas_length": 8},
+    ],
+)
+def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
+    async_scheduling, extra_args
+):
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(is_diffusion=True),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=DiffusionConfig(canvas_length=8),
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    params = SamplingParams(extra_args=extra_args)
+    InputProcessor._validate_params(processor, params, ("generate",))
+
+
+@pytest.mark.parametrize(
+    "extra_args, match",
+    [
+        ({"diffusion_seed_canvas": "abc"}, "list of token ids"),
+        ({"diffusion_seed_canvas": [1, 2.5]}, "list of token ids"),
+        ({"diffusion_seed_canvas": [1, True]}, "list of token ids"),
+        ({"diffusion_seed_canvas": [0, 1024]}, r"in \[0, 1024\)"),
+        ({"diffusion_seed_canvas": [0, -1]}, r"in \[0, 1024\)"),
+        ({"diffusion_max_steps": 0}, "positive integer"),
+        ({"diffusion_max_steps": "1"}, "positive integer"),
+        ({"diffusion_max_steps": True}, "positive integer"),
+        ({"diffusion_read_only": "yes"}, "boolean"),
+        ({"diffusion_read_only": 2}, "boolean"),
+        ({"diffusion_pinned": "0,1"}, "list of canvas positions"),
+        ({"diffusion_pinned": [0, True]}, "list of canvas positions"),
+        ({"diffusion_pinned": [0]}, "needs a diffusion_seed_canvas"),
+    ],
+)
+def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
+    with pytest.raises(VLLMValidationError, match=match):
+        _verify_diffusion(SamplingParams(extra_args=extra_args))
+
+
+@pytest.mark.parametrize("flag", [True, 1])
+def test_diffusion_constrained_needs_logprob_token_ids(flag):
+    bad = SamplingParams(extra_args={"diffusion_constrained": flag})
+    with pytest.raises(VLLMValidationError, match="needs logprob_token_ids"):
+        _verify_diffusion(bad)
+
+    ok = SamplingParams(
+        logprob_token_ids=[3, 5], extra_args={"diffusion_constrained": flag}
+    )
+    _verify_diffusion(ok)
+
+    # An unset or false flag needs no ids.
+    _verify_diffusion(SamplingParams(extra_args={"diffusion_constrained": False}))
+    _verify_diffusion(SamplingParams(extra_args={"diffusion_constrained": 0}))
+
+
+@pytest.mark.parametrize("value", ["yes", 2, [1]])
+def test_diffusion_constrained_must_be_a_bool(value):
+    params = SamplingParams(extra_args={"diffusion_constrained": value})
+    with pytest.raises(VLLMValidationError, match="must be a boolean"):
+        _verify_diffusion(params)
+
+
+def test_diffusion_seed_canvas_must_fill_the_canvas():
+    params = SamplingParams(extra_args={"diffusion_seed_canvas": [0] * 7})
+    with pytest.raises(VLLMValidationError, match="exactly 8 ids, got 7"):
+        _verify_diffusion(params, canvas_length=8)
+    # Without the served diffusion config the canvas length is unknown.
+    _verify_diffusion(params)
+
+
+@pytest.mark.parametrize("max_tokens, expected", [(100, 8), (5, 5), (None, 8)])
+@pytest.mark.parametrize("flag", [True, 1])
+def test_diffusion_read_only_ends_after_one_canvas(max_tokens, expected, flag):
+    params = SamplingParams(
+        max_tokens=max_tokens, extra_args={"diffusion_read_only": flag}
+    )
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == expected
+    assert params.ignore_eos
+
+
+@pytest.mark.parametrize(
+    "width, match",
+    [
+        (0, "positive integer"),
+        ("4", "positive integer"),
+        (True, "positive integer"),
+        (9, "no larger"),
+    ],
+)
+def test_diffusion_rejects_bad_canvas_length(width, match):
+    with pytest.raises(VLLMValidationError, match=match):
+        _verify_diffusion(
+            SamplingParams(extra_args={"diffusion_canvas_length": width}),
+            canvas_length=8,
+        )
+
+
+def test_diffusion_canvas_length_sizes_the_seed_and_the_read():
+    params = SamplingParams(
+        max_tokens=100,
+        extra_args={
+            "diffusion_canvas_length": 4,
+            "diffusion_seed_canvas": [1, 2, 3, 4],
+            "diffusion_read_only": True,
+        },
+    )
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == 4
+
+    params = SamplingParams(
+        extra_args={"diffusion_canvas_length": 4, "diffusion_seed_canvas": [0] * 8}
+    )
+    with pytest.raises(VLLMValidationError, match="exactly 4 ids, got 8"):
+        _verify_diffusion(params, canvas_length=8)
+
+
+def test_diffusion_pinned_positions_stay_inside_the_canvas():
+    seed = [0] * 8
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={"diffusion_seed_canvas": seed, "diffusion_pinned": [7, 8]}
+            ),
+            canvas_length=8,
+        )
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={"diffusion_seed_canvas": seed, "diffusion_pinned": [-1]}
+            )
+        )
+    # A narrower request canvas bounds the positions.
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={
+                    "diffusion_canvas_length": 4,
+                    "diffusion_seed_canvas": seed[:4],
+                    "diffusion_pinned": [4],
+                }
+            ),
+            canvas_length=8,
+        )
+
+
+def test_diffusion_accepts_extra_args():
+    params = SamplingParams(
+        extra_args={
+            "diffusion_seed_canvas": list(range(8)),
+            "diffusion_pinned": [0, 1, 7],
+            "diffusion_max_steps": 4,
+            "diffusion_read_only": True,
+        }
+    )
+    _verify_diffusion(params, canvas_length=8)
+
+
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
 def test_extra_args_rejects_nested_integer_overflow(value):
     """Reject extension values before they reach the engine transport."""
@@ -73,67 +303,102 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     assert params.extra_args["first"] is params.extra_args["second"]
 
 
+@pytest.fixture
+def sampler_model_config(tmp_path):
+    LlamaConfig(
+        vocab_size=1024,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        max_position_embeddings=32,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    return ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        dtype="float32",
+    )
+
+
+def _bad_word_tokenizer():
+    tokenizer = Tokenizer(
+        WordLevel({"[UNK]": 0, "bad": 1024, "word": 1}, unk_token="[UNK]")
+    )
+    tokenizer.pre_tokenizer = Whitespace()
+    return get_cached_tokenizer(
+        TokenizersBackend(tokenizer_object=tokenizer, unk_token="[UNK]")
+    )
+
+
 @pytest.mark.parametrize("token_id", [-1, 1024])
-def test_stop_token_ids_reject_model_out_of_vocab_ids(token_id: int):
+def test_stop_token_ids_reject_model_out_of_vocab_ids(token_id, sampler_model_config):
     params = SamplingParams(stop_token_ids=[token_id])
-
     with pytest.raises(VLLMValidationError, match="stop_token_ids"):
-        params.verify(MockModelConfig(), None, None, None)
+        params.verify(sampler_model_config, None, None, None)
 
 
-def test_eos_expansion_rejects_model_out_of_vocab_ids():
+def test_eos_expansion_rejects_model_out_of_vocab_ids(sampler_model_config):
     params = SamplingParams()
     params.update_from_generation_config(
         {"eos_token_id": [1023, 1024]}, eos_token_id=1023
     )
-
     with pytest.raises(VLLMValidationError, match="stop_token_ids"):
-        params.validate_model_token_ids(MockModelConfig())
+        params.validate_model_token_ids(sampler_model_config)
 
 
-def test_allowed_token_ids_use_model_vocab_without_tokenizer():
-    params = SamplingParams(allowed_token_ids=[1024])
-
-    with pytest.raises(VLLMValidationError, match="allowed_token_ids"):
-        params.verify(MockModelConfig(), None, None, None)
-
-
-def test_bad_word_token_ids_use_model_vocab():
-    class Tokenizer:
-        max_token_id = 2047
-
-        @staticmethod
-        def encode(text: str, add_special_tokens: bool = False) -> list[int]:
-            return [1024]
-
+def test_bad_word_token_ids_use_model_vocab(sampler_model_config):
     params = SamplingParams(bad_words=["bad"])
-    params.update_from_tokenizer(Tokenizer())
-
+    params.update_from_tokenizer(_bad_word_tokenizer())
     with pytest.raises(VLLMValidationError, match="bad_words"):
-        params.validate_model_token_ids(MockModelConfig())
+        params.validate_model_token_ids(sampler_model_config)
 
 
 def test_bad_word_total_token_limit_uses_effective_environment(monkeypatch):
     monkeypatch.setenv("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1")
-
-    class Tokenizer:
-        @staticmethod
-        def encode(text: str, add_special_tokens: bool = False) -> list[int]:
-            return [1, 2]
-
-    params = SamplingParams(bad_words=["bad"])
-
+    params = SamplingParams(bad_words=["bad word"])
     with pytest.raises(VLLMValidationError, match="total bad word tokens"):
-        params.update_from_tokenizer(Tokenizer())
+        params.update_from_tokenizer(_bad_word_tokenizer())
 
 
-def test_bad_word_tokenization_accepts_only_prefixed_nonempty_encoding():
-    class Tokenizer:
-        @staticmethod
-        def encode(text: str, add_special_tokens: bool = False) -> list[int]:
-            return [1] if text.startswith(" ") else []
+@pytest.mark.parametrize(
+    ("kwargs", "parameter"),
+    [
+        ({"allowed_token_ids": list(range(1025))}, "allowed_token_ids"),
+        ({"logit_bias": {str(i): 1.0 for i in range(1025)}}, "logit_bias"),
+        ({"stop_token_ids": list(range(129)), "min_tokens": 1}, "stop_token_ids"),
+    ],
+)
+def test_rejects_sampler_inputs_wider_than_fixed_rows(kwargs, parameter):
+    with pytest.raises(VLLMValidationError, match=parameter):
+        SamplingParams.from_optional(**kwargs)
 
-    params = SamplingParams(bad_words=["bad"])
-    params.update_from_tokenizer(Tokenizer())
 
-    assert params.bad_words_token_ids == [[1]]
+def test_rejects_stop_tokens_wider_than_fixed_row_after_eos_merge():
+    params = SamplingParams(stop_token_ids=list(range(128)), min_tokens=1)
+    with pytest.raises(VLLMValidationError, match="stop_token_ids"):
+        params.update_from_generation_config({}, eos_token_id=128)
+
+
+def test_fixed_stop_budget_uses_effective_tokens():
+    params = SamplingParams(stop_token_ids=[7] * 129, min_tokens=1)
+    params.update_from_generation_config({}, eos_token_id=7)
+    assert params.all_stop_token_ids == {7}
+
+
+def test_stop_budget_does_not_limit_requests_without_min_tokens():
+    params = SamplingParams(stop_token_ids=list(range(129)))
+    assert params.all_stop_token_ids == set(range(129))
+
+
+def test_sampler_inputs_at_fixed_limits_retain_values():
+    allowed = list(range(1024))
+    bias = {i: 1.0 for i in allowed}
+    stops = list(range(128))
+    params = SamplingParams(
+        allowed_token_ids=allowed, logit_bias=bias, stop_token_ids=stops, min_tokens=1
+    )
+    assert params.allowed_token_ids == allowed
+    assert params.logit_bias == bias
+    assert params.all_stop_token_ids == set(stops)

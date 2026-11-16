@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use vllm_metrics::METRICS;
 
 use crate::error::{ApiError, invalid_request};
 use crate::state::AppState;
@@ -62,6 +63,7 @@ pub async fn init_weight_transfer_engine(
         )
     })?;
 
+    let _recorder = METRICS.api_server.record_weight_operation("init");
     state
         .engine_core_client()
         .init_weight_transfer_engine(init_info)
@@ -73,10 +75,27 @@ pub async fn init_weight_transfer_engine(
     }))
 }
 
+/// Release the trainer connection without shutting down inference.
+pub async fn shutdown_weight_transfer_engine(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_weight_operation("shutdown");
+    state
+        .engine_core_client()
+        .shutdown_weight_transfer_engine()
+        .await
+        .map_err(|error| utility_call_error("shutdown_weight_transfer_engine", error))?;
+
+    Ok(Json(MessageResponse {
+        message: "Weight transfer shut down",
+    }))
+}
+
 /// Start a weight update transaction.
 pub async fn start_weight_update(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_weight_operation("start");
     state
         .engine_core_client()
         .start_weight_update()
@@ -92,6 +111,7 @@ pub async fn start_weight_update(
 pub async fn start_draft_weight_update(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_weight_operation("start_draft");
     state
         .engine_core_client()
         .start_draft_weight_update()
@@ -122,6 +142,7 @@ pub async fn update_weights(
             )
         })?;
 
+    let _recorder = METRICS.api_server.record_weight_operation("update");
     state
         .engine_core_client()
         .update_weights(update_info)
@@ -142,6 +163,7 @@ pub async fn finish_weight_update(
     let request = body?.map(|Json(request)| request).unwrap_or_default();
 
     let client = state.engine_core_client();
+    let _recorder = METRICS.api_server.record_weight_operation("finish");
     client
         .finish_weight_update()
         .await

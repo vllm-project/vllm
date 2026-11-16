@@ -5,8 +5,8 @@
 Replays dynamically built token sequences at different chunk sizes and
 holdback depths to verify chunk-size invariance and terminal-token hygiene.
 
-Parser discovery is automatic: any ``ParserEngine`` subclass registered in
-``registered_adapters`` that also has a builder in ``trace_builder._BUILDERS``
+Parser discovery is automatic: any `ParserEngine` subclass registered in
+`registered_adapters` that also has a builder in `trace_builder._BUILDERS`
 is picked up with zero manual wiring.
 """
 
@@ -52,8 +52,8 @@ class _ParserInfo(NamedTuple):
 def _discover_parsers() -> list[_ParserInfo]:
     """Discover engine parsers from registered_adapters that have test builders.
 
-    Returns one ``_ParserInfo`` per parser, sorted by config name.
-    Raises ``RuntimeError`` if any registered parser lacks a builder.
+    Returns one `_ParserInfo` per parser, sorted by config name.
+    Raises `RuntimeError` if any registered parser lacks a builder.
     """
     bare_tok = MockTokenizer(vocab={}, tokens=[])
     found: list[_ParserInfo] = []
@@ -70,13 +70,26 @@ def _discover_parsers() -> list[_ParserInfo]:
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
             continue
-        cfg = obj(bare_tok, None).parser_engine_config
+        # Concrete parsers supply parser_engine_config themselves
+        cfg = obj(bare_tok, None).parser_engine_config  # type: ignore[call-arg]
+        if cfg.name == "llama_json":
+            # Llama JSON uses a semicolon-separated collection with no
+            # TOOL_END terminal. Dedicated coverage lives in
+            # test_llama_json.py.
+            continue
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
-        if cfg.name == "inkling":
-            # Inkling opts out of token-id terminal matching and has typed
-            # structural blocks; its replay coverage lives in test_inkling.py.
+        if cfg.name in ("inkling", "plamo3", "minimax_m3", "ripple"):
+            # Inkling uses typed structural blocks. PLaMo, MiniMax M3 and
+            # Ripple markers can span several token IDs. None fits this
+            # TOOL_END-token harness; their direct and delegating coverage lives
+            # in dedicated tests.
+            continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal, so
+            # it does not fit this token-terminal harness; its replay coverage
+            # lives in test_granite.py.
             continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
@@ -301,7 +314,7 @@ class TestParserEngineAdjustRequest:
         tokenizer = make_mock_tokenizer(sample)
         parser = parser_cls(tokenizer, sample.tools)
         request = _test_request()
-        assert request.skip_special_tokens is True
+        assert request.to_sampling_params(1, {}).skip_special_tokens is True
         adjusted = parser.adjust_request(request)
         assert adjusted.skip_special_tokens is False
 
@@ -322,13 +335,24 @@ _TOOL_CALL_SAMPLES = [
 def _tool_suppression_expectations(
     sample, think_end: str, tool_start: str, *, include_tool_block: bool
 ) -> tuple[str, str]:
-    """Expected (reasoning, content) when tool calls are not extracted.
+    reasoning, content = _raw_tool_suppression_expectations(
+        sample, think_end, tool_start, include_tool_block=include_tool_block
+    )
+    if sample.content_lstrip:
+        content = content.lstrip(sample.content_lstrip)
+    return reasoning, content
 
-    With ``include_tool_block=True`` (skip_tool_parsing / reasoning
+
+def _raw_tool_suppression_expectations(
+    sample, think_end: str, tool_start: str, *, include_tool_block: bool
+) -> tuple[str, str]:
+    """Expected (reasoning, content) from the raw token text.
+
+    With `include_tool_block=True` (skip_tool_parsing / reasoning
     adapter first pass), tool terminal text is preserved as content so
     a second-pass parser can see it.
 
-    With ``include_tool_block=False`` (_suppress_tool_calls /
+    With `include_tool_block=False` (_suppress_tool_calls /
     tool_choice='none'), the state machine consumes tool blocks and
     only non-tool content survives.
     """
@@ -369,10 +393,10 @@ def _tool_suppression_expectations(
 class TestToolCallFilteringReplay:
     """Replay with tool calls not extracted, in both filtering modes.
 
-    ``skip_tool_parsing`` (reasoning adapter first pass): tool terminal
+    `skip_tool_parsing` (reasoning adapter first pass): tool terminal
     text is preserved as content for a second-pass tool parser.
 
-    ``suppress_tool_calls`` (tool_choice='none'): tool call blocks are
+    `suppress_tool_calls` (tool_choice='none'): tool call blocks are
     consumed by the state machine and do not leak into content.
     """
 

@@ -21,8 +21,7 @@ from vllm.triton_utils import triton
 
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
-    """
-    Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
+    """Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
 
     This ensures results are sorted by batch size first, then query length,
     then sequence length, rather than alphabetically.
@@ -200,7 +199,7 @@ class MockLayer(AttentionLayerBase):
         self._q_scale_float = float(self._q_scale.item())
         # AttentionImpl for metadata builders to query
         self.impl = impl
-        # KV cache spec for get_kv_cache_spec
+        # KV cache spec for get_kv_cache_config
         self._kv_cache_spec = kv_cache_spec
 
     def get_attn_backend(self):
@@ -208,12 +207,14 @@ class MockLayer(AttentionLayerBase):
         # Return None as this is just a mock layer for benchmarking
         return None
 
-    def get_kv_cache_spec(self):
-        """Get the KV cache spec (required by AttentionLayerBase)."""
-        return self._kv_cache_spec
+    def get_kv_cache_config(self, vllm_config=None):
+        """Get the KV cache config (required by AttentionLayerBase)."""
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        return FullAttentionManager.layer_config(self._kv_cache_spec)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParameterSweep:
     """Configuration for sweeping a backend parameter."""
 
@@ -229,7 +230,7 @@ class ParameterSweep:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelParameterSweep:
     """Configuration for sweeping model configuration parameter(s).
 
@@ -263,7 +264,7 @@ class ModelParameterSweep:
             raise ValueError("param_name must be set if sweep values are not dicts")
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
 
@@ -285,8 +286,10 @@ class BenchmarkConfig:
     torch_profile_iters: int = 3
     warmup_ms: int | None = None
 
-    # "auto" or "fp8"
+    # Any CacheDType: "auto", "fp8", "int8_per_token_head", ...
     kv_cache_dtype: str = "auto"
+    # Model whose config the backend sees (dtype, rotary dims, ...)
+    model: str = "meta-llama/Meta-Llama-3-8B"
 
     # MLA-specific
     prefill_backend: str | None = None
@@ -306,7 +309,7 @@ class BenchmarkConfig:
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkResult:
     """Results from a single benchmark run."""
 
@@ -354,13 +357,13 @@ class ResultsFormatter:
         backends: list[str],
         compare_to_fastest: bool = True,
     ):
-        """
-        Print results as a rich table.
+        """Print results as a rich table.
 
         Args:
             results: List of BenchmarkResult
             backends: List of backend names being compared
             compare_to_fastest: Show percentage comparison to fastest
+
         """
         # Group by batch spec, preserving first-occurrence order
         by_spec = {}
@@ -489,14 +492,14 @@ class ResultsFormatter:
 
 
 def setup_mla_dims(model_name: str = "deepseek-v3") -> dict:
-    """
-    Get MLA dimensions for known models.
+    """Get MLA dimensions for known models.
 
     Args:
         model_name: Model identifier
 
     Returns:
         Dict with MLA dimension configuration
+
     """
     configs = {
         "deepseek-v2": {
@@ -542,8 +545,7 @@ def get_attention_scale(head_dim: int) -> float:
 
 
 def is_mla_backend(backend: str) -> bool:
-    """
-    Check if backend is an MLA backend using the AttentionBackendEnum.
+    """Check if backend is an MLA backend using the AttentionBackendEnum.
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
@@ -551,6 +553,7 @@ def is_mla_backend(backend: str) -> bool:
 
     Returns:
         True if the backend is an MLA backend, False otherwise
+
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

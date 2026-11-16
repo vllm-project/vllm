@@ -5,6 +5,7 @@ import io
 from unittest.mock import Mock
 
 # imports for structured outputs tests
+import httpx
 import openai
 import pybase64
 import pytest
@@ -52,6 +53,34 @@ async def test_out_of_vocab_token_ids():
             )
 
 
+@pytest.mark.asyncio
+async def test_tokenizer_only_gemma_token_does_not_kill_engine():
+    """Gemma's image token has no embedding row in its text-only checkpoint."""
+    model_name = "google/gemma-3-1b-it"
+    server_args = ["--enforce-eager", "--max-model-len", "128", "--max-num-seqs", "1"]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        async with remote_server.get_async_client() as client:
+            valid = await client.completions.create(
+                model=model_name, prompt=[262143], max_tokens=1, temperature=0
+            )
+            assert valid.usage.prompt_tokens == 1
+            assert valid.usage.completion_tokens == 1
+
+            for token_id in (262145, 262144):
+                with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
+                    await client.completions.create(
+                        model=model_name, prompt=[token_id], max_tokens=1, temperature=0
+                    )
+
+            async with httpx.AsyncClient() as health_client:
+                health = await health_client.get(remote_server.url_for("health"))
+                assert health.status_code == 200
+            following = await client.completions.create(
+                model=model_name, prompt="Hello", max_tokens=1, temperature=0
+            )
+            assert following.usage.completion_tokens == 1
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
     "layout", [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr]
@@ -64,6 +93,7 @@ def test_load_prompt_embeds(
     model_config = Mock(spec=ModelConfig)
     model_config.enable_prompt_embeds = True
     model_config.get_hidden_size.return_value = hidden_size
+    model_config.hf_text_config = object()
     model_config.dtype = dtype
 
     # construct arbitrary tensors of various dtypes, layouts, and sizes.

@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MuseGlimmer multimodal model for vLLM.
 
-Native port of the MuseGlimmer text decoder (``MuseGlimmerForCausalLM``). The text
+Native port of the MuseGlimmer text decoder (`MuseGlimmerForCausalLM`). The text
 stack is a Gemma2 derivative with the
 following MuseGlimmer-specific deltas, each of which is handled explicitly here:
 
-  * SiLU-gated MLP (``hidden_activation="silu"``), not Gemma's gelu-tanh.
+  * SiLU-gated MLP (`hidden_activation="silu"`), not Gemma's gelu-tanh.
   * Scaleless RMSNorm on the token embeddings (no sqrt(hidden) scaling).
-  * Per-layer sandwich RMSNorms with a baked ``+1`` weight offset
-    (``x * (1 + w)``), matching Gemma, but with distinct eps for the
-    pre/post norms (``rms_norm_eps`` vs ``post_norm_eps``).
+  * Per-layer sandwich RMSNorms with a baked `+1` weight offset
+    (`x * (1 + w)`), matching Gemma, but with distinct eps for the
+    pre/post norms (`rms_norm_eps` vs `post_norm_eps`).
   * QK-norm (weightless, fp32) applied *before* RoPE, followed by a query
-    pre-scale of ``qk_scale_factor / sqrt(head_dim)``.
+    pre-scale of `qk_scale_factor / sqrt(head_dim)`.
   * A per-head sigmoid attention output gate.
   * iRoPE layout: NoPE layers use full attention, RoPE layers use sliding
-    window attention. RoPE is applied NEOX-style (``is_neox_style=True``):
-    the HF converter (``convert_muse_glimmer_weights_to_hf.py``, 20260806+) permutes
-    q/k into the half-split (NEOX) layout via ``_permute_for_rope`` so they
-    pair with ``rotate_half`` — matching the reference's interleaved rotation
+    window attention. RoPE is applied NEOX-style (`is_neox_style=True`):
+    the HF converter (`convert_muse_glimmer_weights_to_hf.py`, 20260806+) permutes
+    q/k into the half-split (NEOX) layout via `_permute_for_rope` so they
+    pair with `rotate_half` — matching the reference's interleaved rotation
     on the *native* (unpermuted) weights. Serving the permuted HF weights with
-    ``is_neox_style=False`` scrambles q/k and causes token-repetition collapse.
-  * Final logits are pre-scaled by ``output_multiplier`` and then tanh
-    soft-capped at ``final_logit_softcapping``.
+    `is_neox_style=False` scrambles q/k and causes token-repetition collapse.
+  * Final logits are pre-scaled by `output_multiplier` and then tanh
+    soft-capped at `final_logit_softcapping`.
   * Untied lm_head.
 
 The vision path supports variable-resolution images and temporally patched
@@ -39,17 +39,12 @@ from typing import Annotated, Literal
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -59,6 +54,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -87,8 +83,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.muse_glimmer import MuseGlimmerProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     EagleModelMixin,
@@ -112,55 +108,42 @@ logger = init_logger(__name__)
 
 
 def _text_config(config):
-    """MuseGlimmer checkpoints may nest the text config under ``text_config``
-    (multimodal ``MuseGlimmerConfig``) or expose it directly
-    (``MuseGlimmerTextConfig``)."""
+    """MuseGlimmer checkpoints may nest the text config under `text_config`
+    (multimodal `MuseGlimmerConfig`) or expose it directly
+    (`MuseGlimmerTextConfig`)."""
     return getattr(config, "text_config", config)
 
 
-def _vision_config(config):
-    return getattr(config, "vision_config", config)
-
-
 def _muse_glimmer_has_vision(config) -> bool:
-    has_vision = getattr(config, "has_vision", None)
-    if has_vision is not None:
-        return bool(has_vision)
     return hasattr(config, "vision_config")
 
 
 IMAGE_TOKEN = "<|patch|>"
-IMAGE_PROCESSOR_TOKEN = "<|image|>"
 VIDEO_TOKEN = "<|video|>"
 
 
 class MuseGlimmerImagePixelInputs(TensorSchema):
-    """Batched variable-resolution image inputs."""
+    """Dimensions:
+    - np: Total number of patches over all images
+    - cps: Temporal patch size * channels * patch size * patch size
+    - ni: Number of images
+    """
 
-    type: Literal["image_pixels"]
-    pixel_values: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
-    ]
-    feature_sizes: Annotated[torch.Tensor, TensorShape("bn")]
+    type: Literal["pixel_values"]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 class MuseGlimmerVideoPixelInputs(TensorSchema):
-    """Batched variable-length, variable-resolution video inputs."""
+    """Dimensions:
+    - np: Total number of patches over all videos
+    - ctps: Temporal patch size * channels * patch size * patch size
+    - nv: Number of videos
+    """
 
-    type: Literal["video_pixels"]
-    pixel_values: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape(
-            "bn",
-            "ng",
-            "c",
-            "h",
-            "w",
-            dynamic_dims={"ng", "h", "w"},
-        ),
-    ]
-    feature_sizes: Annotated[torch.Tensor, TensorShape("bn")]
+    type: Literal["pixel_values_videos"]
+    pixel_values_videos: Annotated[torch.Tensor, TensorShape("np", "ctps")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
 class MuseGlimmerProcessingInfo(BaseProcessingInfo):
@@ -173,11 +156,7 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_hf_processor(self, **kwargs: object) -> MuseGlimmerProcessor:
-        return self.ctx.init_processor(
-            MuseGlimmerProcessor,
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
-        )
+        return self.ctx.get_hf_processor(MuseGlimmerProcessor, **kwargs)
 
     def get_mm_max_tokens_per_item(
         self,
@@ -187,12 +166,14 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         image_processor = processor.image_processor
         video_processor = processor.video_processor
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         return {
             "image": int(image_processor.max_image_tokens),
             "video": (
                 num_frames
-                // int(video_processor.patch_temporal)
+                // int(video_processor.temporal_patch_size)
                 * int(video_processor.max_video_frame_tokens)
             ),
         }
@@ -202,26 +183,21 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         grid_size = math.isqrt(int(image_processor.max_image_tokens))
         side = (
             int(image_processor.patch_size)
-            * int(image_processor.downsample_factor)
+            * int(image_processor.merge_size)
             * grid_size
         )
         return ImageSize(width=side, height=side)
 
-    def get_num_frames_with_most_features(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
-        num_videos = max(mm_counts.get("video", 0), 1)
+        num_videos = max(num_videos, 1)
         groups = max(
             1,
             seq_len // num_videos // int(video_processor.max_video_frame_tokens),
         )
-        patch_temporal = int(video_processor.patch_temporal)
-        max_groups = max(
-            1,
-            int(video_processor.video_num_frames) // patch_temporal,
-        )
-        return min(groups, max_groups) * patch_temporal
+        temporal_patch_size = int(video_processor.temporal_patch_size)
+        max_groups = max(1, int(video_processor.num_frames) // temporal_patch_size)
+        return min(groups, max_groups) * temporal_patch_size
 
 
 class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessingInfo]):
@@ -234,7 +210,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         processor = self.info.get_hf_processor()
         video_processor = processor.video_processor
@@ -242,28 +218,24 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         video_grid = math.isqrt(int(video_processor.max_video_frame_tokens))
         video_size = (
             int(video_processor.patch_size)
-            * int(video_processor.downsample_factor)
+            * int(video_processor.merge_size)
             * video_grid
         )
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
         return {
             "image": self._get_dummy_images(
                 width=image_width,
                 height=image_height,
                 num_images=mm_counts.get("image", 0),
-                overrides=image_overrides,
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=video_size,
                 height=video_size,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
-                overrides=video_overrides,
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -271,129 +243,32 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
 class MuseGlimmerMultiModalProcessor(
     BaseMultiModalProcessor[MuseGlimmerProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = processor.tokenizer
-        config = self.info.get_hf_config()
-        images = mm_data.get("images", ())
-        videos = mm_data.get("videos", ())
-        if not isinstance(images, Sequence) or not isinstance(videos, Sequence):
-            raise TypeError("MuseGlimmer multi-modal data must be a sequence")
-
-        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-        image_sentinel_id = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-        video_sentinel_id = tokenizer.convert_tokens_to_ids(VIDEO_TOKEN)
-        if prompt_ids.count(image_sentinel_id) != len(images):
-            raise ValueError("The number of image placeholders does not match images")
-        if prompt_ids.count(video_sentinel_id) != len(videos):
-            raise ValueError("The number of video placeholders does not match videos")
-
-        image_pixels: list[torch.Tensor] = []
-        image_sizes: list[int] = []
-        image_prompt_blocks: list[list[int]] = []
-        for image in images:
-            output = processor(
-                text=IMAGE_PROCESSOR_TOKEN,
-                images=[image],
-                return_tensors=None,
-            )
-            block_ids = output["input_ids"][0]
-            if isinstance(block_ids, torch.Tensor):
-                block_ids = block_ids.tolist()
-            pixels = output["pixel_values"]
-            if isinstance(pixels, torch.Tensor):
-                pixels = [pixels] if pixels.ndim == 3 else list(pixels)
-            if len(pixels) != 1:
-                raise ValueError(
-                    "MuseGlimmer HF processor must return one tensor per image"
-                )
-            image_pixels.append(pixels[0])
-            image_sizes.append(block_ids.count(config.image_token_id))
-            image_prompt_blocks.append(block_ids)
-
-        video_pixels: list[torch.Tensor] = []
-        video_sizes: list[int] = []
-        video_prompt_blocks: list[list[int]] = []
-        for video in videos:
-            if not isinstance(video, np.ndarray):
-                raise TypeError("MuseGlimmer video input must be a NumPy array")
-            frames = [Image.fromarray(frame).convert("RGB") for frame in video]
-            output = processor(
-                text=VIDEO_TOKEN,
-                videos=[frames],
-                return_tensors=None,
-            )
-            block_ids = output["input_ids"][0]
-            if isinstance(block_ids, torch.Tensor):
-                block_ids = block_ids.tolist()
-            pixels = output["pixel_values"]
-            if isinstance(pixels, torch.Tensor):
-                pixels = list(pixels)
-            video_pixels.append(torch.stack(pixels))
-            video_sizes.append(block_ids.count(config.video_token_id))
-            video_prompt_blocks.append(block_ids)
-
-        combined_prompt_ids: list[int] = []
-        image_idx = video_idx = 0
-        for token_id in prompt_ids:
-            if token_id == image_sentinel_id:
-                combined_prompt_ids.extend(image_prompt_blocks[image_idx])
-                image_idx += 1
-            elif token_id == video_sentinel_id:
-                combined_prompt_ids.extend(video_prompt_blocks[video_idx])
-                video_idx += 1
-            else:
-                combined_prompt_ids.append(token_id)
-
-        data: dict[str, object] = {
-            "input_ids": [combined_prompt_ids],
-        }
-        if image_pixels:
-            data.update(
-                image_pixel_values=image_pixels,
-                image_feature_sizes=torch.tensor(image_sizes),
-            )
-        if video_pixels:
-            data.update(
-                video_pixel_values=video_pixels,
-                video_feature_sizes=torch.tensor(video_sizes),
-            )
-        processed_data = BatchFeature(data=data, tensor_type=None)
-        processed_data.update(passthrough_data)
-        return processed_data
+        # vLLM samples video frames before processing
+        hf_kwargs = {**hf_kwargs, "do_sample_frames": False}
+        return super()._call_hf_processor(hf_data, hf_kwargs)
 
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        fields: dict[str, MultiModalFieldConfig] = {}
-        if "image_pixel_values" in hf_inputs:
-            fields.update(
-                image_pixel_values=MultiModalFieldConfig.batched("image"),
-                image_feature_sizes=MultiModalFieldConfig.batched(
-                    "image", keep_on_cpu=True
-                ),
-            )
-        if "video_pixel_values" in hf_inputs:
-            fields.update(
-                video_pixel_values=MultiModalFieldConfig.batched("video"),
-                video_feature_sizes=MultiModalFieldConfig.batched(
-                    "video", keep_on_cpu=True
-                ),
-            )
-        return fields
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+        return dict(
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_grid_thw.prod(-1)
+            ),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_grid_thw.prod(-1)
+            ),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        )
 
     def _get_prompt_updates(
         self,
@@ -403,6 +278,7 @@ class MuseGlimmerMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         config = self.info.get_hf_config()
+        merge_length = config.vision_config.merge_size**2
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
@@ -417,10 +293,9 @@ class MuseGlimmerMultiModalProcessor(
         video_separator_id = vocab["<|vid_frame_separator|>"]
 
         def image_replacement(item_idx: int) -> PromptUpdateDetails:
-            out_item = out_mm_kwargs["image"][item_idx]
-            feature_size = out_item["image_feature_sizes"].data
-            assert isinstance(feature_size, torch.Tensor)
-            num_tokens = int(feature_size.item())
+            grid_thw = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            num_tokens = int(grid_thw.prod()) // merge_length
             replacement = (
                 [image_start_id] + [config.image_token_id] * num_tokens + [image_end_id]
             )
@@ -429,32 +304,20 @@ class MuseGlimmerMultiModalProcessor(
             )
 
         def video_replacement(item_idx: int) -> PromptUpdateDetails:
-            out_item = out_mm_kwargs["video"][item_idx]
-            pixel_values = out_item["video_pixel_values"].data
-            num_groups = len(pixel_values)
-            if num_groups == 0:
-                raise ValueError(
-                    "MuseGlimmer video must contain at least one frame group"
-                )
-
-            feature_size = out_item["video_feature_sizes"].data
-            assert isinstance(feature_size, torch.Tensor)
-            num_tokens = int(feature_size.item())
-            tokens_per_group, remainder = divmod(num_tokens, num_groups)
-            if remainder:
-                raise ValueError(
-                    "MuseGlimmer video feature size must be divisible by frame groups"
-                )
+            grid_thw = out_mm_kwargs["video"][item_idx]["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            num_groups = int(grid_thw[0])
+            tokens_per_group = int(grid_thw[1:].prod()) // merge_length
 
             video_processor = processor.video_processor
-            patch_temporal = int(video_processor.patch_temporal)
-            sampling_fps = float(video_processor.video_sampling_fps)
+            temporal_patch_size = int(video_processor.temporal_patch_size)
+            sampling_fps = float(video_processor.fps)
             if sampling_fps <= 0:
-                raise ValueError("MuseGlimmer video_sampling_fps must be positive")
+                raise ValueError("MuseGlimmer video fps must be positive")
 
             replacement = [video_start_id]
             for group_idx in range(num_groups):
-                timestamp = group_idx * patch_temporal / sampling_fps
+                timestamp = group_idx * temporal_patch_size / sampling_fps
                 replacement.extend(
                     tokenizer.encode(
                         f"Time: {timestamp:.1f}s", add_special_tokens=False
@@ -480,105 +343,6 @@ class MuseGlimmerMultiModalProcessor(
                 replacement=video_replacement,
             ),
         ]
-
-
-def _muse_glimmer_use_qk_norm(config) -> bool:
-    """Whether QK-norm is applied. MuseGlimmer ALWAYS applies QK-norm; the modular HF
-    ``text_config`` schema simply omits ``use_qk_norm`` (reads as ``None``).
-    Treat a missing/None flag as True — only an explicit ``False`` disables it."""
-    val = getattr(config, "use_qk_norm", None)
-    return True if val is None else bool(val)
-
-
-def _muse_glimmer_use_attn_output_gate(config) -> bool:
-    """Whether the per-head sigmoid attention output gate is applied. MuseGlimmer ALWAYS
-    applies it; the modular HF ``text_config`` omits ``use_attn_output_gate``
-    (reads as ``None``). Missing/None -> True; only explicit ``False`` disables."""
-    val = getattr(config, "use_attn_output_gate", None)
-    return True if val is None else bool(val)
-
-
-def _muse_glimmer_query_prescale(config) -> float:
-    """Post-QK-norm query pre-scale (``scale_query_by``), normalized across the
-    two config schemas so the net query scaling matches the native reference.
-
-    HF native modeling computes ``scale_query_by = qk_scale_factor / sqrt(head_dim)``
-    where the NATIVE ``qk_scale_factor`` is the raw ``params.json`` value
-    (~43.784). The modular HF ``text_config`` PRE-FOLDS the ``1/sqrt(head_dim)``
-    factor and ships ``qk_scale_factor = 43.784 / sqrt(128) = 3.87`` already,
-    expecting it applied directly. Both must yield the SAME ``scale_query_by``
-    (~3.87), then softmax uses ``scaling = head_dim**-0.5``.
-
-    Precedence:
-      1. explicit ``scale_query_by`` (already the final factor) -> use as-is.
-      2. else derive from ``qk_scale_factor``:
-         - if it is already the folded value (``~= qk_scale_factor/sqrt(hd)`` is
-           NOT what we want; detect the native form and divide) — we decide by
-           magnitude: the native raw value is ``folded * sqrt(head_dim)``. If
-           ``qk_scale_factor`` is close to ``folded_expected * sqrt(hd)`` we treat
-           it as native and divide; otherwise it is already folded, use directly.
-    """
-    head_dim = config.head_dim
-    sqrt_hd = head_dim**0.5
-
-    explicit = getattr(config, "scale_query_by", None)
-    if explicit is not None:
-        return float(explicit)
-
-    qk_scale = getattr(config, "qk_scale_factor", None)
-    if qk_scale is None:
-        # No scale info at all: fall back to the plain 1/sqrt(head_dim) identity
-        # (net query scaling then just the softmax scaling); should not happen
-        # for real MuseGlimmer checkpoints, which always carry qk_scale_factor.
-        return 1.0
-
-    qk_scale = float(qk_scale)
-    # Disambiguate native (raw, ~43.78) vs modular (folded, ~3.87). The native
-    # form, when divided by sqrt(head_dim), yields the folded target; the folded
-    # form is already the target. Native values are ~sqrt(head_dim)x larger than
-    # folded. Use a threshold at sqrt(head_dim) (with margin): if qk_scale is
-    # comparable to or larger than sqrt(head_dim), it is the native raw value and
-    # must be divided; otherwise it is already folded and used directly.
-    #   head_dim=128 -> sqrt=11.31; native 43.78 > 11.31 (divide -> 3.87),
-    #   folded 3.87 < 11.31 (use as-is).
-    if qk_scale >= sqrt_hd:
-        return qk_scale / sqrt_hd
-    return qk_scale
-
-
-class MuseGlimmerRMSNorm(nn.Module):
-    """RMSNorm mirroring HF MuseGlimmer exactly (fp32 compute, cast at the end).
-
-    ``normed = _norm(x.float()) * (w.float() + weight_offset)`` cast back to the
-    input dtype. When ``with_scale`` is False the layer is weightless (used for
-    QK-norm and the token-embedding norm).
-    """
-
-    def __init__(
-        self,
-        dim: int | None = None,
-        eps: float = 1e-6,
-        with_scale: bool = True,
-        weight_offset: int = 0,
-    ) -> None:
-        super().__init__()
-        self.eps = eps
-        self.with_scale = with_scale
-        self.weight_offset = weight_offset
-        if with_scale:
-            assert dim is not None
-            self.weight = nn.Parameter(torch.zeros(dim))
-        else:
-            self.register_parameter("weight", None)
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        out = self._norm(hidden_states.float())
-        if self.with_scale:
-            out = out * (self.weight.float() + self.weight_offset)
-        return out.type_as(hidden_states)
 
 
 class MuseGlimmerVisionAttention(nn.Module):
@@ -719,14 +483,16 @@ class MuseGlimmerVisionBlock(nn.Module):
 
 
 class MuseGlimmerVisionEncoder(nn.Module):
-    def __init__(self, config, prefix: str = "") -> None:
+    def __init__(self, config: MuseGlimmerConfig, prefix: str = "") -> None:
         super().__init__()
+        out_hidden_size = config.out_hidden_size
+        config = config.vision_config
         hidden_size = config.hidden_size
         patch_dim = config.patch_temporal * 3 * config.patch_size**2
         self.hidden_size = hidden_size
         self.patch_size = config.patch_size
         self.patch_temporal = config.patch_temporal
-        self.merge_kernel_size = config.merge_kernel_size
+        self.merge_size = config.merge_size
         self.pos_emb_height = config.pos_emb_height
         self.pos_emb_width = config.pos_emb_width
         self.head_dim = hidden_size // config.num_attention_heads
@@ -762,140 +528,142 @@ class MuseGlimmerVisionEncoder(nn.Module):
         )
         self.ln_post = nn.LayerNorm(hidden_size)
 
-        expected_output = hidden_size * self.merge_kernel_size**2
-        if config.output_dim != expected_output:
+        expected_output = hidden_size * self.merge_size**2
+        if out_hidden_size != expected_output:
             raise ValueError(
-                f"MuseGlimmer vision output_dim={config.output_dim} does not match "
+                f"MuseGlimmer out_hidden_size={out_hidden_size} does not match "
                 f"pixel-shuffle output {expected_output}"
             )
 
     def _make_2d_rope(
-        self, grid_height: int, grid_width: int, device: torch.device
+        self, height: torch.Tensor, width: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         spatial_dim = self.head_dim // 2
         inv_freq = 1.0 / (
             10000.0
             ** (
-                torch.arange(0, spatial_dim, 2, dtype=torch.float32, device=device)
+                torch.arange(
+                    0, spatial_dim, 2, dtype=torch.float32, device=height.device
+                )
                 / spatial_dim
             )
         )
-        height = torch.arange(1, grid_height + 1, dtype=torch.float32, device=device)
-        width = torch.arange(1, grid_width + 1, dtype=torch.float32, device=device)
-        height = height.unsqueeze(1).expand(-1, grid_width).reshape(-1)
-        width = width.unsqueeze(0).expand(grid_height, -1).reshape(-1)
         freq_w = torch.outer(width, inv_freq)
         freq_h = torch.outer(height, inv_freq)
         freqs = torch.cat([freq_w, freq_h], dim=-1)
         return torch.cos(freqs), torch.sin(freqs)
 
-    def _get_pos_emb(
-        self, grid_height: int, grid_width: int, device: torch.device
-    ) -> torch.Tensor:
-        h_grid = (
-            torch.arange(grid_height, device=device, dtype=torch.float32) + 0.5
-        ) * (self.pos_emb_height / grid_height) - 0.5
-        w_grid = (
-            torch.arange(grid_width, device=device, dtype=torch.float32) + 0.5
-        ) * (self.pos_emb_width / grid_width) - 0.5
-        h_floor = torch.floor(h_grid).long()
-        w_floor = torch.floor(w_grid).long()
+    def _get_pos_emb_layout(
+        self, grid_height: int, grid_width: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        h_grid = (np.arange(grid_height, dtype=np.float32) + np.float32(0.5)) * (
+            np.float32(self.pos_emb_height / grid_height)
+        ) - np.float32(0.5)
+        w_grid = (np.arange(grid_width, dtype=np.float32) + np.float32(0.5)) * (
+            np.float32(self.pos_emb_width / grid_width)
+        ) - np.float32(0.5)
+        h_floor = np.floor(h_grid).astype(np.int64)
+        w_floor = np.floor(w_grid).astype(np.int64)
         h_ceil = h_floor + 1
         w_ceil = w_floor + 1
-        h_frac = h_grid - h_floor.float()
-        w_frac = w_grid - w_floor.float()
+        h_frac = h_grid - h_floor.astype(np.float32)
+        w_frac = w_grid - w_floor.astype(np.float32)
 
         h_floor_valid = (h_floor >= 0) & (h_floor < self.pos_emb_height)
         h_ceil_valid = (h_ceil >= 0) & (h_ceil < self.pos_emb_height)
         w_floor_valid = (w_floor >= 0) & (w_floor < self.pos_emb_width)
         w_ceil_valid = (w_ceil >= 0) & (w_ceil < self.pos_emb_width)
-        h_floor = h_floor.clamp(0, self.pos_emb_height - 1)
-        h_ceil = h_ceil.clamp(0, self.pos_emb_height - 1)
-        w_floor = w_floor.clamp(0, self.pos_emb_width - 1)
-        w_ceil = w_ceil.clamp(0, self.pos_emb_width - 1)
+        h_floor = h_floor.clip(0, self.pos_emb_height - 1)
+        h_ceil = h_ceil.clip(0, self.pos_emb_height - 1)
+        w_floor = w_floor.clip(0, self.pos_emb_width - 1)
+        w_ceil = w_ceil.clip(0, self.pos_emb_width - 1)
 
         h_floor_offset = h_floor * self.pos_emb_width
         h_ceil_offset = h_ceil * self.pos_emb_width
-        indices = torch.stack(
+        indices = np.stack(
             [
-                (h_floor_offset[:, None] + w_floor[None, :]).flatten(),
-                (h_floor_offset[:, None] + w_ceil[None, :]).flatten(),
-                (h_ceil_offset[:, None] + w_floor[None, :]).flatten(),
-                (h_ceil_offset[:, None] + w_ceil[None, :]).flatten(),
+                (h_floor_offset[:, None] + w_floor[None, :]).reshape(-1),
+                (h_floor_offset[:, None] + w_ceil[None, :]).reshape(-1),
+                (h_ceil_offset[:, None] + w_floor[None, :]).reshape(-1),
+                (h_ceil_offset[:, None] + w_ceil[None, :]).reshape(-1),
             ]
         )
-        weights = torch.stack(
+        weights = np.stack(
             [
                 (
                     (1 - h_frac)[:, None]
                     * (1 - w_frac)[None, :]
                     * (h_floor_valid[:, None] & w_floor_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
                 (
                     (1 - h_frac)[:, None]
                     * w_frac[None, :]
                     * (h_floor_valid[:, None] & w_ceil_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
                 (
                     h_frac[:, None]
                     * (1 - w_frac)[None, :]
                     * (h_ceil_valid[:, None] & w_floor_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
                 (
                     h_frac[:, None]
                     * w_frac[None, :]
                     * (h_ceil_valid[:, None] & w_ceil_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
             ]
         )
-        return (self.positional_embedding_vlm[indices] * weights[..., None]).sum(0)
+        return indices, weights
 
-    def _pixel_shuffle_downsample(
-        self, hidden_states: torch.Tensor, grid_height: int, grid_width: int
+    def _get_pos_emb(
+        self, grid_height: int, grid_width: int, device: torch.device
     ) -> torch.Tensor:
-        factor = self.merge_kernel_size
-        output_tokens = (grid_height // factor) * (grid_width // factor)
-        permutation = torch.arange(
-            grid_height * grid_width, device=hidden_states.device
-        )
-        permutation = permutation.view(
+        indices, weights = self._get_pos_emb_layout(grid_height, grid_width)
+        return (
+            self.positional_embedding_vlm[async_tensor_h2d(indices, device=device)]
+            * async_tensor_h2d(weights, device=device)[..., None]
+        ).sum(0)
+
+    def _get_pixel_shuffle_order(self, grid_height: int, grid_width: int) -> np.ndarray:
+        factor = self.merge_size
+        order = np.arange(grid_height * grid_width).reshape(
             grid_height // factor, factor, grid_width // factor, factor
         )
-        permutation = permutation.permute(0, 2, 1, 3).reshape(-1)
-        hidden_states = hidden_states.squeeze(0)[permutation]
-        hidden_size = hidden_states.shape[-1]
-        hidden_states = (
-            hidden_states.view(output_tokens, factor * factor, hidden_size)
+        return order.transpose(0, 2, 1, 3).reshape(-1)
+
+    def _pixel_shuffle_downsample(
+        self, hidden_states: torch.Tensor, order: torch.Tensor
+    ) -> torch.Tensor:
+        factor_sq = self.merge_size**2
+        return (
+            hidden_states[order]
+            .view(-1, factor_sq, self.hidden_size)
             .permute(0, 2, 1)
             .contiguous()
-            .view(output_tokens, hidden_size * factor * factor)
+            .view(-1, self.hidden_size * factor_sq)
         )
-        return hidden_states.unsqueeze(0)
 
     def _get_sparse_permutation(
-        self, grid_height: int, grid_width: int, device: torch.device
-    ) -> tuple[torch.Tensor, list[int]]:
+        self, grid_height: int, grid_width: int
+    ) -> tuple[np.ndarray, list[int]]:
         block_height = self.pos_emb_height
         block_width = self.pos_emb_width
         padded_height = math.ceil(grid_height / block_height) * block_height
         padded_width = math.ceil(grid_width / block_width) * block_width
-        indices = torch.arange(grid_height * grid_width, device=device).view(
-            grid_height, grid_width
-        )
-        indices = F.pad(
+        indices = np.arange(grid_height * grid_width).reshape(grid_height, grid_width)
+        indices = np.pad(
             indices,
-            (0, padded_width - grid_width, 0, padded_height - grid_height),
-            value=-1,
-        ).flatten()
-        indices = indices.view(
+            ((0, padded_height - grid_height), (0, padded_width - grid_width)),
+            constant_values=-1,
+        )
+        indices = indices.reshape(
             padded_height // block_height,
             block_height,
             padded_width // block_width,
             block_width,
         )
-        indices = indices.permute(0, 2, 1, 3).reshape(-1)
-        valid = (indices != -1).view(-1, block_height * block_width)
-        return indices[indices != -1], valid.sum(dim=1).tolist()
+        indices = indices.transpose(0, 2, 1, 3).reshape(-1)
+        valid = (indices != -1).reshape(-1, block_height * block_width)
+        return indices[indices != -1], valid.sum(axis=1).tolist()
 
     def _get_attention_metadata(
         self,
@@ -930,101 +698,93 @@ class MuseGlimmerVisionEncoder(nn.Module):
         )
         return cu_seqlens, max_seqlen, sequence_lengths
 
-    def _patchify(self, pixels: torch.Tensor) -> torch.Tensor:
-        patch_size = self.patch_size
-        _, channels, height, width = pixels.shape
-        grid_height = height // patch_size
-        grid_width = width // patch_size
-        if channels == 3:
-            patches = pixels.unfold(2, patch_size, patch_size).unfold(
-                3, patch_size, patch_size
-            )
-            patches = patches.contiguous().view(
-                1, channels, grid_height, grid_width, patch_size, patch_size
-            )
-            patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
-            patches = patches.unsqueeze(3).expand(
-                -1, -1, -1, self.patch_temporal, -1, -1, -1
-            )
-        elif channels == self.patch_temporal * 3:
-            frame_patches = []
-            for frame_idx in range(self.patch_temporal):
-                frame = pixels[:, frame_idx * 3 : (frame_idx + 1) * 3]
-                frame = frame.unfold(2, patch_size, patch_size).unfold(
-                    3, patch_size, patch_size
-                )
-                frame = frame.contiguous().view(
-                    1, 3, grid_height, grid_width, patch_size, patch_size
-                )
-                frame_patches.append(frame.permute(0, 2, 3, 1, 4, 5).contiguous())
-            patches = torch.stack(frame_patches, dim=3)
-        else:
-            raise ValueError(
-                f"MuseGlimmer vision input has {channels} channels; expected 3 or "
-                f"{self.patch_temporal * 3}"
-            )
-        return patches.reshape(1, grid_height * grid_width, -1)
-
-    def forward(self, pixel_values: Sequence[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+    ) -> torch.Tensor:
         device = self.conv1_linear.weight.device
         dtype = self.conv1_linear.weight.dtype
         has_sparse_layers = any(
             layer_type != "full_attention" for layer_type in self.layer_types
         )
 
-        all_hidden_states = []
-        all_rotary_pos_emb_cos = []
-        all_rotary_pos_emb_sin = []
+        # Each temporal group of an image or video is encoded independently
+        grids = [
+            (grid_height, grid_width)
+            for num_groups, grid_height, grid_width in grid_thw.tolist()
+            for _ in range(num_groups)
+        ]
+        global_seq_lens = [
+            grid_height * grid_width for grid_height, grid_width in grids
+        ]
+        layouts: dict[
+            tuple[int, int],
+            tuple[
+                np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, list[int]] | None
+            ],
+        ] = {}
+        heights: list[np.ndarray] = []
+        widths: list[np.ndarray] = []
+        shuffle_orders: list[np.ndarray] = []
+        window_orders: list[np.ndarray] = []
         sparse_seq_lens: list[int] = []
-        global_seq_lens: list[int] = []
-        metadata = []
-        for pixels in pixel_values:
-            pixels = pixels.to(device=device, dtype=dtype)
-            if pixels.ndim == 3:
-                pixels = pixels.unsqueeze(0)
-            if pixels.ndim != 4 or pixels.shape[0] != 1:
+        offset = 0
+        for grid in grids:
+            grid_height, grid_width = grid
+            if grid_height % self.merge_size or grid_width % self.merge_size:
                 raise ValueError(
-                    "Each MuseGlimmer vision input must have shape [C, H, W]"
+                    "MuseGlimmer vision grid must be divisible by the merge size"
                 )
-            spatial_stride = self.patch_size * self.merge_kernel_size
-            if pixels.shape[-2] % spatial_stride or pixels.shape[-1] % spatial_stride:
-                raise ValueError(
-                    "MuseGlimmer vision input dimensions must divide the "
-                    "merged patch stride"
+            if grid not in layouts:
+                rows, cols = np.divmod(np.arange(grid_height * grid_width), grid_width)
+                layouts[grid] = (
+                    rows + 1,
+                    cols + 1,
+                    self._get_pixel_shuffle_order(grid_height, grid_width),
+                    self._get_sparse_permutation(grid_height, grid_width)
+                    if has_sparse_layers
+                    else None,
                 )
-            grid_height = pixels.shape[-2] // self.patch_size
-            grid_width = pixels.shape[-1] // self.patch_size
-            num_tokens = grid_height * grid_width
-            hidden_states = self.conv1_linear(self._patchify(pixels))
-            hidden_states = hidden_states + self._get_pos_emb(
-                grid_height, grid_width, device
-            ).unsqueeze(0).to(dtype)
-            hidden_states = self.ln_pre(hidden_states.view(-1, self.hidden_size)).view(
-                1, -1, self.hidden_size
-            )
-            rotary_pos_emb_cos, rotary_pos_emb_sin = self._make_2d_rope(
-                grid_height, grid_width, device
-            )
-
-            permutation = None
-            if has_sparse_layers:
-                permutation, seq_lens = self._get_sparse_permutation(
-                    grid_height, grid_width, device
-                )
-                hidden_states = hidden_states[:, permutation]
-                rotary_pos_emb_cos = rotary_pos_emb_cos[permutation]
-                rotary_pos_emb_sin = rotary_pos_emb_sin[permutation]
+            height, width, shuffle_order, sparse_layout = layouts[grid]
+            heights.append(height)
+            widths.append(width)
+            shuffle_orders.append(offset + shuffle_order)
+            if sparse_layout is not None:
+                window_order, seq_lens = sparse_layout
+                window_orders.append(offset + window_order)
                 sparse_seq_lens.extend(seq_lens)
+            offset += grid_height * grid_width
 
-            all_hidden_states.append(hidden_states.squeeze(0))
-            all_rotary_pos_emb_cos.append(rotary_pos_emb_cos)
-            all_rotary_pos_emb_sin.append(rotary_pos_emb_sin)
-            global_seq_lens.append(num_tokens)
-            metadata.append((grid_height, grid_width, num_tokens, permutation))
+        pixel_values = pixel_values.to(device=device, dtype=dtype)
+        # Per group: one matmul over the whole call is not bit-identical on all GPUs.
+        hidden_states = torch.cat(
+            [
+                self.conv1_linear(patches)
+                for patches in pixel_values.split(global_seq_lens)
+            ]
+        )
+        pos_embs = {
+            grid: self._get_pos_emb(*grid, device).to(dtype) for grid in layouts
+        }
+        hidden_states = self.ln_pre(
+            hidden_states + torch.cat([pos_embs[grid] for grid in grids])
+        )
+        rotary_pos_emb_cos, rotary_pos_emb_sin = self._make_2d_rope(
+            async_tensor_h2d(np.concatenate(heights).astype(np.float32), device=device),
+            async_tensor_h2d(np.concatenate(widths).astype(np.float32), device=device),
+        )
 
-        hidden_states = torch.cat(all_hidden_states).unsqueeze(0)
-        rotary_pos_emb_cos = torch.cat(all_rotary_pos_emb_cos)
-        rotary_pos_emb_sin = torch.cat(all_rotary_pos_emb_sin)
+        inverse = None
+        if has_sparse_layers:
+            window_order = np.concatenate(window_orders)
+            permutation = async_tensor_h2d(window_order, device=device)
+            inverse_order = np.empty_like(window_order)
+            inverse_order[window_order] = np.arange(len(window_order))
+            inverse = async_tensor_h2d(inverse_order, device=device)
+            hidden_states = hidden_states[permutation]
+            rotary_pos_emb_cos = rotary_pos_emb_cos[permutation]
+            rotary_pos_emb_sin = rotary_pos_emb_sin[permutation]
+
+        hidden_states = hidden_states.unsqueeze(0)
         global_attention_metadata = self._get_attention_metadata(
             global_seq_lens,
             device,
@@ -1049,29 +809,25 @@ class MuseGlimmerVisionEncoder(nn.Module):
                 *attention_metadata,
             )
 
-        features = []
-        offset = 0
-        for grid_height, grid_width, num_tokens, permutation in metadata:
-            item = hidden_states[:, offset : offset + num_tokens]
-            offset += num_tokens
-            if permutation is not None:
-                inverse = torch.empty_like(permutation)
-                inverse[permutation] = torch.arange(len(permutation), device=device)
-                item = item[:, inverse]
-            item = self.ln_post(item.view(-1, self.hidden_size)).view(
-                1, -1, self.hidden_size
-            )
-            features.append(
-                self._pixel_shuffle_downsample(item, grid_height, grid_width).squeeze(0)
-            )
-        return torch.cat(features)
+        hidden_states = hidden_states.squeeze(0)
+        if inverse is not None:
+            hidden_states = hidden_states[inverse]
+        hidden_states = self.ln_post(hidden_states)
+        return self._pixel_shuffle_downsample(
+            hidden_states,
+            async_tensor_h2d(np.concatenate(shuffle_orders), device=device),
+        )
 
 
 class MuseGlimmerVisionAdapter(nn.Module):
-    def __init__(self, config) -> None:
+    def __init__(self, config: MuseGlimmerConfig) -> None:
         super().__init__()
-        self.c_fc = nn.Linear(config.output_dim, config.adapter_dim, bias=False)
-        self.c_proj = nn.Linear(config.adapter_dim, config.adapter_dim, bias=False)
+        self.c_fc = nn.Linear(
+            config.out_hidden_size, config.projector_hidden_size, bias=False
+        )
+        self.c_proj = nn.Linear(
+            config.projector_hidden_size, config.projector_hidden_size, bias=False
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return F.gelu(self.c_proj(F.gelu(self.c_fc(hidden_states))))
@@ -1146,17 +902,12 @@ class MuseGlimmerAttention(nn.Module):
         # scale_query_by after QK-norm (see forward).
         self.scaling = self.head_dim**-0.5
 
-        # iRoPE: NoPE layers (no_rope_layers[i] == 0) run full attention; RoPE
-        # layers run sliding-window attention.
-        self.use_rope = config.no_rope_layers[self.layer_idx] == 1
+        # iRoPE: layers with a zero RoPE theta are NoPE
+        self.use_rope = bool(config.layer_rope_theta[self.layer_idx])
 
-        self.use_qk_norm = _muse_glimmer_use_qk_norm(config)
-        if self.use_qk_norm:
-            # Weightless, computed in fp32, applied per head over head_dim.
-            self.qk_norm = MuseGlimmerRMSNorm(eps=config.rms_norm_eps, with_scale=False)
-            # Post-QK-norm query pre-scale, normalized across the native (raw
-            # ~43.78) and modular (pre-folded ~3.87) config schemas.
-            self.scale_query_by = _muse_glimmer_query_prescale(config)
+        # Weightless, computed in fp32, applied per head over head_dim.
+        self.qk_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+        self.scale_query_by = config.qk_scale_factor
 
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
@@ -1175,16 +926,14 @@ class MuseGlimmerAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.use_output_gate = _muse_glimmer_use_attn_output_gate(config)
-        if self.use_output_gate:
-            self.output_gate_proj = ColumnParallelLinear(
-                self.hidden_size,
-                self.total_num_heads * self.head_dim,
-                bias=False,
-                gather_output=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.output_gate_proj",
-            )
+        self.output_gate_proj = ColumnParallelLinear(
+            self.hidden_size,
+            self.total_num_heads * self.head_dim,
+            bias=False,
+            gather_output=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output_gate_proj",
+        )
 
         self.rotary_emb = (
             get_rope(
@@ -1199,8 +948,8 @@ class MuseGlimmerAttention(nn.Module):
             else None
         )
 
-        # Full attention on NoPE layers, sliding window otherwise.
-        sliding_window = None if not self.use_rope else config.sliding_window
+        is_sliding = config.layer_types[self.layer_idx] == "sliding_attention"
+        sliding_window = config.sliding_window if is_sliding else None
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -1221,24 +970,22 @@ class MuseGlimmerAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        if self.use_qk_norm:
-            # QK-norm over head_dim, fp32, applied BEFORE RoPE; then pre-scale q.
-            q = q.reshape(-1, self.head_dim)
-            q = self.qk_norm(q).reshape(-1, self.q_size) * self.scale_query_by
-            k = k.reshape(-1, self.head_dim)
-            k = self.qk_norm(k).reshape(-1, self.kv_size)
-            q = q.to(v.dtype)
-            k = k.to(v.dtype)
+        # QK-norm over head_dim, fp32, applied BEFORE RoPE; then pre-scale q.
+        q = q.reshape(-1, self.head_dim)
+        q = self.qk_norm(q).reshape(-1, self.q_size) * self.scale_query_by
+        k = k.reshape(-1, self.head_dim)
+        k = self.qk_norm(k).reshape(-1, self.kv_size)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
 
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
 
-        if self.use_output_gate:
-            # Gate reads the layer input hidden states (not the attn output).
-            gate, _ = self.output_gate_proj(hidden_states)
-            attn_output = torch.sigmoid(gate) * attn_output
+        # Gate reads the layer input hidden states (not the attn output).
+        gate, _ = self.output_gate_proj(hidden_states)
+        attn_output = torch.sigmoid(gate) * attn_output
 
         output, _ = self.o_proj(attn_output)
         return output
@@ -1268,17 +1015,15 @@ class MuseGlimmerDecoderLayer(nn.Module):
         )
         # Sandwich norms with baked +1 offset. Pre-norms use rms_norm_eps; the
         # post-norms use the (typically smaller) post_norm_eps.
-        self.input_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(
+            config.hidden_size, eps=config.post_norm_eps
         )
-        self.post_attention_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
+        self.pre_feedforward_layernorm = GemmaRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
         )
-        self.pre_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
-        )
-        self.post_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
+        self.post_feedforward_layernorm = GemmaRMSNorm(
+            config.hidden_size, eps=config.post_norm_eps
         )
 
     def forward(
@@ -1318,7 +1063,9 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
         )
         # MuseGlimmer normalizes token embeddings with a weightless RMSNorm instead of
         # Gemma's sqrt(hidden_size) multiplier.
-        self.embed_norm = MuseGlimmerRMSNorm(eps=config.rms_norm_eps, with_scale=False)
+        self.embed_norm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps, has_weight=False
+        )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -1328,7 +1075,9 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         # Final norm: weight-as-scale, no offset.
-        self.norm = MuseGlimmerRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps, dtype=torch.float32
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -1476,7 +1225,6 @@ class MuseGlimmerForCausalLM(
         super().__init__()
         config = vllm_config.model_config.hf_config
         text_config = _text_config(config)
-        vision_config = _vision_config(config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.text_config = text_config
@@ -1491,22 +1239,23 @@ class MuseGlimmerForCausalLM(
 
         self.vision_encoder: MuseGlimmerVisionEncoder | None
         self.vision_adapter: MuseGlimmerVisionAdapter | None
+        self.perception_emb_norm: RMSNorm | None
         if self.has_vision:
             with self._mark_tower_model(vllm_config, {"image", "video"}):
                 self.vision_encoder = MuseGlimmerVisionEncoder(
-                    vision_config,
+                    config,
                     prefix=maybe_prefix(prefix, "vision_encoder"),
                 )
-                self.vision_adapter = MuseGlimmerVisionAdapter(vision_config)
+                self.vision_adapter = MuseGlimmerVisionAdapter(config)
                 self.vision_projection = nn.Linear(
-                    vision_config.adapter_dim,
+                    config.projector_hidden_size,
                     text_config.hidden_size,
                     bias=False,
                 )
-                self.perception_emb_norm = (
-                    MuseGlimmerRMSNorm(eps=text_config.rms_norm_eps, with_scale=False)
-                    if text_config.normalize_tok_embeddings
-                    else nn.Identity()
+                self.perception_emb_norm = RMSNorm(
+                    text_config.hidden_size,
+                    eps=text_config.rms_norm_eps,
+                    has_weight=False,
                 )
         else:
             self.vision_encoder = None
@@ -1526,66 +1275,44 @@ class MuseGlimmerForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-        image_token_id = getattr(
-            config, "image_token_id", getattr(config, "patch_token_id", 200092)
-        )
-        video_token_id = getattr(config, "video_token_id", 200091)
         self.configure_mm_token_handling(
-            text_config.vocab_size, [image_token_id, video_token_id]
+            text_config.vocab_size,
+            [
+                getattr(config, "image_token_id", 200092),
+                getattr(config, "video_token_id", 200091),
+            ],
         )
 
     def _parse_and_validate_image_input(
         self,
         **kwargs: object,
     ) -> MuseGlimmerImagePixelInputs | None:
-        pixel_values = kwargs.pop("image_pixel_values", None)
-        feature_sizes = kwargs.pop("image_feature_sizes", None)
-        if pixel_values is None and feature_sizes is None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        if pixel_values is None:
             return None
-        if pixel_values is None or feature_sizes is None:
-            raise ValueError(
-                "MuseGlimmer image_pixel_values and image_feature_sizes "
-                "must be provided together"
-            )
-        if not isinstance(feature_sizes, torch.Tensor):
-            raise ValueError("MuseGlimmer image_feature_sizes must be a tensor")
-        if isinstance(pixel_values, torch.Tensor) and pixel_values.ndim == 3:
-            pixel_values = pixel_values.unsqueeze(0)
         return MuseGlimmerImagePixelInputs(
-            type="image_pixels",
+            type="pixel_values",
             pixel_values=pixel_values,
-            feature_sizes=feature_sizes.reshape(-1),
+            image_grid_thw=kwargs.pop("image_grid_thw", None),
         )
 
     def _parse_and_validate_video_input(
         self,
         **kwargs: object,
     ) -> MuseGlimmerVideoPixelInputs | None:
-        pixel_values = kwargs.pop("video_pixel_values", None)
-        feature_sizes = kwargs.pop("video_feature_sizes", None)
-        if pixel_values is None and feature_sizes is None:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        if pixel_values_videos is None:
             return None
-        if pixel_values is None or feature_sizes is None:
-            raise ValueError(
-                "MuseGlimmer video_pixel_values and video_feature_sizes "
-                "must be provided together"
-            )
-        if not isinstance(feature_sizes, torch.Tensor):
-            raise ValueError("MuseGlimmer video_feature_sizes must be a tensor")
-        if isinstance(pixel_values, torch.Tensor) and pixel_values.ndim == 4:
-            pixel_values = pixel_values.unsqueeze(0)
-        patch_temporal = int(_vision_config(self.config).patch_temporal)
         return MuseGlimmerVideoPixelInputs(
-            type="video_pixels",
-            pixel_values=pixel_values,
-            feature_sizes=feature_sizes.reshape(-1),
-            resolve_bindings={"c": patch_temporal * 3},
+            type="pixel_values_videos",
+            pixel_values_videos=pixel_values_videos,
+            video_grid_thw=kwargs.pop("video_grid_thw", None),
         )
 
-    def _encode_pixel_groups(
+    def _encode_pixel_values(
         self,
-        pixel_groups: Sequence[torch.Tensor],
-        feature_sizes: Sequence[int],
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         if (
             self.vision_encoder is None
@@ -1594,37 +1321,12 @@ class MuseGlimmerForCausalLM(
             or self.perception_emb_norm is None
         ):
             raise ValueError("This MuseGlimmer checkpoint has no vision tower")
-        features = self.vision_encoder(pixel_groups)
+        features = self.vision_encoder(pixel_values, grid_thw)
         features = self.vision_adapter(features)
         features = self.vision_projection(features)
         features = self.perception_emb_norm(features)
-        if features.shape[0] != sum(feature_sizes):
-            raise ValueError(
-                f"MuseGlimmer produced {features.shape[0]} vision features for "
-                f"{sum(feature_sizes)} placeholder tokens"
-            )
-        return features.split(list(feature_sizes))
-
-    def _process_image_input(
-        self,
-        image_input: MuseGlimmerImagePixelInputs,
-    ) -> tuple[torch.Tensor, ...]:
-        images = list(image_input["pixel_values"])
-        sizes = [int(size) for size in image_input["feature_sizes"].tolist()]
-        if len(images) != len(sizes):
-            raise ValueError("MuseGlimmer image batch metadata does not match pixels")
-        return self._encode_pixel_groups(images, sizes)
-
-    def _process_video_input(
-        self,
-        video_input: MuseGlimmerVideoPixelInputs,
-    ) -> tuple[torch.Tensor, ...]:
-        videos = list(video_input["pixel_values"])
-        sizes = [int(size) for size in video_input["feature_sizes"].tolist()]
-        if len(videos) != len(sizes):
-            raise ValueError("MuseGlimmer video batch metadata does not match pixels")
-        groups = [group for video in videos for group in video]
-        return self._encode_pixel_groups(groups, sizes)
+        merge_length = self.vision_encoder.merge_size**2
+        return features.split((grid_thw.prod(-1) // merge_length).tolist())
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -1632,10 +1334,19 @@ class MuseGlimmerForCausalLM(
 
         embeddings: list[torch.Tensor] = []
         for key in kwargs:
-            if key == "image_pixel_values" and image_input is not None:
-                embeddings.extend(self._process_image_input(image_input))
-            elif key == "video_pixel_values" and video_input is not None:
-                embeddings.extend(self._process_video_input(video_input))
+            if key == "pixel_values" and image_input is not None:
+                embeddings.extend(
+                    self._encode_pixel_values(
+                        image_input["pixel_values"], image_input["image_grid_thw"]
+                    )
+                )
+            elif key == "pixel_values_videos" and video_input is not None:
+                embeddings.extend(
+                    self._encode_pixel_values(
+                        video_input["pixel_values_videos"],
+                        video_input["video_grid_thw"],
+                    )
+                )
         return embeddings
 
     def forward(
@@ -1663,9 +1374,7 @@ class MuseGlimmerForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector=["vision_adapter.", "vision_projection."],

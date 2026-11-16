@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the unified Gemma4 parser engine."""
 
+import dataclasses
 import json
 from unittest.mock import MagicMock
 
@@ -17,8 +18,14 @@ from tests.parser.engine.streaming_helpers import (
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
-from vllm.parser.gemma4 import Gemma4Parser
+from vllm.parser.gemma4 import (
+    STRING_DELIM,
+    Gemma4Parser,
+    _gemma4_arg_value_extender,
+    gemma4_config,
+)
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────
 CHANNEL_START_ID = 50  # <|channel>
@@ -274,11 +281,11 @@ _OPEN_REASONING_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 
 class TestGemma4PromptOpenReasoning:
-    """When ``add_generation_prompt=True`` after a final tool response with
-    ``enable_thinking=True``, the Gemma4 chat template leaves the prompt
-    ending with ``<|channel>thought\\n`` — i.e. inside an open reasoning
-    channel. Tokens generated before ``<channel|>`` must be classified as
-    ``reasoning``, not visible ``content``.
+    """When `add_generation_prompt=True` after a final tool response with
+    `enable_thinking=True`, the Gemma4 chat template leaves the prompt
+    ending with `<|channel>thought\\n` — i.e. inside an open reasoning
+    channel. Tokens generated before `<channel|>` must be classified as
+    `reasoning`, not visible `content`.
 
     Regression test for vllm-project/vllm#45834.
     """
@@ -342,8 +349,8 @@ class TestGemma4PromptOpenReasoning:
 
     def test_new_turn_prompt_unchanged(self, parser, mock_tokenizer, request_obj):
         """When the prompt does NOT end in an open reasoning channel (e.g. a
-        new turn that ends with ``<|turn>model\\n``), behaviour must match
-        the existing flow — the model itself opens ``<|channel>``.
+        new turn that ends with `<|turn>model\\n`), behaviour must match
+        the existing flow — the model itself opens `<|channel>`.
         """
         results = _stream_tokens_batched(
             parser,
@@ -380,15 +387,15 @@ _PRE_INIT_THOUGHT_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 
 class TestGemma4PreInitReasoningRobustness:
-    """Tests for the ``(REASONING, THINK_START)`` no-op transition and
-    cooperating ``thought\\n`` prefix stripping.
+    """Tests for the `(REASONING, THINK_START)` no-op transition and
+    cooperating `thought\\n` prefix stripping.
 
     Covers both engine start states: a new-turn prompt (engine starts in
-    ``CONTENT`` and the model emits its own ``<|channel>`` opener) and a
-    prompt ending inside an open ``<|channel>`` block (engine
-    pre-initialised to ``REASONING``). In both cases the ``thought\\n``
-    prefix must be stripped, the ``<|channel>`` must not leak as text,
-    and the post-``<channel|>`` text must appear as content.
+    `CONTENT` and the model emits its own `<|channel>` opener) and a
+    prompt ending inside an open `<|channel>` block (engine
+    pre-initialised to `REASONING`). In both cases the `thought\\n`
+    prefix must be stripped, the `<|channel>` must not leak as text,
+    and the post-`<channel|>` text must appear as content.
     """
 
     @pytest.fixture
@@ -479,11 +486,11 @@ class TestGemma4ChannelLessOutputConsistency:
     """Streaming and non-streaming must classify channel-less output
     identically.
 
-    With ``enable_thinking=True``, a prompt that merely starts a new model
-    turn (ends with ``<|turn>model\\n``) used to pre-initialise the
-    streaming engine to ``REASONING``, so a direct answer containing no
-    channel markers was streamed entirely as ``reasoning`` while the
-    non-streaming path returned the same text as ``content``.
+    With `enable_thinking=True`, a prompt that merely starts a new model
+    turn (ends with `<|turn>model\\n`) used to pre-initialise the
+    streaming engine to `REASONING`, so a direct answer containing no
+    channel markers was streamed entirely as `reasoning` while the
+    non-streaming path returned the same text as `content`.
 
     Regression test for vllm-project/vllm#48217.
     """
@@ -1393,7 +1400,7 @@ BARE_THOUGHT_SEQUENCE.append((TOOL_CALL_END_ID, "<tool_call|>"))
 
 
 class TestBareThoughtWithoutChannelOpener:
-    """When the model omits <|channel> and starts with bare ``thought``,
+    """When the model omits <|channel> and starts with bare `thought`,
     the parser should auto-inject the channel opener so reasoning is
     captured correctly."""
 
@@ -1649,3 +1656,220 @@ class TestGemma4IsReasoningEnd:
     )
     def test_is_reasoning_end(self, ids, thinking, ended):
         assert self._parser(thinking).is_reasoning_end(ids) is ended
+
+
+# ── Argument value extender ──────────────────────────────────────────
+
+_D = STRING_DELIM
+
+_EXTENDER_TOOL = ChatCompletionToolsParam(
+    type="function",
+    function={
+        "name": "f",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "location": {"type": "string"},
+                "n": {"type": "integer"},
+            },
+        },
+    },
+)
+
+_EXTENDER_BODIES = [
+    f"location:{_D}Paris, France{_D}",
+    f"a:{_D}x{_D},b:{_D}hello }} world{_D}",
+    f"a:{_D}smile :-) ok{_D},n:42",
+    f"a:{_D}trailing spaces   {_D},n:42",
+    f'a:{_D}decoys <|x <|"y <|"|z{_D}',
+    f'a:{_D}quote " backslash \\ newline\nunicode 杭州{_D}',
+    f"a:{_D}x{_D},{_D}quoted key{_D}:{_D}val{_D}",
+    f"a:{_D}x{_D},nested:{{inner:{_D}deep value{_D},n:1}}",
+    f"items:[{_D}a{_D},{_D}b, c{_D}],a:{_D}last{_D}",
+    f"a:{_D}call:x{_D},b:{_D}brace {{ colon:{_D}",
+    f"a:{_D}{_D},b:{_D}}}}}{_D}",
+]
+
+_TRUNCATED_BODIES = [
+    f"a:{_D}hello }}",
+    f"a:{_D}hello )",
+    f"a:{_D}hello   ",
+    f'a:{_D}hello<|"',
+    f"a:{_D}x{_D},b:{_D}open",
+    f"a:{_D}",
+]
+
+
+_TOOL_MODES = pytest.mark.parametrize(
+    "tools", [[], [_EXTENDER_TOOL]], ids=["no_schema", "schema"]
+)
+
+
+def _pieces(text: str, size: int) -> list[str]:
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _stream_args(parser, request, chunks: list[str], finished: bool = True) -> str:
+    args = []
+    for i, chunk in enumerate(chunks):
+        last = finished and i == len(chunks) - 1
+        delta = parser.parse_delta(chunk, [], request, finished=last)
+        for tool_call in (delta and delta.tool_calls) or []:
+            if tool_call.function and tool_call.function.arguments:
+                args.append(tool_call.function.arguments)
+    return "".join(args)
+
+
+class TestGemma4ArgValueExtender:
+    """The extender streams exactly what `_gemma4_arg_converter` would, so
+    the converter-only path, which only differs in when it emits, must agree
+    with it byte for byte on the accumulated arguments."""
+
+    @staticmethod
+    def _parser(tokenizer, tools, extender: bool):
+        config = gemma4_config()
+        if not extender:
+            config = dataclasses.replace(config, arg_value_extender=None)
+        return Gemma4Parser(tokenizer, tools, parser_engine_config=config)
+
+    @_TOOL_MODES
+    @pytest.mark.parametrize("size", [1, 3, 7, 64])
+    @pytest.mark.parametrize("body", _EXTENDER_BODIES)
+    def test_matches_converter_at_every_chunking(
+        self, tool_call_tokenizer, mock_request, body, size, tools
+    ):
+        mock_request.tools = tools
+        text = f"<|tool_call>call:f{{{body}}}<tool_call|>"
+        chunks = _pieces(text, size)
+
+        reference = self._parser(tool_call_tokenizer, tools, extender=True)
+        expected = reference.extract_tool_calls(text, mock_request)
+        expected = expected.tool_calls[0].function.arguments
+
+        with_extender = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=True),
+            mock_request,
+            chunks,
+        )
+        converter_only = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=False),
+            mock_request,
+            chunks,
+        )
+
+        assert with_extender == converter_only == expected
+
+    @_TOOL_MODES
+    @pytest.mark.parametrize("size", [1, 3, 7])
+    @pytest.mark.parametrize("body", _TRUNCATED_BODIES)
+    def test_truncated_stream_matches_converter(
+        self, tool_call_tokenizer, mock_request, body, size, tools
+    ):
+        """A stream cut inside the value ends with the converter's final
+        flush, so the extender must hold back the whitespace, closer or
+        partial delimiter that flush would drop."""
+        mock_request.tools = tools
+        chunks = _pieces(f"<|tool_call>call:f{{{body}", size)
+
+        with_extender = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=True),
+            mock_request,
+            chunks,
+        )
+        converter_only = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=False),
+            mock_request,
+            chunks,
+        )
+
+        assert with_extender == converter_only
+        json.loads(with_extender)
+
+    @pytest.mark.parametrize("offset", range(1, len(STRING_DELIM)))
+    def test_split_closing_delimiter(self, tool_call_parser, mock_request, offset):
+        """`STRING_DELIM` is not a lexer terminal, so the extender may see
+        the close split across deltas and must window across them."""
+        head = f"<|tool_call>call:f{{a:{_D}Paris"
+        tail = ",n:1}<tool_call|>"
+        chunks = [head, _D[:offset], _D[offset:] + tail]
+
+        streamed = _stream_args(tool_call_parser, mock_request, chunks)
+
+        assert streamed == '{"a": "Paris", "n": "1"}'
+
+    def test_string_value_streams_before_it_closes(
+        self, tool_call_tokenizer, mock_request
+    ):
+        """Body deltas carry no structural char, so without the extender the
+        gate holds the whole value until the close."""
+        head = [f"<|tool_call>call:f{{location:{_D}", "Paris"]
+
+        def streamed_before_close(extender: bool) -> str:
+            parser = self._parser(tool_call_tokenizer, [], extender)
+            return _stream_args(parser, mock_request, head, finished=False)
+
+        assert streamed_before_close(extender=True) == '{"location": "Paris'
+        assert streamed_before_close(extender=False) == '{"location": "'
+
+    def test_conversions_do_not_grow_with_value_length(
+        self, tool_call_tokenizer, mock_request
+    ):
+        def streaming_conversions(words: int) -> int:
+            calls = 0
+            base = gemma4_config()
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                if partial:
+                    calls += 1
+                assert base.arg_converter is not None
+                return base.arg_converter(raw_args, partial)
+
+            parser = Gemma4Parser(
+                tool_call_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            value = "word, " * words
+            text = f"<|tool_call>call:f{{a:{_D}{value}{_D},n:1}}<tool_call|>"
+            _stream_args(parser, mock_request, _pieces(text, 4))
+            return calls
+
+        assert streaming_conversions(words=40) == streaming_conversions(words=400)
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            f"a:{_D}closed{_D}",
+            f"a:{_D}x{_D},{_D}open ke",
+            f"nested:{{inner:{_D}deep",
+            f"a:{_D}x{_D},b:{_D}y{_D},a:{_D}dup",
+            "a:tr",
+            'a:<|"',
+        ],
+        ids=["closed", "open_key", "nested", "duplicate_key", "bare", "opener"],
+    )
+    def test_factory_declines_without_open_last_string_value(self, raw_args):
+        assert _gemma4_arg_value_extender(raw_args) is None
+
+    def test_extender_holds_back_what_the_converter_hides(self):
+        extend = _gemma4_arg_value_extender(f"a:{_D}hello")
+        assert extend is not None
+        assert [extend(d) for d in [" }", "x", ")", "(", '<|"', "y", '<|"', "|>"]] == [
+            " ",
+            "}x",
+            "",
+            ")(",
+            "",
+            '<|\\"y',
+            "",
+            None,
+        ]
+
+    def test_factory_holds_back_the_tail_already_hidden(self):
+        extend = _gemma4_arg_value_extender(f"a:{_D}hello }} ")
+        assert extend is not None
+        assert extend("x") == "} x"

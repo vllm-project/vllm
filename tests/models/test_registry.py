@@ -21,6 +21,7 @@ from vllm.model_executor.models.registry import (
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
     _LazyRegisteredModel,
+    _ModelRegistry,
 )
 from vllm.platforms import current_platform
 
@@ -88,76 +89,113 @@ def test_registry_imports(model_arch):
         assert supports_multimodal(model_cls)
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model_arch,is_mm,init_cuda,score_type",
+    "model_arch,is_mm,score_type",
     [
-        ("LlamaForCausalLM", False, False, "bi-encoder"),
-        ("LlavaForConditionalGeneration", True, True, "bi-encoder"),
-        ("DeepseekV41ForCausalLM", True, False, "bi-encoder"),
-        ("BertForSequenceClassification", False, False, "cross-encoder"),
-        ("RobertaForSequenceClassification", False, False, "cross-encoder"),
-        ("XLMRobertaForSequenceClassification", False, False, "cross-encoder"),
-        ("GteNewModel", False, False, "bi-encoder"),
-        ("GteNewForSequenceClassification", False, False, "cross-encoder"),
-        ("HF_ColBERT", False, False, "late-interaction"),
+        ("LlamaForCausalLM", False, "bi-encoder"),
+        ("LlavaForConditionalGeneration", True, "bi-encoder"),
+        ("Step5ForCausalLM", False, "bi-encoder"),
+        ("Step5ForConditionalGeneration", True, "bi-encoder"),
+        ("DeepseekV41ForCausalLM", True, "bi-encoder"),
+        ("BertForSequenceClassification", False, "cross-encoder"),
+        ("RobertaForSequenceClassification", False, "cross-encoder"),
+        ("XLMRobertaForSequenceClassification", False, "cross-encoder"),
+        ("GteNewModel", False, "bi-encoder"),
+        ("GteNewForSequenceClassification", False, "cross-encoder"),
+        ("HF_ColBERT", False, "late-interaction"),
     ],
 )
-def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
+def test_registry_model_property(model_arch, is_mm, score_type):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
     assert model_info is not None
 
     assert model_info.supports_multimodal is is_mm
     assert model_info.score_type == score_type
 
-    if init_cuda and current_platform.is_cuda_alike():
-        assert not torch.cuda.is_initialized()
 
-        ModelRegistry._try_load_model_cls(model_arch)
-        if not torch.cuda.is_initialized():
-            warnings.warn(
-                "This model no longer initializes CUDA on import. "
-                "Please test using a different one.",
-                stacklevel=2,
-            )
-
-
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model_arch,is_pp,init_cuda",
+    "model_arch,is_pp",
     [
-        # TODO(woosuk): Re-enable this once the MLP Speculator is supported
-        # in V1.
-        # ("MLPSpeculatorPreTrainedModel", False, False),
-        ("DeepseekV2ForCausalLM", True, False),
-        ("Qwen2VLForConditionalGeneration", True, True),
+        ("DeepseekV2ForCausalLM", True),
+        ("Qwen2VLForConditionalGeneration", True),
     ],
 )
-def test_registry_is_pp(model_arch, is_pp, init_cuda):
+def test_registry_is_pp(model_arch, is_pp):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
     assert model_info is not None
 
     assert model_info.supports_pp is is_pp
 
-    if init_cuda and current_platform.is_cuda_alike():
-        assert not torch.cuda.is_initialized()
 
-        ModelRegistry._try_load_model_cls(model_arch)
-        if not torch.cuda.is_initialized():
-            warnings.warn(
-                "This model no longer initializes CUDA on import. "
-                "Please test using a different one.",
-                stacklevel=2,
-            )
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        ("Qwen4ExpForCausalLM", True),
+        ("Qwen4ExpForConditionalGeneration", True),
+        ("Qwen4ExpMTP", True),
+        ("LlamaForCausalLM", False),
+    ],
+)
+def test_registry_supports_hc_sp(model_arch, supported):
+    """HC SP is opt-in for each model implementation, including MTP."""
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_hc_sp is supported
+
+
+@pytest.mark.parametrize(
+    "model_arch,may_use",
+    [
+        # Its checkpoint has no MTP embedding, so under PP it needs the target's.
+        ("DeepSeekV4MTPModel", True),
+        # Not an EAGLE-capable model, so it never declares the attribute.
+        ("OPTForCausalLM", False),
+    ],
+)
+def test_registry_may_use_target_embed(model_arch, may_use):
+    """A drafter opts in to sharing the target's input embedding; under PP the
+    last rank then keeps a copy of it for the drafter."""
+    if model_arch == "DeepSeekV4MTPModel" and not current_platform.is_cuda():
+        pytest.skip("Only the NVIDIA DeepSeek-V4 MTP opts in")
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.may_use_target_embed is may_use
 
 
 @create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "model_arch",
+    ["LlavaForConditionalGeneration", "Qwen2VLForConditionalGeneration"],
+)
+def test_registry_inspect_does_not_init_cuda(model_arch):
+    """Inspecting a model must not import it: these architectures initialize
+    CUDA at import time, so the inspection path has to stay out-of-process."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires a CUDA-like platform")
+
+    assert ModelRegistry._try_inspect_model_cls(model_arch) is not None
+    assert not torch.cuda.is_initialized()
+
+    ModelRegistry._try_load_model_cls(model_arch)
+    if not torch.cuda.is_initialized():
+        warnings.warn(
+            "This model no longer initializes CUDA on import. "
+            "Please test using a different one.",
+            stacklevel=2,
+        )
+
+
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
         # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
-        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        ("NemotronH_Nano_VL_V2", True),
+        ("NemotronH_Omni_Reasoning_V3", True),
+        (
+            "KimiLinearForCausalLM",
+            not (current_platform.is_rocm() or current_platform.is_xpu()),
+        ),
         ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
@@ -213,6 +251,21 @@ def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
     assert result is cached_model_info
     assert len(loaded_hashes) == 1
     assert loaded_hashes[0]
+
+
+def test_fill_model_info_cache(monkeypatch, tmp_path):
+    """After one fill, inspecting a model reads the cache instead of starting a
+    subprocess."""
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    arch = "LlamaForCausalLM"
+    registry = _ModelRegistry({arch: ModelRegistry.models[arch]})
+    registry.fill_model_info_cache()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        lambda _: pytest.fail("Model info should come from the filled cache"),
+    )
+    assert registry.models[arch].inspect_model_cls().is_text_generation_model
 
 
 def test_hf_registry_coverage():

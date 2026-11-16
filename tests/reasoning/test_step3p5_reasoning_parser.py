@@ -4,7 +4,8 @@
 import pytest
 
 from tests.reasoning.utils import run_reasoning_extraction
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.parser.engine.registered_adapters import Step3p5ParserReasoningAdapter
+from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import get_tokenizer
 
 parser_name = "step3p5"
@@ -111,7 +112,7 @@ EMPTY_STREAMING = {
 }
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
-    "reasoning": "This is a reasoning section",
+    "reasoning": "\nThis is a reasoning section",
     "content": "\nThis is the rest",
     "is_reasoning_end": True,
 }
@@ -125,7 +126,7 @@ NEW_LINE_STREAMING = {
 
 NEW_LINE_STREAMING_COMPLEX_CONTENT = {
     "output": "\n This is a \n reasoning section\n\n\n</think>\n\nThis is the rest",
-    "reasoning": "\n This is a \n reasoning section\n\n",
+    "reasoning": "\n This is a \n reasoning section",
     "content": "\n\nThis is the rest",
     "is_reasoning_end": True,
 }
@@ -283,9 +284,8 @@ def test_reasoning(
     output_tokens: list[str] = [
         step3p5_tokenizer.convert_tokens_to_string([token]) for token in output
     ]
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        step3p5_tokenizer
-    )
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(step3p5_tokenizer)
+    assert isinstance(parser, Step3p5ParserReasoningAdapter)
 
     reasoning, content = run_reasoning_extraction(
         parser, output_tokens, streaming=streaming
@@ -307,9 +307,10 @@ def test_reasoning(
     current_ids: list[int] = []
     for token_id in output_ids:
         current_ids.append(token_id)
-        if token_id == parser.end_token_id:
+        if token_id in parser.reasoning_end_token_ids:
             assert parser.is_reasoning_end_streaming(current_ids, [token_id])
-            assert parser.is_reasoning_end_streaming(output_ids, output_ids)
+            if param_dict["is_reasoning_end"]:
+                assert parser.is_reasoning_end_streaming(output_ids, output_ids)
             break
         assert not parser.is_reasoning_end_streaming(current_ids, [token_id])
     else:
@@ -317,7 +318,7 @@ def test_reasoning(
 
     # Test extract_content
     if param_dict["content"] is not None:
-        content = parser.extract_content_ids(output_ids)
+        content_ids = parser.extract_content_ids(output_ids)
         # Fixed expected token ids for specific test cases
         test_id = (
             request.node.callspec.id if hasattr(request.node, "callspec") else None
@@ -332,7 +333,6 @@ def test_reasoning(
             expected_content_ids = step3p5_tokenizer.convert_tokens_to_ids(
                 step3p5_tokenizer.tokenize(param_dict["content"])
             )
-            assert content == expected_content_ids
-    else:
-        content = parser.extract_content_ids(output_ids)
-        assert content == []
+            assert content_ids == expected_content_ids
+    elif param_dict["is_reasoning_end"]:
+        assert parser.extract_content_ids(output_ids) == []

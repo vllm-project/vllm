@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Native MXFP8 (1x32 block, E8M0 scale) MoE for AMD CDNA4 (gfx950) via Triton
-``tl.dot_scaled`` (hardware microscaling matmul).
+`tl.dot_scaled` (hardware microscaling matmul).
 
 The expert GEMMs consume the FP8 E4M3 weights and their E8M0 block scales
 directly (no dequant-to-BF16), and activations are MXFP8-quantized per token.
-On CDNA4 ``dot_scaled`` maps to the native MX matrix-core ops; on other archs
+On CDNA4 `dot_scaled` maps to the native MX matrix-core ops; on other archs
 Triton upcasts to BF16 (so this stays correct, just not faster) — but the
 oracle only selects this path on gfx950 and routes everything else to the
-BF16 ``Mxfp8EmulationTritonExperts`` fallback.
+BF16 `Mxfp8EmulationTritonExperts` fallback.
 
-Structure mirrors vLLM's ``fused_moe_kernel``: tokens are sorted by expert
-(``moe_align_block_size``); each program computes a ``[BLOCK_M, BLOCK_N]`` tile
-for one expert, accumulating over K with ``dot_scaled``. SwiGLU-OAI activation
+Structure mirrors vLLM's `fused_moe_kernel`: tokens are sorted by expert
+(`moe_align_block_size`); each program computes a `[BLOCK_M, BLOCK_N]` tile
+for one expert, accumulating over K with `dot_scaled`. SwiGLU-OAI activation
 and the top-k weighted reduction run in PyTorch between/after the two GEMMs.
 """
 
@@ -325,7 +325,7 @@ def fused_moe_mxfp8_native(
 
 
 class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
-    """Native MXFP8 MoE (CDNA4 ``dot_scaled``) on gfx950."""
+    """Native MXFP8 MoE (CDNA4 `dot_scaled`) on gfx950."""
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:

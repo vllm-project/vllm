@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This file is used for /tests and /benchmarks"""
+"""This file is used for /tests and /benchmarks."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -11,18 +11,27 @@ import numpy
 import torch
 from torch import fx
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_ep_group, get_tp_group
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
 
+logger = init_logger(__name__)
+
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
 INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
+
+
+def require_finite_positive_scales(name: str, value: torch.Tensor) -> None:
+    if not torch.isfinite(value).all() or not (value > 0).all():
+        raise ValueError(f"{name} must contain finite positive scales")
 
 
 def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
@@ -35,14 +44,14 @@ def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
 def weight_amax(
     weight: torch.Tensor, *, dim: int | None = None, keepdim: bool = False
 ) -> torch.Tensor:
-    """``max(|weight|)``, without materializing a full-size ``abs()``."""
+    """`max(|weight|)`, without materializing a full-size `abs()`."""
     lo, hi = weight.aminmax(dim=dim, keepdim=keepdim)
     return torch.maximum(lo.abs(), hi.abs())
 
 
 def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tensor:
-    """Reduce a weight ``amax`` over the TP group when the weight is sharded
-    along a dim the ``amax`` reduces over, so each shard derives the same scale
+    """Reduce a weight `amax` over the TP group when the weight is sharded
+    along a dim the `amax` reduces over, so each shard derives the same scale
     it would as part of the whole weight.
     """
     if is_sharded:
@@ -55,9 +64,9 @@ def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tens
 
 
 def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Tensor:
-    """Reduce a per-expert weight ``amax`` over the ranks that tensor-shard the
+    """Reduce a per-expert weight `amax` over the ranks that tensor-shard the
     MoE weights. That sharding is flattened over DP x PCP x TP, exactly the EP
-    group's span. Under EP ``moe_tp_size`` is 1 and each rank owns whole
+    group's span. Under EP `moe_tp_size` is 1 and each rank owns whole
     experts, so no reduction is needed.
     """
     if moe_tp_size > 1:
@@ -109,8 +118,7 @@ class _GroupShape(NamedTuple):
 
 
 class GroupShape(_GroupShape):
-    """
-    This class describes the quantization group shape.
+    """This class describes the quantization group shape.
     It includes static members for common shapes (per-tensor, per-token).
     """
 
@@ -137,10 +145,9 @@ GroupShape.PER_TOKEN = GroupShape(1, -1)
 GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScaleDesc:
-    """
-    Class for describing a single quantization scaling factor.
+    """Class for describing a single quantization scaling factor.
     dtype: data type of the scale
     static: static scale if True, dynamic if False
     group_shape: group shape of the scale
@@ -164,10 +171,9 @@ class ScaleDesc:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuantKey:
-    """
-    Class for identifying the type of quantization.
+    """Class for identifying the type of quantization.
     dtype: quantized data type
     scale: scale descriptor
     scale2: second-level scale descriptor
@@ -211,6 +217,20 @@ kNvfp4DynamicGroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
 kNvfp4Dynamic = QuantKey(
     FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kStaticTensorScale
 )
+kNvfp4DynamicToken = QuantKey(
+    FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTokenScale
+)
+
+
+def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:
+    """Whether `key`'s second-level scale is computed per token at runtime."""
+    return (
+        key is not None
+        and key.scale2 is not None
+        and not key.scale2.static
+        and key.scale2.group_shape == GroupShape.PER_TOKEN
+    )
+
 
 kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
 kNvfp4Static = QuantKey(
@@ -292,6 +312,12 @@ kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True
 kInt8DynamicTokenAsym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=False)
 kInt8StaticTensorAsym = QuantKey(torch.int8, kStaticTensorScale, symmetric=False)
 kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=False)
+kDynamic32Scale = ScaleDesc(torch.float32, False, GroupShape(1, 32))
+kInt8Dynamic32Sym = QuantKey(torch.int8, kDynamic32Scale, symmetric=True)
+
+# LUT-B: 3-bit indices into an E4M3 codebook per 8x64 weight tile (Rubin).
+kLutBStaticCodebook = ScaleDesc(torch.float8_e4m3fn, True, GroupShape(8, 64))
+kLutBStatic = QuantKey(torch.uint8, kLutBStaticCodebook, symmetric=True)
 
 # INT4 W4A8 quantization keys
 
@@ -333,6 +359,36 @@ def create_fp8_quant_key(
 ) -> QuantKey:
     scale_desc = ScaleDesc(scale_dtype, static, group_shape)
     return QuantKey(FP8_DTYPE, scale_desc, symmetric=symmetric)
+
+
+def check_activation_quant_fallback(
+    kernel: str,
+    requested_key: QuantKey | None,
+    executed_key: QuantKey | None,
+) -> str | None:
+    """Check a kernel that runs `executed_key` activations for a layer that
+    requests `requested_key`.
+
+    Running a requested activation quantization as a different one (e.g.
+    Marlin running W8A8 as W8A16) is a fallback. Adding activation
+    quantization to an unquantized request is not.
+
+    Returns:
+        Why VLLM_STRICT_QUANT_SCHEME rejects the fallback, or None if the kernel
+        may be used. Warns once for an allowed fallback, so call this only once
+        the kernel is otherwise selectable.
+
+    """
+    if requested_key is None or executed_key == requested_key:
+        return None
+    executed = "unquantized" if executed_key is None else str(executed_key)
+    msg = f"{kernel} runs {requested_key} activations as {executed}"
+    if envs.VLLM_STRICT_QUANT_SCHEME:
+        return f"{msg}, which VLLM_STRICT_QUANT_SCHEME=1 forbids"
+    logger.warning_once(
+        "%s. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.", msg
+    )
+    return None
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
@@ -378,8 +434,7 @@ def prep_scale_for_group_broadcast(
     x: torch.Tensor,
     group_shape: GroupShape | None,
 ) -> torch.Tensor:
-    """
-    Prepare the input quantization scale for group broadcasting.
+    """Prepare the input quantization scale for group broadcasting.
 
     Args:
         scale: The scale tensor (scalar or 1D).
@@ -388,6 +443,7 @@ def prep_scale_for_group_broadcast(
 
     Returns:
         scale reshaped for correct broadcasting.
+
     """
     if scale.numel() == 1:
         # For per-tensor quant, keep the scale as a scalar (not reshaped to (1, 1)).
@@ -432,13 +488,13 @@ def scaled_quantize(
     quant_dtype: torch.dtype,
     compute_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Args:
-        x: Input tensor to quantize
-        group_shape: Shape of quantization groups
-        quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
-        compute_dtype: Optional dtype for intermediate computations.
-            If None, uses input dtype. Use torch.float32 for higher precision.
+    """Args:
+    x: Input tensor to quantize
+    group_shape: Shape of quantization groups
+    quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
+    compute_dtype: Optional dtype for intermediate computations.
+        If None, uses input dtype. Use torch.float32 for higher precision.
+
     """
     group_shape = _normalize_quant_group_shape(x, group_shape)
     assert quant_dtype.is_floating_point, (
@@ -506,7 +562,7 @@ def get_attribute_fallback(obj, attributes: list[str]):
 def get_and_maybe_dequant_weights(
     layer: "LinearBase", out_dtype: torch.dtype = torch.float32
 ):
-    """Return layer's unquantized weights in [out, in] layout"""
+    """Return layer's unquantized weights in [out, in] layout."""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
     from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -868,9 +924,7 @@ def unpack_cols(
     pack_factor = get_pack_factor(num_bits)
     assert size_n % pack_factor == 0
     assert packed_q_w.shape == (size_k, size_n // pack_factor), (
-        "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
-            packed_q_w.shape, size_k, size_n, pack_factor
-        )
+        f"{packed_q_w.shape = } {size_k = }, {size_n = } {pack_factor = }"
     )
 
     orig_device = packed_q_w.device
@@ -913,7 +967,7 @@ def awq_pack(
     elif num_bits == 8:
         interleave = numpy.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise Exception(f"num_bits must be 4 or 8, got {num_bits}")
 
     q_w = q_w.reshape((-1, len(interleave)))[:, interleave].ravel()
     q_w = q_w.reshape((-1, size_n)).contiguous()
@@ -924,8 +978,7 @@ def awq_pack(
 def convert_bf16_scales_to_fp8(
     quant_fp8: Callable, scales: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
+    """Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
     expected by W4A8 GEMM kernels.
     """
     assert scales.is_contiguous(), (
@@ -949,9 +1002,7 @@ def convert_bf16_scales_to_fp8(
 
 
 def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
-    """
-    Convert int4b8 (packed to int32) to signed int4
-    """
+    """Convert int4b8 (packed to int32) to signed int4."""
     assert t.is_cuda, "tensor must be on gpu"
     assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
 

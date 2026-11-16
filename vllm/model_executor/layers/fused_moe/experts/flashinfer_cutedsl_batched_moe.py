@@ -107,8 +107,7 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.
@@ -123,7 +122,6 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
         K_dim = K * 2 if self.use_deep_ep_ll_nvfp4_dispatch else K
@@ -212,8 +210,7 @@ def flashinfer_cutedsl_moe_masked(
     workspace: torch.Tensor,
     out: torch.Tensor,
 ):
-    """
-    Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
+    """Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
     kernels.
 
     Args:
@@ -229,13 +226,14 @@ def flashinfer_cutedsl_moe_masked(
         a2_global_scale (torch.Tensor): (l,)
         w2_blockscale (torch.Tensor): blockscale factors, e4m3,
         w2_alpha (torch.Tensor): (l,)
+        out (torch.Tensor): output tensor written in place, [l, m, k], bf16
         masked_m (torch.Tensor): Masked dimension indices
         workspace (torch.Tensor): For gateup_output
 
     Notes:
         - Assumes max(masked_m) <= m.
-    """
 
+    """
     # === Assertions on dtypes ===
     assert w1.dtype == torch.uint8, f"w1 must be uint8, got {w1.dtype}"
     assert w1_blockscale.dtype == torch.float8_e4m3fn, (

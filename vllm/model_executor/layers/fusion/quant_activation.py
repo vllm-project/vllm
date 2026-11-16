@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-A QuantizedActivation is a pre-quantized activation produced by a fused kernel
+"""A QuantizedActivation is a pre-quantized activation produced by a fused kernel
 and consumed directly by a linear layer, letting the layer skip its own input
 quantization. A linear advertises the key its kernel can consume via
 expose_input_quant_key; the kernel validates and reads the activation via
@@ -17,7 +16,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+@dataclass(slots=True)
 class QuantizedActivation:
     """A quantized activation paired with its scale and original metadata.
 

@@ -13,10 +13,10 @@ from typing import Any, cast
 import pytest
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm import SamplingParams
-from vllm.config import StructuredOutputsConfig
+from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
@@ -53,14 +53,6 @@ class _TwoTokenModelConfig:
 
 class _StubTokenizer:
     pass
-
-
-class _FailIfCompiled:
-    def compile_grammar(self, grammar_spec: str) -> None:
-        pytest.fail(f"native grammar compile reached for {grammar_spec!r}")
-
-    def compile_structural_tag(self, grammar_spec: str) -> None:
-        pytest.fail(f"native structural-tag compile reached for {grammar_spec!r}")
 
 
 class _SerializedGrammar:
@@ -320,15 +312,36 @@ def _multi_trigger_mixed_numeric_string_alias_triggered_tags_payload() -> dict[
     }
 
 
-def _build_hf_tokenizer(vocab: dict[str, int]) -> PreTrainedTokenizerFast:
-    return PreTrainedTokenizerFast(
+def _build_hf_tokenizer(vocab: dict[str, int]) -> TokenizersBackend:
+    return TokenizersBackend(
         tokenizer_object=Tokenizer(WordLevel(vocab, unk_token=None)),
         eos_token=next(iter(vocab)),
     )
 
 
-def _build_structural_tag_tokenizer() -> PreTrainedTokenizerFast:
+def _build_structural_tag_tokenizer() -> TokenizersBackend:
     return _build_hf_tokenizer({"<tool>": 0, "<dispatch>": 1})
+
+
+def _build_backend(
+    tokens: list[str] | None = None, *, vocab_size: int | None = None
+) -> backend_xgrammar.XgrammarBackend:
+    if tokens is None:
+        tokens = ["a", "b", "c", "d", "e"]
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(
+            WordLevel(
+                {token: index for index, token in enumerate(tokens)}, unk_token=None
+            )
+        )
+    )
+    return backend_xgrammar.XgrammarBackend(
+        VllmConfig(
+            structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+        ),
+        tokenizer=tokenizer,
+        vocab_size=len(tokens) if vocab_size is None else vocab_size,
+    )
 
 
 def _run_structural_tag_subprocess(
@@ -343,12 +356,14 @@ def _run_structural_tag_subprocess(
         if not existing_pythonpath
         else f"{worktree_root}{os.pathsep}{existing_pythonpath}"
     )
+    # Native parser failures must not terminate or hang the pytest process.
     return subprocess.run(
         [sys.executable, "-c", script, structural_tag],
         check=False,
         capture_output=True,
         text=True,
         env=env,
+        timeout=30,
     )
 
 
@@ -1327,18 +1342,10 @@ def test_request_validation_preserves_native_token_dispatch_rule_names() -> None
     )
 
 
-def test_request_validation_preserves_native_deep_structural_tag() -> None:
+def test_request_validation_rejects_structural_tags_beyond_nesting_limit() -> None:
     structural_tag = _deep_structural_tag_payload(600, {"value": "ok"})
-    backend_xgrammar.validate_xgrammar_structural_tag_syntax(structural_tag)
-    params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(structural_tag=structural_tag)
-    )
-
-    params._validate_structured_outputs(
-        _StubModelConfig(),
-        StructuredOutputsConfig(backend="xgrammar"),
-        _StubTokenizer(),
-    )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        backend_xgrammar.validate_xgrammar_structural_tag_syntax(structural_tag)
 
 
 @pytest.mark.parametrize("version", ["v13", "v14"])
@@ -1547,20 +1554,14 @@ def test_backend_rejects_out_of_range_tokens_before_native_compile(
     request_type: StructuredOutputOptions,
     grammar_spec: str,
 ) -> None:
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    backend.vocab_size = 5
-    backend.num_speculative_tokens = 0
+    backend = _build_backend(vocab_size=5)
 
     with pytest.raises((ValueError, VLLMValidationError), match="token ID"):
         backend.compile_grammar(request_type, grammar_spec)
 
 
 def test_backend_rejects_negative_repeat_token_before_native_compile() -> None:
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    backend.vocab_size = 5
-    backend.num_speculative_tokens = 0
+    backend = _build_backend(vocab_size=5)
 
     with pytest.raises(
         (ValueError, VLLMValidationError), match="Invalid structural tag specification"
@@ -1634,19 +1635,9 @@ import sys
 from vllm.v1.structured_output import backend_xgrammar
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
-class FailIfCompiled:
-    def compile_grammar(self, grammar_spec):
-        raise AssertionError(f"native grammar compile reached for {grammar_spec!r}")
+from tests.v1.structured_output.test_xgrammar_token_bounds import _build_backend
 
-    def compile_structural_tag(self, grammar_spec):
-        raise AssertionError(
-            f"native structural-tag compile reached for {grammar_spec!r}"
-        )
-
-backend = object.__new__(backend_xgrammar.XgrammarBackend)
-backend.compiler = FailIfCompiled()
-backend.vocab_size = 5
-backend.num_speculative_tokens = 0
+backend = _build_backend()
 
 try:
     backend.compile_grammar(StructuredOutputOptions.STRUCTURAL_TAG, sys.argv[1])
@@ -1662,22 +1653,8 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def test_backend_preserves_repeat_wrapped_nested_grammar_token_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["a", "b", "c"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=3,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 3
-    backend.num_speculative_tokens = 0
+def test_backend_preserves_repeat_wrapped_nested_grammar_token_id() -> None:
+    backend = _build_backend(["a", "b", "c"], vocab_size=3)
 
     backend.compile_grammar(
         StructuredOutputOptions.STRUCTURAL_TAG,
@@ -1685,28 +1662,14 @@ def test_backend_preserves_repeat_wrapped_nested_grammar_token_id(
     )
 
 
-def test_backend_preserves_tokenizer_resolved_deep_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["<tool>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=1,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_compiler = backend.compiler
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 1
-    backend.num_speculative_tokens = 0
+def test_backend_rejects_tokenizer_resolved_tag_beyond_nesting_limit() -> None:
+    backend = _build_backend(["<tool>"], vocab_size=1)
 
-    backend.compile_grammar(
-        StructuredOutputOptions.STRUCTURAL_TAG,
-        _deep_structural_tag_payload(600, {"type": "token", "token": "<tool>"}),
-    )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        backend.compile_grammar(
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            _deep_structural_tag_payload(600, {"type": "token", "token": "<tool>"}),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1793,9 +1756,7 @@ def test_backend_preserves_tokenizer_resolved_deep_structural_tag(
 def test_backend_rejects_coerced_structural_tag_token_ids_before_native_compile(
     format_payload: dict[str, object],
 ) -> None:
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    backend.vocab_size = 5
+    backend = _build_backend(vocab_size=5)
 
     with pytest.raises((ValueError, VLLMValidationError), match="token ID"):
         backend.compile_grammar(
@@ -1807,102 +1768,46 @@ def test_backend_rejects_coerced_structural_tag_token_ids_before_native_compile(
 @pytest.mark.parametrize("format_payload", _string_token_format_payloads())
 def test_backend_preserves_tokenizer_resolved_structural_tag_tokens(
     format_payload: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["x", "<tool>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=2,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_compiler = backend.compiler
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 2
-    backend.num_speculative_tokens = 0
+    backend = _build_backend(["x", "<tool>"], vocab_size=2)
 
     grammar = backend.compile_grammar(
         StructuredOutputOptions.STRUCTURAL_TAG,
         _structural_tag_payload(format_payload),
     )
 
+    assert isinstance(grammar, backend_xgrammar.XgrammarGrammar)
     assert 1 in list(backend_xgrammar._iter_xgrammar_token_ids(grammar.ctx.grammar))
 
 
-def test_backend_preserves_distinct_string_trigger_identities(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["x", "<a>", "<b>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=3,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_compiler = backend.compiler
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 3
-    backend.num_speculative_tokens = 0
+def test_backend_preserves_distinct_string_trigger_identities() -> None:
+    backend = _build_backend(["x", "<a>", "<b>"], vocab_size=3)
 
     grammar = backend.compile_grammar(
         StructuredOutputOptions.STRUCTURAL_TAG,
         _structural_tag_payload(_distinct_string_triggered_tags_payload()),
     )
 
+    assert isinstance(grammar, backend_xgrammar.XgrammarGrammar)
     token_ids = set(backend_xgrammar._iter_xgrammar_token_ids(grammar.ctx.grammar))
 
     assert {1, 2}.issubset(token_ids)
 
 
-def test_backend_preserves_mixed_numeric_string_token_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["<tool>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=1,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_compiler = backend.compiler
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 1
-    backend.num_speculative_tokens = 0
+def test_backend_preserves_mixed_numeric_string_token_aliases() -> None:
+    backend = _build_backend(["<tool>"], vocab_size=1)
 
     grammar = backend.compile_grammar(
         StructuredOutputOptions.STRUCTURAL_TAG,
         _structural_tag_payload(_mixed_numeric_string_alias_triggered_tags_payload()),
     )
 
+    assert isinstance(grammar, backend_xgrammar.XgrammarGrammar)
     assert list(backend_xgrammar._iter_xgrammar_token_ids(grammar.ctx.grammar)) == [0]
 
 
-def test_backend_preserves_multi_trigger_mixed_numeric_string_token_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["<zero>", "<a>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=2,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_compiler = backend.compiler
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 2
-    backend.num_speculative_tokens = 0
+def test_backend_preserves_multi_trigger_mixed_numeric_string_token_aliases() -> None:
+    backend = _build_backend(["<zero>", "<a>"], vocab_size=2)
 
     grammar = backend.compile_grammar(
         StructuredOutputOptions.STRUCTURAL_TAG,
@@ -1911,6 +1816,7 @@ def test_backend_preserves_multi_trigger_mixed_numeric_string_token_aliases(
         ),
     )
 
+    assert isinstance(grammar, backend_xgrammar.XgrammarGrammar)
     assert set(backend_xgrammar._iter_xgrammar_token_ids(grammar.ctx.grammar)) == {
         0,
         1,
@@ -1921,11 +1827,7 @@ def test_backend_preserves_multi_trigger_mixed_numeric_string_token_aliases(
 def test_backend_rejects_nested_grammar_token_placeholder_collisions(
     token_id: int,
 ) -> None:
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    backend._structural_tag_validation_compiler = _FailIfCompiled()
-    backend.vocab_size = 1
-    backend.num_speculative_tokens = 0
+    backend = _build_backend(vocab_size=1)
 
     with pytest.raises((ValueError, VLLMValidationError), match="token ID"):
         backend.compile_grammar(
@@ -1937,11 +1839,7 @@ def test_backend_rejects_nested_grammar_token_placeholder_collisions(
 
 
 def test_backend_rejects_hidden_token_dispatch_after_invalid_string_branches() -> None:
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    backend._structural_tag_validation_compiler = _FailIfCompiled()
-    backend.vocab_size = 5
-    backend.num_speculative_tokens = 0
+    backend = _build_backend(vocab_size=5)
 
     with pytest.raises((ValueError, VLLMValidationError), match="token ID"):
         backend.compile_grammar(
@@ -1952,38 +1850,22 @@ def test_backend_rejects_hidden_token_dispatch_after_invalid_string_branches() -
         )
 
 
-def test_backend_preserves_empty_token_dispatch_trigger(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["", "<tool>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=2,
-    )
-    backend.compiler = backend_xgrammar.xgr.GrammarCompiler(tokenizer_info)
-    backend._structural_tag_validation_compiler = backend.compiler
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 2
-    backend.num_speculative_tokens = 0
+def test_backend_preserves_empty_token_dispatch_trigger() -> None:
+    backend = _build_backend(["", "<tool>"], vocab_size=2)
 
     grammar = backend.compile_grammar(
         StructuredOutputOptions.STRUCTURAL_TAG,
         _structural_tag_payload(_empty_token_dispatch_trigger_payload()),
     )
 
+    assert isinstance(grammar, backend_xgrammar.XgrammarGrammar)
     token_ids = set(backend_xgrammar._iter_xgrammar_token_ids(grammar.ctx.grammar))
 
     assert {0, 1}.issubset(token_ids)
 
 
 def test_backend_rejects_mixed_string_and_oob_token_before_compile() -> None:
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    backend.vocab_size = 5
+    backend = _build_backend(vocab_size=5)
 
     with pytest.raises((ValueError, VLLMValidationError), match="token ID"):
         backend.compile_grammar(
@@ -2012,24 +1894,8 @@ def test_backend_rejects_mixed_string_and_oob_token_before_compile() -> None:
 )
 def test_backend_rejects_tokenizer_resolved_out_of_range_token_ids(
     format_payload: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        backend_xgrammar.xgr, "GrammarMatcher", lambda *args, **kwargs: object()
-    )
-    backend = object.__new__(backend_xgrammar.XgrammarBackend)
-    backend.compiler = _FailIfCompiled()
-    tokenizer_info = backend_xgrammar.xgr.TokenizerInfo(
-        ["x", "<tool>"],
-        backend_xgrammar.xgr.VocabType.RAW,
-        vocab_size=1,
-    )
-    backend._structural_tag_validation_compiler = backend_xgrammar.xgr.GrammarCompiler(
-        tokenizer_info
-    )
-    backend._structural_tag_validation_tokenizer_info = tokenizer_info
-    backend.vocab_size = 1
-    backend.num_speculative_tokens = 0
+    backend = _build_backend(["x", "<tool>"], vocab_size=1)
 
     with pytest.raises((ValueError, VLLMValidationError), match="token ID 1"):
         backend.compile_grammar(

@@ -1,22 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::BTreeSet;
 use std::result::Result;
 
 use thiserror::Error;
 use vllm_engine_core_client::protocol::dtype::TensorDtype;
-use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures};
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::tensor::WireArrayData;
 
 use crate::SamplingLimits;
-use crate::request::SamplingParams;
+
+const MAX_NUM_BAD_WORDS_ENV: &str = "VLLM_MAX_NUM_BAD_WORDS";
+const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
+const MAX_BAD_WORDS_TOTAL_TOKENS_ENV: &str = "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS";
+const DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS: usize = 1024;
 
 #[derive(Debug, Error)]
 pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
+    #[error("bad_words_token_ids must not contain empty sequences")]
+    EmptyBadWordSequence,
+    #[error("bad_words cannot contain an empty string.")]
+    EmptyBadWord,
+    #[error("bad_words entries must tokenize to at least one token.")]
+    EmptyBadWordTokenization,
+    #[error("Too many bad words: {count}. The max number is {max}.")]
+    TooManyBadWords { count: usize, max: usize },
+    #[error("Too many bad words after tokenization: {count}. The max number is {max}.")]
+    TooManyTokenizedBadWords { count: usize, max: usize },
+    #[error("Too many total bad word tokens: {count}. The max is {max}.")]
+    TooManyBadWordTokens { count: usize, max: usize },
     #[error(
         "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
@@ -32,30 +47,6 @@ pub enum TokenIdsError {
         requested: usize,
         max_allowed: usize,
     },
-    #[error("{parameter} entry has length {requested}, which exceeds the maximum of {max_allowed}")]
-    EntryTooLong {
-        parameter: &'static str,
-        requested: usize,
-        max_allowed: usize,
-    },
-    #[error(
-        "{parameter} tokenization produced {requested} entries, \
-         which exceeds the maximum of {max_allowed}"
-    )]
-    TooManyTokenizedEntries {
-        parameter: &'static str,
-        requested: usize,
-        max_allowed: usize,
-    },
-    #[error(
-        "{parameter} tokenization produced {requested} total tokens, \
-         which exceeds the maximum of {max_allowed}"
-    )]
-    TooManyTokenizedTokens {
-        parameter: &'static str,
-        requested: usize,
-        max_allowed: usize,
-    },
 }
 
 fn validate_count(
@@ -63,15 +54,14 @@ fn validate_count(
     requested: usize,
     max_allowed: usize,
 ) -> Result<(), TokenIdsError> {
-    if requested <= max_allowed {
-        return Ok(());
+    if requested > max_allowed {
+        return Err(TokenIdsError::TooManyEntries {
+            parameter,
+            requested,
+            max_allowed,
+        });
     }
-
-    Err(TokenIdsError::TooManyEntries {
-        parameter,
-        requested,
-        max_allowed,
-    })
+    Ok(())
 }
 
 fn validate_param(
@@ -81,9 +71,7 @@ fn validate_param(
 ) -> Result<(), TokenIdsError> {
     let invalid_token_ids: Vec<_> = token_ids
         .into_iter()
-        .filter(|&token_id| {
-            usize::try_from(token_id).map_or(true, |token_id| token_id >= vocab_size)
-        })
+        .filter(|&token_id| token_id as usize >= vocab_size)
         .collect();
     if invalid_token_ids.is_empty() {
         return Ok(());
@@ -96,90 +84,31 @@ fn validate_param(
     })
 }
 
-/// Validate raw sampler-control sizes before any tokenization or engine serialization.
-pub(crate) fn validate_sampler_control_sizes(params: &SamplingParams) -> Result<(), TokenIdsError> {
-    if let Some(allowed_token_ids) = params.allowed_token_ids.as_deref() {
-        validate_count(
-            "allowed_token_ids",
-            allowed_token_ids.len(),
-            SamplingLimits::MAX_ALLOWED_TOKEN_IDS,
-        )?;
-    }
-    if let Some(logit_bias) = params.logit_bias.as_ref() {
-        validate_count(
-            "logit_bias",
-            logit_bias.len(),
-            SamplingLimits::MAX_LOGIT_BIAS_TOKENS,
-        )?;
-    }
-    if let Some(stop_token_ids) = params.stop_token_ids.as_deref() {
-        validate_count(
-            "stop_token_ids",
-            stop_token_ids.len(),
-            SamplingLimits::MAX_STOP_TOKEN_IDS,
-        )?;
-    }
-    if let Some(bad_words) = params.bad_words.as_deref() {
-        validate_count(
-            "bad_words",
-            bad_words.len(),
-            SamplingLimits::MAX_BAD_WORDS_INPUT_COUNT,
-        )?;
-        for bad_word in bad_words {
-            let length = bad_word.chars().count();
-            if length > SamplingLimits::MAX_BAD_WORD_INPUT_LENGTH {
-                return Err(TokenIdsError::EntryTooLong {
-                    parameter: "bad_words",
-                    requested: length,
-                    max_allowed: SamplingLimits::MAX_BAD_WORD_INPUT_LENGTH,
-                });
-            }
-        }
-    }
-
-    Ok(())
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
 
-/// Validate resolved stop-token state after model EOS aliases have been merged in.
-pub(crate) fn validate_resolved_stop_token_ids(
-    all_stop_token_ids: &BTreeSet<u32>,
-) -> Result<(), TokenIdsError> {
-    validate_count(
-        "stop_token_ids after EOS expansion",
-        all_stop_token_ids.len(),
-        SamplingLimits::MAX_STOP_TOKEN_IDS,
-    )
+/// The per-request cap on bad-word sequences.
+pub(super) fn max_num_bad_words() -> usize {
+    env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS)
 }
 
-/// Validate tokenized bad-word state against the engine's fixed-size sampler buffers.
-pub(crate) fn validate_bad_words_tokenized_shape(
-    bad_words_token_ids: &[Vec<u32>],
-    limits: &SamplingLimits,
-) -> Result<(), TokenIdsError> {
-    if bad_words_token_ids.len() > limits.max_num_bad_words {
-        return Err(TokenIdsError::TooManyTokenizedEntries {
-            parameter: "bad_words",
-            requested: bad_words_token_ids.len(),
-            max_allowed: limits.max_num_bad_words,
-        });
+/// Mirrors Model Runner V2's per-request bad-words buffer limits:
+/// <https://github.com/vllm-project/vllm/blob/a956a8126e6bd184cb0a6b8f7318fe4717675c2f/vllm/v1/worker/gpu/sample/bad_words.py#L40-L66>
+fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), TokenIdsError> {
+    let count = bad_words_token_ids.len();
+    let max = max_num_bad_words();
+    if count > max {
+        return Err(TokenIdsError::TooManyBadWords { count, max });
     }
 
-    let total_tokens = bad_words_token_ids
-        .iter()
-        .try_fold(0usize, |total, tokens| total.checked_add(tokens.len()));
-    let Some(total_tokens) = total_tokens else {
-        return Err(TokenIdsError::TooManyTokenizedTokens {
-            parameter: "bad_words",
-            requested: usize::MAX,
-            max_allowed: limits.max_bad_words_total_tokens,
-        });
-    };
-    if total_tokens > limits.max_bad_words_total_tokens {
-        return Err(TokenIdsError::TooManyTokenizedTokens {
-            parameter: "bad_words",
-            requested: total_tokens,
-            max_allowed: limits.max_bad_words_total_tokens,
-        });
+    let count = bad_words_token_ids.iter().map(Vec::len).sum();
+    let max = env_limit(
+        MAX_BAD_WORDS_TOTAL_TOKENS_ENV,
+        DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS,
+    );
+    if count > max {
+        return Err(TokenIdsError::TooManyBadWordTokens { count, max });
     }
 
     Ok(())
@@ -192,48 +121,45 @@ pub(crate) fn validate_prompt_token_ids(
     mm_features: Option<&MmFeatures>,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
-    let invalid_token_ids = prompt_token_ids
-        .iter()
-        .enumerate()
-        .filter_map(|(position, &token_id)| {
-            (usize::try_from(token_id).map_or(true, |token_id| token_id >= limits.model_vocab_size)
-                && !is_multimodal_embed_position(position, mm_features))
+    validate_param(
+        "prompt",
+        prompt_token_ids.iter().copied(),
+        limits.prompt_token_vocab_size(),
+    )?;
+    validate_param(
+        "prompt",
+        prompt_token_ids.iter().copied().enumerate().filter_map(|(position, token_id)| {
+            ((token_id as usize) < limits.model_vocab_size
+                || !is_multimodal_embed_position(position, mm_features))
             .then_some(token_id)
-        })
-        .collect::<Vec<_>>();
-    if invalid_token_ids.is_empty() {
-        return Ok(());
-    }
-    Err(TokenIdsError::OutOfVocab {
-        parameter: "prompt",
-        token_ids: invalid_token_ids,
-        vocab_size: limits.model_vocab_size,
-    })
+        }),
+        limits.model_vocab_size,
+    )
 }
 
 fn is_multimodal_embed_position(position: usize, mm_features: Option<&MmFeatures>) -> bool {
     mm_features.is_some_and(|features| {
-        features.iter().any(|feature| feature_replaces_position(feature, position))
+        features.iter().any(|feature| {
+            let Some(offset) = position.checked_sub(feature.mm_position.offset) else {
+                return false;
+            };
+            if offset >= feature.mm_position.length {
+                return false;
+            }
+            let Some(mask) = feature.mm_position.is_embed.as_ref() else {
+                return true;
+            };
+            if mask.dtype != TensorDtype::Bool
+                || mask.shape.as_slice() != [feature.mm_position.length]
+            {
+                return false;
+            }
+            match &mask.data {
+                WireArrayData::RawView(bytes) => bytes.get(offset).is_some_and(|value| *value != 0),
+                WireArrayData::AuxIndex(_) => false,
+            }
+        })
     })
-}
-
-fn feature_replaces_position(feature: &MmFeatureSpec, position: usize) -> bool {
-    let Some(offset) = position.checked_sub(feature.mm_position.offset) else {
-        return false;
-    };
-    if offset >= feature.mm_position.length {
-        return false;
-    }
-    let Some(mask) = feature.mm_position.is_embed.as_ref() else {
-        return true;
-    };
-    if mask.dtype != TensorDtype::Bool || mask.shape.as_slice() != [feature.mm_position.length] {
-        return false;
-    }
-    match &mask.data {
-        WireArrayData::RawView(bytes) => bytes.get(offset).is_some_and(|value| *value != 0),
-        WireArrayData::AuxIndex(_) => false,
-    }
 }
 
 /// Validate that token IDs in text sampling parameters are within their
@@ -242,6 +168,13 @@ pub(crate) fn validate_vocab_range(
     params: &EngineCoreSamplingParams,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
+    if params.min_tokens > 0 {
+        validate_count(
+            "stop_token_ids after EOS expansion",
+            params.all_stop_token_ids.len(),
+            SamplingLimits::MAX_STOP_TOKEN_IDS,
+        )?;
+    }
     validate_param(
         "stop_token_ids",
         params.all_stop_token_ids.iter().copied(),
@@ -252,6 +185,11 @@ pub(crate) fn validate_vocab_range(
         if token_ids.is_empty() {
             return Err(TokenIdsError::EmptyAllowedTokenIds);
         }
+        validate_count(
+            "allowed_token_ids",
+            token_ids.len(),
+            SamplingLimits::MAX_ALLOWED_TOKEN_IDS,
+        )?;
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),
@@ -260,6 +198,11 @@ pub(crate) fn validate_vocab_range(
     }
 
     if let Some(logit_bias) = params.logit_bias.as_ref() {
+        validate_count(
+            "logit_bias",
+            logit_bias.len(),
+            SamplingLimits::MAX_LOGIT_BIAS_TOKENS,
+        )?;
         validate_param(
             "logit_bias",
             logit_bias.keys().copied(),
@@ -276,6 +219,10 @@ pub(crate) fn validate_vocab_range(
     }
 
     if let Some(bad_words_token_ids) = params.bad_words_token_ids.as_deref() {
+        if bad_words_token_ids.iter().any(Vec::is_empty) {
+            return Err(TokenIdsError::EmptyBadWordSequence);
+        }
+        validate_bad_words_limits(bad_words_token_ids)?;
         validate_param(
             "bad_words",
             bad_words_token_ids.iter().flatten().copied(),

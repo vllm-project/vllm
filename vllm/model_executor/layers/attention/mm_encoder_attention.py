@@ -3,6 +3,7 @@
 
 import functools
 import json
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -40,6 +41,9 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_triton_attn_wrapper,
 )
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphPaddingLogic
+
 logger = init_logger(__name__)
 
 _, _FP8_MAX = get_fp8_min_max()
@@ -58,14 +62,14 @@ _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     """Load per-layer FP8 Q/K/V scales from a JSON file. Results are cached.
 
-    Expected format (keys ``q_scale`` / ``k_scale`` / ``v_scale`` also accepted)::
+    Expected format (keys `q_scale` / `k_scale` / `v_scale` also accepted)::
 
         {
             "visual.blocks.0.attn.attn": {"q": 224.0, "k": 198.0, "v": 210.0},
             "visual.blocks.1.attn.attn": {"q": 218.0, "k": 195.0, "v": 207.0},
         }
 
-    To produce such a file, run with ``mm_encoder_fp8_scale_save_path`` set.
+    To produce such a file, run with `mm_encoder_fp8_scale_save_path` set.
     """
     if path is None:
         return {}
@@ -107,10 +111,10 @@ def _maybe_save_fp8_scales(
     buffer_wrapped: bool,
 ) -> None:
     """Accumulate a layer's scale tensors; on the first amax buffer wrap,
-    dump all accumulated scales to ``mm_encoder_fp8_scale_save_path``.
+    dump all accumulated scales to `mm_encoder_fp8_scale_save_path`.
 
     No-op unless auto-save is configured. Tensor references are stored on
-    every call (no GPU->CPU sync); ``.item()`` is only called at the single
+    every call (no GPU->CPU sync); `.item()` is only called at the single
     save point to avoid stalling the forward path.
     """
     global _fp8_scale_save_path
@@ -214,6 +218,27 @@ def bucket_flashinfer_max_seqlen(
     )
 
 
+def _pad_flashinfer_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    src_mid = src.shape[0] // 2
+    dst_mid = dst.shape[0] // 2
+    assert src_mid <= dst_mid, (
+        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+        f"src_section={src_mid}, dst_section={dst_mid}"
+    )
+
+    dst.zero_()
+    dst[:src_mid].copy_(src[:src_mid])
+    if src_mid < dst_mid:
+        dst[src_mid:dst_mid] = src[src_mid - 1]
+
+    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+    if dst_mid + src_mid < dst.shape[0]:
+        dst[dst_mid + src_mid :] = src[-1]
+
+
 # --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
@@ -314,6 +339,21 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens = async_tensor_h2d(cu_seqlens, device=device)
         return cu_seqlens
 
+    @classmethod
+    def get_cu_seqlens_padding_logics(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        *keys: str,
+    ) -> dict[str, "EncoderCudaGraphPaddingLogic"]:
+        if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
+            return oot_class.get_cu_seqlens_padding_logics(  # type: ignore[attr-defined]
+                attn_backend, *keys
+            )
+
+        if attn_backend != AttentionBackendEnum.FLASHINFER:
+            return {}
+        return dict.fromkeys(keys, _pad_flashinfer_cu_seqlens_buffer)
+
     def __init__(
         self,
         num_heads: int,
@@ -322,14 +362,14 @@ class MMEncoderAttention(CustomOp):
         num_kv_heads: int | None = None,
         prefix: str = "",
     ) -> None:
-        """
-        Args:
-            num_heads: number of attention heads per partition.
-            head_size: hidden_size per attention head.
-            scale: scale factor.
-            num_kv_heads: number of kv heads.
-            prefix: This has no effect, it is only here to make it easier to
-                    swap between Attention and MultiHeadAttention
+        """Args:
+        num_heads: number of attention heads per partition.
+        head_size: hidden_size per attention head.
+        scale: scale factor.
+        num_kv_heads: number of kv heads.
+        prefix: This has no effect, it is only here to make it easier to
+                swap between Attention and MultiHeadAttention
+
         """
         super().__init__()
 
@@ -376,7 +416,7 @@ class MMEncoderAttention(CustomOp):
     def _init_fp8_state(self) -> None:
         """Initialize FP8 attention state from multimodal config.
 
-        No-op if FP8 is not requested. Raises ``ValueError`` if FP8 is
+        No-op if FP8 is not requested. Raises `ValueError` if FP8 is
         requested but the platform does not support it.
         """
         # Populate defaults so backend forward methods can check
@@ -456,13 +496,8 @@ class MMEncoderAttention(CustomOp):
             _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
             _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        """Populate FP8 scale buffers after weights are loaded.
-
-        ``act_dtype`` matches the signature used by :class:`Attention` and
-        :class:`MLAAttention` for the loader auto-scan but is unused:
-        FP8 scales are always float32.
-        """
+    def process_weights_after_loading(self) -> None:
+        """Populate FP8 scale buffers (always float32) after weights are loaded."""
         if not self.fp8_enabled:
             return
 
@@ -517,8 +552,7 @@ class MMEncoderAttention(CustomOp):
         q_len: int,
         kv_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Reshape query, key, value to 4D tensors:
+        """Reshape query, key, value to 4D tensors:
         (batch_size, seq_len, num_heads, head_size)
         """
         query = query.view(bsz, q_len, self.num_heads, self.head_size)

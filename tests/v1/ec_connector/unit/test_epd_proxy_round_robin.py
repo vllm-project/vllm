@@ -2,18 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encoder fan-out fairness in the disaggregated EPD proxy.
 
-Exercises the REAL ``encoder_rr_assignment`` helper loaded from its
-``examples/`` path -- no routing logic is re-implemented here, so a future
+Exercises the REAL `encoder_rr_assignment` helper loaded from its
+`examples/` path -- no routing logic is re-implemented here, so a future
 change to that function is what these tests exercise.
 
 Regression target: the fan-out cursor used to restart at e_urls[0] on every
-incoming request (``e_urls[i % len(e_urls)] for i in range(len(mm_items))``),
+incoming request (`e_urls[i % len(e_urls)] for i in range(len(mm_items))`),
 so single-item requests -- the common case -- always hit the first encoder
-instance and left the rest idle. ``encoder_rr_assignment`` threads a cursor
+instance and left the rest idle. `encoder_rr_assignment` threads a cursor
 across calls so consecutive requests keep advancing through every URL.
 """
 
 import importlib.util
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def _load_proxy_module():
     spec = importlib.util.spec_from_file_location("disagg_epd_proxy_under_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -113,16 +115,20 @@ def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
     rewritten = proxy.rewrite_for_decode(
         request,
         {
-            0: {
-                "mm_hash": "proxy-uuid",
-                "ec_mm_hash": "engine-derived-hash",
-                "transfer_id": "transfer",
-                "image_grid_thw": [1, 2, 3],
-            }
+            0: [
+                {
+                    "mm_hash": "engine-derived-hash",
+                    "modality": "image",
+                    "transfer_id": "transfer",
+                    "metadata": {"image_grid_thw": [1, 2, 3]},
+                }
+            ]
         },
     )
 
-    assert rewritten["messages"][0]["content"][0]["uuid"] == "proxy-uuid"
+    assert rewritten["messages"][0]["content"][0]["uuid"] == proxy.content_uuid(
+        request["messages"][0]["content"][0]
+    )
     assert rewritten["messages"][0]["content"][0]["image_embeds"] == {
         "image_grid_thw": [1, 2, 3]
     }

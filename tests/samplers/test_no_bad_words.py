@@ -6,13 +6,16 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 
 """
 
+import pytest
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from tests.conftest import VllmRunner
+from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
 
 
 def _generate(
-    llm: LLM,
+    llm: VllmRunner,
     prompt: str,
     num_prompt_tokens: int,
     temperature: float = 0,
@@ -35,7 +38,7 @@ def _generate(
 
 
 class TestOneTokenBadWord:
-    MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+    MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 
     PROMPT = "How old are "
     TARGET_TOKEN = "mn"
@@ -56,7 +59,9 @@ class TestOneTokenBadWord:
             output_token_ids = self._generate(llm, bad_words=[self.TARGET_TOKEN])
             assert self.target_token_id not in output_token_ids
 
-    def _generate(self, llm: LLM, bad_words: list[str] | None = None) -> list[int]:
+    def _generate(
+        self, llm: VllmRunner, bad_words: list[str] | None = None
+    ) -> list[int]:
         return _generate(
             llm=llm,
             prompt=self.PROMPT,
@@ -151,7 +156,9 @@ class TestTwoTokenBadWord:
                 self.neighbour_token_id2 in output_token_ids
             )
 
-    def _generate(self, llm: LLM, bad_words: list[str] | None = None) -> list[int]:
+    def _generate(
+        self, llm: VllmRunner, bad_words: list[str] | None = None
+    ) -> list[int]:
         return _generate(
             llm=llm,
             prompt=self.PROMPT,
@@ -183,3 +190,16 @@ class TestTwoTokenBadWord:
 
     def _encode(self, prompt: str, add_special_tokens: bool = True) -> list[int]:
         return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids
+
+
+def test_bad_word_token_budget_rejected_before_generation(vllm_runner, monkeypatch):
+    """Oversized tokenized bad words reject one request while serving stays usable."""
+    monkeypatch.setenv("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1")
+    with vllm_runner("vllm-project/tiny-random-LlamaForCausalLM") as llm:
+        with pytest.raises(VLLMValidationError, match="total bad word tokens"):
+            llm.generate(
+                ["hello"], SamplingParams(bad_words=["one two three"], max_tokens=1)
+            )
+        output = llm.generate(["hello"], SamplingParams(temperature=0, max_tokens=1))
+        prompt_len = len(llm.llm.get_tokenizer().encode("hello"))
+        assert len(output[0][0][0]) == prompt_len + 1

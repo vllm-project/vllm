@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use serde_with::{DeserializeFromStr, SerializeDisplay};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
@@ -64,6 +65,8 @@ pub struct SamplingHints {
     pub default_top_k: Option<u32>,
     pub default_min_p: Option<f32>,
     pub default_repetition_penalty: Option<f32>,
+    pub default_presence_penalty: Option<f32>,
+    pub default_frequency_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
 }
 
@@ -80,12 +83,8 @@ pub struct SamplingLimits {
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.
     pub model_vocab_size: usize,
-    /// Tokenizer vocabulary size exposed as frontend metadata.
+    /// Tokenizer vocabulary size, including multimodal placeholder tokens.
     pub tokenizer_vocab_size: usize,
-    /// Maximum tokenized bad-word sequences accepted by the engine.
-    pub max_num_bad_words: usize,
-    /// Maximum flattened bad-word tokens accepted by the engine.
-    pub max_bad_words_total_tokens: usize,
 }
 
 impl SamplingLimits {
@@ -95,26 +94,31 @@ impl SamplingLimits {
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
+
     /// Fixed-width V2 GPU sampler budget for `allowed_token_ids`.
     pub const MAX_ALLOWED_TOKEN_IDS: usize = 1024;
     /// Fixed-width V2 GPU sampler budget for `logit_bias`.
     pub const MAX_LOGIT_BIAS_TOKENS: usize = 1024;
     /// Fixed-width V2 GPU sampler budget for resolved stop token IDs.
     pub const MAX_STOP_TOKEN_IDS: usize = 128;
-    /// Pre-tokenization cap for user-supplied `bad_words` entries.
-    pub const MAX_BAD_WORDS_INPUT_COUNT: usize = 1000;
-    /// Pre-tokenization cap for one user-supplied `bad_words` entry.
-    pub const MAX_BAD_WORD_INPUT_LENGTH: usize = 1000;
-    /// Default tokenized bad-word sequence limit without an engine handshake.
-    pub const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
-    /// Default flattened bad-word token limit without an engine handshake.
-    pub const DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS: usize = 1024;
+
+    /// Return the union bound used to validate token-ID prompts.
+    pub fn prompt_token_vocab_size(&self) -> usize {
+        self.tokenizer_vocab_size.max(self.model_vocab_size)
+    }
 }
 
 /// Minimal text-processing backend needed by `vllm-text`.
 pub trait TextBackend: Send + Sync {
     /// Return the tokenizer used by this backend.
     fn tokenizer(&self) -> DynTokenizer;
+
+    /// Return whether a real tokenizer is loaded. Under
+    /// `--skip-tokenizer-init` it is not: [`Self::tokenizer`] fails every text
+    /// operation, and requests are served token IDs only.
+    fn has_tokenizer(&self) -> bool {
+        true
+    }
 
     /// Return whether the loaded model is a mixture-of-experts model.
     fn is_moe(&self) -> bool {
@@ -136,6 +140,11 @@ pub trait TextBackend: Send + Sync {
     /// backends should override it with the resolved model config value.
     fn model_vocab_size(&self) -> usize {
         usize::MAX
+    }
+
+    /// Return the checkpoint dtype declared by the model config, if any.
+    fn config_dtype(&self) -> Option<ModelDtype> {
+        None
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).

@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import lm_eval
 import pytest
+import torch
 
 from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 
 def get_model_args(
@@ -15,14 +19,18 @@ def get_model_args(
     spec_method: str,
     tp_size: int,
     model_max_len: int,
+    num_speculative_tokens: int = 1,
     use_async: bool = True,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
         "model": spec_model_name,
-        "num_speculative_tokens": 1,
+        "num_speculative_tokens": num_speculative_tokens,
         "max_model_len": model_max_len,
     }
+    if spec_method == "dspark":
+        speculative_config["model"] = model_name
+        speculative_config["draft_sample_method"] = "probabilistic"
     eplb_config = {
         "num_redundant_experts": tp_size,
         "window_size": 128,
@@ -42,44 +50,243 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
+    if spec_method == "dspark":
+        model_args["trust_remote_code"] = True
     return model_args
 
 
-pytestmark = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="EPLB with Spec Decode is a work in progress on ROCm.",
-)
+class FakeEplbState:
+    instances: list[FakeEplbState] = []
+
+    def __init__(self, parallel_config, device: torch.device):
+        self.add_model_calls: list[tuple[object, object, str | None]] = []
+        FakeEplbState.instances.append(self)
+
+    def add_model(
+        self,
+        model: object,
+        model_config: object,
+        *,
+        model_name: str | None = None,
+    ) -> None:
+        self.add_model_calls.append((model, model_config, model_name))
+
+
+@pytest.fixture
+def dspark_vllm_config():
+    draft_model_config = SimpleNamespace(
+        model="dspark",
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+    )
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_eplb=True,
+            enable_elastic_ep=False,
+        ),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=draft_model_config,
+        ),
+    )
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+def test_dspark_loads_all_local_eplb_redundant_experts(model_type):
+    from torch import nn
+
+    if model_type == "deepseek_v4":
+        from vllm.models.deepseek_v4.nvidia import dspark as dspark_module
+    else:
+        from vllm.models.deepseek_v41.nvidia import dspark as dspark_module
+
+    param_name = "model.layers.0.ffn.experts.routed_experts.w13_weight"
+    param = nn.Parameter(torch.full((5, 2), -1.0))
+
+    def load_local_expert(
+        param,
+        loaded_weight,
+        weight_name,
+        *,
+        shard_id,
+        expert_id,
+        return_success=False,
+    ):
+        assert weight_name == param_name
+        assert shard_id == "w1"
+        assert return_success
+        if expert_id >= param.shape[0]:
+            return False
+        param.data[expert_id].copy_(loaded_weight)
+        return True
+
+    param.weight_loader = load_local_expert
+    draft = object.__new__(dspark_module.DSparkDeepseekV4ForCausalLM)
+    nn.Module.__init__(draft)
+    draft.model = SimpleNamespace(
+        layers=[
+            SimpleNamespace(
+                ffn=SimpleNamespace(
+                    use_native_mega_moe=False,
+                    n_redundant_experts=6,
+                )
+            )
+        ],
+        confidence_head=None,
+    )
+    draft.config = SimpleNamespace(
+        dspark_n_routed_experts=4,
+        n_routed_experts=4 if model_type == "deepseek_v4" else 8,
+        num_attention_heads=4,
+        expert_dtype="fp4",
+    )
+    draft.pad_shared_expert = False
+    draft.quant_config = None
+    draft.named_parameters = lambda: [(param_name, param)]
+
+    # With EP=2, rank 0 owns physical slots 0..4; slots 0 and 4 both map to expert 0.
+    checkpoint_weight = torch.tensor([3.0, 7.0])
+    draft.load_weights([("mtp.0.ffn.experts.0.w1.weight", checkpoint_weight)])
+
+    torch.testing.assert_close(param[0], checkpoint_weight)
+    torch.testing.assert_close(param[4], checkpoint_weight)
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+def test_eplb_registers_dspark_draft_when_supported(
+    dspark_vllm_config, monkeypatch: pytest.MonkeyPatch, model_type
+):
+    """Register DSpark MoE drafts only on platforms that support draft EPLB."""
+    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
+        model_type
+    )
+    FakeEplbState.instances.clear()
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.EplbState",
+        FakeEplbState,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+        lambda model: model,
+    )
+
+    draft = SimpleNamespace()
+    controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
+    controller.prepare_load()
+    speculator = SimpleNamespace(model=draft, eplb_state=None)
+
+    def set_eplb_state(state) -> None:
+        speculator.eplb_state = state
+
+    speculator.set_eplb_state = set_eplb_state
+
+    registered = controller.maybe_register_speculator(
+        speculator,
+        dspark_vllm_config.speculative_config,
+        load_dummy_weights=False,
+    )
+
+    supports_draft_eplb = not current_platform.is_rocm()
+    assert registered is supports_draft_eplb
+    assert controller.state is not None
+    expected_calls = (
+        [
+            (
+                draft,
+                dspark_vllm_config.speculative_config.draft_model_config,
+                "dspark (draft)",
+            )
+        ]
+        if supports_draft_eplb
+        else []
+    )
+    assert controller.state.add_model_calls == expected_calls
+    assert speculator.eplb_state is (controller.state if supports_draft_eplb else None)
+
+
+def test_eplb_skips_dspark_registration_with_dummy_weights(
+    dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
+):
+    FakeEplbState.instances.clear()
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.EplbState",
+        FakeEplbState,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+        lambda model: model,
+    )
+
+    draft = SimpleNamespace()
+    controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
+    controller.prepare_load()
+    speculator = SimpleNamespace(model=draft, eplb_state=None)
+
+    def set_eplb_state(state) -> None:
+        speculator.eplb_state = state
+
+    speculator.set_eplb_state = set_eplb_state
+
+    registered = controller.maybe_register_speculator(
+        speculator,
+        dspark_vllm_config.speculative_config,
+        load_dummy_weights=True,
+    )
+
+    assert registered is False
+    assert controller.state is not None
+    assert controller.state.add_model_calls == []
 
 
 @pytest.mark.parametrize(
     "model_setup",
     [
         pytest.param(
-            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86, 1),
             marks=large_gpu_mark(min_gb=80),
         ),
         pytest.param(
             (
                 "eagle",
                 "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                "vllm-project/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
                 0.92,
+                1,
             ),
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
         ),
+        pytest.param(
+            (
+                "dspark",
+                "deepseek-ai/DeepSeek-V4-Flash-DSpark",
+                None,
+                4,
+                0.95,
+                7,
+            ),
+            marks=large_gpu_mark(min_gb=80),
+        ),
     ],
-    ids=["qwen3_next_mtp", "llama4_eagle"],
+    ids=["qwen3_next_mtp", "llama4_eagle", "dsv4_dspark"],
 )
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
-    model_setup: tuple[str, str, str, int, float],
+    model_setup: tuple[str, str, str | None, int, float, int],
 ):
+    """Test the correctness of EPLB speculative decoding with GSM8K dataset.
+
+    Applicable to MoE models with mtp, eagle, or dspark spec decode.
     """
-    Test the correctness of EPLB speculative decoding with GSM8K dataset.
-    Applicable to MoE models with mtp or eagle spec decode.
-    """
-    method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
+    (
+        method,
+        model_name,
+        spec_model_name,
+        tp_size,
+        expected_gsm8k_value,
+        num_speculative_tokens,
+    ) = model_setup
+    if method == "dspark" and not current_platform.is_device_capability_family(100):
+        pytest.skip("DSV4 DSpark EPLB requires SM100 for MegaMoE")
 
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
@@ -91,6 +298,7 @@ def test_eplb_spec_decode(
         spec_method=method,
         tp_size=tp_size,
         model_max_len=4096,
+        num_speculative_tokens=num_speculative_tokens,
     )
 
     results = lm_eval.simple_evaluate(
@@ -109,10 +317,7 @@ def test_eplb_spec_decode(
 
 @large_gpu_mark(min_gb=80)
 def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
-    """
-    Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
-    """
-
+    """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next."""
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
     RTOL = 0.03

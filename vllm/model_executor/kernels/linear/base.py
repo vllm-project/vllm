@@ -3,19 +3,42 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, Self, TypeVar
 
 import torch
-from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+# TODO: extend similarly to oracle/base.py on MOE side, to remove code duplication in
+# the different linear oracles (#65978)
+class LinearKernelOracle:
+    """Shared behaviour of linear kernel selection (dispatch).
+
+    Linear kernels have no oracle abstraction yet; this only hosts the logic
+    shared by the `init_*_linear_kernel` selectors, to be extended as they are
+    migrated.
+    """
+
+    @staticmethod
+    def maybe_skip_for_requantization_source() -> bool:
+        """Whether to return a placeholder instead of selecting a compute kernel.
+
+        A checkpoint method created as an online requantization source only
+        dequantizes its weights, so it needs no linear kernel.
+        """
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            is_requantization_source,
+        )
+
+        return is_requantization_source()
+
+
+@dataclass(slots=True)
 class MMLinearLayerConfig: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class Params:
     """Base class for quantized layer parameters.
 
@@ -50,6 +73,7 @@ class Params:
         # Access typed parameters
         output = func(input, params.weight, params.weight_scale)
         ```
+
     """
 
     weight: torch.Tensor
@@ -70,9 +94,9 @@ class Params:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class FP8Params(Params):
-    """FP8 layer parameters with typed fields"""
+    """FP8 layer parameters with typed fields."""
 
     input_scale_ub: torch.Tensor | None
 
@@ -80,7 +104,7 @@ class FP8Params(Params):
 
     @classmethod
     def from_layer(cls, layer: torch.nn.Module) -> "FP8Params":
-        """Extract parameters from layer"""
+        """Extract parameters from layer."""
         return cls(
             weight=getattr(layer, cls.WEIGHT),
             weight_scale=getattr(layer, cls.WEIGHT_SCALE),
@@ -163,6 +187,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         2. Initialization: __init__() creates kernel instance with config
         3. Weight loading: process_weights_after_loading() preprocesses weights
         4. Inference: apply_weights() executes the quantized matmul
+
     """
 
     @classmethod
@@ -184,8 +209,19 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             A tuple of (is_supported, reason):
                 - is_supported: True if the kernel can run on this hardware
                 - reason: If not supported, a string explaining why; otherwise None
+
         """
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod
@@ -204,7 +240,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             A tuple of (can_implement, reason):
                 - can_implement: True if this kernel supports the config
                 - reason: If not supported, a string explaining why; otherwise None
-            ```
+
         """
         raise NotImplementedError
 
@@ -214,6 +250,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         Args:
             config: Kernel-specific configuration containing settings like
                    quantization keys, output dtypes, etc.
+
         """
         self.config = config
 
@@ -245,6 +282,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
                 weight_reordered = reorder_weights(params.weight)
                 replace_parameter(layer, params.WEIGHT, weight_reordered)
             ```
+
         """
         raise NotImplementedError
 
@@ -270,6 +308,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             def _get_layer_params(self, layer, **kwargs):
                 return MyKernelParams.from_layer(layer)
             ```
+
         """
         raise NotImplementedError
 
@@ -281,6 +320,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
         Returns:
             Number of tokens to pad, or None for no padding (default)
+
         """
         return None
 
@@ -306,5 +346,6 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
         Returns:
             Output tensor of shape [..., out_features]
+
         """
         raise NotImplementedError
