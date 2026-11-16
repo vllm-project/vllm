@@ -273,6 +273,13 @@ class RocmRdnaAttentionBackend(TritonAttentionBackend):
         return head_size in cls.get_supported_head_sizes()
 
     @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        # The kernels are built for 16-token pages, or 32 where a model's KV
+        # groups double the page; at the default 64 most shapes have
+        # no build and every call runs on Triton.
+        return 16
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         return True
 
