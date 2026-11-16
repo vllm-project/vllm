@@ -25,7 +25,10 @@ The `requirement-pins` stage cuts the PyTorch and FlashInfer pins out of
 `requirements/cuda.txt` into one small file each. `base` installs only the
 PyTorch pins, so the native builds on top of it (`csrc-build`,
 `extensions-build`, `hybrid-test-wheels`) recompile when a pin changes, not on
-every edit to `requirements/`. `rust-build-cache` branches from `toolchain` and
+every edit to `requirements/`. It also passes on
+`requirements/rubin-prerelease.txt`, as an empty file unless
+`INSTALL_RUBIN_PRERELEASE=true`, so an edit to the Rubin pins rebuilds only
+the Rubin images. `rust-build-cache` branches from `toolchain` and
 depends on no Python requirements. `vllm-runtime-base` installs PyTorch,
 FlashInfer with its precompiled kernels, and the remaining requirements as
 three layers in that order, so a routine dependency bump rebuilds only the last.
