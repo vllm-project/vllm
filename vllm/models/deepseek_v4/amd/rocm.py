@@ -1175,28 +1175,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm.platforms.rocm import on_gfx1151
 
         if on_gfx1151() and rocm_aiter_ops.is_rdna_linear_enabled():
-            from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-                AiterFp8BlockScaledMMKernel,
-            )
-
-            for linear, output_size in (
-                (self.fused_wqa_wkv, 1536),
-                (self.wo_b, 4096),
-            ):
-                method = getattr(linear, "quant_method", None)
-                kernel = getattr(method, "fp8_linear", None)
-                if kernel is None:
-                    kernel = getattr(
-                        getattr(linear, "scheme", None), "fp8_linear", None
-                    )
-                if type(kernel) is not AiterFp8BlockScaledMMKernel:
-                    continue
-                if linear.weight.shape[0] != output_size:
-                    raise ValueError(
-                        "DeepSeek V4 gfx1151 skinny blockscale opt-in expected "
-                        f"output size {output_size}, got {linear.weight.shape[0]}"
-                    )
-                kernel.enable_gfx1151_skinny_blockscale(output_size)
             return
 
         if not rocm_aiter_ops.is_enabled():

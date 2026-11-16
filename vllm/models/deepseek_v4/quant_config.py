@@ -6,18 +6,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
+from vllm.config.vllm import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
     kMxfp8Dynamic,
 )
+from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
@@ -227,4 +230,37 @@ class DeepseekV4FP8Config(Fp8Config):
                 return Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
-        return super().get_quant_method(layer, prefix)
+        method = super().get_quant_method(layer, prefix)
+        if type(method) is not Fp8LinearMethod:
+            return method
+        if not prefix.endswith((".fused_wqa_wkv", ".wo_b")):
+            return method
+        if (
+            tuple(self.weight_block_size or ()) != (128, 128)
+            or self.activation_scheme != "dynamic"
+        ):
+            return method
+        if envs.VLLM_BATCH_INVARIANT or not current_platform.is_rocm():
+            return method
+
+        cfg = get_current_vllm_config_or_none()
+        if cfg is None:
+            return method
+        per_quant_backend = cfg.kernel_config.linear_backend_per_quant or {}
+        backend = (
+            per_quant_backend.get("fp8_block_w8a8") or cfg.kernel_config.linear_backend
+        )
+        if backend not in ("auto", "aiter"):
+            return method
+
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.kernels.linear import (
+            RocmGfx1151SkinnyFp8BlockScaledMMKernel,
+        )
+        from vllm.platforms.rocm import on_gfx1151
+
+        if not on_gfx1151() or not rocm_aiter_ops.is_rdna_linear_enabled():
+            return method
+        return Fp8LinearMethod(
+            self, force_kernel=RocmGfx1151SkinnyFp8BlockScaledMMKernel
+        )

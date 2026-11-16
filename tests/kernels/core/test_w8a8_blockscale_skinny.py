@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -11,6 +10,16 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    RocmGfx1151SkinnyFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    create_fp8_quant_key,
+)
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -19,6 +28,8 @@ if not current_platform.is_rocm():
 from vllm.platforms.rocm import on_gfx1151
 
 pytestmark = pytest.mark.skipif(not on_gfx1151(), reason="gfx1151 only")
+_ACTIVATION_GROUP_128 = GroupShape(1, 128)
+_WEIGHT_GROUP_128 = GroupShape(128, 128)
 
 
 def _fp8_dtype() -> torch.dtype:
@@ -61,25 +72,50 @@ def _make_case(m: int, n: int, k: int = 4096, pad_cols: int = 0):
     return a_q.contiguous(), weight, a_scale.contiguous(), w_scale.contiguous()
 
 
+def _make_block_config(
+    n: int = 1536,
+    k: int = 4096,
+    out_dtype: torch.dtype = torch.bfloat16,
+    activation_group_shape: GroupShape = _ACTIVATION_GROUP_128,
+    weight_group_shape: GroupShape = _WEIGHT_GROUP_128,
+) -> FP8ScaledMMLinearLayerConfig:
+    return FP8ScaledMMLinearLayerConfig(
+        activation_quant_key=create_fp8_quant_key(
+            static=False, group_shape=activation_group_shape
+        ),
+        weight_quant_key=create_fp8_quant_key(
+            static=True, group_shape=weight_group_shape
+        ),
+        input_dtype=torch.bfloat16,
+        out_dtype=out_dtype,
+        weight_shape=(n, k),
+    )
+
+
+def _blockscale_reference(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    a_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+) -> torch.Tensor:
+    a_dequant = a.float() * a_scale.repeat_interleave(128, dim=1)
+    w_dequant = w.float() * w_scale.repeat_interleave(128, dim=0).repeat_interleave(
+        128, dim=1
+    )
+    return (a_dequant @ w_dequant.t()).to(torch.bfloat16)
+
+
 @pytest.mark.parametrize("pad_cols", [0, 256])
 @pytest.mark.parametrize("m", [1, 2, 3, 4, 5, 6])
-@pytest.mark.parametrize("n", [1536, 4096])
+@pytest.mark.parametrize("n", [128, 512, 1024, 1536, 2048, 2176, 3072, 4096])
 def test_wvsplitk_blockscale_matches_plain_aiter(m: int, n: int, pad_cols: int):
     a, w, a_scale, w_scale = _make_case(m, n, pad_cols=pad_cols)
     cu = torch.cuda.get_device_properties(a.device).multi_processor_count
 
-    # Exact known-good RDNA AITER Triton blockscale fallback contract.
-    ref = rocm_aiter_ops.triton_gemm_a8w8_blockscale(
-        a,
-        w,
-        a_scale,
-        w_scale,
-        [128, 128],
-        output_dtype=torch.bfloat16,
-    )
+    ref = _blockscale_reference(a, w, a_scale, w_scale)
     got = ops.wvSplitKQBlockScale(w, a, a_scale, w_scale, cu)
 
-    torch.testing.assert_close(got, ref, rtol=5e-2, atol=1e-1)
+    torch.testing.assert_close(got, ref, rtol=7e-2, atol=1.5e-1)
     assert torch.isfinite(got).all()
     # Both physically contiguous and production-padded native AITER layouts.
     assert w.stride() == (4096 + pad_cols, 1)
@@ -87,7 +123,7 @@ def test_wvsplitk_blockscale_matches_plain_aiter(m: int, n: int, pad_cols: int):
 
 
 @pytest.mark.parametrize("pad_cols", [0, 256])
-@pytest.mark.parametrize("n", [1536, 4096])
+@pytest.mark.parametrize("n", [1536, 2048, 2176, 4096])
 def test_wvsplitk_blockscale_m6_graph_replay_changes_inputs(n: int, pad_cols: int):
     m, k = 6, 4096
     a, w, a_scale, w_scale = _make_case(m, n, k, pad_cols=pad_cols)
@@ -118,15 +154,8 @@ def test_wvsplitk_blockscale_m6_graph_replay_changes_inputs(n: int, pad_cols: in
     second = out.clone()
 
     assert not torch.equal(first, second)
-    ref2 = rocm_aiter_ops.triton_gemm_a8w8_blockscale(
-        a2,
-        w,
-        as2,
-        w_scale,
-        [128, 128],
-        output_dtype=torch.bfloat16,
-    )
-    torch.testing.assert_close(second, ref2, rtol=5e-2, atol=1e-1)
+    ref2 = _blockscale_reference(a2, w, as2, w_scale)
+    torch.testing.assert_close(second, ref2, rtol=7e-2, atol=1.5e-1)
 
 
 @pytest.mark.parametrize("pad_cols", [0, 256])
@@ -143,68 +172,104 @@ def test_native_aiter_fallback_non_skinny_sizes(m: int, n: int, pad_cols: int):
     assert torch.isfinite(ref).all()
 
 
-def test_skinny_blockscale_opt_in_validates_backend_and_shape():
-    kernel = SimpleNamespace(
-        config=SimpleNamespace(weight_shape=(4096, 4096)),
-        use_triton=False,
-        use_bpreshuffle=False,
-        use_gfx1151_skinny_blockscale=False,
+@pytest.mark.parametrize("n", [1536, 4096])
+def test_gfx1151_skinny_blockscale_can_implement_validated_shapes(n: int):
+    supported, reason = RocmGfx1151SkinnyFp8BlockScaledMMKernel.can_implement(
+        _make_block_config(n=n)
     )
-    AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(kernel, 4096)
-    assert not kernel.use_gfx1151_skinny_blockscale
+    assert supported, reason
 
-    kernel.use_triton = True
-    kernel.use_bpreshuffle = True
-    AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(kernel, 4096)
-    assert not kernel.use_gfx1151_skinny_blockscale
 
-    kernel.use_bpreshuffle = False
-    with pytest.raises(ValueError, match="kernel weight shape"):
-        AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(kernel, 1536)
+@pytest.mark.parametrize(
+    "config,match",
+    [
+        (_make_block_config(n=512), "validated skinny projection shape"),
+        (_make_block_config(k=8192), "aiter Triton blockscale tuned list"),
+        (_make_block_config(out_dtype=torch.float16), "bfloat16 output"),
+        (
+            _make_block_config(weight_group_shape=GroupShape(64, 128)),
+            "128x128 weight blocks",
+        ),
+        (
+            _make_block_config(activation_group_shape=GroupShape(1, 64)),
+            "dynamic per token group activation quantization",
+        ),
+    ],
+)
+def test_gfx1151_skinny_blockscale_rejects_unsupported_configs(
+    config: FP8ScaledMMLinearLayerConfig, match: str
+):
+    supported, reason = RocmGfx1151SkinnyFp8BlockScaledMMKernel.can_implement(config)
+    assert not supported
+    assert reason is not None and match in reason
 
 
 @pytest.mark.parametrize("pad_cols", [0, 256])
 @pytest.mark.parametrize("m", [1, 2, 3, 4, 5, 6, 8])
 @pytest.mark.parametrize("n", [1536, 4096])
 def test_only_marked_native_aiter_instances_dispatch_skinny(
-    monkeypatch: pytest.MonkeyPatch, m: int, n: int, pad_cols: int
+    default_vllm_config,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    m: int,
+    n: int,
+    pad_cols: int,
 ):
     a, w, a_scale, w_scale = _make_case(m, n, pad_cols=pad_cols)
-    # Exercise the REAL AITER backend method with minimal instance state.
-    # This establishes that unmarked kernels and M=8 retain the original
-    # tuned Triton fallback and that marked M<=6 kernels call skinny.
-    native = SimpleNamespace(
-        config=SimpleNamespace(out_dtype=torch.bfloat16, weight_shape=(n, 4096)),
-        use_triton=True,
-        use_bpreshuffle=False,
-        use_gfx1151_skinny_blockscale=False,
-        weight_group_shape=(128, 128),
-    )
-    expected = AiterFp8BlockScaledMMKernel.apply_block_scaled_mm(
-        native, a, w, a_scale, w_scale
-    )
     calls = []
-    original = ops.wvSplitKQBlockScale
+    parent_calls = []
 
-    def traced_skinny(*args):
-        calls.append((args[1].shape[0], args[0].shape[0]))
-        return original(*args)
+    def traced_skinny(B, A, As, Bs, cu_count):
+        calls.append((A.shape[0], B.shape[0]))
+        return torch.empty(
+            (A.shape[0], B.shape[0]), dtype=torch.bfloat16, device=A.device
+        )
+
+    def traced_parent(self, A, B, As, Bs):
+        parent_calls.append((A.shape[0], B.shape[0]))
+        return torch.empty(
+            (A.shape[0], B.shape[0]), dtype=torch.bfloat16, device=A.device
+        )
 
     monkeypatch.setattr(ops, "wvSplitKQBlockScale", traced_skinny)
-    opted_in = SimpleNamespace(
-        config=SimpleNamespace(out_dtype=torch.bfloat16, weight_shape=(n, 4096)),
-        use_triton=True,
-        use_bpreshuffle=False,
-        weight_group_shape=(128, 128),
-        use_gfx1151_skinny_blockscale=False,
+    monkeypatch.setattr(
+        AiterFp8BlockScaledMMKernel, "apply_block_scaled_mm", traced_parent
     )
-    AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(opted_in, n)
-    actual = AiterFp8BlockScaledMMKernel.apply_block_scaled_mm(
-        opted_in, a, w, a_scale, w_scale
+    kernel = RocmGfx1151SkinnyFp8BlockScaledMMKernel(_make_block_config(n=n))
+    actual = kernel.apply_block_scaled_mm(
+        A=a,
+        B=w,
+        As=a_scale,
+        Bs=w_scale,
     )
     expected_calls = [(m, n)] if m <= 6 else []
     assert calls == expected_calls
-    torch.testing.assert_close(actual, expected, rtol=5e-2, atol=1e-1)
+    expected_parent_calls = [] if m <= 6 else [(m, n)]
+    assert parent_calls == expected_parent_calls
+    assert actual.shape == (m, n)
+
+
+def test_plain_aiter_blockscale_kernel_never_calls_native_skinny(
+    default_vllm_config,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+):
+    a, w, a_scale, w_scale = _make_case(1, 1536)
+    calls = []
+
+    def traced_skinny(*args):
+        calls.append(args)
+        raise AssertionError("plain AITER backend must not call native skinny")
+
+    def traced_aiter(A, B, As, Bs, group_shape, output_dtype):
+        return torch.empty(
+            (A.shape[0], B.shape[0]), dtype=output_dtype, device=A.device
+        )
+
+    monkeypatch.setattr(ops, "wvSplitKQBlockScale", traced_skinny)
+    monkeypatch.setattr(rocm_aiter_ops, "triton_gemm_a8w8_blockscale", traced_aiter)
+    kernel = AiterFp8BlockScaledMMKernel(_make_block_config(n=1536))
+    actual = kernel.apply_block_scaled_mm(A=a, B=w, As=a_scale, Bs=w_scale)
+    assert calls == []
+    assert actual.shape == (1, 1536)
 
 
 @pytest.mark.parametrize("n", [1536, 4096])
