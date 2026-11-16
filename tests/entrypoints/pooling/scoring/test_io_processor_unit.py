@@ -473,8 +473,10 @@ def test_string_scoring_templates_keep_model_placeholders(
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 
 
-def test_scoring_uses_structured_content_with_saved_template(
+def test_scoring_detects_structured_content_with_saved_template(
     multimodal_reranker_processor,
 ):
-    prompt, _ = multimodal_reranker_processor.get_score_prompt("a", "bc", {})
+    prompt, _ = multimodal_reranker_processor.get_score_prompt(
+        "a", "bc", {}, chat_template_content_format="auto"
+    )
     assert prompt == "query:adocument:bc"
