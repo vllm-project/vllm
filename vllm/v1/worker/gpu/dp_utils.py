@@ -331,6 +331,29 @@ def dispatch_cg_and_sync_dp(
                 num_active_loras=num_active_loras,
                 num_ubatches=get_num_ubatches(parallel_config),
             )
+        elif (
+            allow_ubatching
+            and parallel_config is not None
+            and parallel_config.dbo_schedule == "attention-feed-forward-overlap"
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and check_ubatch_thresholds(
+                parallel_config, num_tokens, uniform_decode=uniform_decode
+            )
+        ):
+            # attention-feed-forward-overlap: a local decision too, but only a
+            # captured microbatched graph is taken. An eager two-pool step has
+            # nothing to gain, so without one the batch runs whole.
+            assert cudagraph_manager is not None
+            ubatch_desc = cudagraph_manager.dispatch(
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                num_active_loras=num_active_loras,
+                max_query_len=max_query_len,
+                num_ubatches=get_num_ubatches(parallel_config),
+            )
+            if ubatch_desc.cg_mode == CUDAGraphMode.FULL:
+                batch_desc = ubatch_desc
         return batch_desc, None
 
     if dp_sync_state is not None:
