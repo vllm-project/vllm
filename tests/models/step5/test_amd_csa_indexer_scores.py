@@ -7,12 +7,14 @@ import torch
 
 from vllm.models.step5.amd.ops.indexer_scores import paged_mqa_logits
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Step5 CSA kernels are the ROCm path"
 )
 
 DEVICE = "cuda"
+# Step5 config validation requires proxy_dim=256 and the kernel asserts it.
 DIM = 256
 
 
@@ -39,12 +41,19 @@ def _reference(q, kv_fused, weights, block_tables, seq_lens, max_seq_len):
     return logits.view(batch * next_n, max_seq_len).float()
 
 
-@pytest.mark.parametrize("heads", [8, 16])
+@pytest.mark.parametrize("heads", [4, 8, 16])
 @pytest.mark.parametrize("next_n", [1, 2])
+# Region counts cover one partial tile, tile edges and a 128k-token prompt
+# (16384 regions of 8 tokens).
+@pytest.mark.parametrize(
+    "batch,max_seq_len", [(1, 1), (3, 31), (11, 700), (4, 4100), (2, 16384)]
+)
 @torch.inference_mode()
-def test_scores_match_float64_on_scrambled_pages(heads: int, next_n: int):
-    torch.manual_seed(0)
-    batch, page_size, max_seq_len = 11, 32, 700
+def test_scores_match_float64_on_scrambled_pages(
+    heads: int, next_n: int, batch: int, max_seq_len: int
+):
+    set_random_seed(0)
+    page_size = 32  # pack_summary_pages always packs 32 summaries per page.
     pages_per_req = -(-max_seq_len // page_size)
     num_pages = batch * pages_per_req + 5
     block_tables = (
