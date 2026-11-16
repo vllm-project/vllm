@@ -3340,6 +3340,8 @@ class Scheduler(SchedulerInterface):
         stale vision embeddings are not reused.
         """
         self.encoder_cache_manager.reset()
+        if self.ec_connector is not None:
+            self.ec_connector.reset()
 
     def make_stats(
         self,
