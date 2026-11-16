@@ -55,12 +55,16 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 
-# This module's end-to-end sparse-backend correctness test supports CUDA and
-# ROCm.  The remaining tests exercise CUDA-specific FlashMLA/FlashInfer APIs
-# and are skipped by the autouse fixture below when collecting on ROCm.
-if not (current_platform.is_cuda() or current_platform.is_rocm()):
+# The sparse-backend correctness tests support CUDA, ROCm and XPU. On ROCm
+# and XPU, the autouse fixture below skips tests that exercise CUDA-specific
+# FlashMLA/FlashInfer APIs.
+if not (
+    current_platform.is_cuda()
+    or current_platform.is_rocm()
+    or current_platform.is_xpu()
+):
     pytest.skip(
-        "Sparse MLA backend tests require CUDA or ROCm.",
+        "Sparse MLA backend tests require CUDA, ROCm or XPU.",
         allow_module_level=True,
     )
 
@@ -138,68 +142,88 @@ if current_platform.is_rocm():
     SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
     SPARSE_BLOCK_SIZES = [64]
+elif current_platform.is_xpu():
+    from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseBackend
+
+    SPARSE_BACKENDS = [XPUMLASparseBackend]
+    SPARSE_BACKEND_IDS = ["XPUMLASparse"]
+    SPARSE_KV_CACHE_DTYPES = ["auto"]
+    SPARSE_BLOCK_SIZES = [64]
 else:
     SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
     SPARSE_BACKEND_IDS = ["FlashMLA", "FlashInferTRTLLM"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"]
     SPARSE_BLOCK_SIZES = [32, 64]
 
+ROCM_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_sparse_backend_prefill_correctness",
+    "test_rocm_fused_v32_dense_prefill_matches_mqa",
+    "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+    "test_sparse_mla_common_impl_resolves_buffer_lazily",
+    # HiSparse runtime and kernels, which ROCm builds too.
+    "test_rocm_hisparse_backend_rejects_fp8_ds_mla",
+    "test_hisparse_compact_gather_preserves_strided_payload",
+    "test_hisparse_flashmla_reorders_full_speculative_window_as_decode",
+    "test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention",
+    "test_hisparse_fp8_prefill_gather_uses_dedicated_stream",
+    "test_hisparse_gather_prefill_cache_prefers_resident_rows",
+    "test_hisparse_gather_zeroes_unaligned_destination",
+    "test_hisparse_generic_stream_orders_ipc_event",
+    "test_hisparse_index_group_preserves_row_width",
+    "test_hisparse_invalidation_covers_every_index_group",
+    "test_hisparse_kv_update_writes_resident_cache",
+    "test_hisparse_maps_speculative_rows_through_request_state",
+    "test_hisparse_metadata_keeps_short_prefill_indexer_enabled",
+    "test_hisparse_mixed_single_token_batch_is_not_decode_only",
+    "test_hisparse_multi_step_swaps_match_independent",
+    "test_hisparse_multi_step_writes_request_major_output",
+    "test_hisparse_newest_write_and_recycled_slot_invalidation",
+    "test_hisparse_prefill_resident_sources_follow_each_resident_group",
+    "test_hisparse_prefill_reuses_builder_staging_plan",
+    "test_hisparse_prefill_staging_plan_masks_unused_blocks",
+    "test_hisparse_prefill_staging_plan_resolves_resident_sources",
+    "test_hisparse_prefill_staging_remap",
+    "test_hisparse_profiling_releases_device_storage",
+    "test_hisparse_rejects_union_bound_beyond_shared_memory",
+    "test_hisparse_remaps_strided_hma_rows_for_attention",
+    "test_hisparse_resident_prefill_reads_residency_by_state_row",
+    "test_hisparse_resident_rows_bypass_hot_lru",
+    "test_hisparse_resolver_reads_current_request_ids",
+    "test_hisparse_routes_prefill_to_sparse_mqa",
+    "test_hisparse_row_dma_copies_discontiguous_spans_across_layers",
+    "test_hisparse_speculative_prefetch_preserves_current_resident_kv",
+    "test_hisparse_speculative_rows_count_a_shared_load_once",
+    "test_hisparse_speculative_rows_resolve_host_misses_consistently",
+    "test_hisparse_staged_prefill_cache_backs_min_attention_rows",
+    "test_hisparse_swap_in_preserves_rows_across_eviction",
+    "test_hisparse_union_table_scales_with_union_bound",
+    "test_hisparse_uses_graph_stable_request_state_mapping",
+}
+
+XPU_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_triton_convert_req_index_to_global_index_decode_only",
+    "test_triton_convert_req_index_to_global_index_with_prefill_workspace",
+    "test_triton_convert_rejects_req_id_longer_than_token_indices",
+    "test_triton_convert_returns_valid_counts",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+}
+
 
 @pytest.fixture(autouse=True)
-def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
+def _skip_cuda_specific_sparse_mla_tests(request):
     """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
-    rocm_portable_tests = {
-        "test_sparse_backend_decode_correctness",
-        "test_sparse_backend_prefill_correctness",
-        "test_rocm_fused_v32_dense_prefill_matches_mqa",
-        "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
-        "test_rocm_hisparse_backend_rejects_fp8_ds_mla",
-        "test_split_indexer_prefill_chunks",
-        "test_split_indexer_prefill_chunks_single_request_overflow",
-        "test_sparse_mla_common_impl_resolves_buffer_lazily",
-        # HiSparse runtime and kernels, which ROCm builds too.
-        "test_hisparse_compact_gather_preserves_strided_payload",
-        "test_hisparse_flashmla_reorders_full_speculative_window_as_decode",
-        "test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention",
-        "test_hisparse_fp8_prefill_gather_uses_dedicated_stream",
-        "test_hisparse_gather_prefill_cache_prefers_resident_rows",
-        "test_hisparse_gather_zeroes_unaligned_destination",
-        "test_hisparse_generic_stream_orders_ipc_event",
-        "test_hisparse_index_group_preserves_row_width",
-        "test_hisparse_invalidation_covers_every_index_group",
-        "test_hisparse_kv_update_writes_resident_cache",
-        "test_hisparse_maps_speculative_rows_through_request_state",
-        "test_hisparse_metadata_keeps_short_prefill_indexer_enabled",
-        "test_hisparse_mixed_single_token_batch_is_not_decode_only",
-        "test_hisparse_multi_step_swaps_match_independent",
-        "test_hisparse_multi_step_writes_request_major_output",
-        "test_hisparse_newest_write_and_recycled_slot_invalidation",
-        "test_hisparse_prefill_resident_sources_follow_each_resident_group",
-        "test_hisparse_prefill_reuses_builder_staging_plan",
-        "test_hisparse_prefill_staging_plan_masks_unused_blocks",
-        "test_hisparse_prefill_staging_plan_resolves_resident_sources",
-        "test_hisparse_prefill_staging_remap",
-        "test_hisparse_profiling_releases_device_storage",
-        "test_hisparse_rejects_union_bound_beyond_shared_memory",
-        "test_hisparse_remaps_strided_hma_rows_for_attention",
-        "test_hisparse_resident_prefill_reads_residency_by_state_row",
-        "test_hisparse_resident_rows_bypass_hot_lru",
-        "test_hisparse_resolver_reads_current_request_ids",
-        "test_hisparse_routes_prefill_to_sparse_mqa",
-        "test_hisparse_row_dma_copies_discontiguous_spans_across_layers",
-        "test_hisparse_speculative_prefetch_preserves_current_resident_kv",
-        "test_hisparse_speculative_rows_count_a_shared_load_once",
-        "test_hisparse_speculative_rows_resolve_host_misses_consistently",
-        "test_hisparse_staged_prefill_cache_backs_min_attention_rows",
-        "test_hisparse_swap_in_preserves_rows_across_eviction",
-        "test_hisparse_union_table_scales_with_union_bound",
-        "test_hisparse_uses_graph_stable_request_state_mapping",
-    }
-    if (
-        current_platform.is_rocm()
-        and getattr(request.node, "originalname", request.node.name)
-        not in rocm_portable_tests
-    ):
+    if current_platform.is_rocm():
+        portable_tests = ROCM_PORTABLE_TESTS
+    elif current_platform.is_xpu():
+        portable_tests = XPU_PORTABLE_TESTS
+    else:
+        return
+    if getattr(request.node, "originalname", request.node.name) not in portable_tests:
         pytest.skip("This sparse MLA test exercises a CUDA-specific API")
 
 
@@ -1258,7 +1282,7 @@ def _triton_convert_reference_impl(
 @pytest.mark.parametrize("block_size", [16, 64, 128])
 @pytest.mark.parametrize("num_topk_tokens", [128, 256, 512])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_decode_only(
@@ -1382,7 +1406,7 @@ def test_index_group_convert_during_piecewise_capture():
 
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_size):
@@ -1447,7 +1471,7 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_rejects_req_id_longer_than_token_indices():
@@ -1591,7 +1615,7 @@ def test_flashmla_bf16_preserves_unused_output_heads(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
@@ -5321,7 +5345,7 @@ def _build_sparse_dcp_vllm_config(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
@@ -5360,7 +5384,7 @@ def test_fp8_dcp_head_envelope_guard(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize("comm_backend", ["ag_rs", "a2a"])
@@ -5512,7 +5536,7 @@ def test_fp8_mixed_batch_dcp_compacts_topk_from_32_tokens(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
