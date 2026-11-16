@@ -39,9 +39,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
+    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
+    ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -154,6 +154,10 @@ pub struct RenderArgs {
     /// HTTP bind port.
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    /// TCP port for the gRPC Render service, bound on the HTTP host. When not
+    /// set, no gRPC server is started.
+    #[arg(long)]
+    grpc_port: Option<u16>,
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
@@ -261,6 +265,7 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
         } = self.model.file_sources();
 
         RenderConfig {
@@ -269,12 +274,14 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
             host: self.host,
             port: self.port,
+            grpc_port: self.grpc_port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -480,6 +487,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
 
+    /// Default LoRA adapter per modality, as a JSON object mapping a modality
+    /// to an adapter path or repo id (e.g. `{"audio": "org/speech-lora"}`).
+    /// Each adapter is loaded at startup under its modality's name and serves
+    /// chat requests that name no adapter but carry that modality. Requires
+    /// `--enable-lora`.
+    #[arg(long, value_parser = parse_json::<DefaultMmLoras>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub default_mm_loras: DefaultMmLoras,
+
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -661,6 +677,20 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
+
+    /// Keep the API server running after the engine becomes permanently
+    /// unhealthy. Like Python, it is set only through
+    /// `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub keep_alive_on_engine_death: bool,
 
     /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
     /// the limit, like the Python frontend, which has none. It is set only
@@ -932,6 +962,10 @@ impl SharedRuntimeArgs {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
         }
+        if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
+            self.keep_alive_on_engine_death = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
+        }
         if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
             let size = parse_byte_count(&value)
                 .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
@@ -983,6 +1017,7 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
         } = self.model.file_sources();
 
         Config {
@@ -1003,6 +1038,7 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -1021,6 +1057,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1035,6 +1072,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -1072,6 +1110,7 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
         } = self.model.file_sources();
 
         Config {
@@ -1091,6 +1130,7 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -1109,6 +1149,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1123,6 +1164,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
@@ -1412,8 +1454,8 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// TCP port for the gRPC Inference and Control services. When not set, no
-    /// gRPC server is started.
+    /// TCP port for the gRPC Inference, Control, and Render services. When not
+    /// set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
@@ -1500,6 +1542,15 @@ impl ServeArgs {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        // The engine checks the adapters against the model at startup, as it
+        // does under the Python frontend.
+        if !self.runtime.default_mm_loras.is_empty() {
+            let default_mm_loras = serde_json::to_string(&self.runtime.default_mm_loras)
+                .expect("default-mm-loras serialization should not fail");
+            managed_engine
+                .python_args
+                .extend(["--default-mm-loras".to_string(), default_mm_loras]);
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),

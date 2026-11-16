@@ -466,6 +466,7 @@ class HYV4MLAAttention(nn.Module):
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
+            shardq_eligible=not is_mtp_layer,
             indexer=self.indexer,
             topk_indices_buffer=topk_indices_buffer,
             attn_backend=sink_backend,
