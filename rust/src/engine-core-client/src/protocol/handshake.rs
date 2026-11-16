@@ -145,6 +145,14 @@ pub struct EngineCoreReadyResponse {
     /// Whether expert parallelism is enabled.
     #[serde(default)]
     pub enable_expert_parallel: bool,
+    /// Whether the engine computes prompt logprobs. `false` under
+    /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
+    #[serde(default = "supports_prompt_logprobs_default")]
+    pub supports_prompt_logprobs: bool,
+}
+
+fn supports_prompt_logprobs_default() -> bool {
+    true
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
