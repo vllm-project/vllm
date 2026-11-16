@@ -302,6 +302,17 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
     return kernel
 
 
+def _xpu_preferred_fp8_kernel(
+    quantization: str,
+) -> type[FP8ScaledMMLinearKernel] | None:
+    """Native-FP8 XPUs (Xe3p) prefer W8A8 over the weight-only W8A16 kernel
+    listed first. Returns None to keep the normal list order, which is also the
+    fallback if the forced kernel cannot be used."""
+    if _get_linear_backend(quantization=quantization) != "auto":
+        return None
+    return XPUW8A8FP8LinearKernel if XPUW8A8FP8LinearKernel.has_native_fp8() else None
+
+
 # Kernel classes covered by each --linear-backend value.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "b12x": {
@@ -862,6 +873,8 @@ def init_fp8_linear_kernel(
                 scaled_mm_linear_kernel_config,
                 "fp8_w8a8",
             )
+        elif current_platform.is_xpu() and force_kernel is None:
+            force_kernel = _xpu_preferred_fp8_kernel("fp8_w8a8")
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
