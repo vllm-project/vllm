@@ -290,6 +290,12 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
+    enable_flashinfer_mm_encoder_autotune: bool = False
+    """Include multimodal encoders and projectors in FlashInfer autotuning.
+    Disabled by default because profiling can increase startup time. Requires
+    enable_flashinfer_autotune and Model Runner V2. Skipped when
+    skip_mm_profiling is set."""
+
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
@@ -331,9 +337,10 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
-      mega-kernel with NVFP4 weights (MXFP4 checkpoints are requantized at
-      load) on Blackwell, or with block-FP8 (128x128) weights on Hopper;
-      requires expert parallelism and NVSHMEM
+      mega-kernel with NVFP4 weights on Blackwell (SM100/SM103, where MXFP4
+      checkpoints are requantized at load, or SM107 for NVFP4 checkpoints
+      only), or with block-FP8 (128x128) weights on Hopper; requires expert
+      parallelism and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
@@ -448,6 +455,12 @@ class KernelConfig:
       the budget
     """
 
+    b12x_moe_uncompressed_scales: bool = False
+    """Decode `csf`-compressed NVFP4 MoE block scales at load. By default the
+    B12X MoE backend keeps them compressed on the GPU and expands the routed
+    experts' scales on each call, which saves memory (2.57 GiB on
+    Qwen3.8-Flash-Next-FP4-Local) at some latency at higher batch sizes."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -485,6 +498,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_flashinfer_mm_encoder_autotune",
             "enable_rocm_segmented_attn_autotune",
             "enable_rocm_aiter_gemm_warmup",
         }
