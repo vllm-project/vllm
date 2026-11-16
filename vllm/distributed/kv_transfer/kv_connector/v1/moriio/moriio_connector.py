@@ -1817,7 +1817,10 @@ class MoRIIOConnectorScheduler:
         # unmaps it once its receive is settled. A request finished before its
         # deadline (an abort) stops its timer, as if it had none.
         if not self.is_producer:
-            if request_id in self._write_recv_timed_out:
+            if (
+                self._write_recv_timer_enabled
+                and request_id in self._write_recv_timed_out
+            ):
                 self._write_recv_finished.add(request_id)
             else:
                 if self._write_recv_timer_enabled:
