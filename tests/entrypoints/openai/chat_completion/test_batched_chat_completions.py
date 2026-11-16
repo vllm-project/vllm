@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParserManager
@@ -334,6 +335,7 @@ async def test_batched_echo_does_not_prepend_user_prompt() -> None:
     serving.system_fingerprint = None
     serving.enable_prompt_tokens_details = False
     serving._include_reasoning_tokens_details = False
+    serving.enable_log_outputs = False
 
     conversations = [[{"role": "user", "content": "USER PROMPT"}]]
     request = BatchChatCompletionRequest(
@@ -365,6 +367,7 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     serving.system_fingerprint = None
     serving.enable_prompt_tokens_details = False
     serving._include_reasoning_tokens_details = False
+    serving.enable_log_outputs = False
 
     conversations = [
         [
@@ -444,6 +447,67 @@ async def test_batched_harmony_response_format_uses_structural_tag() -> None:
         assert call.args[1].structured_outputs.structural_tag is not None
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_chat_logs_outputs_when_enabled() -> None:
+    """`--enable-log-outputs` logs each conversation under its sub-request id."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.errored = False
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    texts = ["Hello", "Goodbye"]
+    mock_engine.generate.side_effect = lambda prompt, params, request_id, **kw: (
+        _generator(0, texts[int(request_id.rsplit("_", 1)[1])])
+    )
+
+    models = OpenAIServingModels(mock_engine, BASE_MODEL_PATHS)
+    online_renderer = OnlineRenderer(
+        model_config=mock_engine.model_config,
+        renderer=mock_engine.renderer,
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+    )
+    request_logger = MagicMock(spec=RequestLogger)
+    serving = OpenAIServingChatBatch(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=request_logger,
+        enable_log_outputs=True,
+    )
+
+    response = await serving.create_batch_chat_completion(
+        BatchChatCompletionRequest(
+            model=MOCK_MODEL_NAME,
+            messages=[
+                [{"role": "user", "content": "Say hi"}],
+                [{"role": "user", "content": "Say bye"}],
+            ],
+        )
+    )
+
+    assert not isinstance(response, ErrorResponse)
+    input_ids = [call.args[0] for call in request_logger.log_inputs.call_args_list]
+    assert input_ids == [f"{response.id}_0", f"{response.id}_1"]
+    logged = [call.kwargs for call in request_logger.log_outputs.call_args_list]
+    assert logged == [
+        {
+            "request_id": request_id,
+            "outputs": text,
+            "output_token_ids": [4, 5],
+            "finish_reason": "stop",
+            "is_streaming": False,
+            "delta": False,
+        }
+        for request_id, text in zip(input_ids, texts)
+    ]
+
+
 @pytest.mark.skip_global_cleanup
 def test_batch_rejects_kv_transfer_prompt_token_ids():
     """One pre-tokenized prompt cannot stand in for every conversation."""
@@ -484,6 +548,7 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
     serving.system_fingerprint = None
     serving.enable_prompt_tokens_details = False
     serving._include_reasoning_tokens_details = False
+    serving.enable_log_outputs = False
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}

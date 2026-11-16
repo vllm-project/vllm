@@ -167,7 +167,7 @@ def _resolve_mm_processor_kwargs(
     return resolved
 
 
-@dataclass
+@dataclass(slots=True)
 class TimingContext:
     """Helper class to record execution times during multi-modal processing."""
 
@@ -210,7 +210,7 @@ _C = TypeVar("_C", bound=PreTrainedConfig, default=PreTrainedConfig)
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InputProcessingContext:
     """Contains information about the model which may be used to
     modify the inputs.
