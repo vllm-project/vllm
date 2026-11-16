@@ -2224,7 +2224,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # MoRI: transport the intra-node combine as packed FP4 (E2M1) blockwise
     # instead of BF16. Trades precision for transfer size on the MoE residual
-    # path; requires single-node MoRI on gfx950. Disabled by default.
+    # path; requires single-node MoRI on gfx950. MoRI EPv1 all2all only;
+    # ignored with EPv2 and aiter_mega_moe. Disabled by default.
     "VLLM_MORI_FP4_COMBINE": lambda: bool(int(os.getenv("VLLM_MORI_FP4_COMBINE", "0"))),
     # The number of SMs/CUs to allocate for communication kernels when
     # running DBO; the rest will be allocated to compute.

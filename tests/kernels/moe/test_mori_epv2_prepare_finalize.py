@@ -12,9 +12,13 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+import vllm.config.parallel as parallel_cfg
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
 import vllm.utils.import_utils as import_utils
-from vllm.config.parallel import resolve_mori_all2all
+from vllm.config.parallel import (
+    resolve_mori_all2all,
+    warn_if_mori_fp4_combine_ignored,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
 )
@@ -406,6 +410,36 @@ def test_mori_picks_epv2_where_supported(
         validated_arch,
     )
     assert parallel_config.mori_ep_v2 is ep_v2
+
+
+@pytest.mark.parametrize(
+    "fp4_combine,backend,ep_v2,moe_backend,reason",
+    [
+        ("1", "mori", True, "aiter", "MoRI EPv2"),
+        ("1", "mori", False, "aiter_mega_moe", "aiter_mega_moe"),
+        ("1", "mori_high_throughput", None, "aiter_mega_moe", "aiter_mega_moe"),
+        ("1", "mori", False, "aiter", None),
+        ("1", "mori_high_throughput", None, "aiter", None),
+        ("0", "mori", True, "aiter_mega_moe", None),
+        (None, "mori", True, "aiter_mega_moe", None),
+    ],
+)
+def test_mori_fp4_combine_warns_when_ignored(
+    monkeypatch, fp4_combine, backend, ep_v2, moe_backend, reason
+):
+    if fp4_combine is None:
+        monkeypatch.delenv("VLLM_MORI_FP4_COMBINE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_MORI_FP4_COMBINE", fp4_combine)
+    logger = Mock()
+    monkeypatch.setattr(parallel_cfg, "logger", logger)
+    parallel_config = _parallel_config(all2all_backend=backend, mori_ep_v2=ep_v2)
+    warn_if_mori_fp4_combine_ignored(parallel_config, moe_backend)
+    if reason is None:
+        logger.warning_once.assert_not_called()
+    else:
+        logger.warning_once.assert_called_once()
+        assert reason in logger.warning_once.call_args.args[1]
 
 
 @pytest.mark.parametrize(
