@@ -66,8 +66,10 @@ class IndexCP:
         local_blocks: int,
         width: int,
         grid: int = 0,
+        query_len: int = 4,
     ) -> torch.Tensor:
-        """Score this rank's blocks of every head from its index-q rows `iq`.
+        """Score this rank's blocks of every head from its index-q rows `iq`,
+        `query_len` (4 or 8) rows a request of `block_table` / `seq_lens`.
 
         Returns this rank's head over every block, [1, rows, width]: a view of
         the receive buffer, valid until the next call.
@@ -94,6 +96,7 @@ class IndexCP:
             self.iq_ptrs,
             self.max_rows,
             grid=grid,
+            query_len=query_len,
         )
         return self.score_rcv[: rows * width].view(1, rows, width)
 
