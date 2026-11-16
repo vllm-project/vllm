@@ -38,7 +38,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from .candidate_paged_logits import candidate_paged_logits, prepare_candidate_pages
@@ -176,13 +176,16 @@ class CandidateIndexerBackend(DeepseekV41IndexerBackend):
 class CandidateIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_config: KVCacheLayerConfig,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
         **kwargs,
     ) -> None:
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
+        super().__init__(
+            kv_cache_config.spec, layer_names, vllm_config, device, **kwargs
+        )
+        kv_cache_spec = kv_cache_config.spec
         config = vllm_config.model_config.hf_text_config
         prefix = "attention_config.indexer_sparse_logits"
         if not current_platform.is_device_capability_family(90):
