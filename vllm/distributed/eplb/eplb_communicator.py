@@ -695,14 +695,11 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._layer_idx = None
 
     def on_activated(self, previous: EplbCommunicator) -> None:
-        if (
-            not isinstance(previous, NixlEplbCommunicator)
-            or previous._nixl_wrapper is not self._nixl_wrapper
-        ):
+        assert isinstance(previous, NixlEplbCommunicator)
+        if previous._nixl_wrapper is not self._nixl_wrapper:
             # A separate agent holds those connections and drops them with
             # itself, so there is nothing for this one to release.
             return
-        assert isinstance(previous, NixlEplbCommunicator)
         # Agent names are what `remove_remote_agent` takes, so the departed
         # set is built from them rather than from the rank keys.
         departed = set(previous._remote_agents.values()) - set(
