@@ -158,6 +158,7 @@ class HierarchicalLMHead(nn.Module):
     """
 
     token_ordering: torch.Tensor
+    centroid_weight: torch.Tensor | None
 
     def __init__(
         self,
