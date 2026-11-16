@@ -208,8 +208,10 @@ print(torch.cuda.get_device_properties(0).gcnArchName.split(":")[0],
         --index-strategy unsafe-best-match \
         "torch[device-${rocm_arch}]==${torch_version}" \
         "torchvision[device-${rocm_arch}]==${torchvision_version}"
-    # Use the venv's own ROCm SDK and amdsmi bindings, not the image's.
-    unset LD_LIBRARY_PATH
+    # Use the venv's own ROCm SDK and amdsmi bindings, not the image's. Also
+    # drop the env of CI's kernel recorder: it is built for the image's ROCm,
+    # and its spawn default cannot re-import the stdin script below.
+    unset LD_LIBRARY_PATH LD_PRELOAD ROCP_TOOL_LIBRARIES VLLM_WORKER_MULTIPROC_METHOD
     PYTHONPATH="$(python3 -c 'import _rocm_sdk_core as c; print(c.__path__[0])')/share/amd_smi"
     export PYTHONPATH
 # ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm and run-amd-test.sh).
