@@ -40,9 +40,12 @@ _MARLIN_UNSUPPORTED_SHAPES = [(0, 256), (256, 0), (256, 100)]
 
 _SELECTION_CASES = [
     (100, (128, 128), FlashInferCutedslMxfp8LinearKernel),
-    (100, (130, 256), FlashInferCutedslMxfp8LinearKernel),
+    (100, (136, 256), FlashInferCutedslMxfp8LinearKernel),
+    # CuTe-DSL needs N % 8 == 0.
+    (100, (130, 256), FlashInferCutlassMxfp8LinearKernel),
     (103, (128, 128), FlashInferCutedslMxfp8LinearKernel),
-    (103, (130, 256), FlashInferCutedslMxfp8LinearKernel),
+    (103, (136, 256), FlashInferCutedslMxfp8LinearKernel),
+    (103, (130, 256), FlashInferCutlassMxfp8LinearKernel),
     (120, (128, 128), FlashInferCutlassMxfp8LinearKernel),
     (120, (130, 256), MarlinMxfp8LinearKernel),
     (121, (128, 128), FlashInferCutlassMxfp8LinearKernel),
@@ -114,8 +117,8 @@ def _patch_cuda_platform(capability: int):
     [(100, True), (103, True), (120, False), (121, False)],
 )
 def test_cutlass_mxfp8_requires_aligned_n_only_on_sm12x(capability, expected):
-    """(130, 256) passes the generic mm_mxfp8 limits. Only the SM12x CUTLASS
-    backend needs N % 32 == 0, so SM100/103 must keep accepting it."""
+    """(130, 256) passes the generic mm_mxfp8 limits and the kernel pads N to a
+    multiple of 32, so SM100/103 must keep accepting it. SM12x declines it."""
     config = Mxfp8LinearLayerConfig(weight_shape=(130, 256))
     with _patch_cuda_platform(capability):
         can_implement, _ = FlashInferCutlassMxfp8LinearKernel.can_implement(config)

@@ -20,6 +20,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
+from vllm.utils.math_utils import round_up
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
@@ -78,7 +79,16 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
-        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
+
+        # mm_mxfp8 cutlass requires N % 32 == 0. Pad with zero rows, which
+        # apply_weights slices off the output.
+        padded_n = round_up(N, 32)
+        if padded_n != N:
+            weight = torch.cat([weight, weight.new_zeros(padded_n - N, K)])
+            weight_scale_2d = torch.cat(
+                [weight_scale_2d, weight_scale_2d.new_zeros(padded_n - N, scale_k)]
+            )
+        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=padded_n, K=K)
 
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale_swizzled.contiguous())
@@ -91,7 +101,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale
-        N, K = weight.shape
+        padded_n, K = weight.shape
+        N, _ = self.config.weight_shape
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -115,6 +126,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             out_dtype=out_dtype,
             backend="cutlass",
         )
+        if padded_n != N:
+            output = output[:, :N].contiguous()
 
         if bias is not None:
             output = output + bias
@@ -143,7 +156,18 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        return _check_mm_mxfp8_shape(c.weight_shape)
+        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
+        if not can_implement:
+            return False, reason
+        N, _ = c.weight_shape
+        # The 16-bit output is stored with TMA, which needs 16-byte aligned rows;
+        # FlashInfer does not reject other N and returns garbage for them.
+        if N % 8 != 0:
+            return (
+                False,
+                f"mm_mxfp8 cute-dsl requires N to be divisible by 8, got N={N}.",
+            )
+        return True, None
 
     def input_quant_key(self) -> QuantKey:
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
