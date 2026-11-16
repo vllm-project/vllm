@@ -24,6 +24,7 @@ from .gigachat4 import (
     GigaChat4DecoderLayer,
     GigaChat4ForCausalLM,
     GigaChat4GatedNorm,
+    _prepare_gigachat4_fp8_config,
 )
 from .qwen3_next_mtp import should_torch_compile_mtp_drafter
 from .utils import (
@@ -166,6 +167,7 @@ class GigaChat4MTP(nn.Module):
         vllm_config = replace(
             vllm_config,
             model_config=spec.draft_model_config,
+            quant_config=_prepare_gigachat4_fp8_config(vllm_config.quant_config),
             parallel_config=replace(
                 vllm_config.parallel_config,
                 pipeline_parallel_size=1,

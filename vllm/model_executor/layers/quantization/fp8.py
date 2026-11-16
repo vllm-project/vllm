@@ -114,9 +114,9 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
-        self.ignored_layers_match_mode: Literal["exact", "substring", "suffix"] = (
-            "exact"
-        )
+        self.ignored_layers_match_mode: Literal[
+            "exact", "substring", "suffix", "module"
+        ] = "exact"
         self.store_dtype = store_dtype
         if weight_block_size is not None:
             if len(weight_block_size) != 2:

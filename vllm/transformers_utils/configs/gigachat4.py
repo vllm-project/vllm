@@ -56,7 +56,9 @@ class GigaChat4Config(PreTrainedConfig):
         linear_sigmoid_gate_scale: float = 2.0,
         linear_attn_o_norm_eps: float | None = None,
         linear_use_legacy_qkvz_layout: bool = False,
-        swiglu_limit: float = 0.0,
+        swiglu_limit: float | None = 0.0,
+        branch_multiplier: float = 1.0,
+        linear_attn_output_mult: float = 1.0,
         final_logit_softcapping: float | None = None,
         index_topk: int | None = None,
         index_n_heads: int = 64,
@@ -66,11 +68,15 @@ class GigaChat4Config(PreTrainedConfig):
         dense_attention_layers: list[int] | None = None,
         use_shared_expert_sigmoid: bool = False,
         num_nextn_predict_layers: int = 0,
+        nextn_is_sparse: bool = False,
+        nextn_is_linear: bool = False,
         tie_word_embeddings: bool = False,
         dflash_config: dict | None = None,
         **kwargs,
     ) -> None:
         is_draft = dflash_config is not None
+        self.branch_multiplier = float(branch_multiplier)
+        self.linear_attn_output_mult = float(linear_attn_output_mult)
         if dflash_config is not None and (
             kwargs.get("is_causal") or dflash_config.get("causal")
         ):
@@ -200,6 +206,8 @@ class GigaChat4Config(PreTrainedConfig):
         self.dense_attention_layers = dense_attention_layers or []
         self.use_shared_expert_sigmoid = use_shared_expert_sigmoid
         self.num_nextn_predict_layers = num_nextn_predict_layers
+        self.nextn_is_sparse = nextn_is_sparse
+        self.nextn_is_linear = nextn_is_linear
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
     @property

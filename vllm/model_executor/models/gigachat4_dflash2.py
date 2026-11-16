@@ -50,6 +50,10 @@ class GigaChat4DFlash2DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        if config.branch_multiplier != 1.0 or config.linear_attn_output_mult != 1.0:
+            raise ValueError(
+                "GigaChat4 DFlash2 requires unit branch/output multipliers"
+            )
         if quant_config is not None:
             raise ValueError("GigaChat4 DFlash2 requires unquantized draft weights")
         if config.index_topk:

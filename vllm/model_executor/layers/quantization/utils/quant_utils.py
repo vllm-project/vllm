@@ -673,7 +673,7 @@ def is_layer_skipped(
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
     *,
-    match_mode: Literal["exact", "substring", "suffix"] = "exact",
+    match_mode: Literal["exact", "substring", "suffix", "module"] = "exact",
 ) -> bool:
     def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
         return prefix in ignored_layers
@@ -690,12 +690,17 @@ def is_layer_skipped(
             prefix == layer or prefix.endswith(f".{layer}") for layer in ignored_layers
         )
 
+    def module_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(f".{layer}." in f".{prefix}." for layer in ignored_layers)
+
     if match_mode == "exact":
         match_func = prefix_full_match
     elif match_mode == "substring":
         match_func = substr_match
     elif match_mode == "suffix":
         match_func = suffix_match
+    elif match_mode == "module":
+        match_func = module_match
     else:
         raise ValueError(f"Unsupported layer skip match mode: {match_mode}")
 

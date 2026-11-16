@@ -45,6 +45,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -101,6 +102,28 @@ from .utils import (
     sequence_parallel_chunk,
     spec_decode_needs_target_embed,
 )
+
+
+def _prepare_gigachat4_fp8_config(
+    quant_config: QuantizationConfig | None,
+) -> QuantizationConfig | None:
+    if not isinstance(quant_config, Fp8Config):
+        return quant_config
+    ignored_layers = []
+    for name in quant_config.ignored_layers:
+        name = name.rstrip(".").removesuffix(".weight")
+        if not name:
+            raise ValueError("GigaChat4 FP8 exclusions must name a module")
+        if "experts" in name.split(".")[:-1]:
+            raise ValueError(
+                "GigaChat4 FP8 exclusions must cover the whole experts module, "
+                "not individual experts or their projections"
+            )
+        ignored_layers.append(name)
+    quant_config = copy(quant_config)
+    quant_config.ignored_layers = ignored_layers
+    quant_config.ignored_layers_match_mode = "module"
+    return quant_config
 
 
 class GigaChat4GatedNorm(nn.Module):
@@ -165,6 +188,7 @@ class GigaChat4GatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             self.head_v_dim, config.linear_attn_o_norm_eps
         )
         self.gate_scale = config.linear_sigmoid_gate_scale
+        self.output_mult = config.linear_attn_output_mult
 
     def _output_projection(
         self, core_attn_out: torch.Tensor, z: torch.Tensor
@@ -174,6 +198,8 @@ class GigaChat4GatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         output = output * self.gate_scale
         output = output.flatten(-2)
         output, _ = self.out_proj(output)
+        if self.output_mult != 1.0:
+            output = output * self.output_mult
         return output
 
 
@@ -430,6 +456,7 @@ class GigaChat4MLP(nn.Module):
         is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        swiglu_limit = config.swiglu_limit or 0.0
         self.gate_up_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [intermediate_size, intermediate_size],
@@ -448,9 +475,7 @@ class GigaChat4MLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = (
-            SiluAndMulWithClamp(config.swiglu_limit)
-            if config.swiglu_limit > 0
-            else SiluAndMul()
+            SiluAndMulWithClamp(swiglu_limit) if swiglu_limit > 0 else SiluAndMul()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -464,6 +489,7 @@ class GigaChat4MoE(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_text_config
+        swiglu_limit = config.swiglu_limit or 0.0
         parallel_config = vllm_config.parallel_config
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.gate = GateLinear(
@@ -502,7 +528,7 @@ class GigaChat4MoE(nn.Module):
             topk_group=config.topk_group,
             scoring_func=config.scoring_func,
             routed_scaling_factor=config.routed_scaling_factor,
-            swiglu_limit=config.swiglu_limit if config.swiglu_limit > 0 else None,
+            swiglu_limit=swiglu_limit if swiglu_limit > 0 else None,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             is_sequence_parallel=self.is_sequence_parallel,
             router_logits_dtype=torch.float32,
@@ -533,6 +559,7 @@ class GigaChat4DecoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
         layer_idx = extract_layer_index(prefix)
+        self.branch_multiplier = config.branch_multiplier
         self.layer_type = (
             "full_attention" if is_nextn else config.layer_types[layer_idx]
         )
@@ -570,11 +597,15 @@ class GigaChat4DecoderLayer(nn.Module):
         else:
             hidden_states = self.self_attn(positions, hidden_states)
         hidden_states = self.post_self_attn_layernorm(hidden_states)
+        if self.branch_multiplier != 1.0:
+            hidden_states = hidden_states * self.branch_multiplier
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
+        if self.branch_multiplier != 1.0:
+            hidden_states = hidden_states * self.branch_multiplier
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -831,6 +862,10 @@ class GigaChat4ForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        quant_config = _prepare_gigachat4_fp8_config(vllm_config.quant_config)
+        if quant_config is not vllm_config.quant_config:
+            vllm_config = copy(vllm_config)
+            vllm_config.quant_config = quant_config
         self.config = config = vllm_config.model_config.hf_text_config
         if (
             vllm_config.parallel_config.enable_eplb
