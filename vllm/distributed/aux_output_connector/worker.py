@@ -299,7 +299,9 @@ class AuxOutputWorkerConnector:
                 logits_fn,
                 self._topk_logprobs,
             )
-        if self._buffer is None:
+        if self._buffer is None or not (
+            len(rows) or self._routed_experts_capturer or self._indexer
+        ):
             return None
 
         snapshot = self._indexer.snapshot(num_rows) if self._indexer else None

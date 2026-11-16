@@ -3396,3 +3396,13 @@ def test_step_preparation_survives_a_concurrent_teardown():
     worker.process_output(second)
     assert list(worker._requests) == ["running"]
     worker.close()
+
+
+def test_worker_without_capture_skips_steps_without_session_rows():
+    worker = _make_worker(2, enable_r3=False, shape_per_token=(1,))
+    worker._return_hidden_states = True
+    _begin_step(worker, _metadata(0, [], {}))
+    batch = _input_batch(["plain"], np.array([0]), np.array([0, 3]))
+    assert worker.prepare_output(batch, torch.zeros(3, 2)) is None
+    assert worker._pending_outputs == []
+    worker.close()
