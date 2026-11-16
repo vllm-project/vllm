@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.wrapper import remove_bytecode_hooks
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
@@ -44,7 +45,11 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    clear_layer_kv_caches,
+    groups_with_metadata_builders,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -149,8 +154,12 @@ class BaseSpeculator(ABC):
         return
 
     def shutdown(self) -> None:
-        """Called when the model runner shuts down. No-op by default."""
-        return
+        """Called when the model runner shuts down. Detaches a draft `model`'s
+        layer KV caches and bytecode hooks, since the model object can outlive
+        the runner. Overrides must call super().shutdown()."""
+        if model := getattr(self, "model", None):
+            clear_layer_kv_caches(model.modules())
+            remove_bytecode_hooks(model)
 
 
 class DraftModelSpeculator(BaseSpeculator):

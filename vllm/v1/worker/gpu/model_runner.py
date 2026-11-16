@@ -2558,9 +2558,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
             speculator.shutdown()
-            if draft_model := getattr(speculator, "model", None):
-                clear_layer_kv_caches(draft_model.modules())
-                remove_bytecode_hooks(draft_model)
             self.speculator = None
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
