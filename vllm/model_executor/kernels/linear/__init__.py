@@ -1054,6 +1054,14 @@ def init_mxfp8_linear_kernel(
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and platform is PlatformEnum.CUDA
+        and bmm_batch_size is None
+    ):
+        possible = prioritize_humming(possible)
+        possible = [k for k in possible if k.supports_batch_invariance()]
+
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(
         possible,
