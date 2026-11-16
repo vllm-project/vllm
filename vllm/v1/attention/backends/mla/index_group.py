@@ -318,12 +318,26 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         request_start: int,
     ) -> torch.Event | None:
         cache = self.cache(layer_index)
-        plan = self._prefill_gather_plan(layer_index, attn_metadata)
-        assert cache.view is not None and plan.gpu_row_ids is not None
-        row_width = source_cache.shape[-1]
+        assert cache.view is not None
+        requests = slice(request_start, request_start + batch_size)
+        host_rows: dict[str, torch.Tensor] = {}
+        if cache.all_context_pages_resident:
+            state_indices = cache.runtime.request_state_indices
+            assert cache.block_table is not None and state_indices is not None
+            block_table = cache.block_table.index_select(
+                0, state_indices[attn_metadata.num_decodes :][requests]
+            )
+        else:
+            plan = self._prefill_gather_plan(layer_index, attn_metadata)
+            assert plan.gpu_row_ids is not None
+            block_table = plan.block_table[requests]
+            host_rows = dict(
+                host_cache=source_cache.view(-1, source_cache.shape[-1]),
+                host_row_ids=plan.row_ids,
+                device_row_ids=plan.gpu_row_ids,
+            )
         prefill_stream = self.prefill_stream
         assert prefill_stream is not None
-        block_table = plan.block_table[request_start : request_start + batch_size]
         prefill_stream.wait_stream(torch.accelerator.current_stream())
         with prefill_stream:
             ops.cp_gather_and_upconvert_fp8_kv_cache(
@@ -332,9 +346,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 block_table,
                 workspace_starts,
                 batch_size,
-                host_cache=source_cache.view(-1, row_width),
-                host_row_ids=plan.row_ids,
-                device_row_ids=plan.gpu_row_ids,
+                **host_rows,
             )
             ready = self.prefill_ready_events[layer_index]
             ready.record(prefill_stream)

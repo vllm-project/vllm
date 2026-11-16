@@ -3,7 +3,9 @@
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import cached_property, partial
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
@@ -142,7 +144,13 @@ def _use_dense_mha_prefill(
 
 @dataclass
 class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
-    host_staging_plan: HiSparsePrefillStagingPlan | None = None
+    build_host_staging_plan: Callable[[], HiSparsePrefillStagingPlan] | None = None
+
+    @cached_property
+    def host_staging_plan(self) -> HiSparsePrefillStagingPlan | None:
+        if self.build_host_staging_plan is None:
+            return None
+        return self.build_host_staging_plan()
 
 
 @dataclass(kw_only=True)
@@ -414,7 +422,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 num_prefills,
                 prefill_query_lens_cpu,
             )
-            staging_plan = None
+            build_staging_plan = None
             if self.vllm_config.attention_config.hisparse_config is not None:
                 prefill_seq_lens_cpu = seq_lens_cpu[
                     num_decodes : num_decodes + num_prefills
@@ -425,14 +433,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                         // self.kv_cache_spec.block_size
                     ).sum()
                 )
-                staging_plan = build_hisparse_prefill_staging_plan(
+                build_staging_plan = partial(
+                    build_hisparse_prefill_staging_plan,
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
                     self.kv_cache_spec.block_size,
                     staging_block_capacity,
                 )
-                if chunked_context is not None:
-                    block_table = staging_plan.block_table
             prefill = SparseMLAPrefillMetadata(
                 block_table=block_table,
                 query_start_loc=prefill_query_start_loc,
@@ -450,7 +457,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     and not (self.use_pcp and self.dcp_world_size > 1)
                 ),
                 topk_mask_workspace=self.topk_mask_workspace,
-                host_staging_plan=staging_plan,
+                build_host_staging_plan=build_staging_plan,
             )
             self._prefill_backend.prepare_metadata(prefill)
 
