@@ -295,7 +295,7 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
         if self.ec_connector is not None:
-            self.ec_connector.bind_encoder_cache_lookup(
+            self.ec_connector.bind_encoder_cache_query(
                 self.encoder_cache_manager.get_cached_num_encoder_embeds
             )
         speculative_config = vllm_config.speculative_config

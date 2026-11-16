@@ -187,12 +187,7 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     scheduler._next_transfer_id = 0
     scheduler._expected_load_reports = load_reports
     monkeypatch.setattr(module, "get_encoder_output_width", lambda *args: 1)
-    feature = SimpleNamespace(
-        identifier="loaded",
-        modality="image",
-        mm_position=SimpleNamespace(offset=0, length=2, get_num_embeds=lambda: 2),
-    )
-    request = SimpleNamespace(request_id="r1", mm_features=[feature])
+    request = image_request("loaded", request_id="r1")
 
     if arrival_prefetch:
         scheduler.on_new_request(request)
@@ -591,7 +586,7 @@ def test_async_arrival_prefetch_survives_one_of_two_request_cancellations(
 
 @pytest.mark.parametrize("cpu_ready", [False, True])
 @pytest.mark.parametrize("cached_count", [2, 3])
-def test_connector_original_interface_uses_fresh_gpu_lookup(
+def test_connector_original_interface_uses_fresh_gpu_query(
     indexed_scheduler, cpu_ready, cached_count
 ):
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
@@ -607,7 +602,7 @@ def test_connector_original_interface_uses_fresh_gpu_lookup(
     resident = image_request("A", request_id="resident", num_embeds=cached_count)
     cache.allocate(resident, 0)
     cache.free(resident)
-    connector.bind_encoder_cache_lookup(cache.get_cached_num_encoder_embeds)
+    connector.bind_encoder_cache_query(cache.get_cached_num_encoder_embeds)
     request = image_request("A")
     scheduler = connector.connector_scheduler
     try:
@@ -654,10 +649,10 @@ def test_default_connector_hooks_preserve_cpu_cache(indexed_scheduler):
         entry = cache.alloc("A", 1, (2, 32))
         cache.mark_ready("A")
 
-        def unexpected_lookup(request, input_id):
+        def unexpected_query(request, input_id):
             raise AssertionError("CPU-only connector must not query GPU cache")
 
-        connector.bind_encoder_cache_lookup(unexpected_lookup)
+        connector.bind_encoder_cache_query(unexpected_query)
         connector.on_new_request(image_request("A"))
         assert connector.has_cache_item("A")
         assert cache.get("A") is entry

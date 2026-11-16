@@ -188,6 +188,16 @@ def test_namespace_isolates_processing_and_kernel_config(tmp_path, model_namespa
     assert (
         base
         == model_namespace(
+            config_options={
+                "kernel_config": KernelConfig(
+                    enable_rocm_segmented_attn_autotune=True,
+                )
+            }
+        ).digest()
+    )
+    assert (
+        base
+        == model_namespace(
             config_options={"parallel_config": ParallelConfig(tensor_parallel_size=2)}
         ).digest()
     )
@@ -244,3 +254,162 @@ def test_entry_path_is_versioned_and_hash_prefix_sharded() -> None:
     )
     assert temporary_path.name.startswith(f".{path.name}.{'0' * 32}.")
     assert temporary_path.suffix == ".tmp"
+
+
+@pytest.mark.parametrize("tower", [False, True])
+def test_request_adapter_name_and_path_isolate_all_encoder_cache_keys(
+    tmp_path, monkeypatch, tower
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import (
+        CLIPImageProcessor,
+        LlamaConfig,
+        LlavaConfig,
+        LlavaProcessor,
+        PreTrainedTokenizerFast,
+    )
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.ec_transfer import ECTransferConfig
+    from vllm.config.lora import LoRAConfig
+    from vllm.inputs import mm_input
+    from vllm.lora.request import LoRARequest
+    from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model_path = tmp_path / "model"
+    text = LlamaConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=4,
+    )
+    LlavaConfig(
+        architectures=["LlavaForConditionalGeneration"],
+        text_config=text.to_dict(),
+        vision_config={
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "image_size": 8,
+            "patch_size": 4,
+        },
+        image_token_index=3,
+    ).save_pretrained(model_path)
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(
+            WordLevel(
+                {"<unk>": 0, "<s>": 1, "</s>": 2, "<image>": 3}, unk_token="<unk>"
+            )
+        ),
+        unk_token="<unk>",
+        bos_token="<s>",
+        eos_token="</s>",
+        additional_special_tokens=["<image>"],
+    )
+    LlavaProcessor(
+        CLIPImageProcessor(
+            size={"shortest_edge": 8}, crop_size={"height": 8, "width": 8}
+        ),
+        tokenizer,
+        patch_size=4,
+        vision_feature_select_strategy="default",
+    ).save_pretrained(model_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            dtype="float16",
+            skip_tokenizer_init=False,
+            enforce_eager=True,
+            max_model_len=128,
+        ),
+        ec_transfer_config=ECTransferConfig(
+            ec_connector="ECTieringConnector", ec_role="ec_both"
+        ),
+        lora_config=LoRAConfig(enable_tower_connector_lora=tower, max_lora_rank=8),
+    )
+    processor = InputProcessor(config)
+
+    from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import embedding_cache
+    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+    from vllm.v1.request import Request
+
+    def process(name, path, adapter_id):
+        result = processor.process_inputs(
+            f"request-{adapter_id}",
+            mm_input(
+                [3] * 4,
+                MultiModalKwargsItems({"image": [None]}),
+                {"image": ["cat"]},
+                {"image": [PlaceholderRange(offset=0, length=4)]},
+            ),
+            SamplingParams(max_tokens=1),
+            ("generate",),
+            lora_request=LoRARequest(name, adapter_id, path),
+        )
+        return Request.from_engine_core_request(result, None)
+
+    first = process("vision", "/models/v1", 1)
+    different_path = process("vision", "/models/v2", 2)
+    different_name = process("other", "/models/v1", 3)
+    repeated = process("vision", "/models/v1", 4)
+    identifier = first.mm_features[0].identifier
+    assert identifier == repeated.mm_features[0].identifier
+
+    gpu_cache = EncoderCacheManager(cache_size=16)
+    gpu_cache.allocate(first, 0)
+    cpu_cache = embedding_cache.EmbeddingCache(num_blocks=4)
+    cpu_cache.alloc(identifier, 1, (4, 1))
+    cpu_cache.mark_ready(identifier)
+    key = build_ec_cache_key(_namespace().digest(), identifier, "image", 4, 16)
+    for request in (different_path, different_name):
+        other = request.mm_features[0].identifier
+        assert (other != identifier) == tower
+        assert gpu_cache.check_and_update_cache(request, 0) == (not tower)
+        assert (cpu_cache.get(other) is not None) == (not tower)
+        assert (
+            build_ec_cache_key(_namespace().digest(), other, "image", 4, 16) != key
+        ) == tower
+    assert gpu_cache.check_and_update_cache(repeated, 0)
+    assert cpu_cache.get(repeated.mm_features[0].identifier) is not None
+
+
+def test_namespace_isolates_encoder_lora_config_without_reading_weights(
+    tmp_path, model_namespace
+):
+    from transformers import LlavaConfig
+
+    from vllm.config.lora import LoRAConfig
+
+    LlavaConfig(architectures=["LlavaForConditionalGeneration"]).save_pretrained(
+        tmp_path
+    )
+
+    def namespace(dtype, **options):
+        options.setdefault(
+            "default_mm_loras", {"image": str(tmp_path / "absent-adapter")}
+        )
+        return model_namespace(
+            config_options={
+                "lora_config": LoRAConfig(
+                    enable_tower_connector_lora=True,
+                    lora_dtype=dtype,
+                    **options,
+                )
+            },
+        ).digest()
+
+    first = namespace("float16")
+    assert first == namespace("float16")
+    assert first != namespace("bfloat16")
+    assert first == namespace("float16", max_cpu_loras=4)
+    assert first == namespace(
+        "float16", default_mm_loras={"image": str(tmp_path / "another-adapter")}
+    )
+    assert first != namespace("float16", target_modules=["q_proj"])

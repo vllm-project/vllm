@@ -244,8 +244,8 @@ class ECConnectorBase(ABC):
         """Notify the connector after a new request is queued."""
         return
 
-    def bind_encoder_cache_lookup(
-        self, lookup: Callable[["Request", int], int | None]
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
     ) -> None:
         """Provide a read-only query for each input's cached embedding count."""
         return

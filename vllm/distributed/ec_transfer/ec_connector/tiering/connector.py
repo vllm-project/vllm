@@ -20,16 +20,16 @@ if TYPE_CHECKING:
 class ECTieringConnector(ECCPUConnector):
     """CPU-primary connector with optional asynchronous secondary tiers."""
 
-    _encoder_cache_lookup: Callable[[Request, int], int | None]
+    _encoder_cache_query: Callable[[Request, int], int | None]
 
     def on_new_request(self, request: Request) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
-    def bind_encoder_cache_lookup(
-        self, lookup: Callable[[Request, int], int | None]
+    def bind_encoder_cache_query(
+        self, query: Callable[[Request, int], int | None]
     ) -> None:
-        self._encoder_cache_lookup = lookup
+        self._encoder_cache_query = query
 
     def ensure_cache_available(
         self, request: Request, num_computed_tokens: int
@@ -38,7 +38,7 @@ class ECTieringConnector(ECCPUConnector):
         local_cache_hashes = {
             feature.identifier
             for i, feature in enumerate(request.mm_features)
-            if self._encoder_cache_lookup(request, i)
+            if self._encoder_cache_query(request, i)
             == request.get_num_encoder_embeds(i)
         }
         return self.connector_scheduler.ensure_cache_available(
@@ -50,5 +50,5 @@ class ECTieringConnector(ECCPUConnector):
             ECTieringScheduler,
         )
 
-        self._encoder_cache_lookup = lambda request, input_id: None
+        self._encoder_cache_query = lambda request, input_id: None
         return ECTieringScheduler(vllm_config)

@@ -118,8 +118,11 @@ class ECTieringScheduler(ECCPUScheduler):
         encoder_config = {
             "model_config": model_identity.compute_hash(),
             "multimodal_config": model_config.multimodal_config,
-            "kernel_config": vllm_config.kernel_config,
+            "kernel_config": vllm_config.kernel_config.compute_hash(),
         }
+        lora_config = vllm_config.lora_config
+        if lora_config is not None and lora_config.enable_tower_connector_lora:
+            encoder_config["lora_config"] = lora_config.compute_hash()
         return ECCacheNamespace(
             encoder_config_hash=hash_factors(
                 {"encoder_config": normalize_value(encoder_config)}
@@ -128,12 +131,13 @@ class ECTieringScheduler(ECCPUScheduler):
 
     def update_state_after_alloc(self, request: Request, index: int) -> None:
         super().update_state_after_alloc(request, index)
-        if self._tiering_manager is not None:
-            # The CPU scheduler has acquired the H2D pin before we release ours.
-            self._tiering_manager.release_prefetch(
-                request.request_id, request.mm_features[index].identifier
-            )
-        if self._tiering_manager is None or not self._is_producer:
+        if self._tiering_manager is None:
+            return
+        # The CPU scheduler has acquired the H2D pin before we release ours.
+        self._tiering_manager.release_prefetch(
+            request.request_id, request.mm_features[index].identifier
+        )
+        if not self._is_producer:
             return
         feature = request.mm_features[index]
         if feature.identifier not in self._pending_saves:
