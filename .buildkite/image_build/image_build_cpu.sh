@@ -10,15 +10,26 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 
+# image_build_cpu_arm64.sh sets CPU_ARCH=arm64: a native build, without
+# sccache or the torch nightly lane.
+CPU_ARCH=${CPU_ARCH:-x86}
+TAG_SUFFIX="cpu"
+CACHE_SUFFIX="x86_cpu"
+BUILD_ARGS=(--build-arg VLLM_CPU_X86=true --build-arg USE_SCCACHE=1)
+if [[ "$CPU_ARCH" == "arm64" ]]; then
+  TAG_SUFFIX="arm64-cpu"
+  CACHE_SUFFIX="arm64_cpu"
+  BUILD_ARGS=()
 # When TORCH_NIGHTLY=1, build the CPU image against torch nightly and tag it
 # with the -torch-nightly-cpu suffix the test steps pull on the nightly lane.
-PYTORCH_NIGHTLY_ARGS=()
-if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
-  IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-torch-nightly-cpu"
-  PYTORCH_NIGHTLY_ARGS=(--build-arg PYTORCH_NIGHTLY=1)
-else
-  IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-cpu"
+# Its cache gets its own ref: it resolves a different torch, so sharing one
+# with the regular lane would have the two evict each other on every run.
+elif [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+  TAG_SUFFIX="torch-nightly-cpu"
+  CACHE_SUFFIX="x86_cpu-nightly"
+  BUILD_ARGS+=(--build-arg PYTORCH_NIGHTLY=1)
 fi
+IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-$TAG_SUFFIX"
 
 # replace invalid characters in Docker image tags and truncate to 128 chars
 clean_docker_tag() {
@@ -27,18 +38,11 @@ clean_docker_tag() {
 }
 
 # resolve and set: CACHE_TO, CACHE_FROM, CACHE_FROM_BASE_BRANCH, CACHE_FROM_MAIN
-# Reuses the same ECR cache repos as the CUDA image build, with an
-# "x86_cpu" suffix on every tag so CPU and CUDA cache blobs stay isolated.
-# The nightly lane appends "-nightly": it resolves a different torch, so
-# sharing a cache ref with the regular lane would have the two evict each
-# other from the same ref on every run.
+# Reuses the same ECR cache repos as the CUDA image build, with CACHE_SUFFIX
+# on every tag so CPU and CUDA cache blobs stay isolated.
 prepare_cache_tags() {
     TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
     MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
-    CACHE_SUFFIX="x86_cpu"
-    if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
-        CACHE_SUFFIX="x86_cpu-nightly"
-    fi
 
     if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
         if [[ "${BUILDKITE_BRANCH:-}" == "main" ]]; then
@@ -104,13 +108,11 @@ else
   docker buildx build --file docker/Dockerfile.cpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
-    --build-arg VLLM_CPU_X86=true \
-    --build-arg USE_SCCACHE=1 \
-    "${PYTORCH_NIGHTLY_ARGS[@]}" \
+    "${BUILD_ARGS[@]}" \
     --tag "$IMAGE" \
     --target vllm-test \
     "${CACHE_FROM_ARGS[@]}" \
-    --cache-to "type=registry,ref=${CACHE_TO},mode=max" \
+    --cache-to "type=registry,ref=${CACHE_TO},mode=max,ignore-error=true" \
     --push \
     --progress plain .
 fi
