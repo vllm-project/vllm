@@ -390,7 +390,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.tp_size = 1
     worker.use_mla = False
     worker.kv_cache_config = _make_test_kv_cache_config()
-    worker._physical_blocks_per_logical_kv_block = 1
+    worker._physical_blocks_per_logical_kv_block = [1]
     worker.transfer_topo = SimpleNamespace(
         local_replicates_kv_cache=False,
         total_num_kv_heads=4,
@@ -1562,9 +1562,8 @@ def test_mooncake_compressed_kernel_split(kernel_block_size, raises):
     with (
         set_current_vllm_config(config),
         patch_worker_dependencies(),
-        patch.object(
-            mooncake_connector,
-            "select_common_block_size",
+        patch(
+            "vllm.v1.worker.utils.select_common_block_size",
             return_value=kernel_block_size,
         ),
         ctx,
@@ -2793,7 +2792,7 @@ async def test_build_transfer_params_sends_packed_region_once(
     worker.kv_cache_config = _make_packed_mla_kv_cache_config(
         num_blocks=4, num_groups=len(local_ids)
     )
-    worker._physical_blocks_per_logical_kv_block = 1
+    worker._physical_blocks_per_logical_kv_block = [1] * len(local_ids)
     worker.transfer_topo = SimpleNamespace(
         local_replicates_kv_cache=False,
         total_num_kv_heads=1,
@@ -2879,7 +2878,7 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
     worker.tp_size = 1
     worker.use_mla = False
     worker.kv_cache_config = _make_test_kv_cache_config()
-    worker._physical_blocks_per_logical_kv_block = 1
+    worker._physical_blocks_per_logical_kv_block = [1]
     worker.transfer_topo = SimpleNamespace(
         local_replicates_kv_cache=False,
         total_num_kv_heads=4,

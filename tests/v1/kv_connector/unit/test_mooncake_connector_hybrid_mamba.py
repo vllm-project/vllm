@@ -99,6 +99,29 @@ def make_hybrid_gdn_kv_cache_config(
     )
 
 
+def make_mixed_attention_kv_cache_config(
+    block_sizes: tuple[int, int], num_blocks: int = 16
+) -> KVCacheConfig:
+    """Two attention groups with independent block sizes."""
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        hash_block_size=min(block_sizes),
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                [f"model.layers.{index}.self_attn"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            )
+            for index, block_size in enumerate(block_sizes)
+        ],
+    )
+
+
 def make_hybrid_gdn_scheduler(kv_role: str) -> MooncakeConnectorScheduler:
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
@@ -390,7 +413,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
         worker = connector.connector_worker
         assert worker is not None
         factor = 4
-        worker._physical_blocks_per_logical_kv_block = factor
+        worker._physical_blocks_per_logical_kv_block = [factor, 1]
 
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         physical_page_bytes = fa_spec.page_size_bytes // factor
@@ -441,7 +464,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     }
 
     ratio = 4
-    worker._physical_blocks_per_logical_kv_block = ratio
+    worker._physical_blocks_per_logical_kv_block = [ratio, 1]
     fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
     physical_page_bytes = fa_spec.page_size_bytes // ratio
     fa_cache = torch.empty(
@@ -750,13 +773,58 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
     _stub_worker_shutdown(worker, noop_shutdown)
-    worker._physical_blocks_per_logical_kv_block = 17
+    worker._physical_blocks_per_logical_kv_block = [17, 1]
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
 
     block_ids = [[2], [2]]
     kernel_block_ids = worker._logical_to_kernel_block_ids(block_ids)
 
     assert kernel_block_ids == [list(range(34, 51)), [2]]
+
+
+def test_logical_to_kernel_block_ids_uses_per_group_ratio():
+    """Each group expands with its own ratio, not a ratio shared by all."""
+    worker = object.__new__(MooncakeConnectorWorker)
+    _stub_worker_shutdown(worker, noop_shutdown)
+    worker._physical_blocks_per_logical_kv_block = [12, 1]
+    worker.kv_cache_config = make_mixed_attention_kv_cache_config((1536, 128))
+
+    block_ids = [[2], [2]]
+    kernel_block_ids = worker._logical_to_kernel_block_ids(block_ids)
+
+    assert kernel_block_ids == [list(range(24, 36)), [2]]
+
+
+def test_sync_block_size_resolves_kernel_per_group():
+    """Each group's kernel size comes from its own logical block size."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
+    )
+    kv_cache_config = make_mixed_attention_kv_cache_config((1536, 128))
+
+    def kernel_size(logical: int, *_: object) -> int:
+        return 128 if logical == 1536 else logical
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.v1.worker.utils.select_common_block_size",
+            side_effect=kernel_size,
+        ),
+    ):
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        worker = connector.connector_worker
+        try:
+            assert worker._physical_blocks_per_logical_kv_block == [12, 1]
+        finally:
+            worker.shutdown()
+            _stub_worker_shutdown(worker, noop_shutdown)
+            connector.connector_worker = None
 
 
 def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
