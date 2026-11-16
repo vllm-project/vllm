@@ -527,17 +527,7 @@ __global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t*, const float*,
 
 #endif  // __HIP__MXFP4_RDNA4__
 
-// ---------------------------------------------------------------------------
-// Section 2: skinny GEMV (M <= 8). Weight-bound, so no FP8 conversion: decode
-// E2M1 straight to fp32 magnitudes and fold the E8M0 scale per group.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ float e2m1_mag(uint32_t nib) {
-  // {0,.5,1,1.5,2,3,4,6}, sign from bit 3.
-  const float mag[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
-  const float v = mag[nib & 7u];
-  return (nib & 8u) ? -v : v;
-}
-
+#if defined(__HIP__MXFP4_RDNA4__) || !defined(__HIP_DEVICE_COMPILE__)
 template <typename T, int M_MAX>
 __global__ void gemv_mxfp4_rdna4(const T* __restrict__ a,
                                  const uint32_t* __restrict__ b_q,
@@ -549,7 +539,7 @@ __global__ void gemv_mxfp4_rdna4(const T* __restrict__ a,
   const int ngroups = K / kGroup;
 
   float acc[M_MAX];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_MAX; m++) acc[m] = 0.0f;
 
   for (int g = lane; g < ngroups; g += 32) {
@@ -557,17 +547,25 @@ __global__ void gemv_mxfp4_rdna4(const T* __restrict__ a,
     __builtin_memcpy(&bw, b_q + ((size_t)g * N + n) * 4, 16);
     const float wsc = mxfp4_e8m0_to_f32(b_scales[(size_t)g * N + n]);
     const uint32_t q[4] = {bw.x, bw.y, bw.z, bw.w};
-#pragma unroll
+  #pragma unroll
     for (int o = 0; o < 4; o++) {
       const int k0 = g * kGroup + o * 8;
-      float dq[8];
-#pragma unroll
-      for (int i = 0; i < 8; i++)
-        dq[i] = e2m1_mag((q[o] >> (4 * i)) & 0xFu) * wsc;
+      // E2M1 -> E4M3 via v_perm (shared decode), then v_cvt_f32_fp8 per
+      // element: far fewer VALU ops than a table lookup per nibble.
+      uint32_t blo, bhi;
+      dequant_mxfp4_8_e4m3(q[o], blo, bhi);
+      const float dq[8] = {__builtin_amdgcn_cvt_f32_fp8((int)blo, 0) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)blo, 1) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)blo, 2) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)blo, 3) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)bhi, 0) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)bhi, 1) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)bhi, 2) * wsc,
+                           __builtin_amdgcn_cvt_f32_fp8((int)bhi, 3) * wsc};
       for (int m = 0; m < M; m++) {
         const T* ar = a + (size_t)m * K + k0;
         float s = 0.0f;
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 8; i++) s = fmaf(to_f<T>(ar[i]), dq[i], s);
         acc[m] += s;
       }
@@ -580,6 +578,11 @@ __global__ void gemv_mxfp4_rdna4(const T* __restrict__ a,
     if (lane == 0) c[(size_t)m * N + n] = from_f<T>(s);
   }
 }
+#else
+template <typename T, int M_MAX>
+__global__ void gemv_mxfp4_rdna4(const T*, const uint32_t*, const uint8_t*, T*,
+                                 int, int, int) {}
+#endif
 
 // Tile config override for tuning sweeps: VLLM_MXFP4_RDNA4_TILE =
 // 1 -> 16x16 (1 wave), 2 -> 32x32 (4 waves), 3 -> 64x32 (8 waves).
