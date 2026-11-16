@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass
+@dataclass(slots=True)
 class EplbStats:
     """Load and topology snapshot for one EPLB planning call.
 
