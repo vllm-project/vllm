@@ -596,3 +596,7 @@ To use a custom shared seed, set the same `PYTHONHASHSEED` on every instance tha
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
+
+Set `kv_load_failure_policy="recompute"` in the KV transfer configuration to
+recompute failed remote loads locally. The existing `"fail"` policy terminates
+affected requests. Transfer completion is reported after synchronous SDK return.
