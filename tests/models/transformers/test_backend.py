@@ -223,7 +223,7 @@ def test_output_head_fallback(
     # Disable multiprocessing so that the patch applies to the engine
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    def probe_output_head(model, hidden_size):
+    def probe_output_head(output_head, hidden_size):
         raise AttributeError("'_OutputEmbeddings' object has no attribute 'weight'")
 
     monkeypatch.setattr(causal, "probe_output_head", probe_output_head)
@@ -1058,11 +1058,14 @@ def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
         expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits
 
         embeddings = model.get_output_embeddings()
-        output_head = to_output_head(model, type(model.base_model), embeddings)
+        output_head = to_output_head(model, type(model.base_model))
         assert output_head is not None
-        assert output_head[0] is embeddings
-        assert output_head[1] == renames
+        lm_head_renames = {
+            k: v for k, v in output_head.renames.items() if v.startswith("lm_head.")
+        }
+        assert lm_head_renames == renames
         assert not any(p is embeddings.weight for p in model.parameters())
+        output_head.output_embeddings.project = embeddings
         logits = model(inputs_embeds=hidden_states).logits
 
     torch.testing.assert_close(logits, expected)
@@ -1072,18 +1075,16 @@ def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
 def test_only_projection_is_detected(model_type, arch, overrides, renames):
     """Only heads which apply nothing but their output embeddings are skipped."""
     model = build_causal_lm(model_type, arch, "meta", **overrides)
-    embeddings = model.get_output_embeddings()
-    assert to_output_head(model, type(model.base_model), embeddings) is not None
-    only_projection = probe_output_head(model, model.config.hidden_size)
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    only_projection = probe_output_head(output_head, model.config.hidden_size)
     assert only_projection is (arch == "LlamaForCausalLM")
 
 
 def test_output_head_calling_base_model_submodule():
     """OPT calls its base model's decoder directly, which the stub also serves."""
     model = build_causal_lm("opt", "OPTForCausalLM", "meta", ffn_dim=128)
-    embeddings = model.get_output_embeddings()
-    assert to_output_head(model, type(model.base_model), embeddings) is not None
-    assert probe_output_head(model, model.config.hidden_size)
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    assert probe_output_head(output_head, model.config.hidden_size)
 
 
 def test_transformers_model_class_honours_remote_code_config(monkeypatch):
