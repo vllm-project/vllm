@@ -194,6 +194,10 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        # Requests whose store load failed. The lookup may keep reporting the
+        # hit while the GET keeps failing, so they skip the store from then on
+        # and recompute locally instead of reloading in a loop.
+        self._load_failed_req_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
         self._finished_lookahead_metas: dict[str, ReqMeta] = {}
 
@@ -232,7 +236,7 @@ class MooncakeStoreScheduler:
         Returns `(None, False)` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
-        if not self.enable_lookup:
+        if not self.enable_lookup or request.request_id in self._load_failed_req_ids:
             return 0, False
 
         if request.num_tokens < self._lookup_align():
@@ -326,6 +330,7 @@ class MooncakeStoreScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
+            self._load_failed_req_ids.discard(finished_req_id)
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
@@ -772,7 +777,14 @@ class MooncakeStoreScheduler:
             )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        """Drop the block references of store jobs every rank has finished."""
+        """Record failed loads and drop the block references of store jobs
+        every rank has finished."""
+        self._load_failed_req_ids |= connector_output.failed_recving
+        if invalid_block_ids := connector_output.invalid_block_ids:
+            for req_id, (_, req_block_ids) in self._unfinished_requests.items():
+                if any(invalid_block_ids.intersection(ids) for ids in req_block_ids):
+                    self._load_failed_req_ids.add(req_id)
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
             return
