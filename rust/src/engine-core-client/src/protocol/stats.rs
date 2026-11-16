@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::OpaqueValue;
+
 /// Stores cache hit statistics.
 ///
 /// Original Python definition:
@@ -22,15 +24,25 @@ pub struct BaseCacheStats {
 }
 
 /// Cache-hit tokens per source tier. Python sends a sparse
-/// `dict[CacheHitSource, int]`, so absent tiers default to zero.
+/// `dict[CacheHitSource, int]`, so absent tiers default to zero, and only
+/// non-zero tiers are serialized.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CachedTokensBySource {
+    #[serde(skip_serializing_if = "is_zero")]
     pub device: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub host: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub p2p: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub disk: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub external_unspecified: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl CachedTokensBySource {
@@ -131,6 +143,13 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens: u64,
     /// Accepted drafted tokens counted by draft position.
     pub num_accepted_tokens_per_pos: Vec<u64>,
+    /// Drafted tokens counted by draft position.
+    #[serde(default)]
+    pub num_draft_tokens_per_pos: Vec<u64>,
+    /// Number of draft tokens the target model ran a forward pass on.
+    pub num_verified_tokens: u64,
+    /// Verified draft tokens counted by draft position.
+    pub num_verified_tokens_per_pos: Vec<u64>,
 }
 
 /// Breakdown of a scheduled prefill computation.
@@ -359,6 +378,47 @@ pub mod kv_connector {
     #[serde(transparent)]
     pub struct UmbpStats(pub BTreeMap<UmbpOperation, UmbpOperationCounts>);
 
+    /// SimpleCPUOffload connector telemetry.
+    ///
+    /// Unlike the NIXL, Mooncake and UMBP payloads (one field per counter or
+    /// sample list), Python sends the offloading connectors' self-describing
+    /// envelope (also `OffloadingConnectorStats`): `{"types": {name: kind},
+    /// "data": {name: {label_values: value}}}`, keyed by Prometheus metric name
+    /// and then by the label values as a tuple (`()` when unlabeled). The kind
+    /// of each metric is fixed by its name, so only `data` is read, and the
+    /// fixed-size array keys check each metric's label count when decoding.
+    ///
+    /// Original Python definition: `SimpleCPUOffloadStats` in
+    /// `vllm/v1/simple_kv_offload/metrics.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct SimpleCpuOffloadStats {
+        pub data: SimpleCpuOffloadData,
+    }
+
+    /// SimpleCPUOffload samples of one interval, keyed by metric name and then
+    /// by the metric's label values (a Python tuple, empty when unlabeled).
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct SimpleCpuOffloadData {
+        /// Store admission counter increments by `outcome`.
+        #[serde(default, rename = "vllm:simple_kv_offload_save_outcomes_total")]
+        pub save_outcomes: BTreeMap<[String; 1], u64>,
+        /// Counter increment of blocks loaded back to GPU.
+        #[serde(default, rename = "vllm:simple_kv_offload_load_blocks_total")]
+        pub load_blocks: BTreeMap<[String; 0], u64>,
+        /// Pinned offload-pool blocks. Python sets it on every interval, which
+        /// also tells this payload apart from other connectors' `types`/`data`
+        /// payloads.
+        #[serde(rename = "vllm:simple_kv_offload_used_blocks")]
+        pub used_blocks: BTreeMap<[String; 0], u64>,
+        /// Offload blocks in pending stores.
+        #[serde(default, rename = "vllm:simple_kv_offload_pending_store_blocks")]
+        pub pending_store_blocks: BTreeMap<[String; 0], u64>,
+        /// Deployment facts as labels (`backend`, `page_cache`, `lazy_offload`,
+        /// `capacity_blocks`); the value is always 1.
+        #[serde(default, rename = "vllm:simple_kv_offload_info")]
+        pub info: BTreeMap<[String; 4], u64>,
+    }
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -375,6 +435,8 @@ pub mod kv_connector {
         pub mooncake: Option<MooncakeStats>,
         #[serde(rename = "UMBPStoreConnector")]
         pub umbp: Option<UmbpStats>,
+        #[serde(rename = "SimpleCPUOffloadConnector")]
+        pub simple_cpu_offload: Option<SimpleCpuOffloadStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -396,6 +458,7 @@ pub mod kv_connector {
         MooncakeTransfer(MooncakeTransferStats),
         Mooncake(MooncakeStats),
         Umbp(UmbpStats),
+        SimpleCpuOffload(SimpleCpuOffloadStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }
@@ -435,6 +498,14 @@ pub struct SchedulerStats {
     pub spec_decoding_stats: Option<SpecDecodingStats>,
     /// Connector-specific KV transfer stats.
     pub kv_connector_stats: Option<KvConnectorStats>,
+    /// Connector-specific encoder cache transfer stats, passed through as the
+    /// engine's connector reports them.
+    #[serde(default)]
+    pub ec_connector_stats: Option<OpaqueValue>,
+    /// Scheduler-side details of the engine iteration, when iteration details
+    /// are logged (`SchedulerIterationDetails`), passed through.
+    #[serde(default)]
+    pub iteration_details: Option<OpaqueValue>,
     /// CUDA graph runtime stats when graph metrics are enabled.
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
@@ -469,6 +540,11 @@ mod tests {
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+
+        // Serialized as sparsely as Python sends it.
+        let encoded: serde_json::Value =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&stats).unwrap()).unwrap();
+        assert_eq!(encoded, payload);
     }
 
     #[test]

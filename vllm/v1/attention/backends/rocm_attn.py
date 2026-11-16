@@ -154,15 +154,22 @@ class RocmAttentionBackend(AttentionBackend):
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # The (head_size, block_size) pairs that have a native kernel are enumerated
-        # by csrc/rocm/attention_paged_attn_<head>_<dtype>_<kv>.cu, each of which
-        # instantiates ATTN_LAUNCH from csrc/rocm/attention_kernels.cuh; the runtime
-        # gate is use_rocm_custom_paged_attention() in vllm/platforms/rocm.py.
+        # by BLOCK_SIZES and VARIANTS in csrc/rocm/generate_paged_attn.py; the
+        # runtime gate is use_rocm_custom_paged_attention() in vllm/platforms/rocm.py.
         # However, vLLM allows support for any multiple of 16 via the Triton path.
         # As addressed in PR: https://github.com/vllm-project/vllm/pull/31380,
         # non-standard models (like qwen3-next with block_size 544, or qwen3_5
         # with 784 and 1056) are dynamically routed to our optimized Triton kernel
         # in `do_kv_cache_update`.
         return [MultipleOf(16)]
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        # Only 16 (and 32, where a native kernel exists) runs on the native
+        # C++ paged-attention kernel; any other multiple of 16 falls back to
+        # the slower Triton path. Keep the native kernel for default-sized
+        # runs; explicit --block-size values are unaffected.
+        return 16
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -495,7 +502,12 @@ class RocmAttentionImpl(AttentionImpl):
             (16 // value_cache.element_size()) if interleaved_v else 0
         )
 
-        if block_size in (16, 32) and has_native_layout:
+        # The native kernel writes at most 512 chunks of x elements per token.
+        if (
+            block_size in (16, 32)
+            and has_native_layout
+            and self.num_kv_heads * (self.head_size // key_cache.shape[4]) <= 512
+        ):
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,

@@ -19,7 +19,7 @@ long_query = "What is the capital of France?" * 20
 long_doc = "The capital of France is Paris. " * 20
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     model: str
     args: list[str]
@@ -69,7 +69,7 @@ RERANK_CONFIGS = [
     ),
     # 3. bi-encoder
     TestConfig(
-        model="intfloat/multilingual-e5-small",
+        model="vllm-project/multilingual-e5-small",
         args=[
             "--enforce-eager",
             "--max-model-len",
