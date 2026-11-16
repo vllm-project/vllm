@@ -1400,6 +1400,66 @@ def test_v41_compressor_inserts_main_cache_in_compression_launch(compress_ratio)
     )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_compressor_plain_row_cache_keeps_insert_cache(compress_ratio, cache_dtype):
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        DeepseekCompressor,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    num_tokens = 9
+    positions = torch.arange(3, 3 + num_tokens, device=device)
+    main_slots = torch.where(
+        (positions + 1) % compress_ratio == 0, positions // compress_ratio, -1
+    )
+    main_cache = torch.zeros(1, 128, 512, dtype=cache_dtype, device=device)
+    calls = []
+    compressor = SimpleNamespace(
+        compress_ratio=compress_ratio,
+        head_dim=512,
+        rms_norm_eps=1e-6,
+        norm=SimpleNamespace(
+            weight=torch.ones(512, dtype=torch.bfloat16, device=device)
+        ),
+        pcp_size=1,
+        k_cache_prefix="k_cache",
+        state_cache=SimpleNamespace(
+            prefix="state", kv_cache=torch.randn(2, 8, 1024, device=device)
+        )
+        if compress_ratio == 2
+        else None,
+        _static_forward_context={"k_cache": SimpleNamespace(kv_cache=main_cache)},
+        insert_cache=lambda *args: calls.append(args),
+    )
+    metadata = {
+        "k_cache": SimpleNamespace(slot_mapping=main_slots),
+        "state": CompressorMetadata(
+            slot_mapping=8 + positions % 8,
+            query_start_loc=torch.tensor(
+                [0, num_tokens], dtype=torch.int32, device=device
+            ),
+            token_to_req_indices=torch.zeros(
+                num_tokens, dtype=torch.int32, device=device
+            ),
+        ),
+    }
+    rotary = SimpleNamespace(cos_sin_cache=torch.randn(64, 64, device=device))
+    raw = torch.randn(num_tokens, 512 * compress_ratio, device=device)
+    with override_forward_context(ForwardContext({}, metadata, {})):
+        latent = DeepseekCompressor.forward(compressor, raw, positions, rotary)
+
+    assert len(calls) == 1
+    assert calls[0][0] is latent
+    assert calls[0][1] is positions
+    assert calls[0][2] is rotary
+    assert not main_cache.view(torch.uint8).any()
+
+
 def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
     """PCP compresses locally and publishes the gathered latent to both caches."""
     from vllm.forward_context import ForwardContext, override_forward_context
