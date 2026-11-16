@@ -235,6 +235,8 @@ def test_streaming_resume_refreshes_recomputed_offload_keys():
             assert state.req_context.get_offload_key_position(key) == (
                 chunk_idx * config.tokens_per_chunk
             )
+        for key in set(old) - set(expected):
+            assert state.req_context.get_offload_key_position(key) is None
 
 
 @pytest.mark.parametrize(
