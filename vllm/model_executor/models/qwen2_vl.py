@@ -1165,9 +1165,25 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 )
             )
 
+        if max_width >= unit and max_height >= unit:
+            sizes.append(
+                ImageSize(
+                    width=max_width // unit * unit, height=max_height // unit * unit
+                )
+            )
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        do_resize = video_kwargs.get("do_resize") is not False
+
+        def on_grid(canvas: ImageSize) -> bool:
+            return canvas.width % unit == 0 and canvas.height % unit == 0
+
         def num_tokens(canvas: ImageSize) -> int:
             if max(canvas) > 200 * min(canvas):
                 return 0
+            if not do_resize:
+                return (
+                    (canvas.height // unit) * (canvas.width // unit) * on_grid(canvas)
+                )
             height, width = smart_resize(
                 height=canvas.height,
                 width=canvas.width,
@@ -1179,7 +1195,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
         return max(
             sizes,
-            key=lambda canvas: (num_tokens(canvas), -canvas.width * canvas.height),
+            key=lambda canvas: (
+                num_tokens(canvas),
+                on_grid(canvas),
+                -canvas.width * canvas.height,
+            ),
         )
 
     def get_max_image_tokens(self) -> int:

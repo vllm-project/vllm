@@ -532,10 +532,23 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
                 if k * min(aspect_w, aspect_h) >= MIN_DUMMY_SIDE:
                     sizes.append(ImageSize(width=k * aspect_w, height=k * aspect_h))
 
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        do_resize = video_kwargs.get("do_resize") is not False
+
+        def num_soft_tokens(size: ImageSize) -> int:
+            if do_resize:
+                return self._compute_num_soft_tokens(
+                    size.width, size.height, max_soft_tokens
+                )
+            if size.width % unit or size.height % unit:
+                return 0
+            num_tokens = (size.width // unit) * (size.height // unit)
+            return num_tokens if num_tokens <= max_soft_tokens else 0
+
         return max(
             sizes,
             key=lambda size: (
-                self._compute_num_soft_tokens(size.width, size.height, max_soft_tokens),
+                num_soft_tokens(size),
                 -abs(
                     size.width / size.height - _VIDEO_FRAME_WIDTH / _VIDEO_FRAME_HEIGHT
                 ),

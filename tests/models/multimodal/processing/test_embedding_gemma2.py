@@ -208,3 +208,25 @@ def test_dummy_video_follows_size_hint(
         dummy["mm_placeholders"]["video"][0].get_num_embeds()
         >= processed["mm_placeholders"]["video"][0].get_num_embeds()
     )
+
+
+@pytest.mark.parametrize("hint", [{"width": 1584, "height": 384}, {"width": 624}])
+def test_dummy_video_without_resize_follows_size_hint(hint: dict[str, int]):
+    ctx = build_model_context(
+        MODEL_ID,
+        mm_processor_kwargs={"do_resize": False},
+        limit_mm_per_prompt={
+            "image": 0,
+            "audio": 0,
+            "video": {"count": 1, "num_frames": 4, **hint},
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len, mm_counts={"video": 1}
+    )
+    assert tokens is not None
+
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+
+    assert 0 < dummy["mm_placeholders"]["video"][0].length <= tokens["video"]
