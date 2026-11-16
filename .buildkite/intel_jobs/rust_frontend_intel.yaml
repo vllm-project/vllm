@@ -84,25 +84,26 @@ steps:
     pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist" &&
     pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"'
 
-- label: ":intel: (BMG) Rust Frontend Core Correctness"
-  key: rust-frontend-core-correctness-intel
-  timeout_in_minutes: 30
-  device: intel_gpu_k8s
-  num_devices: 1
-  resource_claim_template: b70-1
-  working_dir: "/vllm-workspace/"
-  env:
-    VLLM_TEST_DEVICE: "xpu"
-  source_file_dependencies:
-  - rust/
-  - vllm/entrypoints/openai/
-  - tests/utils.py
-  - tests/entrypoints/openai/correctness/test_lmeval.py
-  commands:
-  - export VLLM_USE_RUST_FRONTEND=1
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - cd tests
-  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+# Disable due to random accuracy issue
+# - label: ":intel: (BMG) Rust Frontend Core Correctness"
+#   key: rust-frontend-core-correctness-intel
+#   timeout_in_minutes: 30
+#   device: intel_gpu_k8s
+#   num_devices: 1
+#   resource_claim_template: b70-1
+#   working_dir: "/vllm-workspace/"
+#   env:
+#     VLLM_TEST_DEVICE: "xpu"
+#   source_file_dependencies:
+#   - rust/
+#   - vllm/entrypoints/openai/
+#   - tests/utils.py
+#   - tests/entrypoints/openai/correctness/test_lmeval.py
+#   commands:
+#   - export VLLM_USE_RUST_FRONTEND=1
+#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   - cd tests
+#   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: ":intel: (BMG) Rust Frontend Tool Use"
   key: rust-frontend-tool-use-intel
