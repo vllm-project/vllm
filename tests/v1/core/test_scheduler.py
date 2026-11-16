@@ -433,6 +433,24 @@ def test_engine_core_forwards_the_weight_version():
     connector.set_weight_version.assert_called_once_with("v2")
 
 
+@pytest.mark.parametrize(
+    "key_prefix,drains", [("job", True), (None, False)], ids=["sessions", "inline"]
+)
+def test_engine_core_pause_drains_auxiliary_object_writes(key_prefix, drains):
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, 0, key_prefix=key_prefix
+    )
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.model_executor = Mock()
+    core.collective_rpc = Mock()
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._finish_pause(clear_cache=False, reset_connector=False)
+    calls = [entry.args[0] for entry in core.collective_rpc.call_args_list]
+    assert calls == (["drain_aux_output"] if drains else [])
+
+
 def test_engine_core_keeps_the_weight_version_its_connector_rejects():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(

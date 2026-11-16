@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
@@ -187,6 +188,8 @@ class SessionObjectWriter:
             except BaseException as error:
                 logger.exception("Auxiliary output object write failed.")
                 self._error = error
+            finally:
+                self._queue.task_done()
 
     def check(self) -> None:
         """Raise `BlockObjectStoreError` if a write failed."""
@@ -194,6 +197,18 @@ class SessionObjectWriter:
             raise BlockObjectStoreError(
                 "auxiliary output object write failed"
             ) from self._error
+
+    def drain(self, timeout_s: float = 60.0) -> None:
+        deadline = time.monotonic() + timeout_s
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise BlockObjectStoreError(
+                        "auxiliary output objects were not written in time"
+                    )
+                self._queue.all_tasks_done.wait(remaining)
+        self.check()
 
     def add_blocks(
         self,

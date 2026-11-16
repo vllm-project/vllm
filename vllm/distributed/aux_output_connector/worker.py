@@ -751,6 +751,12 @@ class AuxOutputWorkerConnector:
             self._publish_blocks(block_batches, retained_keys, release_keys)
             self._teardown(finished_now)
 
+    def drain(self, metadata: AuxOutputConnectorMetadata) -> None:
+        self.begin_step(metadata)
+        self._step_metadata = None
+        if self._object_writer is not None:
+            self._object_writer.drain()
+
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()

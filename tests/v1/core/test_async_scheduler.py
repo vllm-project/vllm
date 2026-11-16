@@ -902,6 +902,9 @@ class SessionEngine:
         self.version = version
         self.connector.set_weight_version(f"v{version}")
 
+    def pause(self):
+        self.worker.drain(self.connector.drain_metadata())
+
     def schedule(self):
         scheduler_output = self._schedule()
         metadata = scheduler_output.aux_output_connector_metadata
@@ -1670,6 +1673,23 @@ def test_session_release_removes_every_object_of_the_session():
     listed = {key for keys in engine.keys.values() for key in keys}
     assert set(engine.client.objects) - listed
     engine.client.remove_by_regex(aux_session_pattern("job", "s"), True)
+    assert engine.client.objects
+    assert all(key.startswith("job/s2/") for key in engine.client.objects)
+
+
+def test_pause_writes_every_object_of_the_stopped_session_requests():
+    engine = _tier_engine(connector=None)
+    _run_turn(engine, 1, "first", 40, 9)
+    (repeat,) = _session_requests(["repeat"], 40, 4, prompt_logprobs=1)
+    engine.scheduler.add_request(repeat)
+    engine.step(engine.schedule(), {"repeat": [0]})
+    engine.scheduler.finish_requests("repeat", RequestStatus.FINISHED_ABORTED)
+    engine.pause()
+    assert not engine.worker._object_writer._queue.unfinished_tasks
+    assert set(engine.keys["first"]) <= set(engine.client.objects)
+    engine.client.remove_by_regex(aux_session_pattern("job", "s"), True)
+    _run_turn(engine, 1, "other", 40, session="s2")
+    engine.worker.close()
     assert engine.client.objects
     assert all(key.startswith("job/s2/") for key in engine.client.objects)
 

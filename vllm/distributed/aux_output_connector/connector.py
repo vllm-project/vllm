@@ -303,6 +303,24 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
+        metadata = self._take_events(
+            scheduled_requests, block_hashes_by_request, sessions
+        )
+        for request_id in scheduler_output.finished_req_ids or ():
+            self._session_requests.pop(request_id, None)
+        return metadata
+
+    def drain_metadata(self) -> AuxOutputConnectorMetadata | None:
+        if self._key_prefix is None:
+            return None
+        return self._take_events({}, {}, {})
+
+    def _take_events(
+        self,
+        scheduled_requests: dict[str, int],
+        block_hashes_by_request: dict[str, PackedBlockHashes],
+        sessions: dict[str, str],
+    ) -> AuxOutputConnectorMetadata:
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -326,8 +344,6 @@ class AuxOutputSchedulerConnector:
         self._flushed_hashes = {}
         self._retained_hashes, self._released_hashes = [], []
         self._session_tails = {}
-        for request_id in scheduler_output.finished_req_ids or ():
-            self._session_requests.pop(request_id, None)
         return metadata
 
     def _emit_start(self, request: Request) -> int:
