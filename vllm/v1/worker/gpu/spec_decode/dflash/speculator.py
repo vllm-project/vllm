@@ -598,7 +598,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
                 num_reqs,
-                draft_temperature=self.speculative_config.draft_temperature,
             )
 
         if num_speculative_tokens == 0:
@@ -803,7 +802,6 @@ def _prepare_dflash_inputs_kernel(
     CP_INTERLEAVE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     NUM_PAD_PROGRAMS: tl.constexpr,
-    DRAFT_TEMPERATURE: tl.constexpr = None,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -954,10 +952,7 @@ def _prepare_dflash_inputs_kernel(
             tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len),
         )
         # Copy sampling state.
-        if DRAFT_TEMPERATURE is None:
-            draft_temp = tl.load(temperature_ptr + req_state_idx)
-        else:
-            draft_temp = DRAFT_TEMPERATURE
+        draft_temp = tl.load(temperature_ptr + req_state_idx)
         tl.store(
             out_temperature_ptr + req_state_idx,
             draft_temp,
@@ -1003,7 +998,6 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
     num_reqs_override: int | None = None,
-    draft_temperature: float | None = None,
 ) -> None:
     num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
     assert num_reqs <= input_batch.num_reqs
@@ -1055,5 +1049,4 @@ def prepare_dflash_inputs(
         CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=BLOCK_SIZE,
         NUM_PAD_PROGRAMS=_NUM_PAD_PROGRAMS,
-        DRAFT_TEMPERATURE=draft_temperature,
     )

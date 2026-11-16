@@ -160,6 +160,58 @@ def test_draft_temperature_preserves_greedy_target(
         assert acceptance_rates[1] == acceptance_rates[0]
 
 
+@single_gpu_only
+def test_draft_temperature_mapping_handles_mixed_target_temperatures(
+    vllm_runner, monkeypatch
+):
+    """A mixed mapping matches fixed overrides for the same seeded requests."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    model = "Qwen/Qwen3-0.6B"
+    prompts = [
+        "The capital of France is",
+        "Write a short story about a robot:",
+        "Explain why the sky is blue:",
+        "The first ten prime numbers are",
+    ]
+    params = [
+        SamplingParams(temperature=t, seed=42 + i, max_tokens=32, ignore_eos=True)
+        for i, t in enumerate((0.0, 0.5, 1.0, 1.5))
+    ]
+    results = []
+    cases: list[tuple[dict[str, Any], slice]] = [
+        ({"draft_temperature": 0.0}, slice(0, 2)),
+        ({"draft_temperature": 0.5}, slice(2, 4)),
+        (
+            {
+                "draft_temperature_mapping": [
+                    {"target_temperature_lt": 1.0},
+                    {"constant": 0.5},
+                ]
+            },
+            slice(0, 4),
+        ),
+    ]
+    for options, group in cases:
+        with vllm_runner(
+            model,
+            max_model_len=256,
+            max_num_seqs=4,
+            speculative_config={
+                "method": "draft_model",
+                "model": model,
+                "num_speculative_tokens": 3,
+                "draft_sample_method": "probabilistic",
+                **options,
+            },
+            disable_log_stats=False,
+        ) as runner:
+            outputs = runner.llm.generate(prompts[group], params[group])
+            results.append([list(out.outputs[0].token_ids) for out in outputs])
+            assert compute_acceptance_rate(runner.llm.get_metrics()) > 0
+    assert results[2] == results[0] + results[1]
+    assert [p.temperature for p in params] == [0.0, 0.5, 1.0, 1.5]
+
+
 cases = [
     # Same model for draft and target, greedy sampling.
     ArgsTest(

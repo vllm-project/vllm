@@ -79,7 +79,9 @@ def _run_prepare(
     temperature = torch.zeros(max_num_reqs, dtype=torch.float32, device=device)
     seeds = torch.zeros(max_num_reqs, dtype=torch.int64, device=device)
     input_temperature = torch.tensor(
-        [0.0, 0.0, 1.0, 0.0], dtype=torch.float32, device=device
+        [0.0, 0.0, 1.0 if draft_temperature is None else draft_temperature, 0.0],
+        dtype=torch.float32,
+        device=device,
     )
     input_seeds = torch.tensor([0, 0, 17, 0], dtype=torch.int64, device=device)
     last_sampled = torch.tensor([0, 0, 99, 0], dtype=torch.int64, device=device)
@@ -91,7 +93,6 @@ def _run_prepare(
 
     draft = SimpleNamespace(
         vllm_config=VllmConfig(),
-        speculative_config=SimpleNamespace(draft_temperature=draft_temperature),
         input_buffers=input_buffers,
         context_positions=context_positions,
         _context_slot_mappings=context_slot_mapping.unsqueeze(0),
@@ -159,13 +160,13 @@ def _run_prepare(
         sample_pos=sample_pos.cpu(),
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
-        target_temperature=input_temperature.cpu(),
+        input_temperature=input_temperature.cpu(),
         seeds=seeds.cpu(),
     )
 
 
 @pytest.mark.parametrize("draft_temperature", [0.0, 0.5])
-def test_prepare_dflash_inputs_overrides_only_draft_temperature(draft_temperature):
+def test_prepare_dflash_inputs_copies_resolved_draft_temperature(draft_temperature):
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
@@ -173,7 +174,7 @@ def test_prepare_dflash_inputs_overrides_only_draft_temperature(draft_temperatur
     )
 
     assert out.temperature[2].item() == draft_temperature
-    assert out.target_temperature[2].item() == 1.0
+    assert out.input_temperature[2].item() == draft_temperature
 
 
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
