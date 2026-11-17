@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::num::NonZeroU32;
+use std::sync::Once;
 
 use itertools::Itertools as _;
+use tracing::{debug, warn};
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
@@ -65,6 +67,76 @@ pub(super) struct ResponseOptions {
     pub return_weight_versions: bool,
     /// Whether the request forces one named function tool.
     pub is_named_tool_choice: bool,
+}
+
+static FORWARDED_PROMPT_TOKEN_IDS_IGNORED_ONCE: Once = Once::new();
+
+/// Take the prompt token IDs a prefill stage forwarded in
+/// `kv_transfer_params`, like Python's `_reused_prompt_token_ids`.
+///
+/// Both pre-rendered keys are always removed, so they never reach the engine.
+/// Returns `None` when `messages` must be rendered instead.
+pub(super) fn take_forwarded_prompt_token_ids(
+    request: &mut ChatCompletionRequest,
+    trusted: bool,
+) -> Result<Option<Vec<u32>>, ApiError> {
+    let Some(params) = request.kv_transfer_params.as_mut() else {
+        return Ok(None);
+    };
+    let token_ids = params.remove("prompt_token_ids");
+    // Forwarded features only have meaning together with the ids.
+    params.remove("prompt_features");
+    let Some(token_ids) = token_ids.filter(|token_ids| !token_ids.is_null()) else {
+        return Ok(None);
+    };
+    if request.echo {
+        debug!(
+            "Ignoring kv_transfer_params['prompt_token_ids']: \
+             echo is set, so messages are rendered instead."
+        );
+        return Ok(None);
+    }
+    if request.return_prompt_text == Some(true) {
+        debug!(
+            "Ignoring kv_transfer_params['prompt_token_ids']: \
+             return_prompt_text is set, so messages are rendered instead."
+        );
+        return Ok(None);
+    }
+    if request.media_modalities().next().is_some() {
+        debug!(
+            "Ignoring kv_transfer_params['prompt_token_ids']: \
+             messages have non-text content and are rendered instead."
+        );
+        return Ok(None);
+    }
+    // Without a connector, accepting forwarded ids would skip chat templating
+    // and tokenization on any client-supplied text.
+    if !trusted {
+        FORWARDED_PROMPT_TOKEN_IDS_IGNORED_ONCE.call_once(|| {
+            warn!(
+                "Ignoring kv_transfer_params['prompt_token_ids']: the server has no KV \
+                 transfer connector configured for prompt id reuse and \
+                 --enable-prompt-token-ids is not set, so messages are rendered instead. \
+                 Set --enable-prompt-token-ids to keep reusing ids forwarded by a trusted \
+                 caller."
+            );
+        });
+        return Ok(None);
+    }
+    let invalid = || {
+        ApiError::invalid_request(
+            "`kv_transfer_params['prompt_token_ids']` must be a non-empty list of \
+             non-negative integers.",
+            Some("kv_transfer_params.prompt_token_ids"),
+        )
+    };
+    let token_ids = token_ids.as_array().filter(|ids| !ids.is_empty()).ok_or_else(invalid)?;
+    let token_ids = token_ids
+        .iter()
+        .map(|id| id.as_u64().and_then(|id| u32::try_from(id).ok()).ok_or_else(invalid))
+        .try_collect()?;
+    Ok(Some(token_ids))
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat
@@ -218,6 +290,7 @@ pub(super) fn prepare_chat_request(
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
         return_prompt_text: request.return_prompt_text.unwrap_or(false),
+        forwarded_prompt_token_ids: None,
     };
 
     Ok(PreparedRequest {
@@ -483,7 +556,7 @@ mod tests {
     };
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
-    use super::prepare_chat_request;
+    use super::{prepare_chat_request, take_forwarded_prompt_token_ids};
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::{
@@ -2088,6 +2161,35 @@ mod tests {
         assert_eq!(
             prepared.chat_request.chat_options.generation_prompt_mode,
             GenerationPromptMode::StartNewAssistant
+        );
+    }
+
+    /// Both pre-rendered keys leave `kv_transfer_params`, and messages with media
+    /// are rendered so the model sees the media, even on a trusted server.
+    #[test]
+    fn take_forwarded_prompt_token_ids_ignores_media_and_drops_features() {
+        let take = |body: serde_json::Value| {
+            let mut request: ChatCompletionRequest = serde_json::from_value(body).unwrap();
+            let ids = take_forwarded_prompt_token_ids(&mut request, true).unwrap();
+            (ids, request.kv_transfer_params)
+        };
+        let image = json!([{"type": "image_url", "image_url": {"url": "https://x/a.png"}}]);
+
+        let (ids, params) = take(json!({
+            "messages": [{"role": "user", "content": image}],
+            "kv_transfer_params": {"prompt_token_ids": [1, 2], "prompt_features": {}}
+        }));
+        assert_eq!(ids, None);
+        assert_eq!(serde_json::to_value(params).unwrap(), json!({}));
+
+        let (ids, params) = take(json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "kv_transfer_params": {"prompt_features": {}, "do_remote_prefill": true}
+        }));
+        assert_eq!(ids, None);
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            json!({"do_remote_prefill": true})
         );
     }
 }

@@ -702,6 +702,12 @@ pub struct ChatRequest {
     /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
     #[serde(default)]
     pub return_prompt_text: bool,
+    /// Prompt token IDs rendered upstream, such as by the prefill stage of
+    /// disaggregated serving. When set, they are submitted in place of
+    /// rendering and tokenizing `messages`; the output is still parsed and
+    /// detokenized as for any chat request.
+    #[serde(default)]
+    pub forwarded_prompt_token_ids: Option<Vec<u32>>,
 }
 
 impl ChatRequest {
@@ -724,6 +730,7 @@ impl ChatRequest {
             session_id: None,
             lora_request: None,
             return_prompt_text: false,
+            forwarded_prompt_token_ids: None,
         }
     }
 

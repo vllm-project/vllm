@@ -469,6 +469,26 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub exclude_tools_when_tool_choice_none: bool,
 
+    /// Whether to honor `kv_transfer_params.prompt_token_ids` without a KV
+    /// transfer connector. Disabled by default, so aggregated servers render
+    /// `messages` instead. Only enable this for callers trusted to supply ids
+    /// matching the model tokenizer and rendered prompt.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_prompt_token_ids: bool,
+
+    /// Whether `--kv-transfer-config` names a connector other than a local
+    /// offload one, which implies a prefill stage that forwards prompt ids.
+    /// Read from the Python bootstrap's config, or in managed-engine mode from
+    /// the arguments forwarded to Python.
+    #[arg(skip)]
+    #[serde(
+        default,
+        rename = "kv_transfer_config",
+        deserialize_with = "deserialize_prompt_id_reuse_connector"
+    )]
+    pub has_prompt_id_reuse_connector: bool,
+
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
     ///
@@ -1225,6 +1245,8 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            trust_forwarded_prompt_token_ids: self.enable_prompt_token_ids
+                || self.has_prompt_id_reuse_connector,
         }
     }
 
@@ -1389,6 +1411,84 @@ fn from_json_str<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     Ok(value)
 }
 
+/// KV connectors that only offload the local cache, so they don't imply a
+/// prefill stage that rendered the prompt. Matches Python's
+/// `_OFFLOAD_ONLY_CONNECTORS`.
+const OFFLOAD_ONLY_KV_CONNECTORS: [&str; 3] = [
+    "OffloadingConnector",
+    "LMCacheMPConnector",
+    "SimpleCPUOffloadConnector",
+];
+
+/// Whether a KV transfer config may reuse forwarded prompt ids, like Python's
+/// `_has_prompt_token_id_reuse_connector`: any connector but an offload-only
+/// one, or a `MultiConnector` with at least one such child.
+fn reuses_prompt_token_ids(kv_transfer_config: &Value) -> bool {
+    match kv_transfer_config["kv_connector"].as_str() {
+        Some("MultiConnector") => kv_transfer_config["kv_connector_extra_config"]["connectors"]
+            .as_array()
+            .is_some_and(|connectors| {
+                connectors
+                    .iter()
+                    .filter_map(|child| child["kv_connector"].as_str())
+                    .any(|name| !OFFLOAD_ONLY_KV_CONNECTORS.contains(&name))
+            }),
+        Some(name) => !OFFLOAD_ONLY_KV_CONNECTORS.contains(&name),
+        None => false,
+    }
+}
+
+fn deserialize_prompt_id_reuse_connector<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .is_some_and(|config| reuses_prompt_token_ids(&config)))
+}
+
+/// The `--kv-transfer-config` that forwarded Python arguments set, if any.
+///
+/// Like Python's `FlexibleArgumentParser`, dotted fields such as
+/// `--kv-transfer-config.kv_connector X` merge into one object that replaces
+/// any whole-JSON value, and values that are not JSON are strings.
+fn forwarded_kv_transfer_config(python_args: &[String]) -> Option<Value> {
+    let mut whole = None;
+    let mut dotted = Value::Null;
+    let mut args = python_args.iter();
+    while let Some(arg) = args.next() {
+        let Some(rest) = arg.strip_prefix("--kv-transfer-config") else {
+            continue;
+        };
+        let (path, value) = match rest.split_once('=') {
+            Some((path, value)) => (path, Some(value)),
+            None => (rest, None),
+        };
+        if !path.is_empty() && !path.starts_with('.') {
+            continue;
+        }
+        let Some(value) = value.or_else(|| args.next().map(String::as_str)) else {
+            break;
+        };
+        let value = serde_json::from_str(value).unwrap_or_else(|_| Value::from(value));
+        match path.strip_prefix('.') {
+            None => whole = Some(value),
+            Some(path) => {
+                let field = path.split('.').fold(&mut dotted, |object, key| {
+                    if !object.is_object() {
+                        *object = Value::Object(Default::default());
+                    }
+                    &mut object[key]
+                });
+                *field = value;
+            }
+        }
+    }
+    if dotted.is_null() {
+        whole
+    } else {
+        Some(dotted)
+    }
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     from_json_str(value).map_err(|e| format!("invalid JSON object: {e}"))
 }
@@ -1530,7 +1630,11 @@ impl ServeArgs {
             port,
         });
 
-        self.runtime.clone().into_managed_config(
+        let mut runtime = self.runtime.clone();
+        runtime.has_prompt_id_reuse_connector =
+            forwarded_kv_transfer_config(&self.managed_engine.python_args)
+                .is_some_and(|config| reuses_prompt_token_ids(&config));
+        runtime.into_managed_config(
             listener_mode,
             grpc_listener_mode,
             handshake_address,

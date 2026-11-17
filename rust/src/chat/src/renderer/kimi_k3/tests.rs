@@ -17,7 +17,9 @@ use super::{KimiK3ChatRenderer, KimiK3Variant};
 use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, render_checking_template_kwargs,
+};
 use crate::request::{ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
@@ -74,7 +76,7 @@ fn standard_effort_controls_prompt_and_exported_native_effort() {
         let mut request = crate::ChatRequest::for_test();
         request.chat_options.reasoning_effort = typed;
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
-        let rendered = renderer.render(&request).unwrap();
+        let rendered = render_checking_template_kwargs(&renderer, &request);
         let prompt = tokenizer.decode(&rendered.prompt.into_token_ids().unwrap(), false).unwrap();
         let enabled = effort != "none";
         assert_eq!(prompt.ends_with("<|open|>think<|sep|>"), enabled);

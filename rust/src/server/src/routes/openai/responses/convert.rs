@@ -279,6 +279,7 @@ pub(crate) fn prepare_responses_request(
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
         return_prompt_text: false,
+        forwarded_prompt_token_ids: None,
     };
 
     let meta = ResponseMeta {

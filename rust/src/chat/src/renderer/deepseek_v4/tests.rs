@@ -13,7 +13,8 @@ use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{
-    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+    FixtureRequestOptions, fixture_chat_request, render_checking_template_kwargs,
+    tool_search_request,
 };
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
@@ -342,7 +343,8 @@ fn normalized_reasoning_drives_both_prompt_and_compatibility_kwargs() {
     ] {
         let mut request = ChatRequest::for_test();
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
-        let rendered = DeepSeekV4ChatRenderer::default().render(&request).unwrap();
+        let rendered =
+            render_checking_template_kwargs(&DeepSeekV4ChatRenderer::default(), &request);
         let prompt = rendered.prompt.into_text().unwrap();
         assert_eq!(prompt.ends_with("<think>"), enabled);
         assert_eq!(prompt.contains("Reasoning Effort:"), enabled);

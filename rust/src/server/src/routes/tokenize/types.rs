@@ -133,6 +133,7 @@ impl TokenizeChatRequest {
             session_id: None,
             lora_request: None,
             return_prompt_text: false,
+            forwarded_prompt_token_ids: None,
         })
     }
 }

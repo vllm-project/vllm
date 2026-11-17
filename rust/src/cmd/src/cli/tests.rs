@@ -290,6 +290,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         reasoning_effort_map: None,
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
+                        enable_prompt_token_ids: false,
+                        has_prompt_id_reuse_connector: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         default_mm_loras: {},
@@ -1020,6 +1022,110 @@ fn serve_args_tool_strict_level_requires_xgrammar() {
         format!("{error:#}").contains("requires the xgrammar structured outputs backend"),
         "{error:#}"
     );
+}
+
+/// Forwarded chat prompt ids are trusted with `--enable-prompt-token-ids` or a
+/// non-offload KV transfer connector, whose config `serve` forwards to Python.
+#[test]
+fn serve_args_trust_forwarded_prompt_token_ids() {
+    let trusted = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .trust_forwarded_prompt_token_ids
+    };
+
+    assert!(!trusted(&[]));
+    assert!(trusted(&["--enable-prompt-token-ids"]));
+    assert!(trusted(&[
+        "--kv-transfer-config",
+        r#"{"kv_connector":"NixlConnector","kv_role":"kv_both"}"#,
+    ]));
+    assert!(trusted(&[
+        r#"--kv-transfer-config={"kv_connector":"NixlConnector"}"#
+    ]));
+    assert!(trusted(&[
+        "--kv_transfer_config.kv_connector",
+        "NixlConnector",
+        "--kv-transfer-config.kv_role=kv_both",
+    ]));
+    assert!(!trusted(&["--kv-transfer-config.kv_role", "kv_both"]));
+    assert!(!trusted(&[
+        "--kv-transfer-config.kv_connector",
+        "OffloadingConnector",
+    ]));
+    // Dotted fields replace a whole-JSON value, as in Python.
+    assert!(!trusted(&[
+        "--kv-transfer-config",
+        r#"{"kv_connector":"NixlConnector"}"#,
+        "--kv-transfer-config.kv_connector",
+        "LMCacheMPConnector",
+    ]));
+    assert!(!trusted(&[
+        "--kv-transfer-configs",
+        r#"{"kv_connector":"NixlConnector"}"#
+    ]));
+}
+
+/// The Python bootstrap forwards `--enable-prompt-token-ids` and the KV
+/// transfer config itself in `--args-json`. Offload-only connectors don't
+/// imply a prefill stage, so they don't trust forwarded ids.
+#[test]
+fn frontend_config_trusts_forwarded_prompt_token_ids_from_args_json() {
+    let trusted = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+        .unwrap();
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        args.into_config().api_server_options.trust_forwarded_prompt_token_ids
+    };
+
+    assert!(!trusted(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    assert!(!trusted(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","kv_transfer_config":null}"#
+    ));
+    assert!(trusted(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_prompt_token_ids":true}"#
+    ));
+    assert!(trusted(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","kv_transfer_config":{"kv_connector":"NixlConnector","kv_role":"kv_both"}}"#
+    ));
+    for connector in [
+        "OffloadingConnector",
+        "LMCacheMPConnector",
+        "SimpleCPUOffloadConnector",
+    ] {
+        assert!(!trusted(&format!(
+            r#"{{"model_tag":"Qwen/Qwen3-0.6B","kv_transfer_config":{{"kv_connector":"{connector}"}}}}"#
+        )));
+    }
+    let multi_connector = |children: &str| {
+        format!(
+            r#"{{"model_tag":"Qwen/Qwen3-0.6B","kv_transfer_config":{{"kv_connector":"MultiConnector","kv_connector_extra_config":{{"connectors":[{children}]}}}}}}"#
+        )
+    };
+    assert!(!trusted(&multi_connector(
+        r#"{"kv_connector":"OffloadingConnector"}"#
+    )));
+    assert!(trusted(&multi_connector(
+        r#"{"kv_connector":"OffloadingConnector"},{"kv_connector":"NixlConnector"}"#
+    )));
 }
 
 #[test]
@@ -2353,6 +2459,8 @@ fn frontend_args_accept_json() {
                         reasoning_effort_map: None,
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
+                        enable_prompt_token_ids: false,
+                        has_prompt_id_reuse_connector: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         default_mm_loras: {},
@@ -3381,6 +3489,8 @@ fn serve_args_accept_handshake_aliases() {
                         reasoning_effort_map: None,
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
+                        enable_prompt_token_ids: false,
+                        has_prompt_id_reuse_connector: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         default_mm_loras: {},
@@ -3716,6 +3826,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                trust_forwarded_prompt_token_ids: false,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {
@@ -3852,6 +3963,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                trust_forwarded_prompt_token_ids: false,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {
@@ -4101,6 +4213,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                trust_forwarded_prompt_token_ids: false,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {

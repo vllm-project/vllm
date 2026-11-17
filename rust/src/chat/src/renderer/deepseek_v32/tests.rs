@@ -11,7 +11,9 @@ use super::DeepSeekV32ChatRenderer;
 use crate::EffortValue;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, render_checking_template_kwargs,
+};
 use crate::request::{
     ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode,
     ResolvedToolContext,
@@ -37,7 +39,8 @@ fn effort_enables_binary_thinking_and_none_disables_it() {
         (EffortValue::from("none"), false),
     ] {
         request.chat_options.reasoning_effort = Some(effort);
-        let rendered = DeepSeekV32ChatRenderer::default().render(&request).unwrap();
+        let rendered =
+            render_checking_template_kwargs(&DeepSeekV32ChatRenderer::default(), &request);
         assert_eq!(
             rendered.prompt.into_text().unwrap().ends_with("<think>"),
             enabled

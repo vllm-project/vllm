@@ -257,6 +257,7 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
         return_prompt_text: false,
+        forwarded_prompt_token_ids: None,
         prompt_truncation: chat.truncation.map(truncation_from_proto).transpose()?,
         priority: 0,
         documents: None,

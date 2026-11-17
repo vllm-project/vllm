@@ -25,7 +25,7 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
 
-use self::convert::{ResponseOptions, prepare_chat_request};
+use self::convert::{ResponseOptions, prepare_chat_request, take_forwarded_prompt_token_ids};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
@@ -68,7 +68,7 @@ pub(crate) fn lower_chat_request(
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    ValidatedJson(mut body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
@@ -77,7 +77,12 @@ pub async fn chat_completions(
         .resolve_model_with_default_mm_loras(requested_model, body.media_modalities())
         .await;
 
-    let prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
+    let forwarded_prompt_token_ids = take_forwarded_prompt_token_ids(
+        &mut body,
+        state.api_server_options.trust_forwarded_prompt_token_ids,
+    )?;
+    let mut prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
+    prepared.chat_request.forwarded_prompt_token_ids = forwarded_prompt_token_ids;
     validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)?;
     validate_max_output_tokens(
         "max_completion_tokens",

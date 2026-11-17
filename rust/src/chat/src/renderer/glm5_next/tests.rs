@@ -12,6 +12,7 @@ use vllm_tokenizer::{DynTokenizer, HuggingFaceTokenizer};
 use super::writer::{ControlTokenizer, Glm5PromptWriter};
 use super::{Glm5NextChatRenderer, encoding};
 use crate::renderer::hf::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
+use crate::renderer::test_utils::render_checking_template_kwargs;
 use crate::request::{
     ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
 };
@@ -224,7 +225,7 @@ fn defaults_request_kwargs_and_typed_effort_have_defined_precedence() {
     let rendered = renderer.render(&request).unwrap();
     assert!(rendered.prompt.into_text().unwrap().contains("Reasoning Effort: High"));
     request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
-    let rendered = renderer.render(&request).unwrap();
+    let rendered = render_checking_template_kwargs(&renderer, &request);
     assert!(rendered.prompt.into_text().unwrap().contains("Reasoning Effort: Low"));
     assert_eq!(
         rendered.effective_template_kwargs["reasoning_effort"],
