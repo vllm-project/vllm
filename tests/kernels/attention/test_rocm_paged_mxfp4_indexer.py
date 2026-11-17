@@ -367,6 +367,8 @@ def _run_layers(
         assert bool((out[num_rows + pad :] == 7).all())
 
     def assert_packs_from_row_lens(out, md, ratio):
+        if md.decode is None:
+            return
         _assert_packs_from_row_lens(
             out, md, md.decode.block_table, case.cache[ratio].shape[1]
         )

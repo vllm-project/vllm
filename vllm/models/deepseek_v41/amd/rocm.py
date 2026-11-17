@@ -1269,7 +1269,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _index_k_cache_prefix(self) -> str | None:
         assert self._index_source_prefix is not None
         assert self.topk_indices_buffer is not None
-        indexer = self._static_forward_context[self._index_source_prefix].indexer
+        indexer = getattr(
+            self._static_forward_context[self._index_source_prefix], "indexer", None
+        )
         topk = self.topk_indices_buffer.shape[1]
         pool = self.candidate_topk_blocks
         if (
