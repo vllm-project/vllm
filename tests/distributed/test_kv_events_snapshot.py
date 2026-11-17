@@ -90,7 +90,7 @@ def wire(events):
 def random_batches(seed, n=400):
     rng = random.Random(seed)
     live: Counter = Counter()
-    for i in range(n):
+    for _ in range(n):
         events = []
         if rng.random() < 0.5 or not live:
             start = 1 + 8 * rng.randrange(30)

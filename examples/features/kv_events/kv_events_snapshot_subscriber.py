@@ -28,7 +28,7 @@ _identity = msgspec.msgpack.Decoder(_Identity)
 class SnapshotClient:
     """One publisher's snapshot/live transport; use from a single thread.
 
-    ``ready`` describes transport continuity. Callers must build and install a
+    `ready` describes transport continuity. Callers must build and install a
     private index before advertising it to their own request-serving path.
     """
 
