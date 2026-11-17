@@ -67,6 +67,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _kernel_type(module: torch.nn.Module) -> type:
+    return type(getattr(module.quant_method, "kernel", None))
+
+
 def _decode_metadata(query, seq, block_table, *, batches, tokens, max_query, physical):
     """Keep every real-builder test on the same ordinary decode metadata ABI."""
     return CommonAttentionMetadata(
@@ -97,7 +101,7 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
     capture_tokens = options.get("capture_tokens", 8)
     state_dtype = options.get("state_dtype", "auto")
     sr_rng = options.get("sr_rng")
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     props = torch.cuda.get_device_properties(device)
     if (props.major, props.minor, props.multi_processor_count) != (12, 1, 48):
         pytest.skip("requires the supported SM121/48SM device")
@@ -219,7 +223,7 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
                         if options.get("disable_marlin", False)
                         else MarlinNvFp4LinearKernel
                     )
-                    assert type(projection.quant_method.kernel) is expected_kernel
+                    assert _kernel_type(projection) is expected_kernel
                     projection.quant_method.process_weights_after_loading(projection)
                     assert projection.input_scale.retired
                     assert torch.isnan(projection.input_scale).all()
@@ -270,8 +274,8 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
 def test_gb10_mamba_ownership_does_not_change_attention_or_global_backend(owned_mamba):
     """Only Mamba's two methods select Marlin before their single post-load pack."""
     config, layer, *_ = owned_mamba
-    assert type(layer.in_proj.quant_method.kernel) is MarlinNvFp4LinearKernel
-    assert type(layer.out_proj.quant_method.kernel) is MarlinNvFp4LinearKernel
+    assert _kernel_type(layer.in_proj) is MarlinNvFp4LinearKernel
+    assert _kernel_type(layer.out_proj) is MarlinNvFp4LinearKernel
     quant = ModelOptNvFp4Config(
         quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
     )
@@ -283,7 +287,7 @@ def test_gb10_mamba_ownership_does_not_change_attention_or_global_backend(owned_
             quant_config=quant,
             prefix="model.layers.1.attention.q_proj",
         )
-    assert type(attention.quant_method.kernel) is B12xNvFp4W4A16LinearKernel
+    assert _kernel_type(attention) is B12xNvFp4W4A16LinearKernel
     assert config.kernel_config.linear_backend == "b12x"
     assert config.kernel_config.moe_backend == "b12x"
     assert config.kernel_config.linear_backend_per_quant is None
@@ -297,8 +301,8 @@ def test_gb10_mamba_ownership_does_not_change_attention_or_global_backend(owned_
 def test_gb10_mamba_respects_disabled_marlin_kernel(owned_mamba):
     """A disabled kernel keeps each real Mamba projection on its selected backend."""
     config, layer, *_ = owned_mamba
-    assert type(layer.in_proj.quant_method.kernel) is B12xNvFp4W4A16LinearKernel
-    assert type(layer.out_proj.quant_method.kernel) is B12xNvFp4W4A16LinearKernel
+    assert _kernel_type(layer.in_proj) is B12xNvFp4W4A16LinearKernel
+    assert _kernel_type(layer.out_proj) is B12xNvFp4W4A16LinearKernel
     assert config.kernel_config.linear_backend == "b12x"
     assert config.kernel_config.linear_backend_per_quant is None
 
@@ -396,7 +400,7 @@ def test_fused_layer_uses_bound_checkpoint_and_scale_cache(
                     output = run_marlin_output(layer, normalized)
                 else:
                     output, _ = layer.out_proj(normalized)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.isfinite(output).all() and output.any()
         return output.clone(), pages.clone(), starts.clone(), history.clone()
 
@@ -448,7 +452,7 @@ def test_dynamic_tokens_keep_real_marlin_mamba_dispatch(owned_mamba, trace_token
         rng = torch.cuda.get_rng_state()
         with set_forward_context({layer.prefix: metadata}, config, num_tokens=tokens):
             output = layer(inputs[tokens])
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.equal(rng, torch.cuda.get_rng_state())
         assert torch.isfinite(output).all()
         assert all(torch.isfinite(state).all() for state in layer.kv_cache)
@@ -523,7 +527,7 @@ def test_configured_short_drafts_and_runtime_shorter_queries(owned_mamba):
                 output = layer(inputs[tokens])
         finally:
             layer._marlin_input_conv_allowed = allowed
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.equal(rng, torch.cuda.get_rng_state())
         return output.clone(), pages.clone(), starts.clone(), history.clone()
 
@@ -612,7 +616,7 @@ def test_normal_constructor_capture_admission_and_padded_fallback(owned_mamba):
                 output = layer(hidden[:8])
         finally:
             layer._marlin_input_conv_allowed = allowed
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.equal(rng, torch.cuda.get_rng_state())
         # Original padding rows have no semantic output. Compare all live rows
         # plus the full cache/trackers, rather than inventing padding semantics.
@@ -751,7 +755,7 @@ def test_batched_real_builder_admission_and_fallback(
                 output = layer(hidden[:physical])
         finally:
             layer._marlin_input_conv_allowed = allowed
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.equal(rng, torch.cuda.get_rng_state())
         return output[:total].clone(), pages.clone(), starts.clone(), history.clone()
 
@@ -860,7 +864,7 @@ def test_batched_normal_graph_replay_reads_padded_null_requests(owned_mamba):
             pristine = pages.clone()
             rng = torch.cuda.get_rng_state()
             graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             assert torch.equal(rng, torch.cuda.get_rng_state())
             torch.testing.assert_close(
                 captured_output[: live * tokens], expected_output, rtol=0, atol=0
@@ -926,7 +930,7 @@ def test_batched_normal_worker_preparation_replays_live_requests(owned_mamba):
     assert layer_config is not None
     spec = layer_config.spec
     group = AttentionGroup(
-        Mamba2AttentionBackend,
+        Mamba2AttentionBackend,  # type: ignore[type-abstract]
         [layer.prefix],
         spec,
         kv_cache_group_id=0,
@@ -1052,7 +1056,7 @@ def test_batched_normal_worker_preparation_replays_live_requests(owned_mamba):
             pristine = pages.clone()
             rng = torch.cuda.get_rng_state()
             actual_output = manager.run_fullgraph(desc)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             assert torch.equal(rng, torch.cuda.get_rng_state())
             torch.testing.assert_close(
                 actual_output[: live * tokens], expected_output, rtol=0, atol=0

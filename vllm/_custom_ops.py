@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING
 
 import torch
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform

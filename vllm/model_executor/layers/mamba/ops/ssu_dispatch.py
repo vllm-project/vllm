@@ -629,9 +629,9 @@ def initialize_mamba_ssu_backend(
         from inspect import signature
 
         try:
-            parameters = signature(checkpointing_ssu).parameters
+            parameters = set(signature(checkpointing_ssu).parameters)
         except (TypeError, ValueError):
-            parameters = {}
+            parameters = set()
         _flashinfer_replayssm_main_controls_supported = all(
             name in parameters for name in ("main_pipeline_stages", "main_ctas_per_sm")
         )

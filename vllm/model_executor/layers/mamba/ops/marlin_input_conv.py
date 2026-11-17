@@ -6,7 +6,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.model_executor.kernels.linear import is_supported_and_can_implement_kernel
 from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
 from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
@@ -65,10 +64,12 @@ def select_mamba_marlin_ownership(layer, config) -> None:
             )
         ):
             continue
-        supported, _ = is_supported_and_can_implement_kernel(
-            MarlinNvFp4LinearKernel, method.kernel.config, capability.to_int()
-        )
-        if not supported:
+        if MarlinNvFp4LinearKernel.__name__ in envs.VLLM_DISABLED_KERNELS:
+            continue
+        supported, _ = MarlinNvFp4LinearKernel.is_supported(capability.to_int())
+        if not (
+            supported and MarlinNvFp4LinearKernel.can_implement(method.kernel.config)[0]
+        ):
             continue
         method.kernel = MarlinNvFp4LinearKernel(method.kernel.config)
         if hasattr(projection, "_input_quant_key"):

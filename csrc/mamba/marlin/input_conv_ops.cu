@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 // Fixed M<=16 Marlin input projection + BF16 convolution. The device template
-// preserves its original Neural Magic / Elias Frantar / IST-DASLab notices.
+// preserves the original notices from Neural Magic, Elias Frantar and
+// https://github.com/IST-DASLab/marlin.
 
 #include "../../quantization/marlin/kernel.h"
 #include "input_conv_params.h"

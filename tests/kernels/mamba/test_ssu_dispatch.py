@@ -87,6 +87,12 @@ def _cuda_ints(values):
     return torch.tensor(values, dtype=torch.int32, device="cuda")
 
 
+def _parameters(fn) -> set[str]:
+    from inspect import signature
+
+    return set(signature(fn).parameters)
+
+
 def _replayssm_mixer(kv_cache, ring_start, committed, A, sr_rng=None):
     return SimpleNamespace(
         kv_cache=kv_cache,
@@ -140,9 +146,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
 ):
     """Publish a boundary without modifying its live or cached-prefix sources."""
     try:
-        from flashinfer.mamba.replayssm_materialize import (
-            replayssm_materialize,  # noqa: F401
-        )
+        from flashinfer.mamba.replayssm_materialize import replayssm_materialize
 
         has_materializer = True
     except ImportError:
@@ -152,6 +156,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
             pytest.fail(reason)
         pytest.skip(reason)
+    if sr_rng == "shared_seed" and "sr_rng" not in _parameters(replayssm_materialize):
+        pytest.skip("installed FlashInfer replayssm_materialize lacks sr_rng")
 
     set_random_seed(42)
     slots, heads, dim, dstate, ring_len = 19, 8, 64, 128, 20
@@ -300,7 +306,9 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         materializer_calls.append(
             (sr_rng, kwargs["philox_rounds"], kwargs["rand_seed"])
         )
-        return replayssm_materialize(*args, sr_rng=sr_rng, **kwargs)
+        if sr_rng != "philox":
+            kwargs["sr_rng"] = sr_rng
+        return replayssm_materialize(*args, **kwargs)
 
     monkeypatch.setattr(
         replayssm_utils, "_load_replayssm_materialize", lambda: record_materializer
@@ -798,6 +806,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.num_spec = 3
     mixer.use_replayssm = True
     mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
+    mixer._gb10_replayssm_profile_allowed = False
     mixer.replayssm_buffer_len = 16
     mixer.replayssm_state_dtype = "auto"
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
@@ -987,6 +996,9 @@ def test_shared_seed_dispatch_matches_flashinfer_api(dtype):
     """The vLLM dispatcher forwards shared-seed SR rather than invoking Philox."""
     _require_cuda()
     from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    if "sr_rng" not in _parameters(checkpointing_ssu):
+        pytest.skip("installed FlashInfer checkpointing_ssu lacks sr_rng")
 
     from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
         quantize_replayssm_state,

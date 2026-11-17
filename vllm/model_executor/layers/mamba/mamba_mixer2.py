@@ -565,7 +565,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
             and marlin_owner_selected
             and hasattr(torch.ops._C, "mamba_marlin_input_conv")
         ):
-            props = torch.cuda.get_device_properties(torch.cuda.current_device())
+            props = torch.cuda.get_device_properties(
+                torch.accelerator.current_device_index()
+            )
             self._marlin_input_conv_allowed = (
                 props.major == 12
                 and props.minor == 1
@@ -1443,7 +1445,11 @@ def mamba_mixer2_with_input_projection(
     layer_name = _resolve_layer_name(layer_name)
     context = get_forward_context()
     layer = context.no_compile_layers[layer_name]
-    metadata = (context.attn_metadata or {}).get(layer_name)
+    attn_metadata = context.attn_metadata
+    metadata = None
+    if attn_metadata is not None:
+        assert isinstance(attn_metadata, dict)
+        metadata = attn_metadata.get(layer_name)
     project_and_run(layer, hidden_states, projected, output, metadata)
 
 
