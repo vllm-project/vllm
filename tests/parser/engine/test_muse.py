@@ -10,6 +10,7 @@ from tests.parser.engine.replay_harness import (
     MockTokenizer,
     collect_output,
     replay_streaming,
+    replay_with_text_holdback,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -142,6 +143,21 @@ def test_arguments_follow_the_registered_tool(chunk):
     assert _parse(raw, chunk, [tool])[2] == [("echo", {"text": "25", "count": 25})]
 
 
+@MODES
+@pytest.mark.parametrize("emitted", ["Bash.command", "Bash.execute", "Bash."])
+def test_bare_tool_name_with_any_suffix_collapses(chunk, emitted):
+    tool = _tool("Bash", {"timeout": {"type": "integer"}})
+    raw = _call("Bash", emitted, timeout="5") + EOT
+    assert _parse(raw, chunk, [tool])[2] == [("Bash", {"timeout": 5})]
+
+
+@MODES
+def test_suffix_is_kept_when_a_sibling_is_registered(chunk):
+    raw = _call("Bash", "Bash.fetch") + EOT
+    tools = [_tool("Bash"), _tool("Bash.run")]
+    assert _parse(raw, chunk, tools)[2] == [("Bash.fetch", {})]
+
+
 def test_reasoning_ends_only_at_a_tool_header_of_the_current_turn():
     prompt = _tokens(
         f"{H}{_call('get_weather', city='Paris')}{EOT}"
@@ -169,3 +185,28 @@ def test_reasoning_tokens_include_reasoning_after_tool_call():
     parser = _muse_parser(tokens)
     replay_streaming(parser, tokens, chunk_size=1, finished_on_last=True)
     assert parser.count_reasoning_tokens([tid for tid, _ in tokens]) == len("abcde")
+
+
+def test_reasoning_tokens_count_text_held_back_by_the_detokenizer():
+    tokens = _tokens(f" to=self{MESSAGE}abcd{EOM}{H} to=user{MESSAGE}Ok.{EOT}")
+    parser = _muse_parser(tokens)
+    replay_with_text_holdback(parser, tokens, text_delay=3)
+    assert parser.count_reasoning_tokens([tid for tid, _ in tokens]) == len("abcd")
+
+
+def test_parallel_tool_calls_survive_detokenizer_holdback():
+    tools = [_tool("get_weather", {"city": {"type": "string"}})]
+    tokens = _tokens(
+        _call("get_weather", city="Paris")
+        + f"{EOM}{H}"
+        + _call("get_weather", city="Rome")
+        + EOT
+    )
+    parser = _muse_parser(tokens, tools)
+    output = collect_output(
+        replay_with_text_holdback(parser, tokens, text_delay=3, tools=tools)
+    )
+    assert [(c["name"], json.loads(c["arguments"])) for c in output.tool_calls] == [
+        ("get_weather", {"city": "Paris"}),
+        ("get_weather", {"city": "Rome"}),
+    ]

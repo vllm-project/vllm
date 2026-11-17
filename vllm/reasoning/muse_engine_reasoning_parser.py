@@ -13,7 +13,4 @@ class MuseEngineReasoningParser(MuseParserReasoningAdapter):  # type: ignore[val
         return self._parser_engine.is_reasoning_end_streaming(input_ids, delta_ids)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        # Reasoning after a tool call streams through the tool pass, so recount.
-        if self.has_engine_confirmed_reasoning_end():
-            self._streaming_count_valid = False
-        return super().count_reasoning_tokens(token_ids)
+        return self._parser_engine.count_reasoning_tokens(token_ids)

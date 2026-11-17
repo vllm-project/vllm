@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -36,7 +37,7 @@ from vllm.parser.engine.parser_engine_config import (
 )
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.schema_types import ParameterTypesCache, convert_value
-from vllm.tool_parsers.utils import find_tool_name
+from vllm.tool_parsers.utils import find_tool_name, get_function_tools
 from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
@@ -291,16 +292,52 @@ class MuseParser(ParserEngine):
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return []
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning-body tokens from the ids alone.
+
+        Counting streamed text events undercounts when the detokenizer holds
+        text back (stop strings, partial UTF-8) while ids advance.
+        """
+        count = 0
+        header_start = 0
+        in_reasoning = False
+        for i, token_id in enumerate(token_ids):
+            if token_id in self._message_ids:
+                header = self.model_tokenizer.decode(list(token_ids[header_start:i]))
+                in_reasoning = _route_header(header)[0] == "REASONING_HEADER"
+                header_start = i + 1
+            elif token_id in self._boundary_ids:
+                in_reasoning = False
+                header_start = i + 1
+            elif in_reasoning:
+                count += 1
+        return count
+
     def _handle_tool_name(self, event: SemanticEvent) -> None:
         self._tool_slots[event.tool_index].name += self._registered_name(event.value)
 
     def _registered_name(self, name: str) -> str:
+        """Map `NAME.<suffix>` back to a registered bare `NAME`.
+
+        The chat template renders a bare tool as `"NAME.*"`, so the model may
+        fill in any suffix (`Bash.Bash`, `Bash.command`, `Glob.`). The doubled
+        form always collapses; other suffixes collapse only when no registered
+        name lives under `NAME.`, where the suffix may name a missing sibling.
+        """
         if not self._tools or find_tool_name(self._tools, name):
             return name
         head, sep, tail = name.partition(".")
-        if sep and head == tail and find_tool_name(self._tools, head):
-            return head
-        return name
+        if not sep or not find_tool_name(self._tools, head):
+            return name
+        names = (
+            tool.function.name
+            if isinstance(tool, ChatCompletionToolsParam)
+            else tool.name
+            for tool in get_function_tools(self._tools)
+        )
+        if head != tail and any(n.startswith(f"{head}.") for n in names):
+            return name
+        return head
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
         match = _INVOKE_RE.match(raw_args)
