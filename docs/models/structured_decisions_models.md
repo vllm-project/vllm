@@ -409,16 +409,7 @@ one, the same field can be passed on the command line:
 ```bash
 vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
     --hf-overrides '{"knowline_config": {}}' \
-    --compilation-config '{
-        "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64,
-            72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176,
-            184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304,
-            320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512,
-            528, 544, 560, 576, 592, 608, 624, 640, 656, 672, 688, 704, 720,
-            736, 752, 768, 784, 800, 816, 832, 848, 864, 880, 896, 912, 928,
-            944, 960, 976, 992, 1008, 1024, 1088, 2176, 3264, 4352, 5440,
-            6528, 7616, 8704, 9792, 10880, 11968, 13056, 14144, 15232, 16384],
-        "max_cudagraph_capture_size": 16384}'
+    --compilation-config '{"max_prefill_cudagraph_capture_tokens": 8192}'
 ```
 
 - The server writes the prompt the checkpoint was trained on, so picks and
@@ -434,9 +425,10 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
 - The reads score the labels in the serving dtype. Under bf16 the label
   logprobs move in steps of 0.125, so close options can tie exactly: a
   noul of exactly 0.5 is a tie, not a signal. The reference serves FP8
-  weights with an fp32 LM head (`--quantization fp8` and
-  `"head_dtype": "float32"` in `--hf-overrides`); against that setting
-  the picks differ only on near-ties.
+  weights with an fp32 LM head: add `--quantization fp8_per_tensor` to the command
+  above and `"head_dtype": "float32"` to the same `--hf-overrides` JSON as
+  the marker. Against that setting the bf16 picks differ only on
+  near-ties.
 - Labels run `A` to `Z`, then two-letter labels from `AA`, skipping any
   that is not one token right after `Answer:`. A choice can have up to 255
   options and a score up to 255 levels. With the checkpoint's tokenizer,
@@ -444,15 +436,17 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   tokenizer with fewer than 255 such labels disables the decisions
   endpoints.
 - This is a hybrid model (GDN linear attention). With prefix caching, vLLM
-  prefills any prompt over one 1088-token mamba block as a single chunk,
-  and that chunk must replay a piecewise CUDA graph: the default capture
-  sizes stop at 1024 tokens, and larger chunks run the compiled pieces
-  kernel by kernel, several times slower. The `--compilation-config` above
-  appends the mamba block's multiples to the default capture sizes, up to
-  the 16,384-token chunked-prefill budget; size the list to your own
-  budget. Under the V2 runner, `prefill_cudagraph_capture_token_sizes`
-  and `max_prefill_cudagraph_capture_tokens` are the prefill-specific
-  keys.
+  prefills any prompt over one 1088-token mamba block as a single chunk. A
+  chunk larger than every prefill CUDA graph runs the compiled pieces
+  without a graph. The default prefill graphs stop at 512 tokens on H200
+  (8192 on B300). On H200 a 600-token prompt then takes about twice as
+  long to its first token (61 ms against 32 ms). The `--compilation-config`
+  above captures prefill graphs up to 8192 tokens, capped at
+  `--max-num-batched-tokens`; on H200 that takes 1.4 GiB of graph memory
+  instead of 0.9 GiB. From 4k tokens up, graphs made no measurable
+  difference on H200. Longer prompts gain from a larger chunked-prefill
+  budget instead: `--max-num-batched-tokens 16384` took 9-13% off 16k-
+  and 32k-token prompts there.
 - The read asks for the labels' logprobs over the whole vocabulary, so
   `diagnostics.label_mass` is the labels' share and `argmax_is_label`
   reports the model's actual first token. One read can ask for up to 256
