@@ -1,5 +1,21 @@
 # Sweep Tuning
 
+## Intel Arc Pro B70 / XPU sweeps
+
+With `--hardware arc_pro_b70 --detect-hardware`, GPU-aware TP/DP candidate
+generation uses process-visible XPU devices rather than CPU NUMA nodes.
+Supported TP candidates are 1/2/4/8 (plus recipe TP), limited by GPU count
+and model attention/KV head constraints. Full-card DP layouts and TP-only
+layouts are evaluated; model/KV-cache fit remains a runtime check.
+
+The full workflow reuses concurrency and scheduler stages. Before generation,
+set a tested `max-model-len` in the recipe config or use an explicitly chosen
+model context compatible with available memory. XPU generator and benchmark
+runners are not yet hardware validated in all TP/DP configurations.
+
+To avoid a busy port 8000, run the generated scripts with
+`VLLM_RECIPE_SWEEP_PORT=8001`.
+
 Sweep tuning is optional. The converter always creates an initial `config.yml`
 that can be deployed directly. Scheduler calculation is disabled by default:
 TP/DP and concurrency stages remove explicit `max-num-seqs` and
