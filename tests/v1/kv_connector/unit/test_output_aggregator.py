@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheKVEvents,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector import (
     MooncakeStoreKVEvents,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
