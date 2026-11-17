@@ -143,6 +143,12 @@ def parse_args() -> argparse.Namespace:
         help="Output shell environment file (default: env.sh)",
     )
 
+    p.add_argument(
+        "--max-model-len",
+        type=int,
+        help="Explicit context-length override for generated serving config.",
+    )
+
     tuning = p.add_argument_group(
         "optional runtime tuning",
         (
@@ -892,6 +898,10 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+        if args.max_model_len is not None:
+            if args.max_model_len <= 0:
+                raise ValueError("--max-model-len must be positive")
+            config["max-model-len"] = args.max_model_len
 
         tuning_requested = (
             args.detect_hardware
@@ -967,14 +977,6 @@ def main() -> int:
                 else:
                     raise ValueError(f"No detector registered for {recipe_hardware!r}")
 
-            if recipe_hardware == "arc_pro_b70" and (
-                args.generate_full_sweep or args.generate_parallel_layout_sweep
-            ):
-                raise ValueError(
-                    "NUMA-based parallel-layout/full sweeps are Xeon-only; "
-                    "use an XPU-aware sweep implementation for B70"
-                )
-
             tuning = finetune_runtime_config(
                 config,
                 hardware=hardware,
@@ -1008,7 +1010,11 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                numa_node_count=hardware.numa_node_count,
+                **(
+                    {"gpu_count": hardware.gpu_count}
+                    if recipe_hardware == "arc_pro_b70"
+                    else {"numa_node_count": hardware.numa_node_count}
+                ),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_parallel_layout_sweep:
@@ -1025,7 +1031,11 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                numa_node_count=hardware.numa_node_count,
+                **(
+                    {"gpu_count": hardware.gpu_count}
+                    if recipe_hardware == "arc_pro_b70"
+                    else {"numa_node_count": hardware.numa_node_count}
+                ),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_concurrency_sweep:
