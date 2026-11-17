@@ -216,6 +216,11 @@ class _RDTProducerServer:
         # concurrent packs only convoy on it, which multiplies the cost of
         # every tensor op. The device sync after a pack is outside it.
         self._pack_lock = threading.Lock()
+        # Returns an oversize bucket's temporary to the device once it is
+        # freed (`_freed_oversize`), off the thread that freed it.
+        self._cache_releaser = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="rdt-release"
+        )
 
         # A frozen post-init object graph keeps gen-2 GC from stopping the
         # world mid-serve.
@@ -567,7 +572,25 @@ class _RDTProducerServer:
         unit's count for that consumer stays short, so the watchdog and the
         next (degraded) sync handle it as before. If Ray fails to store the
         return, the consumer's `ray.get` fails the sync."""
-        weakref.finalize(flat, self._freed_bucket, *key)
+        offset = key[-1]
+        weakref.finalize(
+            flat, self._freed_bucket if offset >= 0 else self._freed_oversize, *key
+        )
+
+    def _freed_oversize(self, *key: int) -> None:
+        """An oversize bucket's temporary is free: account it, then give its
+        memory back to the device. The caching allocator would otherwise
+        keep it reserved on the trainer's GPU, and this process allocates
+        nothing else but the arena, so emptying the cache returns only
+        these."""
+        self._freed_bucket(*key)
+        if not self._shutdown:
+            self._cache_releaser.submit(self._empty_cache)
+
+    def _empty_cache(self) -> None:
+        if torch.cuda.is_available():
+            with torch.cuda.device(self._device_index):
+                torch.cuda.empty_cache()
 
     def _freed_bucket(
         self, consumer_id: int, unit: int, sync_idx: int, offset: int
@@ -598,6 +621,7 @@ class _RDTProducerServer:
 
     def shutdown(self) -> None:
         self._shutdown = True
+        self._cache_releaser.shutdown(wait=False, cancel_futures=True)
         with self._cond:
             self._cache.clear()
             self._unit_names.clear()

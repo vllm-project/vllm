@@ -357,6 +357,8 @@ class TestRegister:
         block (nor the CUDA-IPC source, which NIXL cannot register), and its
         unit stays held until Ray frees it."""
         s = server(cls=_RDTProducerServer, arena_bytes=64, bucket_bytes=16)
+        released = []
+        s._empty_cache = lambda: released.append(True)
         s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
         s.begin_sync([0], 0)
         w = _weights()
@@ -371,6 +373,9 @@ class TestRegister:
         assert s._freed_pending == []  # the unit is held: Ray still has it
         del ray_store
         assert s.wait_freed() == [0]
+        # and its memory goes back to the device, off the freeing thread
+        s._cache_releaser.shutdown(wait=True)
+        assert released == [True]
 
     def test_an_oversize_strided_piece_is_served_through_a_temporary(self, server):
         s = server(cls=_RDTProducerServer, arena_bytes=64, bucket_bytes=8)
