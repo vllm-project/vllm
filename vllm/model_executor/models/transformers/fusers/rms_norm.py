@@ -174,6 +174,10 @@ class RMSNormFuser(BaseFuser):
         if rms_norm is not None and peel(_operand(rms_norm, 0, "input")) is x:
             if _has_trailing_compute(graph, rms_norm):
                 return None
+            shape = _operand(rms_norm, 1, "normalized_shape")
+            sizes = shape if isinstance(shape, (list, tuple)) else (shape,)
+            if len(sizes) != 1:
+                return None
             eps_attr, eps = cls._eps_source(graph, module)
             return cls(
                 zero_centered=False,
