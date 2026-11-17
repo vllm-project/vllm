@@ -54,6 +54,7 @@ mod video;
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
 pub use self::metadata::ImageMetadata;
+use self::metadata::ImageReference;
 use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
 
@@ -178,7 +179,7 @@ struct ResolvedMultimodalSpec {
     /// differs from the per-modality default (e.g. `"patches"` for
     /// DeepSeek-V4.1 images).
     encoder_input_key: Option<String>,
-    image_metadata: Option<metadata::ImageMetadataKind>,
+    image_metadata: Option<&'static str>,
 }
 
 impl ResolvedMultimodalSpec {
@@ -189,7 +190,7 @@ impl ResolvedMultimodalSpec {
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
             encoder_input_key: raw.encoder_input_key_for(modality),
-            image_metadata: metadata::ImageMetadataKind::for_model(raw.name()),
+            image_metadata: ImageMetadata::field_for_model(raw.name()),
         }
     }
 
@@ -645,11 +646,8 @@ pub(crate) async fn finalize_rendered_prompt(
     max_model_len: Option<usize>,
     allow_missing_mm_embeddings: bool,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
-    let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
-    if media_parts
-        .iter()
-        .any(|part| matches!(part, MediaContentPart::ImageEmbeds { .. }))
-    {
+    let (media_parts, references) = extract_media_parts(request, rendered.media_order.as_deref())?;
+    if !references.is_empty() {
         if !allow_missing_mm_embeddings {
             bail_invalid_preprocessed_multimodal!(
                 "metadata-only image_embeds requires an EC or multimodal KV consumer"
@@ -670,7 +668,7 @@ pub(crate) async fn finalize_rendered_prompt(
             );
         }
     }
-    if media_parts.is_empty() {
+    if media_parts.is_empty() && references.is_empty() {
         return Ok((rendered.prompt, None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
@@ -683,8 +681,9 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let prepared = info
-        .prepare_multimodal(
+        .prepare_multimodal_timed(
             media_parts,
+            references,
             &mut prompt_token_ids,
             model_dtype,
             max_model_len,
@@ -699,7 +698,7 @@ pub(crate) async fn finalize_rendered_prompt(
 fn extract_media_parts(
     request: &ChatRequest,
     media_order: Option<&[MediaPartSource]>,
-) -> Result<Vec<MediaContentPart>> {
+) -> Result<(Vec<MediaContentPart>, Vec<ImageReference>)> {
     let parts = match media_order {
         // Resolve exactly the sources selected by the renderer, in placeholder order.
         Some(media_order) => Either::Left(media_order.iter().map(|source| -> Result<_> {
@@ -750,8 +749,10 @@ fn extract_media_parts(
             .map(Ok)
         })),
     };
-    parts
-        .map(|part| match part? {
+    let mut raw = Vec::new();
+    let mut references = Vec::new();
+    for part in parts {
+        raw.push(match part? {
             ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => {
                 bail_multimodal!("renderer reported a non-media part as multimodal content")
             }
@@ -759,34 +760,36 @@ fn extract_media_parts(
                 image_url,
                 detail,
                 uuid,
-            } => Ok(MediaContentPart::ImageUrl {
+            } => MediaContentPart::ImageUrl {
                 url: image_url.clone(),
                 detail: *detail,
                 uuid: uuid.clone(),
                 max_long_side_pixel: None,
-            }),
+            },
             ChatContentPart::ImageEmbeds { image_embeds, uuid } => {
-                Ok(MediaContentPart::ImageEmbeds {
-                    payload: serde_json::to_value(image_embeds).expect("integer metadata is JSON"),
-                    uuid: Some(uuid.clone()),
-                })
+                references.push(ImageReference {
+                    metadata: *image_embeds,
+                    uuid: uuid.clone(),
+                });
+                continue;
             }
-            ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
+            ChatContentPart::VideoUrl { video_url, uuid } => MediaContentPart::VideoUrl {
                 url: video_url.clone(),
                 uuid: uuid.clone(),
                 fps: None,
                 max_long_side_pixel: None,
-            }),
-            ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
+            },
+            ChatContentPart::InputAudio { data, format, uuid } => MediaContentPart::AudioUrl {
                 url: input_audio_data_url(data, format.as_deref())?,
                 uuid: uuid.clone(),
-            }),
-            ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
+            },
+            ChatContentPart::AudioUrl { audio_url, uuid } => MediaContentPart::AudioUrl {
                 url: audio_url.clone(),
                 uuid: uuid.clone(),
-            }),
-        })
-        .collect()
+            },
+        });
+    }
+    Ok((raw, references))
 }
 
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
@@ -961,8 +964,14 @@ impl MultimodalModelInfo {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
-            .await
+        self.prepare_multimodal_timed(
+            media_parts,
+            Vec::new(),
+            prompt_token_ids,
+            model_dtype,
+            max_model_len,
+        )
+        .await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -976,15 +985,13 @@ impl MultimodalModelInfo {
     async fn prepare_multimodal_timed(
         &self,
         media_parts: Vec<MediaContentPart>,
+        references: Vec<ImageReference>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
-        let media_parts_len = media_parts.len();
+        let media_parts_len = media_parts.len() + references.len();
         self.validate_mm_limits(&media_parts)?;
-        let (references, media_parts): (Vec<_>, Vec<_>) = media_parts
-            .into_iter()
-            .partition(|part| matches!(part, MediaContentPart::ImageEmbeds { .. }));
         if !references.is_empty()
             && media_parts.iter().any(|part| {
                 matches!(
@@ -997,6 +1004,7 @@ impl MultimodalModelInfo {
                 "Mixing raw image and embedding inputs is not allowed"
             );
         }
+        self.validate_modality_limits(std::iter::repeat_n(MmModality::Image, references.len()))?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
@@ -2108,12 +2116,13 @@ mod tests {
                     .map(|bytes| i64::from_ne_bytes(bytes.try_into().unwrap()))
                     .collect()
             };
-            let metadata = MediaContentPart::ImageEmbeds {
-                payload: serde_json::json!({key: values}),
-                uuid: Some("image-a".to_owned()),
+            let metadata = ImageReference {
+                metadata: serde_json::from_value(serde_json::json!({key: values})).unwrap(),
+                uuid: "image-a".to_owned(),
             };
             let features = info
-                .prepare_multimodal(
+                .prepare_multimodal_timed(
+                    Vec::new(),
                     vec![metadata],
                     &mut tokens,
                     ModelDtype::BFloat16,
@@ -2229,6 +2238,7 @@ mod tests {
         let uuids = selections.map(|order| {
             extract_media_parts(&request, order)
                 .unwrap()
+                .0
                 .into_iter()
                 .map(|part| match part {
                     MediaContentPart::ImageUrl { uuid, .. } => uuid,

@@ -5134,12 +5134,6 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
 const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-fn metadata_only_ready_response(allow: bool) -> EngineCoreReadyResponse {
-    let mut ready = serde_json::to_value(default_ready_response()).unwrap();
-    ready["allow_missing_mm_embeddings"] = json!(allow);
-    serde_json::from_value(ready).unwrap()
-}
-
 /// Proxy image references preserve the raw render and cache identity without pixels.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -5169,8 +5163,10 @@ async fn chat_metadata_only_matches_raw_images_for_ec_and_kv_consumers() {
     ] {
         let expected = rendered.clone();
         let kwargs = kwargs.clone();
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = true;
         let (mut app, engine) = test_app_with_ready_and_engine_request_check(
-            metadata_only_ready_response(true),
+            ready,
             |llm| {
                 ChatLlm::from_shared_backend(
                     llm,
@@ -5224,8 +5220,10 @@ async fn chat_metadata_only_matches_raw_images_for_ec_and_kv_consumers() {
 #[serial]
 async fn chat_metadata_only_rejects_unsupported_role_and_invalid_metadata() {
     for allow in [false, true] {
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = allow;
         let (state, _engine) = test_admin_state_with_backend_and_engine_script(
-            metadata_only_ready_response(allow),
+            ready,
             Arc::new(FakeChatBackend::with_multimodal_model_info(
                 qwen_multimodal_model_info(),
             )),
@@ -5235,11 +5233,17 @@ async fn chat_metadata_only_rejects_unsupported_role_and_invalid_metadata() {
         .await;
         let mut app = build_router(state);
         let reference = json!({"type": "image_embeds", "image_embeds": {"image_grid_thw": [1, 4, 4]}, "uuid": "image-1"});
-        let mut cases = vec![(reference.clone(), json!({"producer": "e"}))];
+        let params = if allow {
+            json!(null)
+        } else {
+            json!({"producer": "e"})
+        };
+        let mut cases = vec![(reference.clone(), params)];
         if allow {
-            cases.clear();
-            cases.push((reference.clone(), json!(null)));
             for metadata in [
+                json!({"image_grid_thw": [1, 4]}),
+                json!({"llm_grid": [4, 4]}),
+                json!({"image_grid_thw": [1, 4, 4], "llm_grid": [4, 4]}),
                 json!({"image_grid_thw": [1, 0, 4]}),
                 json!({"image_grid_thw": [2, 4, 4]}),
                 json!({"image_grid_thw": [1, 3, 4]}),

@@ -3,9 +3,8 @@
 
 //! Rebuild image placeholders from Python's metadata-only EPD payloads.
 
-use std::collections::BTreeMap;
-
-use llm_multimodal::{MediaContentPart, Modality, PreprocessedEncoderInputs};
+use llm_multimodal::{Modality, PreprocessedEncoderInputs};
+use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue, MmKwargsItem,
 };
@@ -17,49 +16,56 @@ use crate::error::{
 };
 
 /// Numeric JSON arrays published by the encoder, without embedding values.
-pub type ImageMetadata = BTreeMap<String, Vec<i64>>;
-
-#[derive(Clone, Copy)]
-pub(super) enum ImageMetadataKind {
-    Grid,
-    LlmGrid,
-    ImageSize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ImageMetadata {
+    Grid { image_grid_thw: [i64; 3] },
+    LlmGrid { llm_grid: [i64; 2] },
+    ImageSize { image_sizes: [u32; 2] },
 }
 
-impl ImageMetadataKind {
-    pub(super) fn for_model(spec: &str) -> Option<Self> {
+impl ImageMetadata {
+    pub(super) fn field_for_model(spec: &str) -> Option<&'static str> {
         match spec {
-            "qwen_vl" | "qwen3_vl" => Some(Self::Grid),
-            "deepseek_v41" => Some(Self::LlmGrid),
-            "kimi_k3" => Some(Self::ImageSize),
+            "qwen_vl" | "qwen3_vl" => Some("image_grid_thw"),
+            "deepseek_v41" => Some("llm_grid"),
+            "kimi_k3" => Some("image_sizes"),
             _ => None,
         }
     }
 
-    fn field(self) -> (&'static str, usize) {
+    fn field(&self) -> (&'static str, Vec<i64>) {
         match self {
-            Self::Grid => ("image_grid_thw", 3),
-            Self::LlmGrid => ("llm_grid", 2),
-            Self::ImageSize => ("image_sizes", 2),
+            Self::Grid { image_grid_thw } => ("image_grid_thw", image_grid_thw.to_vec()),
+            Self::LlmGrid { llm_grid } => ("llm_grid", llm_grid.to_vec()),
+            Self::ImageSize { image_sizes } => ("image_sizes", image_sizes.map(i64::from).to_vec()),
         }
     }
+}
+
+pub(super) struct ImageReference {
+    pub metadata: ImageMetadata,
+    pub uuid: String,
+}
+
+fn batched_metadata(values: Vec<i64>) -> Result<MmFieldElem> {
+    Ok(MmFieldElem {
+        data: Some(MmKwargValue::Tensor(
+            WireTensor::from_i64(vec![values.len()], values).map_err(Error::Multimodal)?,
+        )),
+        field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
+    })
 }
 
 impl MultimodalModelInfo {
     pub(super) fn prepare_image_references(
         &self,
-        references: Vec<MediaContentPart>,
+        references: Vec<ImageReference>,
         max_model_len: Option<usize>,
     ) -> Result<PreparedMedia> {
         let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: "image".to_owned(),
         })?;
-        let kind = support.spec.image_metadata.ok_or_else(|| {
-            invalid_preprocessed_multimodal!(
-                "metadata-only images are not supported for this model"
-            )
-        })?;
-        let (key, size) = kind.field();
         let mut remaining = max_model_len.ok_or_else(|| {
             invalid_preprocessed_multimodal!(
                 "metadata-only images require a configured max_model_len"
@@ -67,66 +73,57 @@ impl MultimodalModelInfo {
         })?;
         let mut replacements = Vec::with_capacity(references.len());
         let mut items = Vec::with_capacity(references.len());
-        for reference in references {
-            let MediaContentPart::ImageEmbeds { payload, uuid } = reference else {
-                unreachable!("only image references are partitioned here")
-            };
-            let uuid = uuid.filter(|uuid| !uuid.is_empty()).ok_or_else(|| {
-                invalid_preprocessed_multimodal!(
+        for ImageReference { metadata, uuid } in references {
+            let (key, values) = metadata.field();
+            if uuid.is_empty() {
+                bail_invalid_preprocessed_multimodal!(
                     "metadata-only image_embeds requires a nonempty uuid"
-                )
-            })?;
-            let metadata: ImageMetadata = serde_json::from_value(payload).map_err(|error| {
-                invalid_preprocessed_multimodal!("invalid image metadata: {error}")
-            })?;
-            let values = metadata
-                .get(key)
-                .filter(|values| {
-                    metadata.len() == 1 && values.len() == size && values.iter().all(|v| *v > 0)
-                })
-                .ok_or_else(|| invalid_preprocessed_multimodal!(
-                    "image_embeds must contain only {key}, a positive integer array of length {size}"
-                ))?;
-            let dimensions = values
-                .iter()
-                .map(|&v| usize::try_from(v))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    invalid_preprocessed_multimodal!("invalid image dimensions: {error}")
-                })?;
+                );
+            }
+            if support.spec.image_metadata != Some(key) || values.iter().any(|v| *v <= 0) {
+                bail_invalid_preprocessed_multimodal!(
+                    "unsupported image metadata or nonpositive dimensions"
+                );
+            }
             let mut image_size = (0, 0);
-            let count = match kind {
-                ImageMetadataKind::Grid => {
-                    let merge = support.config.merge_size
+            let count = match metadata {
+                ImageMetadata::Grid {
+                    image_grid_thw: [t, h, w],
+                } => {
+                    let merge = support
+                        .config
+                        .merge_size
                         .or_else(|| {
                             self.context.config["vision_config"]["spatial_merge_size"]
-                                .as_u64().and_then(|v| usize::try_from(v).ok())
+                                .as_u64()
+                                .and_then(|v| usize::try_from(v).ok())
                         })
-                        .unwrap_or(2);
-                    let [t, h, w] = dimensions.as_slice() else {
-                        unreachable!("grid length was validated")
-                    };
-                    if *t != 1 || merge == 0 || h % merge != 0 || w % merge != 0 {
+                        .unwrap_or(2) as u64;
+                    let (h, w) = (h as u64, w as u64);
+                    if t != 1 || merge == 0 || h % merge != 0 || w % merge != 0 {
                         bail_invalid_preprocessed_multimodal!(
                             "image_grid_thw must have t=1 and spatial dimensions divisible by merge_size"
                         );
                     }
                     (h / merge).checked_mul(w / merge)
                 }
-                ImageMetadataKind::LlmGrid => dimensions[1].checked_add(1)
-                    .and_then(|w| dimensions[0].checked_mul(w))
+                ImageMetadata::LlmGrid { llm_grid: [h, w] } => (w as u64)
+                    .checked_add(1)
+                    .and_then(|w| (h as u64).checked_mul(w))
                     .and_then(|n| n.checked_add(2)),
-                ImageMetadataKind::ImageSize => {
-                    let width = u32::try_from(dimensions[0])
-                        .map_err(|error| invalid_preprocessed_multimodal!("invalid image width: {error}"))?;
-                    let height = u32::try_from(dimensions[1])
-                        .map_err(|error| invalid_preprocessed_multimodal!("invalid image height: {error}"))?;
+                ImageMetadata::ImageSize {
+                    image_sizes: [width, height],
+                } => {
                     image_size = (width, height);
-                    Some(support.processor.calculate_num_tokens(width, height)?)
+                    Some(support.processor.calculate_num_tokens(image_size.0, image_size.1)? as u64)
                 }
-            }
+            };
+            let count = count
+                .and_then(|n| usize::try_from(n).ok())
                 .filter(|count| *count > 0 && *count <= remaining)
-                .ok_or_else(|| invalid_preprocessed_multimodal!("image metadata exceeds max_model_len"))?;
+                .ok_or_else(|| {
+                    invalid_preprocessed_multimodal!("image metadata exceeds max_model_len")
+                })?;
             remaining -= count;
 
             // The model spec owns the placeholder layout; no pixel buffer or
@@ -138,26 +135,12 @@ impl MultimodalModelInfo {
             );
             replacements
                 .extend(support.spec.prompt_replacements_for(&self.context, &preprocessed)?);
-            let mut data = MmKwargsItem::from([(
-                key.to_owned(),
-                MmFieldElem {
-                    data: Some(MmKwargValue::Tensor(
-                        WireTensor::from_i64(vec![size], values.clone())
-                            .map_err(Error::Multimodal)?,
-                    )),
-                    field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
-                },
-            )]);
-            if matches!(kind, ImageMetadataKind::ImageSize) {
+            let mut data: MmKwargsItem =
+                [(key.to_owned(), batched_metadata(values)?)].into_iter().collect();
+            if matches!(metadata, ImageMetadata::ImageSize { .. }) {
                 data.insert(
                     "image_num_tokens".to_owned(),
-                    MmFieldElem {
-                        data: Some(MmKwargValue::Tensor(
-                            WireTensor::from_i64(vec![1], vec![count as i64])
-                                .map_err(Error::Multimodal)?,
-                        )),
-                        field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
-                    },
+                    batched_metadata(vec![count as i64])?,
                 );
             }
             items.push(PreparedItem {
