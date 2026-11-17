@@ -30,14 +30,16 @@ for this).
 Same for every owner:
 
 ```python
-foo_bar: int | None = None
+foo_bar: int | None = Field(default=None, ge=0)
 """What it does, how to enable it, and the default behaviour.
 This docstring is the `--help` text and the rendered CLI reference."""
 ```
 
-- Validation goes in the owning class (`__post_init__` or a pydantic
-  validator), so it applies to the Python API as well as the CLI.
-- Mutable defaults use `field(default_factory=...)`.
+- The owning classes are pydantic dataclasses, so validation lives on the
+  field and applies to the Python API as well as the CLI. Express bounds and
+  lengths as `pydantic.Field` constraints (`ge`, `gt`, `le`, `min_length`);
+  use a validator or `__post_init__` only for rules that span fields.
+- Mutable defaults use `Field(default_factory=...)`.
 - When the generated kwargs don't fit (wrong parser, missing choices), fix the
   annotation, or extend `_compute_kwargs` in `arg_utils.py` so every class
   gets the fix.
