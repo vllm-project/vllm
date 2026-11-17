@@ -60,6 +60,34 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+To isolate uniform multi-token MLA metadata costs, compare expanded query-row
+metadata with per-request metadata inside a CUDA graph:
+
+```bash
+.venv/bin/python benchmarks/kernels/benchmark_mla_query_metadata.py \
+  --output mla-metadata.json
+```
+
+The benchmark checks bitwise equality of attention outputs and LSE before timing.
+`--cases` accepts a JSON list of configurations, for example
+`[{"batch": 4, "query_len": 8, "window": 8192, "seq_len": 1048576}]`.
+Unspecified fields use the script's defaults. Set `fp8` to `false` for BF16 KV.
+The reported medians and ranges cover seven groups of graph replays, including
+metadata construction. These kernel measurements do not estimate serving TPOT.
+
+To compare Triton with the native windowed FlashMLA operator on supported
+SM100-family hardware while keeping the standard FP8 KV layout, run:
+
+```bash
+.venv/bin/python benchmarks/kernels/benchmark_windowed_flashmla.py \
+  --output windowed-flashmla.json
+```
+
+The candidate timing includes gathering and packing the visible KV window,
+building window indices, live planning, and attention. It does not require a
+packed persistent cache. The script uses the same `--cases` format and reports
+numerical error against Triton alongside timing distributions.
+
 ## Dataset Overview
 
 <style>
