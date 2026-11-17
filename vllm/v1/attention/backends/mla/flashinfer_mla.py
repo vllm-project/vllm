@@ -41,11 +41,11 @@ logger = init_logger(__name__)
 def _trtllm_gen_mla_decode_supports_num_heads(num_heads: int) -> bool:
     """True if trtllm-gen's MLA decode kernel supports this query head count.
 
-    The kernel groups Q heads into CTAs of ``min(num_heads, tileSizeQ)`` and
-    requires ``num_heads`` divisible by that, else raises "The
+    The kernel groups Q heads into CTAs of `min(num_heads, tileSizeQ)` and
+    requires `num_heads` divisible by that, else raises "The
     numHeadsQ/numHeadsKv is not supported" (flashinfer fmhaKernels.cuh).
-    ``tileSizeQ`` is 8/16 for ``num_heads <= 8``/``<= 32`` (SwapsMmaAb) else 64;
-    treat ``> 32`` as tile 64 (safe bound). E.g. 96/24 -> False, 48/64/128 -> True.
+    `tileSizeQ` is 8/16 for `num_heads <= 8`/`<= 32` (SwapsMmaAb) else 64;
+    treat `> 32` as tile 64 (safe bound). E.g. 96/24 -> False, 48/64/128 -> True.
     """
     if num_heads <= 8:
         tile = 8
@@ -99,11 +99,11 @@ def _get_multi_ctas_kv_counter_buffer(
 
     trtllm-gen's multi-CTA-KV MLA decode kernel resets these semaphores to zero
     at the end of every launch, so the buffer only needs zeroing once. The
-    public ``trtllm_batch_decode_with_kv_cache_mla`` entry point builds a fresh
+    public `trtllm_batch_decode_with_kv_cache_mla` entry point builds a fresh
     runner per call, so without a caller-owned buffer it re-allocates and
-    re-zeros this counter on every decode step (a tiny ``FillFunctor<uint8>``
+    re-zeros this counter on every decode step (a tiny `FillFunctor<uint8>`
     launch right before the FMHA). Owning it here and passing it in removes that
-    per-step launch. ``min_bytes`` is sized to the worst-case batch so the
+    per-step launch. `min_bytes` is sized to the worst-case batch so the
     buffer is allocated once and never reallocated after CUDA-graph capture.
     """
     global _fi_multi_ctas_kv_counter

@@ -391,6 +391,71 @@ fn continue_final_assistant_omits_final_eos() {
         .assert_eq(&rendered);
 }
 
+/// Text parts of every role are joined like Python's `string` content format:
+/// "\n" between parts, empty parts dropped. Expected prompt from Python's
+/// `parse_chat_messages(content_format="string")` plus `encode_messages`.
+#[test]
+fn text_parts_are_joined_with_newlines_like_python() {
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::system(vec![
+                ChatContentPart::text("Sys one."),
+                ChatContentPart::text(""),
+                ChatContentPart::text("Sys two."),
+            ]),
+            ChatMessage::user(vec![
+                ChatContentPart::text("Part one. "),
+                ChatContentPart::text("Part two."),
+            ]),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Text {
+                    text: "Answer one.".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "Answer two.".to_string(),
+                },
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call-1".to_string(),
+                    name: "weather".to_string(),
+                    arguments: "{\"city\":\"Paris\"}".to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::text("sunny"), ChatContentPart::text("20C")],
+                "call-1",
+            ),
+            ChatMessage::user(vec![
+                ChatContentPart::text("Thanks."),
+                ChatContentPart::text("Bye."),
+            ]),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let rendered = render_request(&request);
+
+    expect![[r#"
+        <｜begin▁of▁sentence｜>Sys one.
+        Sys two.<｜User｜>Part one. 
+        Part two.<｜Assistant｜></think>Answer one.
+        Answer two.
+
+        <｜DSML｜function_calls>
+        <｜DSML｜invoke name="weather">
+        <｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜function_calls><｜end▁of▁sentence｜>
+
+        <function_results>
+        <result>sunny
+        20C</result>
+        </function_results>
+
+        </think><｜User｜>Thanks.
+        Bye.<｜Assistant｜></think>"#]]
+    .assert_eq(&rendered);
+}
+
 #[test]
 fn render_rejects_multimodal_input() {
     let request = ChatRequest {
