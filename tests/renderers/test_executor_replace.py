@@ -354,48 +354,27 @@ def test_render_replaces_pool_stuck_in_another_job(monkeypatch):
 def test_render_keeps_pool_whose_queue_moves(monkeypatch):
     """A render that waits longer than the timeout behind jobs that start and
     finish must keep waiting: it neither fails nor replaces the pool."""
-    _patch_render(monkeypatch, 0.5, lambda *args, **kwargs: "rendered")
+    timeout_s = 0.5
+    # Each job is shorter than the timeout; together they outlast it.
+    job_seconds, num_jobs = 0.2, 5
+    _patch_render(monkeypatch, timeout_s, lambda *args, **kwargs: "rendered")
     renderer = _build_renderer()
     executor = renderer._executor
     old_inner = executor._inner
-    first_started, release_first = threading.Event(), threading.Event()
-    second_started, release_second = threading.Event(), threading.Event()
 
     async def _run():
         loop = asyncio.get_running_loop()
-        waited_one_timeout = asyncio.Event()
-        progress = executor.progress
-        num_progress_reads = 0
-
-        def counted_progress() -> int:
-            # The render reads the count before each wait and after a timeout.
-            nonlocal num_progress_reads
-            num_progress_reads += 1
-            if num_progress_reads == 2:
-                waited_one_timeout.set()
-            return progress()
-
-        monkeypatch.setattr(executor, "progress", counted_progress)
-        first = loop.run_in_executor(executor, _hold, first_started, release_first)
-        second = loop.run_in_executor(executor, _hold, second_started, release_second)
-        assert await asyncio.to_thread(first_started.wait, 5)
-        queued = asyncio.ensure_future(renderer._render_with_timeout(None, None, []))
-        # One loop step: the task queues its render behind the two jobs.
-        await asyncio.sleep(0)
-        # The pool moves after the render was queued: one job ends, one starts.
-        release_first.set()
-        assert await asyncio.to_thread(second_started.wait, 5)
-        await asyncio.wait_for(waited_one_timeout.wait(), timeout=5)
+        jobs = [
+            loop.run_in_executor(executor, time.sleep, job_seconds)
+            for _ in range(num_jobs)
+        ]
+        start = time.monotonic()
+        assert await renderer._render_with_timeout(None, None, []) == "rendered"
+        assert time.monotonic() - start > timeout_s
         assert executor._inner is old_inner
-        release_second.set()
-        assert await asyncio.wait_for(queued, timeout=5) == "rendered"
-        assert executor._inner is old_inner
-        await first
-        await second
+        await asyncio.gather(*jobs)
 
     try:
         asyncio.run(_run())
     finally:
-        release_first.set()
-        release_second.set()
         renderer.shutdown()
