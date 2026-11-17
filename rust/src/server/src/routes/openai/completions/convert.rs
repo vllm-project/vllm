@@ -76,8 +76,9 @@ pub(super) fn prepare_completion_request(
     processor: &TextRequestProcessor,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
-    // Python's message; `prompt_embeds` itself is rejected above. An empty text
-    // prompt is left to tokenization, which may still yield a BOS token.
+    // Python's message; `prompt_embeds` itself is rejected above. A bare empty
+    // text prompt is rejected by `validate_request_compat`; empty strings inside
+    // a prompt list are left to tokenization, which may still yield a BOS token.
     let Some(prompt) = request.prompt else {
         bail_invalid_request!(
             param = "prompt",

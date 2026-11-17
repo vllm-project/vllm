@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde_json::Value;
+use vllm_text::Prompt;
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
@@ -43,6 +44,18 @@ pub(super) fn validate_request_compat(
         .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
     {
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
+    }
+
+    // Same check and message as Python's CompletionRequest: only a bare empty
+    // string counts as an empty prompt, and `prompt_embeds` was rejected above.
+    if matches!(
+        &request.prompt,
+        Some(CompletionPrompt::Single(Prompt::Text(text))) if text.is_empty()
+    ) {
+        bail_invalid_request!(
+            param = "prompt",
+            "Either prompt or prompt_embeds must be provided and non-empty."
+        );
     }
 
     if let Some(logprobs) = request.logprobs
@@ -265,6 +278,19 @@ mod tests {
             };
             assert!(validate_request_compat(&request, &served_names(&["served-model"])).is_ok());
         }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_empty_text_prompt() {
+        let names = served_names(&["Qwen/Qwen1.5-0.5B-Chat"]);
+        let request: CompletionRequest =
+            serde_json::from_value(json!({"prompt": ""})).expect("parse request");
+        assert!(validate_request_compat(&request, &names).is_err());
+
+        // Python rejects only the empty string, so whitespace is still a prompt.
+        let request: CompletionRequest =
+            serde_json::from_value(json!({"prompt": " "})).expect("parse request");
+        assert!(validate_request_compat(&request, &names).is_ok());
     }
 
     #[test]
