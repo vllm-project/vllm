@@ -994,32 +994,26 @@ def test_admission_cap_counts_recyclable_held_blocks(chunked_local, shared):
     """
     block_size = 16
     max_in_flight_tokens = 1024
+    base_spec = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
     if chunked_local:
-        spec = ChunkedLocalAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-            attention_chunk_size=128,
-        )
         manager_cls = ChunkedLocalAttentionManager
+        layer = manager_cls.layer_config(base_spec, attention_chunk_size=128)
     else:
-        spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-            sliding_window=128,
-        )
         manager_cls = SlidingWindowManager
-    cap = spec.max_admission_blocks_per_request(
-        max_in_flight_tokens=max_in_flight_tokens, max_model_len=8192
+        layer = manager_cls.layer_config(base_spec, sliding_window=128)
+    cap = manager_cls.max_admission_blocks(
+        layer.manager_config,
+        block_size,
+        max_in_flight_tokens=max_in_flight_tokens,
+        max_model_len=8192,
     )
     block_pool = BlockPool(
         num_gpu_blocks=200, enable_caching=True, hash_block_size=block_size
     )
     manager = manager_cls(
-        spec,
+        new_kv_cache_group(["layer"], layer),
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
