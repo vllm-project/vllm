@@ -6,7 +6,7 @@ Ported from the official reference implementation
 (deepseek-ai/DeepSeek-V4-Flash-Vision-Exp). Weight names match the HF
 checkpoint so no renaming is needed at load time. Attention and MLP weights
 are tensor-parallel sharded (replicated when the vision head count is not
-divisible by TP size, or under ``--mm-encoder-tp-mode data``); the patch
+divisible by TP size, or under `--mm-encoder-tp-mode data`); the patch
 embed and norms are replicated, so the residual stream is full-width on
 every rank.
 """
@@ -26,6 +26,10 @@ from vllm.distributed import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
+)
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    IdentityInputNorm,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -89,9 +93,11 @@ class DeepseekV4PatchEmbed(nn.Module):
             bias=True,
             quant_config=None,
         )
+        self.input_norm = IdentityInputNorm()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out, _ = self.proj(x.flatten(1))
+        x = self.input_norm(x.flatten(1), self.proj.weight.dtype)
+        out, _ = self.proj(x)
         return out
 
 
@@ -216,6 +222,13 @@ class DeepseekV4ViT(nn.Module):
         )
         self.norm = DeepseekV4RMSNorm(config.vision_dim)
 
+    def enable_mm_device_normalize(self) -> None:
+        self.patch_embed.input_norm = FusedMMInputNorm(
+            image_mean=[0.5, 0.5, 0.5],
+            image_std=[0.5, 0.5, 0.5],
+            rescale_factor=1 / 255,
+        )
+
     def forward(
         self, patches: torch.Tensor, n_vit_h: int, n_vit_w: int
     ) -> torch.Tensor:
@@ -236,7 +249,7 @@ class DeepseekV4ViT(nn.Module):
         max_seqlen: torch.Tensor,
     ) -> torch.Tensor:
         """Varlen path for encoder CUDA graphs: multiple images packed along
-        rows, per-image attention via ``cu_seqlens``, RoPE tables precomputed
+        rows, per-image attention via `cu_seqlens`, RoPE tables precomputed
         on device. Pure-tensor (no host reads, no H2D), safe to capture."""
         x = self.patch_embed(patches)
         for block in self.blocks:
@@ -253,19 +266,19 @@ def build_packed_vit_metadata(
     max_seqlen_override: int | None = None,
     cached: bool = True,
 ) -> dict[str, torch.Tensor]:
-    """Precompute packed-batch ViT metadata for ``DeepseekV4ViT.forward_packed``.
+    """Precompute packed-batch ViT metadata for `DeepseekV4ViT.forward_packed`.
 
     Args:
-        grids: ``[n_vit_h, n_vit_w]`` per image, in packing order.
+        grids: `[n_vit_h, n_vit_w]` per image, in packing order.
         rope_dim: RoPE embedding dimension of the ViT.
         rope_theta: RoPE base frequency of the ViT.
-        device: Device for the returned tensors (except ``max_seqlen``,
+        device: Device for the returned tensors (except `max_seqlen`,
             which stays on the host).
         max_seqlen_override: Worst-case value baked in at CUDA graph capture
-            (the attention wrapper reads ``max_seqlen`` on the host, so the
+            (the attention wrapper reads `max_seqlen` on the host, so the
             capture-time value becomes a graph constant).
-        cached: Use the shared ``lru_cache`` for RoPE tables. Capture-time
-            dummy grids pass ``False`` to avoid evicting real entries.
+        cached: Use the shared `lru_cache` for RoPE tables. Capture-time
+            dummy grids pass `False` to avoid evicting real entries.
 
     """
     cos_sin = get_vision_cos_sin if cached else _compute_vision_cos_sin
@@ -304,9 +317,9 @@ def build_packed_merge_metadata(
     device: torch.device,
     dtype: torch.dtype,
 ) -> dict[str, torch.Tensor]:
-    """Gather indices/mask for ``DeepseekV4Aligner.forward_packed``.
+    """Gather indices/mask for `DeepseekV4Aligner.forward_packed`.
 
-    For each aligner output row, the ``r x r`` source patch rows in the
+    For each aligner output row, the `r x r` source patch rows in the
     packed ViT output; positions past the image edge (the eager path pads
     them with zeros) get mask 0 and a clamped in-range index.
     """
@@ -380,8 +393,8 @@ class DeepseekV4Aligner(nn.Module):
     ) -> torch.Tensor:
         """Packed multi-image path for encoder CUDA graphs.
 
-        ``merge_idx``/``merge_mask`` come from ``build_packed_merge_metadata``;
-        gather+mask reproduces the eager ``F.pad`` + ``F.unfold`` merge
+        `merge_idx`/`merge_mask` come from `build_packed_merge_metadata`;
+        gather+mask reproduces the eager `F.pad` + `F.unfold` merge
         exactly (unfold rows are channel-major, so the gathered patch rows
         are transposed before flattening).
         """
@@ -408,11 +421,11 @@ def encode_images(
     Args:
         vision_model: The ViT tower.
         aligner: The spatial-merge projector.
-        patches: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` patches of all images.
-        vit_grid: ``[n_vit_h, n_vit_w]`` per image.
+        patches: `(sum(n_vit_h * n_vit_w), 3, p, p)` patches of all images.
+        vit_grid: `[n_vit_h, n_vit_w]` per image.
 
     Returns:
-        One ``(n_aligner_rows, hidden_size)`` embedding tensor per image.
+        One `(n_aligner_rows, hidden_size)` embedding tensor per image.
 
     """
     sizes = [h * w for h, w in vit_grid]
@@ -454,8 +467,8 @@ def run_dp_sharded_vision_tower(
 ) -> list[torch.Tensor]:
     """Run the ViT + aligner with images sharded across TP ranks.
 
-    Every rank holds the full tower weights (``--mm-encoder-tp-mode data``)
-    and receives the full ``patches`` batch. Images are assigned to ranks by
+    Every rank holds the full tower weights (`--mm-encoder-tp-mode data`)
+    and receives the full `patches` batch. Images are assigned to ranks by
     patch count (greedy load balancing), each rank encodes only its share,
     and per-image embeddings are exchanged with one padded all-gather and
     returned in the original image order.
@@ -463,11 +476,11 @@ def run_dp_sharded_vision_tower(
     Args:
         vision_model: The (weight-replicated) ViT tower.
         aligner: The (weight-replicated) spatial-merge projector.
-        patches: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` patches of all images.
-        vit_grid: ``[n_vit_h, n_vit_w]`` per image.
+        patches: `(sum(n_vit_h * n_vit_w), 3, p, p)` patches of all images.
+        vit_grid: `[n_vit_h, n_vit_w]` per image.
 
     Returns:
-        One ``(n_aligner_rows, hidden_size)`` embedding tensor per image.
+        One `(n_aligner_rows, hidden_size)` embedding tensor per image.
 
     """
     tp_size = get_tensor_model_parallel_world_size()
@@ -507,7 +520,11 @@ def run_dp_sharded_vision_tower(
     if local_embeds:
         embeds_local = torch.cat(local_embeds, dim=0)
     else:
-        embeds_local = patches.new_zeros((0, aligner.out_dim))
+        embeds_local = torch.zeros(
+            (0, aligner.out_dim),
+            device=patches.device,
+            dtype=aligner.w2.weight.dtype,
+        )
     if embeds_local.shape[0] < max_rows:
         embeds_local = torch.cat(
             [

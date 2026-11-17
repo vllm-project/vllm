@@ -139,7 +139,7 @@ def _markov_select_kernel(
 
 
 class FusedMarkovSampler:
-    """``DSparkSpeculator._sample_sequential``'s hook. Its scratch is allocated
+    """`DSparkSpeculator._sample_sequential`'s hook. Its scratch is allocated
     at model init, so CUDA graphs keep the addresses."""
 
     def __init__(

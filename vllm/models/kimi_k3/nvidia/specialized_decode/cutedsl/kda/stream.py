@@ -56,9 +56,9 @@ def load_shared_bf16x4(pointer):
 
 
 class KdaStream(KdaWide):
-    """KdaWide's operands and semantics; ``ctas`` persistent CTAs (two per SM),
-    ``conv_dim_first`` the convolution cache layout ([channel, window] when true,
-    else [window, channel] per slot) and ``window`` its length."""
+    """KdaWide's operands and semantics; `ctas` persistent CTAs (two per SM),
+    `conv_dim_first` the convolution cache layout ([channel, window] when true,
+    else [window, channel] per slot) and `window` its length."""
 
     def __init__(
         self,

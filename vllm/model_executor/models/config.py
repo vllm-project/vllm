@@ -4,6 +4,7 @@ import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -118,6 +119,47 @@ class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
             )
 
 
+class MistralLarge4ForCausalLM(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # KV-sharing layers have no latent KV of their own for the new tokens,
+        # so they cannot use the dense MHA prefill path; run all tokens through
+        # sparse MQA.
+        vllm_config.attention_config.sparse_mla_force_mqa = True
+
+        # The direct A2A combine beats all-gather + reduce-scatter; PCP+DCP
+        # only supports the latter.
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size == 1:
+            parallel_config.set_dcp_defaults(comm_backend="a2a")
+
+        # The checkpoint declares the latent KV cache precision; an explicit
+        # `--kv-cache-dtype bfloat16` opts out of FP8.
+        cache_config = vllm_config.cache_config
+        text_config = vllm_config.model_config.hf_text_config
+        if cache_config.cache_dtype == "auto" and getattr(
+            text_config, "fp8_kv_cache", False
+        ):
+            if current_platform.is_rocm():
+                # ROCm sparse MLA has no fp8_ds_mla layout; honor the flag
+                # with the plain e4m3 latent cache of the AITER sparse kernel.
+                cache_config.cache_dtype = "fp8"
+                logger.info("Using fp8 kv-cache for Mistral Large 4 on ROCm")
+            else:
+                cache_config.cache_dtype = "fp8_ds_mla"
+                logger.info("Using fp8_ds_mla kv-cache for Mistral Large 4")
+        elif cache_config.cache_dtype == "bfloat16":
+            cache_config.cache_dtype = "auto"
+
+
+class PixtralForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        text_config = vllm_config.model_config.hf_text_config
+        if getattr(text_config, "model_type", None) == "mistral_large_4":
+            MistralLarge4ForCausalLM.verify_and_update_config(vllm_config)
+
+
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -156,13 +198,6 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
 
         cache_config.cache_dtype = "fp8"
         logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
-        spec_config = vllm_config.speculative_config
-        if (
-            spec_config is not None
-            and spec_config.method not in ("mtp", "dspark")
-            and spec_config.kv_cache_dtype is None
-        ):
-            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -219,22 +254,22 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure Unlimited-OCR attention backends for R-SWA and vision.
 
-        Backend selection — controlled by the standard ``--attention-config``
+        Backend selection — controlled by the standard `--attention-config`
         CLI argument (priority order):
 
-          1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
+          1. `--attention-config '{"backend": "FLASH_ATTN"}'`
              → FA4 + rswa_mask_mod.  Exact token-level R-SWA.
-               ``flash_attn_version`` is forced to 4 if not already set (R-SWA
+               `flash_attn_version` is forced to 4 if not already set (R-SWA
                mask_mod requires FA4; FA3 cannot express it).  Raises if FA4 is
                not available on this device.
 
-          2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
+          2. `--attention-config '{"backend": "FLEX_ATTENTION"}'`
              → FlexAttention R-SWA via Triton block mask.
 
-          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+          3. `--attention-config '{"backend": "TRITON_ATTN"}'`
              → Triton unified attention with an R-SWA decode mask.
 
-          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+          4. `--attention-config '{"backend": "auto"}'` (or omitted)
              → Auto-detect: FA4 if available (H20/H100 SM90), else TritonAttention.
 
         Regardless of backend, prefix caching is disabled for this model: R-SWA
@@ -501,7 +536,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         requests to this per-layer FA3/FA4 selection. For other configurations,
         force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
-        When FA4 is not available, fall back to Triton.
+        When FA4 is not available, fall back to Triton, or to FlashInfer for a
+        plain Gemma4 with an NVFP4 KV cache, which Triton cannot read.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -549,11 +585,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 head_dims,
             )
         elif vllm_config.attention_config.backend is None:
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            backend = AttentionBackendEnum.TRITON_ATTN
+            if (
+                vllm_config.cache_config.cache_dtype == "nvfp4"
+                and MODELS_CONFIG_MAP.get(model_config.architecture) is Gemma4Config
+            ):
+                backend = AttentionBackendEnum.FLASHINFER
+            vllm_config.attention_config.backend = backend
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "%s. FA4 not available, forcing TRITON_ATTN backend.",
+                "%s. FA4 not available, forcing %s backend.",
                 head_dims,
+                backend.name,
             )
 
 
@@ -599,7 +642,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         """Set up the diffusion config and defaults for DiffusionGemma.
 
         Auto-creates DiffusionConfig from the HF config when the user
-        didn't pass ``--diffusion-config``. Diffusion sampling params are
+        didn't pass `--diffusion-config`. Diffusion sampling params are
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
@@ -665,10 +708,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 
 def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
-    """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
-    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
-    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
-    backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
+    """Whether to enable candidate-only indexer scoring by default."""
     from vllm.platforms import current_platform
 
     hf_config = vllm_config.model_config.hf_text_config
@@ -679,11 +719,16 @@ def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
         block <= 0
         or topk_blocks <= 0
         or not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
         or parallel.decode_context_parallel_size > 1
         or parallel.prefill_context_parallel_size > 1
-        or vllm_config.kernel_config.sparse_indexer_topk_backend
-        not in ("auto", "deep_select")
+    ):
+        return False
+    if current_platform.is_device_capability_family(90):
+        return True
+    topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+    if not current_platform.is_device_capability_family(100) or topk_backend not in (
+        "auto",
+        "deep_select",
     ):
         return False
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
@@ -745,15 +790,15 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
 
     Kimi-K3 ships its routed experts as compressed-tensors
-    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
-    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
-    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
-    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    `mxfp4-pack-quantized` (`quant_method="compressed-tensors"`), which
+    lands them on `CompressedTensorsW4A4Mxfp4MoEMethod` and its narrow kernel
+    selection. Rewriting `quant_method` to `"mxfp4"` selects `Mxfp4Config`
+    (hence `Mxfp4MoEMethod`) with its full backend set, while any non-MXFP4
     checkpoint is left untouched. Covers both the main model and the MTP draft.
 
-    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
-    ``ModelConfig.__init__`` before this hook runs, and it is what
-    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    `model_arch_config.quantization_config` is a separate dict, snapshotted in
+    `ModelConfig.__init__` before this hook runs, and it is what
+    `_verify_quantization` reads when resolving the quant method. Patch it
     alongside the hf configs so the rewrite lands before resolution; otherwise
     the main model still resolves to compressed-tensors.
     """
@@ -772,6 +817,52 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 and quant_config.get("format") == "mxfp4-pack-quantized"
             ):
                 quant_config["quant_method"] = "mxfp4"
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Default the kv-cache dtype when the text backbone carries DSA:
+        per-tensor fp8 for FLASHINFER_MLA_SPARSE, the default on SM10x, and
+        "fp8_ds_mla" otherwise."""
+        hf_config = vllm_config.model_config.hf_config
+        # Multimodal composite configs carry dsa_config on text_config;
+        # text-only models have it at the top level.
+        hf_text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(hf_text_config, "dsa_config", None) is None:
+            return
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        cache_config = vllm_config.cache_config
+        backend = vllm_config.attention_config.backend
+        if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE or (
+            backend is None
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            # FlashInfer reads per-tensor fp8 MLA rows, not the ds_mla formats.
+            if cache_config.cache_dtype == "auto":
+                cache_config.cache_dtype = "fp8_e4m3"
+        elif cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
+            "fp8"
+        ):
+            cache_config.cache_dtype = "fp8_ds_mla"
+        if vllm_config.speculative_config is not None:
+            from vllm.models.kimi_k3.nvidia.dense_draft import configure_dense_draft
+
+            configure_dense_draft(vllm_config.speculative_config, hf_text_config)
+
+
+class HrmTextForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # The prompt attends bidirectionally during prefill, so its KV is not a
+        # causal function of the prefix.
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            logger.info("HRM-Text: disabling chunked prefill (non-causal prefill).")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+        if vllm_config.cache_config.enable_prefix_caching:
+            logger.info("HRM-Text: disabling prefix caching (non-causal prefill).")
+            vllm_config.cache_config.enable_prefix_caching = False
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1058,9 +1149,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                "Chunked prefill is required for Mamba prefix caching."
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -1454,6 +1542,119 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
             pooler_config.use_activation = False
 
 
+class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        overrides = getattr(hf_config, "modeling_overrides", None)
+        served = {
+            "attention": {
+                "full_attention": "block_bidirectional",
+                "linear_attention": "causal",
+            },
+            "readout": "slot_lm",
+        }
+        found = dict(overrides) if isinstance(overrides, dict) else {}
+        # head_dim sizes the learned "head" readout, which vLLM does not serve.
+        found.pop("head_dim", None)
+        n_slots = found.pop("n_slots", 256)
+        if found != served or type(n_slots) is not int or not 1 <= n_slots <= 256:
+            raise ValueError(
+                f"unsupported modeling_overrides {overrides!r}; vLLM serves "
+                f"{served} with 1 to 256 n_slots"
+            )
+        # The slot read needs the fp32 LM head; an explicit head_dtype wins.
+        if getattr(hf_config, "head_dtype", None) is None:
+            hf_config.head_dtype = "float32"
+        # The checkpoints are trained on prompts of up to 16,384 tokens, far
+        # below max_position_embeddings. Each prompt is prefilled in one step,
+        # so the default step budget follows this length.
+        if model_config.original_max_model_len is None:
+            model_config.max_model_len = min(model_config.max_model_len, 16384)
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        scheduler_config = vllm_config.scheduler_config
+        prefix_lm = "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM"
+        prefix_lm_schedulers = (f"{prefix_lm}Scheduler", f"{prefix_lm}AsyncScheduler")
+        if cache_config.enable_prefix_caching:
+            from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
+
+            _, gdn = qwen_gdn_linear_attn._resolve_gdn_prefill_backend(vllm_config)
+            if gdn != "flashinfer":
+                logger.info(
+                    "Disabling prefix caching for %s: the %s GDN prefill backend "
+                    "exports no mid-prefill Mamba states, which prefix caching "
+                    "needs when each prompt is prefilled in one step",
+                    model_config.architecture,
+                    gdn,
+                )
+                cache_config.enable_prefix_caching = False
+        unsupported = {
+            "KV transfer connectors": vllm_config.kv_transfer_config,
+            "--kv-offloading-size": cache_config.kv_offloading_size is not None,
+            "speculative decoding": vllm_config.speculative_config,
+            "context parallelism": (
+                vllm_config.parallel_config.prefill_context_parallel_size > 1
+                or vllm_config.parallel_config.decode_context_parallel_size > 1
+            ),
+            "micro-batching": vllm_config.parallel_config.use_ubatching,
+            "--prefix-match-unit": (
+                cache_config.enable_prefix_caching and cache_config.prefix_match_unit
+            ),
+            "--scheduler-cls": (
+                scheduler_config.scheduler_cls not in (None, *prefix_lm_schedulers)
+            ),
+        }
+        if features := [name for name, enabled in unsupported.items() if enabled]:
+            raise ValueError(
+                f"{model_config.architecture} does not support {', '.join(features)}"
+            )
+
+        # Triton attention applies the PrefixLM ranges to every request. A
+        # per-kind backend wins over the global one, as in the selector.
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        backend = attention_config.backend_per_kind.get(
+            "full_attention", attention_config.backend
+        )
+        if backend != AttentionBackendEnum.TRITON_ATTN:
+            raise ValueError(
+                f"{model_config.architecture} needs the TRITON_ATTN attention "
+                f"backend for full attention, not {backend.name}"
+            )
+
+        # Each prompt is prefilled from its cache hit in one step, or waits.
+        # PrefixLMScheduler also reads streamed requests causally.
+        scheduler_config.enable_chunked_prefill = False
+        scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
+        scheduler_config.long_prefill_token_threshold = 0
+        # As EngineArgs does with chunked prefill off, raise the step budget to
+        # --max-model-len so a full prompt fits in one step.
+        if scheduler_config.max_num_batched_tokens < model_config.max_model_len:
+            logger.info(
+                "Raising max_num_batched_tokens from %d to %d: %s prefills each "
+                "prompt in one step",
+                scheduler_config.max_num_batched_tokens,
+                model_config.max_model_len,
+                model_config.architecture,
+            )
+            scheduler_config.max_num_batched_tokens = model_config.max_model_len
+        scheduled = scheduler_config.max_num_scheduled_tokens
+        if scheduled is not None and scheduled < model_config.max_model_len:
+            raise ValueError(
+                f"{model_config.architecture} prefills each prompt in one step, "
+                f"so --max-num-scheduled-tokens ({scheduled}) must be at least "
+                f"--max-model-len ({model_config.max_model_len})"
+            )
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1519,6 +1720,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
@@ -1529,6 +1731,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
+    "KimiK31ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "Lfm3VlForConditionalGeneration": Lfm3VlForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
@@ -1540,6 +1743,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
+    "MistralLarge4ForCausalLM": MistralLarge4ForCausalLM,
     "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
     "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
@@ -1552,12 +1756,14 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
         Nemotron3_5TranscribeForConditionalGenerationConfig
     ),
     "NomicBertModel": NomicBertModelConfig,
+    "PixtralForConditionalGeneration": PixtralForConditionalGenerationConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5ForSlotDecision": Qwen3_5ForSlotDecisionConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,

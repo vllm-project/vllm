@@ -5,8 +5,9 @@
 Each case is a list of requests `(query_len, kv_len, num_draft_tokens)`
 per DP rank. The bench builds the batch without the scheduler, runs it through
 the real `execute_model` (input prep, attention metadata, DP sync), and times
-the target forward and configured drafter captured as a CUDA graph. Target
-sampling, rejection sampling and CPU step overhead aren't measured.
+the target forward, target sampling (rejection sampling for verify rows) and
+configured drafter captured as a CUDA graph. Requests use the model's default
+sampling parameters (`--generation-config`). CPU step overhead isn't measured.
 
 Single GPU: `vllm bench forward --model M --case decode=32*1@8192`.
 Multi-GPU: `torchrun --nproc-per-node=N -m vllm.entrypoints.cli.main bench
@@ -31,6 +32,7 @@ from vllm.benchmarks.forward.shapes import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -77,9 +79,16 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     parser.add_argument(
         "--exclude-drafter",
         action="store_true",
-        help="Time only the target model. By default, a configured MTP, EAGLE, "
-        "DSpark, or DFlash drafter is included, assuming all draft tokens "
-        "are accepted. Target sampling and rejection sampling are excluded.",
+        help="Exclude the drafter from timing. By default, a configured MTP, "
+        "EAGLE, DSpark, or DFlash drafter is included, assuming all draft "
+        "tokens are accepted.",
+    )
+    parser.add_argument(
+        "--exclude-sampler",
+        action="store_true",
+        help="Exclude target sampling and rejection sampling from timing. "
+        "Requests still use the model's default sampling parameters "
+        "(`--generation-config`).",
     )
     parser.add_argument("--iters", type=int, default=20, help="Replays per sample.")
     parser.add_argument("--samples", type=int, default=5)
@@ -139,7 +148,20 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
     return engine_args
 
 
-def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any]:
+def _sampling_params(runner) -> SamplingParams:
+    """The model's default sampling parameters, as `LLM` uses them."""
+    defaults = runner.model_config.get_diff_sampling_param()
+    if defaults:
+        return SamplingParams.from_optional(**defaults)
+    return SamplingParams()
+
+
+def run_case(
+    runner,
+    case: BenchCase,
+    args: argparse.Namespace,
+    sampling_params: SamplingParams,
+) -> dict[str, Any]:
     required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
     if required_drafts > runner.num_speculative_steps:
         raise ValueError(
@@ -180,6 +202,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         rng,
         dcp_size,
         lookahead,
+        sampling_params,
     )
     zero_kv_blocks(kv_caches, attn_groups, batch, kv_config.num_blocks)
     profile_prefix = None
@@ -210,6 +233,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         case.name,
         profile_prefix,
         include_drafter=include_drafter,
+        include_sampler=not args.exclude_sampler,
     )
     routing, fixture = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
@@ -252,10 +276,21 @@ def main(args: argparse.Namespace) -> None:
         jitter_kv_lens(c, args.kv_len_jitter, max_kv_len, args.seed) for c in cases
     ]
     world = get_world_group()
+    sampling_params = _sampling_params(runner)
+    sampling = {
+        "temperature": sampling_params.temperature,
+        "top_p": sampling_params.top_p,
+        "top_k": sampling_params.top_k,
+        "min_p": sampling_params.min_p,
+        "repetition_penalty": sampling_params.repetition_penalty,
+        "presence_penalty": sampling_params.presence_penalty,
+        "frequency_penalty": sampling_params.frequency_penalty,
+    }
+    logger.info("Sampling parameters: %s", sampling)
     results = []
     with torch.inference_mode(), set_current_vllm_config(runner.vllm_config):
         for case in cases:
-            result = run_case(runner, case, args)
+            result = run_case(runner, case, args, sampling_params)
             gathered: list[Any] = [None] * world.world_size
             torch.distributed.all_gather_object(gathered, result, group=world.cpu_group)
             if world.rank != 0:
@@ -267,6 +302,7 @@ def main(args: argparse.Namespace) -> None:
                     "case": case.name,
                     "requests": [asdict(r) for r in case.requests],
                     "median_us": latency["median"],
+                    "sampling_params": sampling,
                     "ranks": gathered,
                 }
             )

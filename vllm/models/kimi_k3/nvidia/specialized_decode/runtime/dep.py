@@ -26,7 +26,7 @@ stream beside the front and MegaMoE) up to its FRONT_MAX tokens.
 
 Precision is the stock layer's at every stage (FP32 accumulation, BF16 outputs;
 the split-K order differs). K3 MLA layers run stock (per-kind policy:
-``DEP_KINDS``)."""
+`DEP_KINDS`)."""
 
 from typing import Any
 
@@ -54,7 +54,7 @@ DEP_KINDS = ("dsa", "kda")
 
 
 def _bins(table, batch):
-    """The tactic of ``batch`` rows from a {max rows: tactic} table."""
+    """The tactic of `batch` rows from a {max rows: tactic} table."""
     return table[next((n for n in sorted(table) if batch <= n), max(table))]
 
 
@@ -86,14 +86,14 @@ DEP_OPROJ = {
 
 
 def dep_policies(table, batches):
-    """{batch: tactic} of the split-K batches of ``table`` (cuBLAS ones left out)."""
+    """{batch: tactic} of the split-K batches of `table` (cuBLAS ones left out)."""
     tactics = {b: _bins(table, b) for b in batches}
     return {b: t for b, t in tactics.items() if t is not None}
 
 
 class DepProjection:
     """A TP1 linear: split-K at the batches its table gives a tactic, else cuBLAS
-    (``torch.mm`` into the output: the stock linear's FP32-accumulated BF16 GEMM)."""
+    (`torch.mm` into the output: the stock linear's FP32-accumulated BF16 GEMM)."""
 
     def __init__(self, weight, table, batches):
         self.weight = weight
@@ -112,7 +112,7 @@ class DepProjection:
 
 class DepAttention:
     """One K3.1 DSA layer's attention at TP1: the input projection, the prepared
-    core and o_proj for ``runtime.wide`` rows (the DEP step rows)."""
+    core and o_proj for `runtime.wide` rows (the DEP step rows)."""
 
     def __init__(self, decoder, runtime):
         attention = decoder.self_attn
@@ -147,7 +147,7 @@ class DepAttention:
         self.core.prepare_cache(caches[0])
 
     def run_wide(self, x, caches, metadata, slot_mapping, q):
-        """The attention output [B, 7168] of the normalized rows ``x``."""
+        """The attention output [B, 7168] of the normalized rows `x`."""
         from vllm.forward_context import get_forward_context
 
         b = x.shape[0]
@@ -172,8 +172,8 @@ class DepAttention:
 
 class DepKda:
     """One KDA layer's attention at TP1: the input projection, the prepared KDA
-    core (96 heads) and o_proj for ``runtime.wide`` rows: q = 1 decode steps and
-    uniform verify steps of ``runtime.q`` tokens per request."""
+    core (96 heads) and o_proj for `runtime.wide` rows: q = 1 decode steps and
+    uniform verify steps of `runtime.q` tokens per request."""
 
     def __init__(self, decoder, runtime):
         from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -212,7 +212,7 @@ class DepKda:
         self.core.prepare_caches(caches)
 
     def run_wide(self, x, caches, metadata, slot_mapping, q):
-        """The attention output [B, 7168] of the normalized rows ``x``."""
+        """The attention output [B, 7168] of the normalized rows `x`."""
         b = x.shape[0]
         projected = self.projection.run(x, self.projected[:b])
         local = self.local[:b]

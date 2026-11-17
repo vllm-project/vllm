@@ -12,7 +12,7 @@ class CacheHitSource(StrEnum):
 
     Members are listed in the order blocks are offloaded: accelerator, then
     host memory, then secondary tiers. Per-source token counts are plain
-    ``dict[CacheHitSource, int]`` mappings holding only non-zero entries.
+    `dict[CacheHitSource, int]` mappings holding only non-zero entries.
     """
 
     DEVICE = "device"
@@ -25,7 +25,7 @@ class CacheHitSource(StrEnum):
 
     @classmethod
     def outermost(cls, sources: Iterable[CacheHitSource]) -> CacheHitSource:
-        """The tier in ``sources`` farthest from the accelerator."""
+        """The tier in `sources` farthest from the accelerator."""
         return max(sources, key=_SOURCE_ORDER.__getitem__)
 
 
