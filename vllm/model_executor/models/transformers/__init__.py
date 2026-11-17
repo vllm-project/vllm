@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+import vllm.envs as envs
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
@@ -130,7 +131,57 @@ ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
 
 
 # Text only models
-class TransformersForCausalLM(CausalMixin): ...
+class TransformersForCausalLM(CausalMixin):
+    def __init__(self, *, vllm_config, prefix=""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self._ffn_token_indices: torch.Tensor | None = None
+        self._ffn_pruning_supported = False
+        if (
+            envs.VLLM_ENABLE_LAST_LAYER_FFN_PRUNING
+            and self.text_config.model_type == "qwen2"
+            and self.pp_group.world_size == 1
+        ):
+            layers = self._decoder_layers
+            if layers is not None and hasattr(layers[-1], "mlp"):
+                layers[-1].mlp.register_forward_pre_hook(self._select_final_ffn_rows)
+                layers[-1].mlp.register_forward_hook(self._restore_final_ffn_rows)
+                self._ffn_pruning_supported = True
+
+    @property
+    def supports_last_layer_ffn_pruning(self):
+        return self._ffn_pruning_supported
+
+    def _select_final_ffn_rows(self, module, args):
+        if self._ffn_token_indices is None:
+            return None
+        (hidden_states,) = args
+        self._ffn_input_shape = hidden_states.shape
+        return (hidden_states.index_select(-2, self._ffn_token_indices),)
+
+    def _restore_final_ffn_rows(self, module, args, output):
+        if self._ffn_token_indices is None:
+            return output
+        return output.new_zeros(self._ffn_input_shape).index_copy_(
+            -2, self._ffn_token_indices, output
+        )
+
+    def forward(
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        last_layer_token_indices=None,
+        **kwargs,
+    ):
+        # Hooks preserve parameter names and the Transformers residual contract.
+        self._ffn_token_indices = last_layer_token_indices
+        try:
+            return super().forward(
+                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            )
+        finally:
+            self._ffn_token_indices = None
 
 
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin): ...

@@ -146,6 +146,7 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
+from vllm.v1.worker.gpu.last_layer_ffn import LastLayerFFNPruner
 from vllm.v1.worker.gpu.lora_utils import (
     LoraState,
     create_lora_capture_hook,
@@ -209,6 +210,7 @@ logger = init_logger(__name__)
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
+        self.last_layer_ffn_pruner = LastLayerFFNPruner()
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -2156,6 +2158,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             n = input_batch.num_tokens_after_padding
             model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
+
+        last_layer_indices = self.last_layer_ffn_pruner.prepare(
+            self, input_batch, batch_desc, dummy_run, ubatch_state
+        )
+        if last_layer_indices is not None:
+            model_inputs["last_layer_token_indices"] = last_layer_indices
 
         # Update the EPLB meta.
         ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
