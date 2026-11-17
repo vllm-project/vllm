@@ -1133,6 +1133,7 @@ def test_mxfp4_experts_check_accepts_aiter_deployments(
         _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
 
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_select_mxfp4_moe_backend_relu2_dispatches_to_aiter(
     monkeypatch: pytest.MonkeyPatch,
     default_vllm_config,
