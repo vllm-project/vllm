@@ -1647,6 +1647,32 @@ def pytest_addoption(parser):
     )
 
 
+def pytest_configure(config):
+    import tempfile
+
+    os.environ.setdefault(
+        "VLLM_FRONTEND_PROBE_FILE",
+        os.path.join(tempfile.gettempdir(), f"vllm_frontend_probe_{os.getpid()}.jsonl"),
+    )
+
+
+def pytest_terminal_summary(terminalreporter):
+    """List the frontend each `vllm serve` selected in this session (CI probe)."""
+    import json
+
+    path = os.environ.get("VLLM_FRONTEND_PROBE_FILE", "")
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    terminalreporter.section("frontend probe")
+    for r in records:
+        terminalreporter.write_line(
+            f"[FRONTEND-PROBE-SUMMARY] frontend={r['frontend']} mode={r['mode']} "
+            f"reason={r['reason']} model={r['model']} test={r['test']}"
+        )
+
+
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--optional"):
         # --optional given in cli: do not skip optional tests

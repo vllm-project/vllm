@@ -221,6 +221,28 @@ class RemoteVLLMServer:
     def _get_process_termination_timeout(self) -> float:
         return 15.0
 
+    def _report_frontend_probe(self) -> None:
+        """Print which frontend `vllm serve` selected for this server (CI probe)."""
+        path = os.environ.get("VLLM_FRONTEND_PROBE_FILE")
+        entry = None
+        if path and os.path.exists(path):
+            with open(path) as f:
+                for line in f:
+                    rec = json.loads(line)
+                    if rec["pid"] == getattr(self.proc, "pid", None):
+                        entry = rec
+        if entry is None and isinstance(self, RemoteLaunchRenderServer):
+            entry = {"frontend": "python", "mode": "-", "reason": "launch-render"}
+        if entry is None:
+            entry = {"frontend": "unknown", "mode": "-", "reason": "no-serve-record"}
+        print(
+            f"[FRONTEND-PROBE] server={type(self).__name__} "
+            f"test={os.environ.get('PYTEST_CURRENT_TEST', '')} "
+            f"frontend={entry['frontend']} mode={entry['mode']} "
+            f"reason={entry['reason']}",
+            flush=True,
+        )
+
     def __init__(
         self,
         model: str,
@@ -292,7 +314,9 @@ class RemoteVLLMServer:
         max_wait_seconds = max_wait_seconds or 480
         try:
             self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
+            self._report_frontend_probe()
         except Exception:
+            self._report_frontend_probe()
             # If the server never became healthy, we must still clean up
             # the subprocess tree. Without this, a timeout in __init__
             # leaks the server + EngineCore processes (and their GPU

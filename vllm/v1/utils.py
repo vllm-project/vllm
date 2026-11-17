@@ -276,6 +276,74 @@ class APIServerProcessManager:
             )
 
 
+def build_rust_frontend_args(
+    args: argparse.Namespace, model_config: "ModelConfig | None" = None
+) -> tuple[str, str]:
+    """Return the `--args-json` payload for the Rust frontend and a redacted copy
+    that is safe to log."""
+    from vllm.entrypoints.common.startup import jsonify_non_default_args
+
+    args_dict = jsonify_non_default_args(
+        args,
+        exclude={
+            "api_server_count",
+            # Python passes the bootstrapped engine range explicitly.
+            "data_parallel_rank",
+            "data_parallel_external_lb",
+            "data_parallel_hybrid_lb",
+        },
+    )
+
+    # `model_tag` is the positional `vllm serve` model argument. When the
+    # model is supplied only through `--config`, argparse populates `model`
+    # while leaving `model_tag` unset. The Rust frontend requires
+    # `model_tag` in its JSON bootstrap payload, so use the resolved model
+    # as a fallback.
+    model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+    if model_tag is not None:
+        args_dict["model_tag"] = model_tag
+
+    # Object storage models (s3://, gs://, az://) have their config and
+    # tokenizer pulled into a local directory, which the Rust frontend can
+    # read; it can't read the object storage URI. Keep serving the URI as
+    # the model name, like the Python frontend.
+    if model_config is not None and model_config.model_weights:
+        args_dict["model_tag"] = model_config.model
+        args_dict.setdefault("served_model_name", [model_config.served_model_name])
+
+    # The Rust `frontend` subcommand parses --args-json via serde_json,
+    # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+    # declarations on SharedRuntimeArgs fields. Forward the env-driven
+    # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
+    # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
+    # frontends.
+    args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+    args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+
+    # `--log-level`, `--logging-config` and `--log-config-file` default to
+    # argparse.SUPPRESS, so get_non_default_args() never sees them;
+    # cli/main.py has already merged them into `args.logging_config`.
+    if logging_config := getattr(args, "logging_config", None):
+        args_dict["logging_config"] = {
+            "log_level": logging_config.log_level,
+            "formatter": logging_config.formatter,
+        }
+        if not logging_config.configure_logging or logging_config.pylogging_config_file:
+            logger.warning(
+                "configure_logging and pylogging_config_file apply to "
+                "Python logging only, not to the Rust frontend's logs."
+            )
+
+    args_json = json.dumps(args_dict, sort_keys=True)
+
+    # The subprocess needs the real values, but the log must not carry
+    # credentials such as api_key or hf_token.
+    from vllm.entrypoints.common.startup import redact_sensitive_args
+
+    redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
+    return args_json, redacted_json
+
+
 class RustFrontendProcessManager:
     """Manages a single Rust frontend subprocess.
 
@@ -331,70 +399,8 @@ class RustFrontendProcessManager:
             inherited_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.entrypoints.common.startup import jsonify_non_default_args
-
-        args_dict = jsonify_non_default_args(
-            args,
-            exclude={
-                "api_server_count",
-                # Python passes the bootstrapped engine range explicitly.
-                "data_parallel_rank",
-                "data_parallel_external_lb",
-                "data_parallel_hybrid_lb",
-            },
-        )
-
-        # `model_tag` is the positional `vllm serve` model argument. When the
-        # model is supplied only through `--config`, argparse populates `model`
-        # while leaving `model_tag` unset. The Rust frontend requires
-        # `model_tag` in its JSON bootstrap payload, so use the resolved model
-        # as a fallback.
-        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
-        if model_tag is not None:
-            args_dict["model_tag"] = model_tag
-
-        # Object storage models (s3://, gs://, az://) have their config and
-        # tokenizer pulled into a local directory, which the Rust frontend can
-        # read; it can't read the object storage URI. Keep serving the URI as
-        # the model name, like the Python frontend.
-        if model_config is not None and model_config.model_weights:
-            args_dict["model_tag"] = model_config.model
-            args_dict.setdefault("served_model_name", [model_config.served_model_name])
-
-        # The Rust `frontend` subcommand parses --args-json via serde_json,
-        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
-        # declarations on SharedRuntimeArgs fields. Forward the env-driven
-        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
-        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
-        # frontends.
-        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
-        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
-
-        # `--log-level`, `--logging-config` and `--log-config-file` default to
-        # argparse.SUPPRESS, so get_non_default_args() never sees them;
-        # cli/main.py has already merged them into `args.logging_config`.
-        if logging_config := getattr(args, "logging_config", None):
-            args_dict["logging_config"] = {
-                "log_level": logging_config.log_level,
-                "formatter": logging_config.formatter,
-            }
-            if (
-                not logging_config.configure_logging
-                or logging_config.pylogging_config_file
-            ):
-                logger.warning(
-                    "configure_logging and pylogging_config_file apply to "
-                    "Python logging only, not to the Rust frontend's logs."
-                )
-
-        args_json = json.dumps(args_dict, sort_keys=True)
+        args_json, redacted_json = build_rust_frontend_args(args, model_config)
         cmd.extend(["--args-json", args_json])
-
-        # The subprocess needs the real values, but the log must not carry
-        # credentials such as api_key or hf_token.
-        from vllm.entrypoints.common.startup import redact_sensitive_args
-
-        redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
         self._listeners = [input_listener, output_listener]
         try:

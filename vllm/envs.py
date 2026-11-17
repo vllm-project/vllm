@@ -174,7 +174,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
-    VLLM_USE_RUST_FRONTEND: bool = False
+    VLLM_USE_RUST_FRONTEND: bool | None = None
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
@@ -1567,10 +1567,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
-    # If set, use the Rust frontend binary instead of the Python API server
-    # process(es).
-    "VLLM_USE_RUST_FRONTEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RUST_FRONTEND", "0"))
+    # Tri-state. "1" forces the Rust frontend binary, "0" forces the Python API
+    # server process(es), and unset lets `vllm serve` choose at startup
+    # (`auto`, resolved by `resolve_frontend`).
+    "VLLM_USE_RUST_FRONTEND": lambda: (
+        bool(int(os.environ["VLLM_USE_RUST_FRONTEND"]))
+        if os.environ.get("VLLM_USE_RUST_FRONTEND")
+        else None
     ),
     # If set, use the packaged Rust client for `vllm bench serve`.
     "VLLM_USE_RUST_BENCH": lambda: bool(int(os.getenv("VLLM_USE_RUST_BENCH", "0"))),

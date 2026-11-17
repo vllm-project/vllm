@@ -156,6 +156,9 @@ class ServeSubcommand(CLISubcommand):
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.launchers.frontend_selection import resolve_frontend
+
+        resolve_frontend(args)
         validate_parsed_serve_args(args)
 
     def subparser_init(
