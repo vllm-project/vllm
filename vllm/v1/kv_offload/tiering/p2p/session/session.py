@@ -23,7 +23,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Iterable, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, NamedTuple
 
 import vllm.envs as envs
@@ -39,6 +39,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
     FetchMsg,
+    ListKeysMsg,
+    ListKeysRespMsg,
     LookupMsg,
     LookupRespMsg,
     TransferDoneMsg,
@@ -67,6 +69,34 @@ _MAX_CONSECUTIVE_DISPATCH_ERRORS = 5
 # before disconnecting: the peer frees their destination blocks on
 # DisconnectMsg, but a stuck transfer must not hold the session open.
 _PEER_FAULT_DRAIN_S = 10.0
+
+# Bounds a ListKeysRespMsg, the listings (whole-tier snapshots) a peer holds,
+# and its queued listing requests.
+_MAX_LIST_PAGE = 16384
+_MAX_OPEN_LISTINGS = 4
+_MAX_PENDING_LISTINGS = 64
+# Least time between two snapshots for one peer.
+_MIN_SNAPSHOT_GAP_S = 1.0
+
+_listing_pool: ThreadPoolExecutor | None = None
+
+
+def _listing_executor() -> ThreadPoolExecutor:
+    """One thread orders key snapshots for every session in the process."""
+    global _listing_pool
+    if _listing_pool is None:
+        _listing_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="p2p-key-listing"
+        )
+    return _listing_pool
+
+
+class KeyPage(NamedTuple):
+    """One page of a peer's key listing; see ListKeysRespMsg."""
+
+    keys: list[OffloadKey]
+    next_cursor: int
+    error: str | None
 
 
 class SessionPollResult(NamedTuple):
@@ -171,6 +201,15 @@ class P2PSession:
         # peer it may start sending, and nothing may be served before the
         # peer's blocks are registered here.
         self._pending_registration: Future[None] | None = None
+
+        # Key listing for bulk import. Client: pages received for listings we
+        # asked for. Server: requests waiting for a parent handle, and the
+        # snapshot each listing pages through.
+        self._key_pages: dict[str, KeyPage] = {}
+        self._requested_listings: set[str] = set()
+        self._pending_listings: list[tuple[str, int, int]] = []
+        self._listing_snapshots: dict[str, Future[list[OffloadKey]]] = {}
+        self._last_snapshot_at = float("-inf")
 
         self._client = ClientRole(peer_id=peer_id, send=self._send)
         self._server = ServerRole(
@@ -322,9 +361,103 @@ class P2PSession:
         """Resolve inbound peer lookups against the tiering manager.
 
         Delegates to the server role; the `parent` handle is valid
-        only for the duration of this call.
+        only for the duration of this call. Key listings need it too.
         """
+        self._serve_listings(parent)
         self._server.serve_external_requests(parent)
+
+    def has_unresolved_probes(self, kv_request_id: str) -> bool:
+        """True while a probe of kv_request_id is unsent or unanswered."""
+        return self._client.has_unresolved_probes(kv_request_id)
+
+    def request_key_page(self, list_id: str, cursor: int, limit: int) -> None:
+        """Ask the peer for one page of its keys; see take_key_page."""
+        self._key_pages.pop(list_id, None)
+        self._requested_listings.add(list_id)
+        self._send(
+            {
+                TYPE_KEY: ListKeysMsg.TYPE,
+                ListKeysMsg.LIST_ID: list_id,
+                ListKeysMsg.CURSOR: cursor,
+                ListKeysMsg.LIMIT: limit,
+            }
+        )
+
+    def take_key_page(self, list_id: str, abandon: bool = False) -> KeyPage | None:
+        """Pop the page answering request_key_page, or None if not here yet;
+        abandon also stops waiting for it."""
+        page = self._key_pages.pop(list_id, None)
+        if page is not None or abandon:
+            self._requested_listings.discard(list_id)
+        return page
+
+    def _serve_listings(self, parent: ParentManager) -> None:
+        pending, self._pending_listings = self._pending_listings, []
+        for list_id, cursor, limit in pending:
+            if cursor == 0 and list_id not in self._listing_snapshots:
+                now = time.monotonic()
+                if (
+                    any(not f.done() for f in self._listing_snapshots.values())
+                    or now - self._last_snapshot_at < _MIN_SNAPSHOT_GAP_S
+                ):
+                    # One snapshot at a time per peer, spaced out: each copies
+                    # the whole key set under the manager lock.
+                    self._pending_listings.append((list_id, cursor, limit))
+                    continue
+                self._last_snapshot_at = now
+                while len(self._listing_snapshots) >= _MAX_OPEN_LISTINGS:
+                    self._listing_snapshots.pop(next(iter(self._listing_snapshots)))
+                try:
+                    # Only the capture runs under the manager lock; the
+                    # ordering runs on another thread, so serving is not stalled.
+                    order = parent.key_snapshot()
+                except Exception:
+                    logger.exception(
+                        "P2PSession %s: cannot list keys for %s", self.peer_id, list_id
+                    )
+                    self._send_key_page(list_id, [], -1, "peer cannot list its keys")
+                    continue
+                self._listing_snapshots[list_id] = _listing_executor().submit(order)
+            snapshot = self._listing_snapshots.get(list_id)
+            if snapshot is None:
+                # A new session, or a snapshot dropped for a newer listing.
+                self._send_key_page(list_id, [], -1, "listing not found on peer")
+                continue
+            if not snapshot.done():
+                self._pending_listings.append((list_id, cursor, limit))
+                continue
+            try:
+                keys = snapshot.result()
+            except Exception:
+                logger.exception(
+                    "P2PSession %s: ordering keys for %s failed", self.peer_id, list_id
+                )
+                self._listing_snapshots.pop(list_id, None)
+                self._send_key_page(list_id, [], -1, "peer failed to list its keys")
+                continue
+            page = keys[cursor : cursor + min(limit, _MAX_LIST_PAGE)]
+            next_cursor = cursor + len(page)
+            if not page or next_cursor >= len(keys):
+                next_cursor = -1
+                self._listing_snapshots.pop(list_id, None)
+            self._send_key_page(list_id, page, next_cursor, None)
+
+    def _send_key_page(
+        self,
+        list_id: str,
+        keys: list[OffloadKey],
+        next_cursor: int,
+        error: str | None,
+    ) -> None:
+        msg = {
+            TYPE_KEY: ListKeysRespMsg.TYPE,
+            ListKeysRespMsg.LIST_ID: list_id,
+            ListKeysRespMsg.KEYS: keys,
+            ListKeysRespMsg.NEXT_CURSOR: next_cursor,
+        }
+        if error is not None:
+            msg[ListKeysRespMsg.ERROR] = error
+        self._send(msg)
 
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
@@ -635,6 +768,24 @@ class P2PSession:
             ]
             hits = msg[LookupRespMsg.HITS]
             self._client.on_lookup_resp(kv_request_id, keys, hits)
+        elif msg_type == ListKeysMsg.TYPE:
+            ListKeysMsg.validate(msg)
+            list_id = msg[ListKeysMsg.LIST_ID]
+            if len(self._pending_listings) >= _MAX_PENDING_LISTINGS:
+                self._send_key_page(list_id, [], -1, "too many listing requests")
+            else:
+                self._pending_listings.append(
+                    (list_id, msg[ListKeysMsg.CURSOR], msg[ListKeysMsg.LIMIT])
+                )
+        elif msg_type == ListKeysRespMsg.TYPE:
+            ListKeysRespMsg.validate(msg, _MAX_LIST_PAGE)
+            list_id = msg[ListKeysRespMsg.LIST_ID]
+            if list_id in self._requested_listings:  # Never unsolicited pages.
+                self._key_pages[list_id] = KeyPage(
+                    [OffloadKey(bytes(k)) for k in msg[ListKeysRespMsg.KEYS]],
+                    msg[ListKeysRespMsg.NEXT_CURSOR],
+                    msg.get(ListKeysRespMsg.ERROR),
+                )
         elif msg_type == DisconnectMsg.TYPE:
             self._mark_dead("peer disconnected")
         else:

@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -64,6 +64,9 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 
 logger = init_logger(__name__)
 
@@ -1705,6 +1708,37 @@ class OffloadingConnectorScheduler:
         # Still a generator, so callers testing the result for truthiness keep
         # seeing a non-empty object the way they do today.
         yield from self._events_tracker.take_events(manager_events)
+
+    def _tiering_manager(self) -> "TieringOffloadingManager | None":
+        from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+
+        if isinstance(self.manager, TieringOffloadingManager):
+            return self.manager
+        return None
+
+    @property
+    def supports_peer_import(self) -> bool:
+        """Whether the manager can bulk-import a peer's cache."""
+        return self._tiering_manager() is not None
+
+    def start_peer_import(
+        self,
+        host: str,
+        port: int,
+        max_chunks: int | None,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        """Start a bulk import of a peer's cache; see TieringOffloadingManager."""
+        manager = self._tiering_manager()
+        assert manager is not None
+        with self._manager_locked():
+            return manager.start_peer_import(host, port, max_chunks, timeout_s)
+
+    def peer_import_status(self, import_id: str | None) -> list[dict[str, Any]]:
+        manager = self._tiering_manager()
+        assert manager is not None
+        with self._manager_locked():
+            return manager.peer_import_status(import_id)
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""

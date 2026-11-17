@@ -280,3 +280,29 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return OffloadPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
+
+
+def find_peer_import_scheduler(
+    connector: KVConnectorBase_V1 | None,
+) -> OffloadingConnectorScheduler:
+    """The scheduler of the connector (or MultiConnector sub-connector) that
+    can bulk-import a peer's cache, i.e. an OffloadingConnector with tiering."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+
+    candidates = (
+        connector.sub_connectors
+        if isinstance(connector, MultiConnector)
+        else [connector]
+    )
+    for candidate in candidates:
+        if (
+            isinstance(candidate, OffloadingConnector)
+            and candidate.connector_scheduler is not None
+            and candidate.connector_scheduler.supports_peer_import
+        ):
+            return candidate.connector_scheduler
+    raise ValueError(
+        "KV peer import needs an OffloadingConnector with TieringOffloadingSpec"
+    )
