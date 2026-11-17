@@ -3,7 +3,9 @@
 """Microbenchmark for the `_copy_mamba_state_block` device function.
 
 Isolates the per-(request, state, tile) mamba state copy body from the surrounding
-postprocess decision logic. `--model` takes any HF hybrid model with a conv +
+postprocess decision logic. The copy metadata comes from the production
+`MambaSpecDecodeGPUContext`, and every config checks the copy before timing
+it. `--model` takes any HF hybrid model with a conv +
 temporal state per layer; its layout (tp=1) comes from vLLM's own state
 shape/dtype logic. These presets work offline:
 
@@ -52,8 +54,10 @@ Usage:
 
 import argparse
 import math
+import os
 import time
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 import torch
 import torch.cuda.nvtx as nvtx
@@ -61,13 +65,20 @@ import torch.cuda.nvtx as nvtx
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
+    get_conv_state_layout,
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.mamba_utils import _TEMPORAL_TILES, _copy_mamba_state_block
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup, MambaSpec
+from vllm.v1.worker.mamba_utils import (
+    _TEMPORAL_TILES,
+    MambaSpecDecodeGPUContext,
+    _copy_mamba_state_block,
+)
 
 DEVICE = "cuda"
 
@@ -304,11 +315,11 @@ def bench_copy_mamba_state_block(
 
 def build_state_tensors(
     model: ModelStateConfig, conv_state_dim_first: bool, num_blocks: int
-):
+) -> dict[str, list[torch.Tensor]]:
     """Allocate one conv and one temporal state tensor per state-carrying layer.
 
-    Returns interleaved [conv0, temp0, conv1, temp1, ...] to match the flat
-    metadata layout produced by MambaSpecDecodeGPUContext.
+    Returns each layer's `kv_cache` list ([conv, temporal]) keyed by layer
+    name. Random contents let `check_copy` tell copied blocks from stale ones.
     """
     conv_shape_per_block = (
         (model.conv_dim, model.conv_state_len)
@@ -316,111 +327,108 @@ def build_state_tensors(
         else (model.conv_state_len, model.conv_dim)
     )
 
-    state_tensors: list[torch.Tensor] = []
-    is_conv_list: list[bool] = []
-    for _ in range(model.num_state_layers):
-        conv = torch.empty(
+    layer_states: dict[str, list[torch.Tensor]] = {}
+    for i in range(model.num_state_layers):
+        conv = torch.randn(
             (num_blocks, *conv_shape_per_block),
             dtype=model.conv_dtype,
             device=DEVICE,
         )
-        temporal = torch.empty(
+        temporal = torch.randn(
             (num_blocks, *model.temporal_shape),
             dtype=model.temporal_dtype,
             device=DEVICE,
         )
-        state_tensors.append(conv)
-        is_conv_list.append(True)
-        state_tensors.append(temporal)
-        is_conv_list.append(False)
-    return state_tensors, is_conv_list
+        layer_states[f"layers.{i}.mixer"] = [conv, temporal]
+    return layer_states
 
 
-def build_metadata(state_tensors, is_conv_list, conv_state_dim_first: bool):
-    """Pack per-state metadata arrays consumed by `_copy_mamba_state_block`."""
-    n = len(state_tensors)
-    state_base_addrs = torch.empty(n, dtype=torch.int64, device=DEVICE)
-    state_block_strides = torch.empty(n, dtype=torch.int64, device=DEVICE)
-    state_elem_sizes = torch.empty(n, dtype=torch.int32, device=DEVICE)
-    state_inner_sizes = torch.empty(n, dtype=torch.int64, device=DEVICE)
-    state_conv_widths = torch.empty(n, dtype=torch.int32, device=DEVICE)
-    state_group_indices = torch.zeros(n, dtype=torch.int32, device=DEVICE)
-    state_dim_row_count = torch.zeros(n, dtype=torch.int32, device=DEVICE)
-    state_dim_row_stride = torch.zeros(n, dtype=torch.int64, device=DEVICE)
+def build_gpu_context(
+    layer_states: dict[str, list[torch.Tensor]], block_table: torch.Tensor
+) -> MambaSpecDecodeGPUContext:
+    """Populate the copy metadata with the production MambaSpecDecodeGPUContext.
 
-    for i, (t, is_conv) in enumerate(zip(state_tensors, is_conv_list)):
-        state_base_addrs[i] = t.data_ptr()
-        state_block_strides[i] = t.stride(0) * t.element_size()
-        state_elem_sizes[i] = t.element_size()
-        if is_conv:
-            if conv_state_dim_first:
-                # DS layout: (dim, state_len) per block
-                state_conv_widths[i] = t.size(2)
-                state_inner_sizes[i] = 1
-                state_dim_row_count[i] = t.size(1)
-                state_dim_row_stride[i] = t.stride(1) * t.element_size()
-            else:
-                # SD layout: (state_len, dim) per block
-                state_conv_widths[i] = t.size(1)
-                state_inner_sizes[i] = t.stride(1)
-        else:
-            state_conv_widths[i] = 0
-            state_inner_sizes[i] = t[0].numel()
-
-    return (
-        state_base_addrs,
-        state_block_strides,
-        state_elem_sizes,
-        state_inner_sizes,
-        state_conv_widths,
-        state_group_indices,
-        state_dim_row_count,
-        state_dim_row_stride,
+    The context reads only each layer's `kv_cache`, so a namespace holding the
+    state tensors stands in for the attention layer in the forward context.
+    """
+    conv, temporal = next(iter(layer_states.values()))
+    spec = MambaSpec(
+        # Only the postprocess decision logic reads block_size.
+        block_size=16,
+        shapes=(tuple(conv.shape[1:]), tuple(temporal.shape[1:])),
+        dtypes=(conv.dtype, temporal.dtype),
     )
+    layer_config = MambaManager.layer_config(spec, mamba_cache_mode="align")
+    kv_cache_config = KVCacheConfig(
+        num_blocks=conv.shape[0],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroup.from_layers(dict.fromkeys(layer_states, layer_config))
+        ],
+    )
+    copy_funcs = {spec.mamba_type: (get_conv_copy_spec, get_temporal_copy_spec)}
+    forward_context = {
+        name: SimpleNamespace(kv_cache=states) for name, states in layer_states.items()
+    }
+    ctx = MambaSpecDecodeGPUContext.create(
+        max_num_reqs=block_table.shape[0],
+        kv_cache_config=kv_cache_config,
+        copy_funcs=copy_funcs,
+        forward_context=forward_context,
+        device=block_table.device,
+    )
+    ctx.initialize_from_forward_context(
+        kv_cache_config, forward_context, copy_funcs, [block_table]
+    )
+    return ctx
 
 
-def bytes_moved_per_launch(state_tensors, is_conv_list, conv_state_dim_first: bool):
+def check_copy(
+    layer_states: dict[str, list[torch.Tensor]], block_table: torch.Tensor
+) -> None:
+    """Assert every state's dst blocks match its src blocks.
+
+    With TOKEN_BIAS=0 both conv and temporal copies move whole blocks.
+    """
+    src = block_table[:, SRC_COL].long()
+    dst = block_table[:, DST_COL].long()
+    for name, states in layer_states.items():
+        for state_type_idx, state in enumerate(states):
+            assert torch.equal(state[dst], state[src]), (
+                f"{name} state {state_type_idx}: dst blocks differ from src"
+            )
+
+
+def bytes_moved_per_launch(
+    layer_states: dict[str, list[torch.Tensor]], conv_state_dim_first: bool
+) -> int:
     """Bytes copied (read+write) across all (num_reqs, state, tile) programs,
     per request. Multiply by num_reqs to get per-launch total."""
     per_req = 0
-    for t, is_conv in zip(state_tensors, is_conv_list):
-        elem = t.element_size()
-        if is_conv:
-            if conv_state_dim_first:
-                per_row = (t.size(2) - TOKEN_BIAS) * elem
-                copy_bytes = t.size(1) * per_row
-            else:
-                copy_bytes = (t.size(1) - TOKEN_BIAS) * t.stride(1) * elem
+    for conv, temporal in layer_states.values():
+        elem = conv.element_size()
+        if conv_state_dim_first:
+            per_req += conv.size(1) * (conv.size(2) - TOKEN_BIAS) * elem
         else:
-            copy_bytes = t[0].numel() * elem
-        per_req += copy_bytes
+            per_req += (conv.size(1) - TOKEN_BIAS) * conv.stride(1) * elem
+        per_req += temporal[0].numel() * temporal.element_size()
     return per_req
 
 
 def bench_one(
     model: ModelStateConfig,
     num_reqs: int,
-    conv_state_dim_first: bool,
     temporal_tiles: int,
     iters_warmup: int,
     iters_timed: int,
 ) -> None:
+    # The production metadata reads the conv layout from the env, so the
+    # allocation and the CONV_STATE_DIM_FIRST constexpr follow it too.
+    conv_state_dim_first = is_conv_state_dim_first()
     # Give every request distinct src/dst block ids so concurrent copies don't
     # share cache lines. State tensors hold at least 2*num_reqs blocks.
     num_blocks = 2 * num_reqs
-    state_tensors, is_conv_list = build_state_tensors(
-        model, conv_state_dim_first, num_blocks
-    )
-    (
-        state_base_addrs,
-        state_block_strides,
-        state_elem_sizes,
-        state_inner_sizes,
-        state_conv_widths,
-        state_group_indices,
-        state_dim_row_count,
-        state_dim_row_stride,
-    ) = build_metadata(state_tensors, is_conv_list, conv_state_dim_first)
+    layer_states = build_state_tensors(model, conv_state_dim_first, num_blocks)
 
     # Single mamba group. Per-request rows point to distinct src/dst blocks:
     # req i reads block 2*i and writes block 2*i+1. Two columns are enough
@@ -429,26 +437,23 @@ def bench_one(
     row_ids = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
     block_table[:, SRC_COL] = 2 * row_ids
     block_table[:, DST_COL] = 2 * row_ids + 1
-    block_table_ptrs = torch.tensor(
-        [block_table.data_ptr()], dtype=torch.int64, device=DEVICE
-    )
-    block_table_stride_req = block_table.stride(0)
+    ctx = build_gpu_context(layer_states, block_table)
 
-    grid = (num_reqs, model.total_states, temporal_tiles)
+    grid = (num_reqs, ctx.num_states, temporal_tiles)
     args = (
         SRC_COL,
         DST_COL,
         TOKEN_BIAS,
-        block_table_ptrs,
-        block_table_stride_req,
-        state_base_addrs,
-        state_block_strides,
-        state_elem_sizes,
-        state_inner_sizes,
-        state_conv_widths,
-        state_group_indices,
-        state_dim_row_count,
-        state_dim_row_stride,
+        ctx.block_table_ptrs,
+        ctx.block_table_stride_req,
+        ctx.state_base_addrs,
+        ctx.state_block_strides,
+        ctx.state_elem_sizes,
+        ctx.state_inner_sizes,
+        ctx.state_conv_widths,
+        ctx.state_group_indices,
+        ctx.state_dim_row_count,
+        ctx.state_dim_row_stride,
         num_reqs,
     )
 
@@ -459,6 +464,10 @@ def bench_one(
             CONV_STATE_DIM_FIRST=conv_state_dim_first,
             TEMPORAL_TILES=temporal_tiles,
         )
+
+    launch()
+    torch.accelerator.synchronize()
+    check_copy(layer_states, block_table)
 
     for _ in range(iters_warmup):
         launch()
@@ -479,9 +488,7 @@ def bench_one(
     nvtx.range_pop()
 
     avg_us = start.elapsed_time(end) * 1000.0 / iters_timed
-    bytes_per_req = bytes_moved_per_launch(
-        state_tensors, is_conv_list, conv_state_dim_first
-    )
+    bytes_per_req = bytes_moved_per_launch(layer_states, conv_state_dim_first)
     total_bytes = bytes_per_req * num_reqs
     # Read + write: memory traffic is 2x copy size.
     gbps = (2 * total_bytes) / (avg_us * 1e-6) / 1e9
@@ -596,20 +603,16 @@ def main():
     )
     print()
 
-    layouts = (
-        [False]
-        if args.conv_layout == "SD"
-        else ([True] if args.conv_layout == "DS" else [False, True])
-    )
+    layouts = ["SD", "DS"] if args.conv_layout == "both" else [args.conv_layout]
 
     torch.cuda.cudart().cudaProfilerStart()
     t0 = time.perf_counter()
-    for conv_ds in layouts:
+    for layout in layouts:
+        os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = layout
+        get_conv_state_layout.cache_clear()
         for tiles in args.temporal_tiles:
             for nr in args.concurrencies:
-                bench_one(
-                    model, nr, conv_ds, tiles, args.iters_warmup, args.iters_timed
-                )
+                bench_one(model, nr, tiles, args.iters_warmup, args.iters_timed)
     torch.cuda.cudart().cudaProfilerStop()
     print(f"\ntotal wall: {time.perf_counter() - t0:.2f}s")
 
