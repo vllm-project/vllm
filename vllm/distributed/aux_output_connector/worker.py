@@ -85,6 +85,7 @@ class _WorkerRequestState:
     staged: list[tuple[int, np.ndarray]] = field(default_factory=list)
     fields: dict[str, tuple[int, int, list[np.ndarray]]] = field(default_factory=dict)
     tail: tuple[str, np.ndarray, dict[str, np.ndarray]] | None = None
+    orphans: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
     buffer_start: int = 0
@@ -675,6 +676,9 @@ class AuxOutputWorkerConnector:
             if state.tail is not None:
                 assert self._object_writer is not None
                 self._object_writer.add_tail(*state.tail)
+            if state.orphans:
+                assert self._object_writer is not None
+                self._object_writer.remove(state.orphans)
             for _, rows in state.pending_blocks:
                 buffer.release_block(rows)
             buffer.discard(request_id)
@@ -717,6 +721,12 @@ class AuxOutputWorkerConnector:
         if self._buffer is None or metadata is None:
             return
         self._object_size = metadata.session_object_size
+        for request_id, keys in metadata.session_orphans.items():
+            assert self._object_writer is not None
+            if request_id in self._requests:
+                self._requests[request_id].orphans = keys
+            else:
+                self._object_writer.remove(keys)
         assert not metadata.requests.keys() & metadata.finished_requests, (
             "auxiliary output request cannot run and finish in one step"
         )

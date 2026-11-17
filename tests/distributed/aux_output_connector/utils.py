@@ -13,6 +13,7 @@ class FakeMooncake:
         self.objects = {}
         self.payloads = defaultdict(list)
         self.writes = []
+        self.removes = []
         self.configs = []
         self.closed = False
 
@@ -30,6 +31,10 @@ class FakeMooncake:
         for key in removed:
             del self.objects[key]
         return len(removed)
+
+    def batch_remove(self, keys, force):
+        self.removes.append(list(keys))
+        return [0 if self.objects.pop(key, None) is not None else -704 for key in keys]
 
     def get(self, key):
         return self.objects.get(key, b"")

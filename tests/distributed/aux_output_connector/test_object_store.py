@@ -16,10 +16,12 @@ from tests.distributed.aux_output_connector.utils import FakeMooncake, fake_stor
 from vllm.config import AuxOutputConfig
 from vllm.distributed.aux_output_connector import object_store
 from vllm.distributed.aux_output_connector.object_store import (
+    AuxSampleKeys,
     MooncakeAuxObjectStore,
     aux_prefix_pattern,
     aux_session_pattern,
     read_aux_rows,
+    release_aux_keys,
 )
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
 
@@ -274,3 +276,45 @@ def test_session_patterns_match_their_keys_in_ecmascript_syntax(prefix, session)
     ]
     matched = [[key for key in keys if re.search(pattern, key)] for pattern in patterns]
     assert matched == [keys[:3], keys[:2]]
+
+
+class LateMooncake(FakeMooncake):
+    def __init__(self, late, codes=()):
+        super().__init__()
+        self.late = late
+        self.codes = list(codes)
+
+    def batch_remove(self, keys, force):
+        code = self.codes.pop(0) if self.codes else 0
+        codes = [code] * len(keys) if code else super().batch_remove(keys, force)
+        if self.late:
+            self.objects[self.late.pop(0)] = b"x"
+        return codes
+
+
+class TestReleaseAuxKeys:
+    @pytest.mark.parametrize(
+        "late,codes,left",
+        [
+            (["b"], (), []),
+            ([], (), ["b"]),
+            (["b"], (-703,), []),
+            ([], (-600,), ["a", "b"]),
+        ],
+        ids=["written-after-the-first-try", "never-written", "being-written", "error"],
+    )
+    def test_retries_keys_not_written_yet(self, late, codes, left):
+        client = LateMooncake(late, codes)
+        store = MooncakeAuxObjectStore(client, None)
+        client.objects["a"] = b"x"
+        assert release_aux_keys(store, ["a", "b"], timeout_s=0.3) == left
+        assert not client.objects or left
+
+    def test_sample_owns_only_keys_it_did_not_hold(self):
+        parent = AuxSampleKeys()
+        parent.add(["p0", "p1", "pt"])
+        child = AuxSampleKeys(parent)
+        child.add(["p0", "c1", "ct"])
+        child.add(["p0", "c1", "c2", "ct2"])
+        assert parent.owned == ["p0", "p1", "pt"]
+        assert child.owned == ["c1", "ct", "c2", "ct2"]

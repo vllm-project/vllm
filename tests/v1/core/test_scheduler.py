@@ -380,26 +380,25 @@ def test_session_salt_replaces_frontend_hashes(session, salt, key_prefix, kept):
     assert (list(request.block_hashes) == hashes) == kept
     assert (request.cache_salt == salt) == kept
     other = _preprocess_session_request("o", "s")
-    assert (request.block_hashes == other.block_hashes) == (session == "s")
+    assert not set(request.block_hashes) & set(other.block_hashes)
 
 
 def test_session_requests_under_other_object_key_prefixes_share_no_blocks():
-    first = _preprocess_session_request("a", "s", key_prefix="a")
-    second = _preprocess_session_request("b", "s", key_prefix="b")
+    first = _preprocess_session_request("r", "s", key_prefix="a")
+    second = _preprocess_session_request("r", "s", key_prefix="b")
     assert not set(first.block_hashes) & set(second.block_hashes)
 
 
 @pytest.mark.parametrize(
     "segments,expected",
     [
-        (None, [(0, "w")]),
-        ([[0, "v1"], [32, "v2"], [64, None]], [(0, "v1"), (32, "v2"), (64, "w")]),
-        ([[0, "v1"], [32, "w"], [64, None]], [(0, "v1"), (32, "w")]),
-        ([[0, "v1"], [32, "v2"], [90, None]], [(0, "v1"), (32, "v2"), (80, "w")]),
+        (None, [(0, "r@w")]),
+        ([[0, "a"], [32, "b"], [64, None]], [(0, "a"), (32, "b"), (64, "r@w")]),
+        ([[0, "a"], [32, "b"], [90, None]], [(0, "a"), (32, "b"), (80, "r@w")]),
     ],
-    ids=["first-turn", "later-turn", "current-version", "past-the-prompt"],
+    ids=["first-turn", "later-turn", "past-the-prompt"],
 )
-def test_session_request_is_salted_with_its_versions_before_hashing(segments, expected):
+def test_session_request_is_salted_with_its_segments_before_hashing(segments, expected):
     request = _preprocess_session_request("r", "s", segments=segments)
     assert request.cache_salt_segments == expected
     scheduler = create_scheduler(enable_prefix_caching=True)
@@ -422,7 +421,7 @@ def test_engine_core_salts_session_requests_with_its_weight_version():
     core.set_weight_version("v2")
     request = _preprocess_session_request("r", "s")
     scheduler.add_request(request)
-    assert request.cache_salt_segments == [(0, "v2")]
+    assert request.cache_salt_segments == [(0, "r@v2")]
     assert core.get_weight_version() == "v2"
 
 
@@ -434,8 +433,9 @@ def test_engine_core_keeps_the_weight_version_its_connector_rejects():
     core = object.__new__(EngineCore)
     core.scheduler = scheduler
     core.set_weight_version("v1")
-    with pytest.raises(VLLMValidationError):
-        core.set_weight_version("")
+    for version in ("", "v@2"):
+        with pytest.raises(VLLMValidationError):
+            core.set_weight_version(version)
     assert core.get_weight_version() == "v1"
 
 

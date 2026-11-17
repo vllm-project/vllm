@@ -14,6 +14,7 @@ import numpy as np
 
 from vllm.distributed.aux_output_connector.session_objects import (
     aux_object_key,
+    aux_segment_id,
     aux_tail_key,
     session_version_segments,
 )
@@ -86,6 +87,7 @@ class AuxOutputConnectorMetadata:
     session_object_size: int = 0
     flushed_block_hashes: dict[str, PackedBlockHashes] = field(default_factory=dict)
     session_hash_starts: dict[str, int] = field(default_factory=dict)
+    session_orphans: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -182,6 +184,12 @@ class AuxOutputSchedulerConnector:
         self._session_requests: dict[str, _SessionRequest] = {}
         self._session_tails: dict[str, tuple[str, int, int]] = {}
         self._flushed_hashes: dict[str, PackedBlockHashes] = {}
+        self._written: dict[str, list[BlockHash]] = {}
+        self._listed: dict[str, set[str]] = {}
+        self._orphans: dict[str, list[str]] = {}
+
+    def _segment_id(self, request: Request) -> str:
+        return aux_segment_id(request.request_id, self._weight_version)
 
     def _session(self, request: Request) -> str | None:
         params = request.sampling_params
@@ -195,9 +203,8 @@ class AuxOutputSchedulerConnector:
 
     def add_request(self, request: Request) -> None:
         """Salt a session request's positions before any KV connector sees its
-        block hashes: with the versions of its `aux_version_segments` up to the
-        last full hash block of the prompt they cover, then with the current
-        weight version."""
+        block hashes: with its `aux_version_segments` up to the last full hash
+        block of the prompt they cover, then with its own segment id."""
         session = self._session(request)
         if session is None:
             return
@@ -207,7 +214,7 @@ class AuxOutputSchedulerConnector:
             request.sampling_params.aux_version_segments,
             request.num_prompt_tokens,
             self._block_size,
-            self._weight_version,
+            self._segment_id(request),
         )
         if segments != request.cache_salt_segments:
             request.cache_salt_segments = segments
@@ -216,14 +223,16 @@ class AuxOutputSchedulerConnector:
 
     def set_weight_version(self, weight_version: str) -> None:
         """Set the weight version of later steps; call while no step runs.
-        A running session request is named again with it from its computed
-        positions on; a waiting one from its first unhashed position, and from
-        its hit when it is scheduled."""
+        A running session request names the positions it has not computed yet
+        with it; a waiting one from its first unhashed position, and from its
+        hit when it is scheduled."""
         if self._key_prefix is not None and not (
-            isinstance(weight_version, str) and weight_version
+            isinstance(weight_version, str)
+            and weight_version
+            and "@" not in weight_version
         ):
             raise VLLMValidationError(
-                "weight version must be a non-empty string",
+                "weight version must be a non-empty string without '@'",
                 parameter="weight_version",
             )
         self._weight_version = weight_version
@@ -234,7 +243,7 @@ class AuxOutputSchedulerConnector:
             if running:
                 del request.block_hashes[computed // self._hash_block_size :]
             request.add_cache_salt_segment(
-                computed, weight_version, self._hash_block_size
+                computed, self._segment_id(request), self._hash_block_size
             )
             if running:
                 request.update_block_hashes()
@@ -324,6 +333,7 @@ class AuxOutputSchedulerConnector:
             hash_starts,
         )
         self._flushed_hashes = {}
+        metadata.session_orphans, self._orphans = self._orphans, {}
         self._retained_hashes, self._released_hashes = [], []
         self._session_tails = {}
         return metadata
@@ -357,20 +367,21 @@ class AuxOutputSchedulerConnector:
     def salt_from_hit(self, request: Request, num_hit: int) -> None:
         if self._session(request) is None:
             return
+        segment_id = self._segment_id(request)
         segments = request.cache_salt_segments
         ends = [start for start, _ in segments[1:]]
         start = next(
             (
                 max(begin, num_hit)
                 for (begin, salt), end in zip(segments, [*ends, request.num_tokens])
-                if salt != self._weight_version and end > num_hit
+                if salt != segment_id and end > num_hit
             ),
             None,
         )
         if start is not None:
             hash_size = self._hash_block_size
             del request.block_hashes[start // hash_size :]
-            request.add_cache_salt_segment(start, self._weight_version, hash_size)
+            request.add_cache_salt_segment(start, segment_id, hash_size)
             request.update_block_hashes()
 
     def cap_external_hit(
@@ -538,6 +549,7 @@ class AuxOutputSchedulerConnector:
             segment for segment in request.cache_salt_segments if segment[0] < end
         ]
         segments.append((end, None))
+        self._listed[request.request_id] = set(keys)
         return None, None, keys, segments
 
     def request_finished(self, request: Request) -> None:
@@ -556,6 +568,8 @@ class AuxOutputSchedulerConnector:
                 request, num_computed
             )
             del self._sent_hash_counts[request_id]
+        if session and request.is_finished():
+            self._release_unlisted(request)
         computed_from = self._computed_from.pop(request_id, request.num_tokens)
         num_blocks = request.num_computed_tokens // self._block_size
         if self._session(request) is not None:
@@ -589,7 +603,28 @@ class AuxOutputSchedulerConnector:
         if num_keyed <= num_sent:
             return None
         self._sent_hash_counts[request.request_id] = num_keyed
+        if request.request_id in self._session_requests:
+            self._record_written(request, num_sent, num_keyed)
         return self._pack_hashes(block_hashes[num_sent:num_keyed])
+
+    def _record_written(self, request: Request, first: int, end: int) -> None:
+        step = self._block_size // self._hash_block_size
+        self._written.setdefault(request.request_id, []).extend(
+            request.block_hashes[index]
+            for index in range(first, end)
+            if (index + 1) % step == 0
+        )
+
+    def _release_unlisted(self, request: Request) -> None:
+        listed = self._listed.pop(request.request_id, set())
+        session = self._session_requests[request.request_id].session
+        keys = (
+            aux_object_key(self._key_prefix, session, block_hash.hex())
+            for block_hash in self._written.pop(request.request_id, ())
+        )
+        orphans = [key for key in dict.fromkeys(keys) if key not in listed]
+        if orphans:
+            self._orphans[request.request_id] = orphans
 
     def reset(self) -> None:
         """Start a new auxiliary output namespace after a prefix-cache reset."""

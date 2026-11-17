@@ -15,6 +15,8 @@ from safetensors.numpy import load
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
 
 _PUT_NO_MEMORY = -200
+_NOT_READY = -703
+_NOT_FOUND = -704
 
 
 class AuxObjectStoreFullError(BlockObjectStoreError):
@@ -81,6 +83,11 @@ class MooncakeAuxObjectStore:
             f"objects from {keys[0]!r}: {code}"
         )
 
+    def remove(self, keys: Sequence[str]) -> list[int]:
+        """Remove the objects `keys`, even if read under a lease; one
+        Mooncake status per key, 0 if removed."""
+        return list(self._store.batch_remove(list(keys), True))
+
     def get(self, key: str) -> bytes | None:
         """Return the object, or `None` if it does not exist."""
         return self._store.get(key) or None
@@ -130,3 +137,46 @@ def read_aux_rows(
             )
         parts.append(rows[field])
     return np.concatenate(parts) if parts else np.empty(0)
+
+
+_REMOVE_RETRY_CODES = (_NOT_READY, _NOT_FOUND)
+
+
+class AuxSampleKeys:
+    """The objects one sample owns: the keys its responses list that neither
+    an earlier response of the sample nor its fork `parent` listed."""
+
+    def __init__(self, parent: AuxSampleKeys | None = None) -> None:
+        self._held: set[str] = set() if parent is None else set(parent._held)
+        self.owned: list[str] = []
+
+    def add(self, keys: Sequence[str]) -> None:
+        """Take the `aux_output_keys` of a response of the sample."""
+        new = [key for key in dict.fromkeys(keys) if key not in self._held]
+        self._held.update(new)
+        self.owned.extend(new)
+
+
+def release_aux_keys(
+    store: MooncakeAuxObjectStore,
+    keys: Sequence[str],
+    timeout_s: float = 600.0,
+) -> list[str]:
+    """Remove the objects `keys`; retry those not written yet for up to
+    `timeout_s` in total. Return the keys that were not removed."""
+    deadline = time.monotonic() + timeout_s
+    pending = list(keys)
+    failed = []
+    while pending:
+        retry = []
+        for key, code in zip(pending, store.remove(pending), strict=True):
+            if code in _REMOVE_RETRY_CODES:
+                retry.append(key)
+            elif code:
+                failed.append(key)
+        pending = retry
+        if pending and time.monotonic() >= deadline:
+            break
+        if pending:
+            time.sleep(0.05)
+    return failed + pending

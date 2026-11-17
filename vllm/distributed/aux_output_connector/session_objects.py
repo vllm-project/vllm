@@ -91,23 +91,28 @@ _SESSION_SALT = "aux_session:"
 _PLAIN_SALT = "aux_salt:"
 
 
+def aux_segment_id(request_id: str, weight_version: str) -> str:
+    """Name of the positions a request computes while `weight_version` is
+    current."""
+    return f"{request_id}@{weight_version}"
+
+
 def session_version_segments(
     client_segments: Sequence[Sequence] | None,
     num_prompt_tokens: int,
     block_size: int,
-    weight_version: str,
+    segment_id: str,
 ) -> tuple[int, list[tuple[int, str]]]:
     """The end of the prompt positions a session request's client
     `aux_version_segments` salt, rounded down to `block_size` before the last
-    prompt token, and the cache salt segments: the client's versions below
-    it, then `weight_version`."""
+    prompt token, and the cache salt segments: the client's segments below
+    it, then `segment_id`."""
     end = min(client_segments[-1][0], num_prompt_tokens - 1) if client_segments else 0
     end = end // block_size * block_size
     segments = [
         (start, version) for start, version in client_segments or () if start < end
     ]
-    if not segments or segments[-1][1] != weight_version:
-        segments.append((end, weight_version))
+    segments.append((end, segment_id))
     return end, segments
 
 
@@ -119,7 +124,7 @@ def salt_aux_session(
 ) -> None:
     """Fold a request's `aux_session` into its cache salt, so that only
     requests of the session compute or hit its KV blocks, and salt its
-    positions with their weight versions."""
+    positions with the segments that name them."""
     if vllm_config.aux_output_config.object_key_prefix is None:
         return
     params = request.sampling_params
@@ -134,7 +139,7 @@ def salt_aux_session(
             params.aux_version_segments,
             num_prompt_tokens,
             hash_block_size,
-            weight_version,
+            aux_segment_id(request.request_id, weight_version),
         )
     elif salt is not None and salt.startswith((_SESSION_SALT, _PLAIN_SALT)):
         salt = _PLAIN_SALT + salt
@@ -180,8 +185,8 @@ class SessionObjectWriter:
         self._put_stall_timeout_s = put_stall_timeout_s
         self._last_progress = time.monotonic()
         self._closed = threading.Event()
-        self._queue: queue.Queue[tuple[list[str], list[bytes]] | None] = queue.Queue(
-            maxsize=max_pending_batches
+        self._queue: queue.Queue[tuple[list[str], list[bytes] | None] | None] = (
+            queue.Queue(maxsize=max_pending_batches)
         )
         self._error: BaseException | None = None
         self._error_lock = threading.Lock()
@@ -213,10 +218,15 @@ class SessionObjectWriter:
     def _stalled(self) -> bool:
         return time.monotonic() - self._last_progress >= self._put_stall_timeout_s
 
-    def _write(self, batch: tuple[list[str], list[bytes]]) -> None:
+    def _write(self, batch: tuple[list[str], list[bytes] | None]) -> None:
+        keys, values = batch
+        if values is None:
+            self._store.remove(keys)
+            self._last_progress = time.monotonic()
+            return
         while True:
             try:
-                self._store.put_batch(*batch)
+                self._store.put_batch(keys, values)
             except AuxObjectStoreFullError as error:
                 if self._stalled() or self._closed.wait(_PUT_RETRY_INTERVAL_S):
                     raise BlockObjectStoreError(
@@ -240,7 +250,7 @@ class SessionObjectWriter:
                 "auxiliary output object write failed"
             ) from self._error
 
-    def _put(self, batch: tuple[list[str], list[bytes]]) -> None:
+    def _put(self, batch: tuple[list[str], list[bytes] | None]) -> None:
         if not self._queue.unfinished_tasks:
             self._last_progress = time.monotonic()
         while True:
@@ -303,6 +313,11 @@ class SessionObjectWriter:
         """Write the rows after a request's last full object."""
         fields = {**self._fields(np.array(rows)), **fields}
         self._put(([key], [save(fields)]))
+
+    def remove(self, keys: Sequence[str]) -> None:
+        """Remove objects of a request that it never returned, after the
+        writes queued before."""
+        self._put((list(keys), None))
 
     @staticmethod
     def field_rows(
