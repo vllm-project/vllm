@@ -20,19 +20,28 @@ class AsyncScheduler(Scheduler):
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         # Use the latest num of scheduled draft tokens in next step as placeholder.
         spec_token_placeholders = [-1] * scheduler_output.num_spec_tokens_to_schedule
+        pending_structured_output_tokens = (
+            scheduler_output.pending_structured_output_tokens
+        )
+        structured_output_spec_decode = (
+            scheduler_output.has_structured_output_spec_decode
+        )
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
             if request.is_prefill_chunk:
                 continue
 
-            scheduler_output.pending_structured_output_tokens |= (
-                request.use_structured_output and request.num_output_placeholders > 0
-            )
             # The request will generate num_sampled_tokens_per_step new tokens
             # plus num_spec_tokens in this scheduling step. Diffusion has no AR
             # bonus token (num_sampled_tokens_per_step == 0) — only the canvas
             # (spec) tokens.
             cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
+            if (
+                scheduler_output.has_structured_output_requests
+                and request.use_structured_output
+            ):
+                pending_structured_output_tokens |= request.num_output_placeholders > 0
+                structured_output_spec_decode |= cur_num_spec_tokens > 0
             request.num_output_placeholders += (
                 self.num_sampled_tokens_per_step + cur_num_spec_tokens
             )
@@ -43,3 +52,10 @@ class AsyncScheduler(Scheduler):
             # Set the next step index in which this request is eligible to be
             # scheduled for decode (for PP microbatching).
             request.next_decode_eligible_step = self.current_step + self.decode_stagger
+
+        scheduler_output.pending_structured_output_tokens = (
+            pending_structured_output_tokens
+        )
+        scheduler_output.has_structured_output_spec_decode = (
+            structured_output_spec_decode
+        )
