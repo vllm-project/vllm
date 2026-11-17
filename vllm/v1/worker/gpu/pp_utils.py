@@ -10,16 +10,15 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
-logger = init_logger(__name__)
+PP_POSITIONS_KEY = "pp_positions"
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
 
@@ -36,48 +35,6 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
-
-
-def check_received_tensors(
-    received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
-) -> None:
-    """Check tensors received from the previous PP stage against the persistent
-    buffers they are copied into. The per-step copy drops tensors without a
-    buffer, broadcasts mismatched trailing dimensions and rounds to the buffer's
-    dtype without an error."""
-    if missing := buffers.keys() - received.keys():
-        raise ValueError(
-            f"The previous pipeline stage does not send the intermediate tensors "
-            f"{sorted(missing)} that this stage expects."
-        )
-    if unexpected := received.keys() - buffers.keys():
-        logger.warning(
-            "PP intermediate tensors %s from the previous stage have no buffer on "
-            "this stage and are dropped. Declare them in the model's "
-            "make_empty_intermediate_tensors.",
-            sorted(unexpected),
-        )
-    for name, buffer in buffers.items():
-        tensor = received[name]
-        if tensor.shape[1:] != buffer.shape[1:]:
-            raise ValueError(
-                f"PP intermediate tensor {name!r} has per-token shape "
-                f"{tuple(tensor.shape[1:])}, but its buffer on this stage has "
-                f"{tuple(buffer.shape[1:])}."
-            )
-        src, dst = tensor.dtype, buffer.dtype
-        if src == dst or not (src.is_floating_point and dst.is_floating_point):
-            continue
-        src_info, dst_info = torch.finfo(src), torch.finfo(dst)
-        if dst_info.eps > src_info.eps or dst_info.max < src_info.max:
-            logger.warning(
-                "PP intermediate tensor %r arrives as %s but its buffer is %s, so "
-                "it loses precision at every stage boundary. Declare the dtype in "
-                "the model's make_empty_intermediate_tensors.",
-                name,
-                src,
-                dst,
-            )
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -145,17 +102,12 @@ class PPHandler:
         self.upstream_aux_keys: tuple[str, ...] = ()
         self.local_aux_keys: tuple[str, ...] = ()
         self.num_aux_hidden_states = 0
-        self.checked_received_tensors = False
+        # Whether positions depend on encoder outputs, which only the first
+        # stage has, so later stages use the first stage's positions.
+        self.relay_positions = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
-
-    def check_received_tensors(
-        self, received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
-    ) -> None:
-        if not self.checked_received_tensors:
-            check_received_tensors(received, buffers)
-            self.checked_received_tensors = True
 
     def _sample_len(self, input_batch: InputBatch) -> int:
         # Width of the sampled-token broadcast. Must be the same on all ranks.
@@ -195,6 +147,44 @@ class PPHandler:
             output_intermediate_tensors.tensors
             | {key: intermediate_tensors[key] for key in self.upstream_aux_keys}
         )
+
+    def add_positions_buffer(
+        self,
+        intermediate_tensors: IntermediateTensors,
+        max_num_tokens: int,
+        num_dims: int,
+    ) -> None:
+        """Add the relayed positions to the persistent intermediate tensors,
+        which every PP transport checks received tensors against."""
+        if not self.relay_positions:
+            return
+        intermediate_tensors[PP_POSITIONS_KEY] = torch.zeros(
+            (max_num_tokens, num_dims), dtype=torch.int64, device=self.device
+        )
+
+    def send_positions(
+        self, output_intermediate_tensors: IntermediateTensors, positions: torch.Tensor
+    ) -> IntermediateTensors:
+        """Add this step's positions to the tensors sent to the next stage."""
+        if not self.relay_positions:
+            return output_intermediate_tensors
+        # Token-major, since IntermediateTensors are sliced along dim 0.
+        token_major = positions.movedim(-1, 0).contiguous()
+        return IntermediateTensors(
+            output_intermediate_tensors.tensors | {PP_POSITIONS_KEY: token_major}
+        )
+
+    def receive_positions(
+        self,
+        intermediate_tensors: IntermediateTensors,
+        positions: torch.Tensor,
+        num_tokens: int,
+    ) -> None:
+        """Overwrite the locally prepared positions with the first stage's."""
+        if not self.relay_positions:
+            return
+        received = intermediate_tensors[PP_POSITIONS_KEY][:num_tokens]
+        positions[..., :num_tokens].copy_(received.movedim(0, -1))
 
     def add_upstream_aux_hidden_states(
         self,
