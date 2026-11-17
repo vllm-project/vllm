@@ -107,7 +107,7 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     packed_wire_segments: bool = False
-    """Packed transfer only: tensors over twice the buffer travel as dim-0
+    """Packed transfer only: tensors over the buffer travel as dim-0
     segments (`chunk_layout`). Producer and consumers must agree, so it is off
     unless the trainer asks for it; vLLM's own trainer engine does."""
     use_load_plan: bool = False

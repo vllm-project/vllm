@@ -152,13 +152,13 @@ def wire_segments(
 ) -> list[tuple[int, int]] | None:
     """Dim-0 row ranges a tensor travels as, or `None` to send it whole.
 
-    A tensor over twice the buffer (e.g. one layer's expert stack) is split
-    along dim 0 so that no side needs a buffer of its size. A tensor between
-    one and two buffers travels whole, so a chunk can reach about three
-    buffers; a tensor whose single row exceeds the buffer also travels whole.
+    A tensor over the buffer (e.g. one layer's expert stack) is split along
+    dim 0 into segments that fit it, so no side needs a buffer of its size and
+    a chunk stays under twice the buffer. A tensor whose single row exceeds
+    the buffer travels whole.
     """
     nbytes = math.prod(shape) * dtype.itemsize
-    if nbytes <= 2 * limit or len(shape) == 0 or shape[0] < 2:
+    if nbytes <= limit or len(shape) == 0 or shape[0] < 2:
         return None
     row = nbytes // shape[0]
     if row > limit:
@@ -242,7 +242,7 @@ def chunk_layout(
 ) -> ChunkLayout:
     """The chunks `specs` travel as. `segments` (both sides must agree; see
     `NCCLWeightTransferInitInfo.packed_wire_segments`) splits tensors over
-    twice the buffer along dim 0; without it the layout is `pack_tensors`'s."""
+    the buffer along dim 0; without it the layout is `pack_tensors`'s."""
     full = [(tuple(shape), dtype) for shape, dtype in specs]
     chunks: list[list[Piece]] = [[]]
     sizes: list[int] = []
@@ -294,7 +294,7 @@ def packed_nccl_broadcast_producer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
-        segments: split tensors over twice the buffer along dim 0. Both sides
+        segments: split tensors over the buffer along dim 0. Both sides
             must agree (`chunk_layout`).
 
     """
@@ -378,7 +378,7 @@ def packed_nccl_broadcast_consumer(
                     Both producer and consumer must use the same value.
         device: Device for the receive buffers. Must match the device the NCCL
                 communicator was created on (the worker's assigned device).
-        segments: tensors over twice the buffer arrive as dim-0 segments
+        segments: tensors over the buffer arrive as dim-0 segments
                  (`chunk_layout`); each is joined into one tensor of its
                  full size before `post_unpack_func` sees it.
 

@@ -875,22 +875,24 @@ class TestChunkLayout:
         assert _layout_bytes(layout, tensors) == expected
         assert all(p.rows is None for chunk in layout.chunks for p in chunk)
 
-    def test_segments_split_only_over_twice_the_buffer(self):
+    def test_segments_split_only_over_the_buffer(self):
         limit = 1000
         big = torch.randn(10, 100)  # 4000 B, rows of 400 B
-        mid = torch.randn(15, 25)  # 1500 B: between 1x and 2x, whole
+        mid = torch.randn(15, 25)  # 1500 B, rows of 100 B
+        small = torch.randn(10, 25)  # 1000 B: fits, whole
         layout = pt.chunk_layout(
-            [(big.shape, big.dtype), (mid.shape, mid.dtype)], limit, segments=True
+            [(t.shape, t.dtype) for t in (big, mid, small)], limit, segments=True
         )
-        rows = [p.rows for chunk in layout.chunks for p in chunk if p.index == 0]
-        assert rows == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
-        assert [p.rows for chunk in layout.chunks for p in chunk if p.index == 1] == [
-            None
-        ]
-        # no segment is larger than the buffer
-        assert all(
-            p.nbytes <= limit for chunk in layout.chunks for p in chunk if p.rows
-        )
+
+        def rows(i):
+            return [p.rows for chunk in layout.chunks for p in chunk if p.index == i]
+
+        assert rows(0) == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
+        assert rows(1) == [(0, 10), (10, 15)]
+        assert rows(2) == [None]
+        # no piece is larger than the buffer, so no chunk reaches twice it
+        assert all(p.nbytes <= limit for chunk in layout.chunks for p in chunk)
+        assert max(layout.sizes) < 2 * limit
         off = pt.chunk_layout([(big.shape, big.dtype)], limit)
         assert [p.rows for chunk in off.chunks for p in chunk] == [None]
 
@@ -945,8 +947,8 @@ class TestSegmentedRoundtrip:
         tensors.insert(3, torch.randint(0, 9, (5,), dtype=torch.uint8).cuda())
         tensors.append(torch.randn(30, 6, device="cuda", dtype=torch.float64))
         group = self._roundtrip(tensors, limit=512, segments=segments)
-        if segments:  # every chunk fits a few buffers
-            assert max(t.numel() for t in group.broadcasted_tensors) <= 3 * 512
+        if segments:  # every chunk stays under twice the buffer
+            assert max(t.numel() for t in group.broadcasted_tensors) < 2 * 512
 
     def test_split_tensor_is_joined_without_a_second_copy(self):
         """The consumer writes segments into one tensor of the full size:
