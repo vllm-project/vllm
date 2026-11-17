@@ -52,8 +52,8 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Prepare weights for `zentorch_dynamic_qlinear`.
 
-        Keeps weight in [N, K] layout (int8, contiguous) and converts the
-        per-channel weight scale to bf16 with shape `(N,)`.
+        Keeps weight in [N, K] layout (int8, contiguous) and the per-channel
+        weight scale as fp32 with shape `(N,)`.
         """
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
         weight = getattr(layer, w_q_name)
@@ -68,7 +68,9 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         ws = weight_scale.data
         if ws.dim() == 2 and ws.shape[-1] == 1:
             ws = ws.squeeze(-1)
-        ws = ws.to(torch.bfloat16).contiguous()
+        # Native dynamic quant emits f32 activation scales. An f32 weight
+        # scale keeps them; bf16 forces a narrowing cast on every call.
+        ws = ws.to(torch.float32).contiguous()
         assert ws.shape == (n,), (
             f"[zen_cpu] expected weight scale shape ({n},), got {tuple(ws.shape)}"
         )
