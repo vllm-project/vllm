@@ -173,12 +173,6 @@ class Hf3fsClient:
                 self.stream = torch.cuda.Stream(device=device)
             else:
                 self.stream = torch.Stream(device=device)
-            # TEMP(e2e): remove before merge.
-            logger.info(
-                "TEMP(e2e) Hf3fsClient shm copy path=%s stream=%s",
-                "cuda_ext" if self._cuda_ops is not None else "generic",
-                self.stream,
-            )
 
         except Exception:
             self._release_resources()

@@ -579,22 +579,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         ptrs = _ptrs_to_int64([cache.data_ptr() for cache in self._kv_caches.values()])
         self._kvcache_ptrs = torch.tensor(ptrs, dtype=torch.int64, device=self._device)
 
-        # TEMP(e2e): remove before merge.
-        raw_ptrs = [cache.data_ptr() for cache in self._kv_caches.values()]
-        roundtrip = [p & ((1 << 64) - 1) for p in self._kvcache_ptrs.tolist()]
-        logger.info(
-            "TEMP(e2e) kv ptrs: device=%s layers=%d >=2^63=%d/%d "
-            "first=%s last=%s int64[0]=%d roundtrip_ok=%s",
-            self._device,
-            len(raw_ptrs),
-            sum(p >= (1 << 63) for p in raw_ptrs),
-            len(raw_ptrs),
-            hex(raw_ptrs[0]),
-            hex(raw_ptrs[-1]),
-            self._kvcache_ptrs[0].item(),
-            roundtrip == raw_ptrs,
-        )
-
     def _setup_storage_clients(self):
         os.makedirs(self._storage_path, exist_ok=True)
 
