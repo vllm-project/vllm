@@ -313,7 +313,17 @@ def test_local_hit_covering_the_peer_hit_only_releases_the_pin():
 
 @pytest.mark.parametrize(
     "case",
-    ["no_hash", "no_host", "no_port", "no_engine", "short", "block_size", "groups"],
+    [
+        "no_hash",
+        "no_host",
+        "no_port",
+        "no_engine",
+        "short",
+        "block_size",
+        "groups",
+        "no_remote_prefill",
+        "remote_prefill_false",
+    ],
 )
 def test_local_precondition_miss_sends_nothing(case):
     sched = make_consumer()
@@ -329,6 +339,10 @@ def test_local_precondition_miss_sends_nothing(case):
         del params["remote_port"]
     elif case == "no_engine":
         del params["remote_engine_id"]
+    elif case == "no_remote_prefill":
+        del params["do_remote_prefill"]
+    elif case == "remote_prefill_false":
+        params["do_remote_prefill"] = False
     elif case == "block_size":
         sched.kv_cache_config.hash_block_size = BLOCK_SIZE * 2
     elif case == "groups":

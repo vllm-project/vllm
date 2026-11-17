@@ -136,6 +136,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         self, request: "Request", params: dict[str, Any]
     ) -> str | None:
         """Why this request cannot do a peer lookup, or None. No network."""
+        if not params.get("do_remote_prefill"):
+            # A hit is loaded as a remote prefill; without the flag the load
+            # would never be queued and the request would wait on it forever.
+            return "do_remote_prefill not set"
         if self._compatibility_hash is None:
             return "compatibility hash not known"
         hash_block_size = self.kv_cache_config.hash_block_size
