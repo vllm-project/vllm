@@ -12,6 +12,12 @@ from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.model_loader.reload import (
+    finish_reload,
+    record_metadata_for_reloading,
+    start_reload,
+)
+from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
@@ -766,6 +772,57 @@ def test_engram_meta_initialization_does_not_allocate_host_tables(
     assert layer.weight_scale_inv.shape == (36, 2)
     assert layer.weight.dtype == (torch.uint8 if packed_fp4 else torch.float8_e4m3fn)
     assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_engram_layerwise_reload_preserves_storage(dist_init, monkeypatch, cpu_offload):
+    """Reload FP8 values and E8M0 scale bytes without replacing host/UVA storage."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    with torch.device("cuda"):
+        table = ParallelEngramEmbedding(36, 64, (17, 19), cpu_offload=cpu_offload)
+        record_metadata_for_reloading(table)
+    params = dict(table.named_parameters())
+    pointers = {name: param.data_ptr() for name, param in params.items()}
+    loaders = {name: param.weight_loader for name, param in params.items()}
+    assert table._skip_layerwise_reload == cpu_offload
+    expected_bytes = 0 if cpu_offload else sum(p.nbytes for p in params.values())
+    assert max_layer_reload_bytes(table) == expected_bytes
+    ids = torch.tensor([[0, 17], [16, 35]], dtype=torch.int32, device="cuda")
+    out = torch.empty(2, 2, 64, dtype=torch.bfloat16, device="cuda")
+
+    for value in (1, 2, 1):
+        weight = torch.full((36, 64), value, dtype=torch.float32).to(
+            torch.float8_e4m3fn
+        )
+        scales = torch.full((36, 2), 127 + value, dtype=torch.uint8)
+        start_reload(table)
+        for name, param in table.named_parameters():
+            if cpu_offload:
+                assert param is params[name]
+                assert param.device.type == "cpu"
+                assert param.is_pinned()
+                assert param.data_ptr() == pointers[name]
+                assert param.weight_loader is loaders[name]
+            else:
+                assert param.is_meta
+                assert param.weight_loader.__name__ == "online_process_loader"
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(
+            table.weight_scale_inv, scales.view(torch.float8_e8m0fnu)
+        )
+        finish_reload(table, model_config=None, device=torch.device("cuda"))
+
+        for name, expected in (("weight", weight), ("weight_scale_inv", scales)):
+            param = getattr(table, name)
+            assert param is params[name]
+            assert param.data_ptr() == pointers[name]
+            assert param.weight_loader is loaders[name]
+            assert torch.equal(
+                param.view(torch.uint8).cpu(), expected.view(torch.uint8)
+            )
+        table.lookup(ids, out)
+        expected = _reference_lookup(weight.cuda(), scales.cuda(), ids, 0, 36)
+        assert torch.equal(out, expected)
 
 
 @pytest.mark.parametrize(

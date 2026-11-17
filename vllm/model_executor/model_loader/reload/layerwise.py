@@ -118,6 +118,9 @@ def initialize_layerwise_reload(
     model._do_torchao_reload = False
 
     for layer in model.modules():
+        if getattr(layer, "_skip_layerwise_reload", False):
+            continue
+
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized

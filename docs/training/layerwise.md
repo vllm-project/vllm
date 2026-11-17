@@ -135,6 +135,11 @@ finalize_layerwise_processing(model, llm.model_config)
 
 ## Troubleshooting Excessive Memory Usage
 
+DeepSeek-V4.1 CPU-offloaded Engram tables are updated directly in their existing
+host storage by their original weight loaders. Layerwise reload does not stage
+these tables on the GPU, and their post-load hooks still run when the update
+finishes. This exception does not apply to GPU-resident or peer-HBM Engram tables.
+
 Layerwise reloading allows users to incrementally load and process weights as they are loaded into the model. This system relies on buffering layer weights on device until all weights of a layer have been loaded. However, without offloading, this approach necessarily causes excessive buffering if weights are loaded out of order.
 
 For this reason, users must take care as to the order of weights when they are reloading into the model. Weight should be loaded "in order", meaning that each layer's weights are fully loaded before beginning to load the next layer's weights. "Out of order" loading can cause layer weights to stay buffered while other layer weights are loading, leading to excessive memory usage. In the example below, q_proj, k_proj, v_proj, and up_proj are all buffered at the same time, using more memory than if up_proj was loaded after q_proj, k_proj and v_proj.
