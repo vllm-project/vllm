@@ -316,19 +316,14 @@ class MultiComponentSpec(KVCacheSpec):
     """A page made of named components, each with its own spec.
 
     Planning and allocation see one page. `split` views its components, and
-    TP transfers slice each component with its own spec. Components are packed
-    one of two ways, shown for components K and V of a page with two states.
-
-    Back to back in the page (the default): each component is its own
-    `[H, N, C]`, stored as the page stores its heads and states and aligned
-    to `component_alignment`.
+    TP transfers slice each component with its own spec. The components are
+    back to back in the page: each is its own `[H, N, C]`, stored as the page
+    stores its heads and states and aligned to `component_alignment`. For
+    components K and V of a page with two states:
 
         | K state 0 | K state 1 | V state 0 | V state 1 |
 
-    Side by side in every state (`components_per_state`): a state holds the
-    heads of each component in turn.
-
-        | K state 0 | V state 0 | K state 1 | V state 1 |
+    A subclass that packs its components another way overrides `split`.
     """
 
     component_specs: tuple[tuple[str, KVCacheSpec], ...] = field(
@@ -341,10 +336,6 @@ class MultiComponentSpec(KVCacheSpec):
         return dict(self.component_specs)
 
     @property
-    def components_per_state(self) -> bool:
-        return False
-
-    @property
     def component_alignment(self) -> int:
         """Byte alignment of each component within the page."""
         return 1
@@ -353,19 +344,11 @@ class MultiComponentSpec(KVCacheSpec):
     def num_heads(self) -> int:
         return 1
 
-    def get_num_kernel_states(self, kernel_block_size: int) -> int:
-        if not self.components_per_state:
-            return super().get_num_kernel_states(kernel_block_size)
-        first = next(iter(self.components.values()))
-        return first.get_num_kernel_states(kernel_block_size)
-
     @property
     def state_content_size_bytes(self) -> int:
         return sum(
             round_up(
-                spec.num_heads
-                * (1 if self.components_per_state else spec.num_states)
-                * spec.state_content_size_bytes,
+                spec.num_heads * spec.num_states * spec.state_content_size_bytes,
                 self.component_alignment,
             )
             for spec in self.components.values()
@@ -375,36 +358,31 @@ class MultiComponentSpec(KVCacheSpec):
         """Byte `[B, H, N, C]` views of the components of `cache`, a byte
         `[B, H, N, C]` page view of this spec."""
         assert cache.element_size() == 1, "split takes a byte page view"
-        per_state = self.components_per_state
-        assert not per_state or cache.shape[1] == 1
-        # The dims in the order they are stored in: states of each
-        # component's heads, or as the page stores its own.
-        stored = (
-            [0, 2, 1, 3]
-            if per_state
-            else sorted(range(4), key=cache.stride, reverse=True)
-        )
-        logical = [stored.index(dim) for dim in range(4)]
-        # The dims of each component, in the bytes the components follow each
-        # other in: a state, or the page.
-        own = stored[2:] if per_state else stored[1:]
-        flat = cache.permute(stored)
-        flat = flat.view(*flat.shape[: 4 - len(own)], -1)
+        num_blocks, _, page_states, _ = cache.shape
+        block_stride, head_stride, state_stride, _ = cache.stride()
         tokens = (
-            cache.shape[2] * self.tokens_per_state
+            page_states * self.tokens_per_state
             if self.tokens_per_state > 0
             else self.block_size
         )
+        # Each component is a dense `[H, N, C]` at its offset in every block,
+        # with its heads and states in the order the page stores its own.
+        layout = (
+            KVCacheLayout.LBHNC if head_stride >= state_stride else KVCacheLayout.LBNHC
+        )
         views = {}
-        offset = 0
+        offset = cache.storage_offset()
         for name, spec in self.components.items():
-            shape = (0, spec.num_heads, spec.get_num_kernel_states(tokens), -1)
-            size = spec.state_content_size_bytes * prod(shape[dim] for dim in own[:-1])
-            view = flat[..., offset : offset + size].unflatten(
-                -1, [shape[dim] for dim in own]
+            _, heads, states, content = compute_layer_kv_cache_shape_bytes(
+                spec, 1, tokens
             )
-            views[name] = view.permute(logical)
-            offset += round_up(size, self.component_alignment)
+            _, *strides = compute_layout_strides(
+                spec, 1, 1, layout, tokens, (None, block_stride, None, None, None)
+            )
+            views[name] = view = cache.as_strided(
+                (num_blocks, heads, states, content), strides, offset
+            )
+            offset += round_up(view[0].numel(), self.component_alignment)
         return views
 
     def slice_for_tp_transfer(self, cache: torch.Tensor) -> dict[str, torch.Tensor]:

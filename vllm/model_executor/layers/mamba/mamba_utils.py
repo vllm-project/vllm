@@ -357,10 +357,25 @@ class ConvComponentSpec(MultiComponentSpec):
             for name, size in self.parts
         }
 
+    def get_num_kernel_states(self, kernel_block_size: int) -> int:
+        return 1 if self.dim_first else self.state_len
+
     @property
-    def components_per_state(self) -> bool:
-        # (state_len, dim) holds every part's channels in each state.
-        return not self.dim_first
+    def state_content_size_bytes(self) -> int:
+        if self.dim_first:
+            return super().state_content_size_bytes
+        return sum(size for _, size in self.parts) * self.element_bytes
+
+    def split(self, cache: torch.Tensor) -> dict[str, torch.Tensor]:
+        if self.dim_first:
+            return super().split(cache)
+        # (state_len, dim): every state holds each part's channels in turn.
+        sizes = [size * self.element_bytes for _, size in self.parts]
+        parts = cache.squeeze(1).split(sizes, dim=-1)
+        return {
+            name: part.unflatten(-1, (size, -1)).transpose(1, 2)
+            for (name, size), part in zip(self.parts, parts)
+        }
 
 
 def create_conv_temporal_state_spec(

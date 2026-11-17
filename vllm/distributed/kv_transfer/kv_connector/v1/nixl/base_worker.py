@@ -119,6 +119,11 @@ def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     )
 
 
+def _first_block(views: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """A layer's `slice_for_tp_transfer` views, of its first block alone."""
+    return {name: view[:1] for name, view in views.items()}
+
+
 @dataclass(slots=True)
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
@@ -206,6 +211,13 @@ class NixlBaseConnectorWorker:
     _physical_blocks_per_logical_kv_block: int
     _logical_num_blocks: int
 
+    @property
+    def transfer_kv_cache_layout(self) -> str:
+        """The layout of the blocks that transfer: the host buffer's, if any."""
+        if self.use_host_buffer:
+            return self.host_buffer_kv_cache_layout
+        return self.kv_cache_layout
+
     def _transfer_block(
         self,
         spec: KVCacheSpec,
@@ -263,6 +275,10 @@ class NixlBaseConnectorWorker:
         group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
         layout = KVCacheLayout[nixl_agent_meta.kv_cache_layout].layer_view_order
         remote_split = self._remote_block_splits.get(nixl_agent_meta.engine_id, 1)
+        remote_views_by_layer = {
+            name: _first_block(deserialize_layer_meta_tensors(views))
+            for name, views in nixl_agent_meta.layer_meta_tensors.items()
+        }
         all_ranges = []
         for local, group, remote in regions:
             name = next(
@@ -271,33 +287,24 @@ class NixlBaseConnectorWorker:
                 if group_by_layer.get(name) == group and name in self._layer_specs
             )
             spec = self._layer_specs[name]
+            # Recurrent state blocks move whole; token blocks move as the
+            # smaller blocks both sides can address.
             ssm = _is_ssm_spec(self._group_spec_types[group])
-            ratio = 1 if ssm else block_size_ratio
+            ratio, split = (1, 1) if ssm else (block_size_ratio, remote_split)
             block_len = self.block_len_per_layer[local] // ratio
-            if name not in nixl_agent_meta.layer_meta_tensors:
+            if name not in remote_views_by_layer:
                 raise ValueError(f"The remote advertised no views of {name!r}.")
-            remote_views = {
-                component: view[:1]
-                for component, view in deserialize_layer_meta_tensors(
-                    nixl_agent_meta.layer_meta_tensors[name]
-                ).items()
-            }
-            # Blocks of the remote's layout and block size land where they
-            # belong. Others land in the remote's byte order, in a contiguous
-            # block, and are reordered after the transfer.
+            remote_views = remote_views_by_layer[name]
             layer_views, contiguous = self._layer_views.get(name, (None, True))
+            # Blocks of our layout and block size land where they belong.
+            # Others land in the remote's byte order, in a contiguous block,
+            # and are reordered after the transfer.
             if (
                 layer_views is not None
-                and ratio == 1
-                and (ssm or remote_split == 1)
-                and nixl_agent_meta.kv_cache_layout
-                == (
-                    self.host_buffer_kv_cache_layout
-                    if self.use_host_buffer
-                    else self.kv_cache_layout
-                )
+                and ratio == split == 1
+                and nixl_agent_meta.kv_cache_layout == self.transfer_kv_cache_layout
             ):
-                views = {component: view[:1] for component, view in layer_views.items()}
+                views = _first_block(layer_views)
             elif not contiguous:
                 raise NotImplementedError(
                     f"The blocks of {name!r} are not contiguous, so the remote's "
@@ -347,9 +354,7 @@ class NixlBaseConnectorWorker:
                 remote_block_len = max(map(view_end, remote_views.values()))
 
             if ranges_by_rank and remote is not None and contiguous:
-                remote_len = nixl_agent_meta.block_lens[remote] // (
-                    1 if ssm else remote_split
-                )
+                remote_len = nixl_agent_meta.block_lens[remote] // split
                 # Page padding follows the shards of a re-sharded block.
                 padded = not same_block and spec.page_size_padded is not None
                 if remote_len < remote_block_len or (
@@ -1644,9 +1649,7 @@ class NixlBaseConnectorWorker:
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             block_strides=self.block_stride_per_layer,
-            kv_cache_layout=self.kv_cache_layout
-            if not self.use_host_buffer
-            else self.host_buffer_kv_cache_layout,
+            kv_cache_layout=self.transfer_kv_cache_layout,
             block_size=self.block_size,
             attn_backend_name=self.backend_name,
             physical_blocks_per_group=self._physical_blocks_per_group,
@@ -2308,11 +2311,7 @@ class NixlBaseConnectorWorker:
             assert not self.use_host_buffer, (
                 "Heterogeneous block sizes are not supported with host buffer"
             )
-        kv_cache_layout = (
-            self.kv_cache_layout
-            if not self.use_host_buffer
-            else self.host_buffer_kv_cache_layout
-        )
+        kv_cache_layout = self.transfer_kv_cache_layout
         # The layout orders a block's heads and tokens, which a single head
         # (e.g. MLA's latent) does not distinguish.
         multi_head = any(
