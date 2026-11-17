@@ -153,6 +153,7 @@ class _RegionPairs:
     # SSM descriptors are built, and its PLE region (set by _pair_ssm_regions).
     remote_ssm_regions: list[int] | None = None
     remote_ple_region: int | None = None
+    remote_group_for_local: list[int] | None = None
 
 
 @dataclass(slots=True)
@@ -567,6 +568,7 @@ class NixlBaseConnectorWorker:
         triples: dict[tuple[int, int, int], None] = {}
         layers: set[str] = set()
         groups_match = True
+        remote_groups_by_local: dict[int, set[int]] = defaultdict(set)
         for layer_name, remote_regions in remote_regions_by_layer.items():
             local_regions = self._regions_by_layer.get(layer_name)
             if local_regions is None:
@@ -583,6 +585,8 @@ class NixlBaseConnectorWorker:
                     f"regions on engine {engine_id} and {len(local_regions)} here."
                 )
             group = group_by_layer[layer_name]
+            if layer_name in remote_layer_groups:
+                remote_groups_by_local[group].add(remote_layer_groups[layer_name])
             layers.add(layer_name)
             # Block ids are listed per group, so the group numbers must match;
             # a region shared by several groups (-1) cannot show that.
@@ -622,6 +626,19 @@ class NixlBaseConnectorWorker:
             partner=partner,
             groups_match=groups_match,
         )
+        if (
+            not groups_match
+            and self.kv_cache_config.hisparse_host_num_blocks is not None
+            and self._TRANSFER_MODE == "pull"
+            and all(
+                len(remote_groups_by_local[group]) == 1
+                for group in range(len(self.kv_cache_config.transfer_groups))
+            )
+        ):
+            pairs.remote_group_for_local = [
+                next(iter(remote_groups_by_local[group]))
+                for group in range(len(self.kv_cache_config.transfer_groups))
+            ]
         if self._has_mamba:
             self._pair_ssm_regions(pairs, engine_id)
         return pairs
@@ -633,7 +650,7 @@ class NixlBaseConnectorWorker:
         regions are listed in the order of the local SSM regions they pair
         with, so identical layouts keep identical descriptor lists.
         """
-        if not pairs.groups_match:
+        if not pairs.groups_match and pairs.remote_group_for_local is None:
             # Region-mapped reads, the only fallback, support pure MLA alone.
             raise NotImplementedError(
                 f"Engine {engine_id} puts Mamba/SSM hybrid KV layers in other "
@@ -759,7 +776,7 @@ class NixlBaseConnectorWorker:
         if self._is_csa_linear:
             ple_groups = [
                 (index, group)
-                for index, group in enumerate(kv_cache_config.kv_cache_groups)
+                for index, group in enumerate(kv_cache_config.transfer_groups)
                 if group.layer_names
                 and all(
                     isinstance(spec, MambaSpec) and spec.tp_replicated
@@ -1954,7 +1971,17 @@ class NixlBaseConnectorWorker:
         self.region_mem_types = region_mem_types
         self._mixed_mem_types = len(set(region_mem_types)) > 1
         if self._has_mamba:
-            self.region_num_blocks = [self.num_blocks] * self.num_regions
+            self.region_num_blocks = [
+                count
+                if any(
+                    self.kv_cache_config.transfer_groups[group].host_resident
+                    for group in groups
+                )
+                else self.num_blocks
+                for count, groups in zip(
+                    self.region_num_blocks, region_groups, strict=True
+                )
+            ]
 
         self._set_region_layers(region_layers)
         self._packed_member_layouts = packed_member_layouts
@@ -1964,9 +1991,11 @@ class NixlBaseConnectorWorker:
 
         self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
-            assert self.use_mla and not self._has_mamba, (
-                "Mixed-device KV registration is only supported for MLA "
-                "models without Mamba layers."
+            assert (self.use_mla and not self._has_mamba) or (
+                self.kv_cache_config.hisparse_host_num_blocks is not None
+            ), (
+                "Mixed-device KV registration requires an MLA model without "
+                "Mamba layers or an explicit HiSparse host pool."
             )
         for mem_type in sorted(set(region_mem_types)):
             if mem_type == "DRAM" and self._skip_dram_xfer:
@@ -2413,6 +2442,10 @@ class NixlBaseConnectorWorker:
                     )
                 ]
             )
+            if self._has_mamba:
+                desc_is_dram = np.concatenate(
+                    [desc_is_dram, np.zeros(int(mamba[:, 4].sum()), dtype=bool)]
+                )
             assert len(desc_is_dram) == blocks_data[:, 4].sum()
             desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
             dram_idx = np.where(desc_is_dram)[0]

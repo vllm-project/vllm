@@ -26,6 +26,8 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import clear_layer_kv_caches
 
+from ...utils import create_new_process_for_each_test
+
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
     reason="QSA kernels require CUDA and Triton",
@@ -791,6 +793,54 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(actual_tensor, expected_tensor)
     torch.testing.assert_close(actual_k_work, expected_k_work)
+
+
+@requires_qsa_kernels
+@create_new_process_for_each_test("spawn")
+def test_qsa_sparse_attention_warmup_covers_different_cache_pools() -> None:
+    """Host and resident pool sizes must reuse the warmed logical-index kernel."""
+    from vllm.triton_utils import triton
+
+    torch.manual_seed(7)
+    # The packed selection's final column contains the valid count.
+    q = torch.randn(3, 24, 64, device="cuda", dtype=torch.bfloat16)
+    gate = torch.randn_like(q)
+    cache = torch.randn(17, 16, 2, 128, device="cuda", dtype=q.dtype)
+    block_table = torch.zeros(2, 1, device="cuda", dtype=torch.int32)
+    requests = torch.tensor([0, 1, 1], device="cuda", dtype=torch.int32)
+    indices = torch.full((3, 32), -1, device="cuda", dtype=torch.int32)
+    indices[:, :16] = torch.arange(16, device="cuda")
+    indices[:, -1] = 16
+    k_cache, v_cache = cache.split(64, dim=-1)
+    expected = _qsa_sparse_paged_attention_reference(
+        q, k_cache, v_cache, indices[:, :-1], block_table, requests, 64**-0.5
+    ) * torch.sigmoid(gate)
+
+    qsa_ops.warmup_qsa_sparse_paged_attention(
+        cache.transpose(1, 2),
+        block_table,
+        num_query_heads=24,
+        selection_width=31,
+    )
+
+    def fail_compile(**kwargs):
+        pytest.fail(f"QSA compiled after warmup: {kwargs.get('fn')}")
+
+    # Restore Triton's compilation observer after checking the runtime calls.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(triton.knobs.runtime, "jit_post_compile_hook", fail_compile)
+        for num_blocks in (16, 1, 17):
+            actual = qsa_ops.qsa_sparse_paged_attention(
+                q,
+                k_cache[:num_blocks],
+                v_cache[:num_blocks],
+                indices,
+                block_table,
+                requests,
+                use_prefill_config=True,
+                output_gate=gate,
+            )
+            torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
 @requires_qsa_kernels

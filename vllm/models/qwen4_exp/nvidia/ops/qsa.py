@@ -10,7 +10,6 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
-    triton_scalar_specialization_rep,
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8
 from vllm.platforms import current_platform
@@ -71,7 +70,7 @@ def _is_sm90() -> bool:
     return current_platform.get_device_capability() == (9, 0)
 
 
-@triton.jit(do_not_specialize=["num_rows", "num_requests"])
+@triton.jit(do_not_specialize=["num_rows", "num_requests", "num_cache_blocks"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
     k_cache_ptr,
@@ -908,9 +907,8 @@ def warmup_qsa_sparse_paged_attention(
         for use_prefill_config in (False, True)
     }
 
-    # Scalars constant per deployment get their real values (their divisibility
-    # specialization is wanted); the batch-varying ones are do_not_specialize'd
-    # on the kernels, so any value here compiles the only variant.
+    # Preserve stride specialization. Batch and cache-pool sizes are runtime
+    # bounds, so do_not_specialize lets warmup cover their different values.
     num_rows = 16
     num_requests = 16
     q_ptr = TritonWarmupTensor(
@@ -952,7 +950,7 @@ def warmup_qsa_sparse_paged_attention(
     )
     head_stride = head_dim
     row_stride = num_query_heads * head_dim
-    num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
+    num_cache_blocks = kv_cache.shape[0]
 
     warmed: list[tuple[int | str, ...]] = []
     for block_n, warps, num_tiles, num_splits in sorted(profiles):

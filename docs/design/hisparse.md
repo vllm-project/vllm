@@ -59,10 +59,44 @@ vllm serve QSA_MODEL \
 ```
 
 The device layout resolves to `BLNHC`, so one copy row holds a token's K and V
-for every local K/V head. Compressed indexer keys, raw-key rings and recurrent
-state stay GPU-resident. With prefix caching, prefixes are reused at whole
-scheduler-page boundaries; matching tokens past the boundary are recomputed.
-P/D disaggregation and decode context parallelism are not supported for QSA.
+for every local K/V head. HiSparse leaves compressed indexer keys, raw-key rings
+and recurrent state in their normal GPU cache groups. With prefix caching,
+prefixes are reused at whole scheduler-page boundaries; matching tokens past
+the boundary are recomputed.
+
+QSA does not yet implement decode context parallelism, even without HiSparse.
+The current HiSparse configuration also rejects DCP.
+
+For NIXL pull P/D, keep HiSparse disabled on P and compose `NixlConnector`
+with `HiSparseConnector` on D. Set `VLLM_KV_CACHE_LAYOUT=BLNHC` on both endpoints,
+use matching tensor-parallel degrees and block sizes, and keep PP, PCP and DCP
+at 1. Follow the [NIXL setup guide](../features/nixl_connector_usage.md) for
+the prefiller and proxy; use this KV transfer configuration on D:
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_buffer_device": "cuda",
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+      {
+        "kv_connector": "HiSparseConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"host_pool_gib": 8}
+      }
+    ]
+  }
+}
+```
+
+NIXL registers main KV in host memory and the indexer, raw-key rings and
+recurrent state in GPU memory. It pairs transferable layers across P and D
+to account for HiSparse's split cache groups. Each local transfer group must
+map to one remote group; ambiguous hybrid mappings are rejected. Resident and
+hot groups do not participate in the P/D transfer.
 
 ## Ownership
 
@@ -167,17 +201,12 @@ behind it.
 
 ## P/D import target
 
-The decoder chooses the landing target once per request from the normal cache
-admission calculation. If the complete imported prefix fits the device pools,
-NIXL transfers it directly into resident GPU pages. Otherwise, if the fixed
-host-backed GPU footprint and host source blocks fit, the request imports into
-the host tier. There is no context-length threshold or other heuristic, and a
-request waiting for capacity retains its choice across admission retries.
-
-A host import reads through a bounded decoder-GPU staging pool before copying
-into registered host memory. Pages needed immediately are mirrored into their
-resident destinations during that copy. Both landing targets then use the same
-fused decode resolver described above.
+For supported P/D configurations, NIXL imports offloaded main KV into the host
+tier. After an import completes, the coordinator schedules host-to-device
+copies for the tail page and promotes additional imported pages using free
+GPU blocks above the transition watermark. Promoted pages retain their host
+backing and follow the normal residency policy. Indexer KV is transferred to
+its GPU cache group.
 
 ## Indexer KV offloading
 
@@ -190,8 +219,7 @@ The two prefix sources can have different hit lengths. When the HiSparse host
 prefix extends beyond the GPU-resident indexer prefix, the scheduler asks
 `OffloadingConnector` to restore only the missing indexer suffix, capped at the
 host prefix boundary. If that suffix is unavailable, all groups fall back to
-the shorter prefix they share. NIXL P/D transfers continue to place indexer KV
-directly in its GPU group.
+the shorter prefix they share.
 
 ## Spill transaction
 
