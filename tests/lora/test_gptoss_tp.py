@@ -6,7 +6,11 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    _triton_kernel_moe_supports_current_device,
+)
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_triton_kernels
 
 from ..utils import multi_gpu_test
 
@@ -157,14 +161,24 @@ def test_gpt_oss_lora(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @pytest.mark.parametrize(
-    "mxfp4_use_marlin",
+    "mxfp4_moe_backend",
     [
-        False,
+        "auto",
         pytest.param(
-            True,
+            "marlin",
             marks=pytest.mark.skipif(
                 current_platform.is_rocm() or current_platform.is_xpu(),
                 reason="marlin not supported",
+            ),
+        ),
+        pytest.param(
+            "triton_unfused",
+            marks=pytest.mark.skipif(
+                not (
+                    has_triton_kernels()
+                    and _triton_kernel_moe_supports_current_device()
+                ),
+                reason="triton_unfused backend not supported on this device",
             ),
         ),
     ],
@@ -172,7 +186,7 @@ def test_gpt_oss_lora(
 def test_gpt_oss_lora_tp2(
     gptoss20b_lora_files,
     fully_sharded_loras,
-    mxfp4_use_marlin,
+    mxfp4_moe_backend,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _enable_deterministic_lora_shrink(monkeypatch)
@@ -191,8 +205,8 @@ def test_gpt_oss_lora_tp2(
         gpu_memory_utilization=0.8,
         fully_sharded_loras=fully_sharded_loras,
         enable_expert_parallel=not fully_sharded_loras,
-        moe_backend="marlin" if mxfp4_use_marlin else "auto",
-        linear_backend="marlin" if mxfp4_use_marlin else "auto",
+        moe_backend=mxfp4_moe_backend,
+        linear_backend="marlin" if mxfp4_moe_backend == "marlin" else "auto",
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=False,
         ),

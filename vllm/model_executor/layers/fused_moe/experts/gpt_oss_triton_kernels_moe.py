@@ -60,6 +60,8 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
         # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
         return on_gfx9() or on_gfx1x()
+    if p.is_xpu():  # noqa: SIM103
+        return True
     return False
 
 
@@ -477,6 +479,120 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
     _routing.sort_tokens = _sort_tokens_pow2
 
 
+def _make_default_opt_flags_xpu(
+    out_dtype,
+    lhs_dtype,
+    rhs_dtype,
+    precision_config,
+    m,
+    n,
+    k,
+    routing_data,
+    can_use_persistent_tma,
+    can_use_fused_scatter,
+    enforce_bitwise_invariance,
+    epilogue_effective_itemsize,
+    constraints,
+):
+    """matmul_ogs tile selection for Intel GPUs.
+
+    triton_kernels only ships NVIDIA and AMD heuristics, and both read
+    `torch.cuda` device properties. This picks conservative tiles instead: no
+    TMA (hence no persistent kernel), no split_k, and `block_n`/`block_k`
+    capped at 128 so an MXFP4 tile fits Xe shared local memory.
+    """
+    from triton_kernels.matmul_ogs_details.opt_flags import OptFlags
+
+    if routing_data is None:
+        tokens_per_expt = m
+    elif routing_data.expected_tokens_per_expt is None:
+        tokens_per_expt = max(1, m // routing_data.n_expts_tot)
+    else:
+        tokens_per_expt = routing_data.expected_tokens_per_expt
+
+    if constraints.get("block_m", None):
+        block_m = constraints["block_m"]
+    elif enforce_bitwise_invariance:
+        block_m = 128
+    else:
+        block_m = max(16, min(triton.next_power_of_2(tokens_per_expt), 128))
+
+    block_n = max(16, min(128, triton.next_power_of_2(n)))
+    block_k = constraints.get("block_k", None) or max(
+        32, min(128, triton.next_power_of_2(k)) if k is not None else 128
+    )
+
+    return OptFlags(
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+        num_warps=max(block_m * block_n // 4096, 4),
+        num_stages=2,
+        group_m=8,
+        xcd_swizzle=1,
+        w_cache_modifier=None,
+        split_k=1,
+        is_persistent=False,
+        fused_scatter=can_use_fused_scatter,
+        idle_sms=0,
+        epilogue_subtile=constraints.get("epilogue_subtile", None) or 1,
+        arch=None,
+        target_kernel_kwargs=dict(),
+    )
+
+
+def _patch_opt_flags_for_xpu() -> None:
+    """Route matmul_ogs tile selection to `_make_default_opt_flags_xpu`.
+
+    `make_opt_flags` asserts on any backend that is not cuda or hip, and
+    `matmul_ogs` binds it by value at import time, so the patch has to land on
+    the `matmul_ogs` module attribute.
+    """
+    if not current_platform.is_xpu():
+        return
+
+    import triton_kernels.matmul_ogs as matmul_ogs
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+
+    if getattr(matmul_ogs, "_vllm_xpu_opt_flags", False):
+        return
+
+    def make_opt_flags_xpu(
+        out_dtype,
+        lhs_dtype,
+        rhs_dtype,
+        precision_config,
+        m,
+        n,
+        k,
+        routing_data,
+        can_use_persistent_tma,
+        can_use_fused_scatter,
+        epilogue_effective_itemsize,
+    ):
+        if opt_flags._opt_flags is not None:
+            assert not opt_flags._opt_flags_constraints
+            return opt_flags._opt_flags
+        return _make_default_opt_flags_xpu(
+            out_dtype,
+            lhs_dtype,
+            rhs_dtype,
+            precision_config,
+            m,
+            n,
+            k,
+            routing_data,
+            can_use_persistent_tma,
+            can_use_fused_scatter,
+            precision_config.enforce_bitwise_invariance,
+            epilogue_effective_itemsize,
+            opt_flags._opt_flags_constraints,
+        )
+
+    matmul_ogs.make_opt_flags = make_opt_flags_xpu
+    matmul_ogs._vllm_xpu_opt_flags = True
+
+
 triton_kernels_version = get_triton_kernels_version()
 
 # tk 3.8: combine via w2 scatter + topk sum instead of index_add (RDNA only).
@@ -536,6 +652,8 @@ if triton_kernels_version is not None:
             _patch_make_bitmatrix_metadata()
         elif triton_kernels_version == "3.5.1":
             _patch_legacy_routing_for_nonpow2_topk()
+
+        _patch_opt_flags_for_xpu()
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "

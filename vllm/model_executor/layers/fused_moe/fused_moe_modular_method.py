@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
@@ -109,8 +110,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
