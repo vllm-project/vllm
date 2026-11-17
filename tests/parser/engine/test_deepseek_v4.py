@@ -324,12 +324,13 @@ class TestNonStringArgValueConversions:
         return calls
 
     @staticmethod
-    def _html_call(attr: str) -> str:
+    def _html_call(attr: str, path_first: bool = True) -> str:
         value = TestNonStringArgValueConversions._HTML_LINE * 200
+        path = f"{_param('path', 'true', 'index.html')}\n" if path_first else ""
         return (
             f"{DSML_TOOL_START}"
             f"{DSML_INVOKE_PREFIX}write_file{DSML_INVOKE_NAME_END}\n"
-            f"{_param('path', 'true', 'index.html')}\n"
+            f"{path}"
             f'<｜DSML｜parameter name="content"{attr}>{value}{_PARAM_CLOSE}\n'
             f"{DSML_INVOKE_END}{DSML_TOOL_END}"
         )
@@ -365,6 +366,36 @@ class TestNonStringArgValueConversions:
         assert json.loads(collect_tool_arguments(results)) == {
             "path": "index.html",
             "content": self._HTML_LINE * 200,
+        }
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_markup_only_parameter_non_streaming(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr, path_first=False)
+
+        _, _, tool_calls = DeepSeekV4Parser(mock_tokenizer).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert tool_calls is not None
+        assert json.loads(tool_calls[0].arguments) == {"content": self._HTML_LINE * 200}
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_markup_only_parameter_streaming(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr, path_first=False)
+        chunks = [text[i : i + 16] for i in range(0, len(text), 16)]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": self._HTML_LINE * 200
         }
         assert len(count_arg_conversions) <= 5
 
