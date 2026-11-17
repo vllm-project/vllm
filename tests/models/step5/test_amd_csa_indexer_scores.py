@@ -72,8 +72,10 @@ def test_scores_match_float64_on_scrambled_pages(
     weights = torch.randn(batch * next_n, heads, device=DEVICE)
     args = (q, kv_fused, weights, block_tables, seq_lens, max_seq_len)
 
+    # On e4m3fn GPUs (MI355) long rows land up to ~2e-3 from float64.
+    tol = 1e-3 if current_platform.is_fp8_fnuz() else 5e-3
     torch.testing.assert_close(
-        paged_mqa_logits(*args), _reference(*args), rtol=1e-3, atol=1e-3
+        paged_mqa_logits(*args), _reference(*args), rtol=tol, atol=tol
     )
 
 

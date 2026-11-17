@@ -1356,7 +1356,7 @@ steps:
   - vllm/platforms/rocm.py
   - tests/models/step5/test_amd_csa_indexer_scores.py
   commands:
-  # Only gfx942 is fnuz, so the MI355 Step5 step never compiles this path.
+  # MI355 runs this test in the Step5 step; this step covers the gfx942 fnuz path.
   - pytest -v -s models/step5/test_amd_csa_indexer_scores.py
 
 - label: ":amd: (MI300 DPX) Kimi K3" # TBD
