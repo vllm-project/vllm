@@ -570,7 +570,7 @@ def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MOETensors:
     a: torch.Tensor
     w1: torch.Tensor
@@ -602,7 +602,7 @@ class MOETensors:
         )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MOETensors8Bit(MOETensors):
     # quantized
     a_q: torch.Tensor | None = None  # a -> a_q
