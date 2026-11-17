@@ -1328,7 +1328,7 @@ presets:
 
       **Tool calling and reasoning** are on in this preset. Under Dynamo the builder renders `--dyn-tool-call-parser kimi_k3`, `--dyn-reasoning-parser kimi_k3` and vLLM's `--reasoning-parser kimi_k3`, and the preset adds `--dyn-enable-structural-tag`: the flags of the lane's accuracy runs.
 
-      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it (recompute on a failed store load, the NIXL KV buffer on the GPU, the 60 s lookup timeout, store lookups started on arrival, cross-layer blocks and store offload off). Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode and session affinity (the builder renders round-robin).
+      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it (recompute on a failed store load, the NIXL KV buffer on the GPU, the 60 s lookup timeout, store lookups started on arrival, cross-layer blocks and store offload off). Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode (the builder renders round-robin).
 
       ### Services
 
@@ -1587,7 +1587,7 @@ presets:
     # The connector options and draft length of the TP8 + DCP8 PD preset,
     # without its store lookup timeout.
     json_args:
-      "--speculative-config": { num_speculative_tokens: 4, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config":
         kv_load_failure_policy: recompute
         NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
@@ -1657,10 +1657,10 @@ presets:
 
       ### Throughput measurement only (synthetic acceptance)
 
-      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.46. Only `--speculative-config` changes, on both roles: With `--block-size 16384` the draft's KV block is 16384 tokens, so prefix-cache hits stay block-aligned at any `--prefix-match-unit`.
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes, on both roles:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
