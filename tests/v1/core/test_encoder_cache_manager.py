@@ -569,10 +569,65 @@ def test_encoder_cache_budgets_are_mutually_exclusive():
         )
 
 
-def test_byte_budget_floors_to_whole_embeddings():
-    # 2G, width 16384, bf16 -> 65536 slots. 1 GiB is not divisible by 1000.
-    assert (2 << 30) // (16384 * 2) == 65536
-    assert (1 << 30) // 1000 == 1_073_741
+@pytest.mark.parametrize(
+    "budget_bytes, reports, expected",
+    [
+        (2 << 30, [{"image": (16384, 2), "audio": (2048, 4)}, {}], 65536),
+        (1 << 30, [{"image": (250, 2)}, {"image": (250, 4)}], 1_073_741),
+    ],
+)
+def test_byte_budget_resolves_and_updates_workers(budget_bytes, reports, expected):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.v1.engine.core import EngineCore
+
+    config = _scheduler_config(
+        max_num_batched_tokens=16384, encoder_cache_bytes=budget_bytes
+    )
+    core = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            scheduler_config=config,
+            ec_transfer_config=None,
+            model_config=SimpleNamespace(multimodal_config=None),
+        ),
+        collective_rpc=Mock(side_effect=[reports, []]),
+    )
+    EngineCore._resolve_encoder_cache_budget(core)
+    assert config.encoder_cache_size == expected
+    core.collective_rpc.assert_any_call("measure_encoder_output_layouts")
+    core.collective_rpc.assert_called_with(
+        "update_encoder_cache_budget", args=(expected,)
+    )
+
+
+@pytest.mark.parametrize(
+    "ec_transfer, skip_profile, match",
+    [(True, False, "EC transfer"), (False, True, "skip-mm-profiling")],
+)
+def test_byte_budget_rejects_unsupported_modes(ec_transfer, skip_profile, match):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.v1.engine.core import EngineCore
+
+    core = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            scheduler_config=_scheduler_config(
+                max_num_batched_tokens=16384, encoder_cache_bytes=2 << 30
+            ),
+            ec_transfer_config=SimpleNamespace(is_ec_transfer_instance=True)
+            if ec_transfer
+            else None,
+            model_config=SimpleNamespace(
+                multimodal_config=SimpleNamespace(skip_mm_profiling=skip_profile)
+            ),
+        ),
+        collective_rpc=Mock(),
+    )
+    with pytest.raises(ValueError, match=match):
+        EngineCore._resolve_encoder_cache_budget(core)
+    core.collective_rpc.assert_not_called()
 
 
 def test_byte_budget_does_not_grow_to_fit_an_item():

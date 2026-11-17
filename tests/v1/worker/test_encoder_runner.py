@@ -509,3 +509,45 @@ def test_residency_reservation_tolerates_no_dummy_outputs():
     cache: dict[str, torch.Tensor] = {}
     assert reserve_encoder_cache_residency(cache, [], 1000) == 0
     assert cache == {}
+
+
+@pytest.mark.parametrize(
+    "first_pp_rank, supports_mm", [(True, True), (False, True), (True, False)]
+)
+def test_measure_encoder_output_layouts(monkeypatch, first_pp_rank, supports_mm):
+    from vllm.distributed import parallel_state
+    from vllm.multimodal import encoder_budget, utils
+    from vllm.v1.worker.worker_base import WorkerBase
+
+    outputs = {
+        "image": torch.zeros(3, 64, dtype=torch.bfloat16),
+        "audio": torch.zeros(3, 16, dtype=torch.float32),
+    }
+    model = MagicMock()
+    model.embed_multimodal.side_effect = lambda modality: [outputs[modality]]
+    runner = SimpleNamespace(
+        supports_mm_inputs=supports_mm,
+        device=torch.device("cpu"),
+        get_model=lambda: model,
+    )
+    budget = MagicMock()
+    budget.mm_max_toks_per_item = dict.fromkeys(outputs, 8)
+    budget.get_dummy_encoder_profile_inputs.side_effect = (
+        lambda modality, count: [(modality, None)]
+    )
+    monkeypatch.setattr(
+        parallel_state,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=first_pp_rank),
+    )
+    monkeypatch.setattr(encoder_budget, "MultiModalBudget", lambda *a, **kw: budget)
+    monkeypatch.setattr(
+        utils,
+        "group_and_batch_mm_kwargs",
+        lambda items, **kw: iter([(items[0][0], 1, {"modality": items[0][0]})]),
+    )
+    worker = SimpleNamespace(model_runner=runner, vllm_config=None)
+    expected = {"image": (64, 2), "audio": (16, 4)}
+    assert WorkerBase.measure_encoder_output_layouts(worker) == (
+        expected if first_pp_rank and supports_mm else {}
+    )

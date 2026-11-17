@@ -60,10 +60,7 @@ def test_worker_reports_the_encoder_output_width_per_modality(patched):
     """The width comes from the tensor the encoder emits, not from config."""
     worker, group = _worker()
     patched(group)
-    assert eow._measure_on_worker(worker) == {
-        "image": (64, 4),
-        "audio": (16, 4),
-    }
+    assert eow._measure_on_worker(worker) == {"image": 64, "audio": 16}
 
 
 @pytest.mark.parametrize("first_pp_rank, supports_mm", [(False, True), (True, False)])
@@ -75,7 +72,7 @@ def test_ranks_without_an_encoder_report_nothing(patched, first_pp_rank, support
 
 def test_producer_records_the_widths_its_encoder_ranks_agree_on():
     config = create_ec_vllm_config(ec_role="ec_producer", encoder_output_widths={})
-    reports = [{"image": (64, 2)}, {}, {"image": (64, 2)}]
+    reports = [{"image": 64}, {}, {"image": 64}]
     eow.measure_encoder_output_widths(config, lambda fn: reports)
     assert config.ec_transfer_config.mm_encoder_output_widths == {"image": 64}
     assert eow.get_encoder_output_width(config, "image") == 64
@@ -85,7 +82,7 @@ def test_producer_records_the_widths_its_encoder_ranks_agree_on():
     "reports, match",
     [
         ([{}, {}], "could not measure"),
-        ([{"image": (64, 2)}, {"image": (16, 2)}], "disagree"),
+        ([{"image": 64}, {"image": 16}], "disagree"),
     ],
     ids=["no-encoder", "disagree"],
 )
@@ -93,21 +90,3 @@ def test_producer_refuses_to_start_without_a_trustworthy_width(reports, match):
     config = create_ec_vllm_config(ec_role="ec_producer", encoder_output_widths={})
     with pytest.raises(ValueError, match=match):
         eow.measure_encoder_output_widths(config, lambda fn: reports)
-
-
-def test_byte_budget_uses_the_largest_embedding_and_ignores_empty_ranks():
-    config = create_ec_vllm_config(ec_role="ec_consumer")
-    config.scheduler_config.encoder_cache_bytes = 2 << 30
-    reports = [
-        {"image": (8192, 2), "audio": (2048, 2)},
-        {},
-        {"image": (8192, 2), "audio": (2048, 2)},
-    ]
-    assert eow.measure_encoder_output_widths(config, lambda fn: reports) == 16384
-
-
-def test_byte_budget_without_a_local_encoder_is_rejected():
-    config = create_ec_vllm_config(ec_role="ec_consumer")
-    config.scheduler_config.encoder_cache_bytes = 1 << 30
-    with pytest.raises(ValueError, match="local encoder tower"):
-        eow.measure_encoder_output_widths(config, lambda fn: [{}, {}])

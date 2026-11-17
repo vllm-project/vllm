@@ -22,11 +22,10 @@ logger = init_logger(__name__)
 
 
 @torch.inference_mode()
-def _measure_on_worker(worker: Any) -> dict[str, tuple[int, int]]:
+def _measure_on_worker(worker: Any) -> dict[str, int]:
     """Encode one dummy item per modality; runs on every worker.
 
-    Returns `modality -> (width, element_size)`, or {} on ranks that hold no
-    encoder. Both values come from the emitted tensor, not from model config.
+    Returns {} on ranks that hold no encoder.
     """
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -41,7 +40,7 @@ def _measure_on_worker(worker: Any) -> dict[str, tuple[int, int]]:
         worker.vllm_config, MULTIMODAL_REGISTRY, enable_cache=False
     )
     model = runner.get_model()
-    layouts: dict[str, tuple[int, int]] = {}
+    widths: dict[str, int] = {}
     for modality in budget.mm_max_toks_per_item:
         items = budget.get_dummy_encoder_profile_inputs(modality, 1)
         if not items:
@@ -52,81 +51,37 @@ def _measure_on_worker(worker: Any) -> dict[str, tuple[int, int]]:
             )
         )
         outputs = model.embed_multimodal(**mm_kwargs)
-        output = outputs[0]
-        if output.ndim != 2 or output.shape[-1] <= 0:
-            raise ValueError(
-                "Cannot size encoder outputs for modality "
-                f"{modality!r}: expected a 2D (embeddings, width) tensor, "
-                f"got shape {tuple(output.shape)}."
-            )
-        layouts[modality] = (int(output.shape[-1]), int(output.element_size()))
+        widths[modality] = int(outputs[0].shape[-1])
         del outputs
-    return layouts
+    return widths
 
 
 def measure_encoder_output_widths(
     vllm_config: "VllmConfig", collective_rpc: Callable[..., list[Any]]
-) -> int | None:
-    """Measure encoder output layouts once, before the KV cache is allocated.
+) -> None:
+    """Record the encoder output widths on an EC producer's config.
 
-    EC producers still record per-modality widths for transfer sizing. When
-    `--encoder-cache-bytes` is set, the same dummy encode also supplies the
-    bytes per embedding used to resolve the token capacity. Ranks without an
-    encoder contribute nothing. Widths must agree across ranks that do measure;
-    byte cost uses the maximum so one token budget covers every layout.
-
-    Returns:
-        Bytes per embedding when a byte budget is configured, otherwise None.
+    Call after the model is loaded and before the KV cache is allocated: the
+    Scheduler's connector reads the widths, and once the KV cache holds the
+    memory budget there is no room left for a dummy encode.
 
     Raises:
-        ValueError: A required measurement is missing, widths disagree, or the
-            output is not a 2D embedding tensor.
+        ValueError: No worker could encode a dummy item, or workers disagree.
 
     """
     ec_config = vllm_config.ec_transfer_config
-    need_widths = ec_config is not None and ec_config.is_ec_producer
-    need_bytes = vllm_config.scheduler_config.encoder_cache_bytes is not None
-    if not need_widths and not need_bytes:
-        return None
-    reports = [layouts for layouts in collective_rpc(_measure_on_worker) if layouts]
+    if ec_config is None or not ec_config.is_ec_producer:
+        return
+    reports = [widths for widths in collective_rpc(_measure_on_worker) if widths]
     if not reports:
-        if need_widths:
-            raise ValueError(
-                "EC producer could not measure the encoder output width: the "
-                "model encoded no dummy multimodal input."
-            )
         raise ValueError(
-            "--encoder-cache-bytes requires a local encoder tower so startup "
-            "can measure the encoder output layout. This process encoded no "
-            "dummy multimodal input. Instances that drop the encoder tower and "
-            "have no local layout measurement are not supported."
+            "EC producer could not measure the encoder output width: the model "
+            "encoded no dummy multimodal input."
         )
-    width_maps = [
-        {modality: width for modality, (width, _) in report.items()}
-        for report in reports
-    ]
-    if need_widths and any(widths != width_maps[0] for widths in width_maps):
-        raise ValueError(f"Workers disagree on the encoder output widths: {width_maps}")
-    if need_widths:
-        assert ec_config is not None
-        logger.info("EC producer encoder output widths: %s", width_maps[0])
-        ec_config.mm_encoder_output_widths = width_maps[0]
-    if not need_bytes:
-        return None
-    bytes_per_embedding = max(
-        width * element_size
-        for report in reports
-        for width, element_size in report.values()
-    )
-    if bytes_per_embedding <= 0:
-        raise ValueError(
-            "Encoder output measurement did not produce a usable embedding size."
-        )
-    logger.info(
-        "Encoder embedding size for the cache budget: %d bytes.",
-        bytes_per_embedding,
-    )
-    return bytes_per_embedding
+    if any(widths != reports[0] for widths in reports):
+        raise ValueError(f"Workers disagree on the encoder output widths: {reports}")
+    logger.info("EC producer encoder output widths: %s", reports[0])
+    ec_config.mm_encoder_output_widths = reports[0]
 
 
 def get_encoder_output_width(vllm_config: "VllmConfig", modality: str) -> int:

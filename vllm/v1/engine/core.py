@@ -172,34 +172,8 @@ class EngineCore:
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 self._eep_scale_up_before_kv_init()
 
-            bytes_per_embedding = measure_encoder_output_widths(
-                vllm_config, self.collective_rpc
-            )
-            budget_bytes = vllm_config.scheduler_config.encoder_cache_bytes
-            if budget_bytes is not None:
-                mm_config = vllm_config.model_config.multimodal_config
-                if mm_config is not None and mm_config.skip_mm_profiling:
-                    raise ValueError(
-                        "--encoder-cache-bytes cannot be combined with "
-                        "--skip-mm-profiling."
-                    )
-                if not bytes_per_embedding:
-                    raise RuntimeError(
-                        "--encoder-cache-bytes was set but the encoder output "
-                        "layout was not measured."
-                    )
-                cache_size = budget_bytes // bytes_per_embedding
-                logger.info(
-                    "Encoder cache budget of %d bytes is %d embeddings "
-                    "(%d bytes each).",
-                    budget_bytes,
-                    cache_size,
-                    bytes_per_embedding,
-                )
-                # Workers already have the byte budget. They need the token
-                # capacity before profiling builds MultiModalBudget.
-                vllm_config.scheduler_config.encoder_cache_size = cache_size
-                self.collective_rpc("update_encoder_cache_budget", args=(cache_size,))
+            self._resolve_encoder_cache_budget()
+            measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
             # Setup KV Caches and update CacheConfig after profiling.
             kv_cache_config = self._initialize_kv_caches(vllm_config)
@@ -307,6 +281,47 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _resolve_encoder_cache_budget(self) -> None:
+        config = self.vllm_config
+        budget_bytes = config.scheduler_config.encoder_cache_bytes
+        if budget_bytes is None:
+            return
+
+        ec_config = config.ec_transfer_config
+        if ec_config is not None and ec_config.is_ec_transfer_instance:
+            raise ValueError(
+                "--encoder-cache-bytes does not yet support EC transfer."
+            )
+        mm_config = config.model_config.multimodal_config
+        if mm_config is not None and mm_config.skip_mm_profiling:
+            raise ValueError(
+                "--encoder-cache-bytes cannot be combined with --skip-mm-profiling."
+            )
+
+        reports = self.collective_rpc("measure_encoder_output_layouts")
+        bytes_per_embedding = max(
+            (
+                width * element_size
+                for report in reports
+                for width, element_size in report.values()
+            ),
+            default=0,
+        )
+        if bytes_per_embedding <= 0:
+            raise ValueError(
+                "--encoder-cache-bytes requires a measured local encoder output."
+            )
+
+        cache_size = budget_bytes // bytes_per_embedding
+        logger.info(
+            "Encoder cache budget of %d bytes is %d embeddings (%d bytes each).",
+            budget_bytes,
+            cache_size,
+            bytes_per_embedding,
+        )
+        config.scheduler_config.encoder_cache_size = cache_size
+        self.collective_rpc("update_encoder_cache_budget", args=(cache_size,))
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:

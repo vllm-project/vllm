@@ -77,6 +77,5 @@ def create_ec_vllm_config(
     vllm_config.ec_transfer_config = ec_transfer_config
     vllm_config.parallel_config = parallel_config
     vllm_config.model_config = model_config
-    vllm_config.scheduler_config = Mock(encoder_cache_bytes=None)
     vllm_config.instance_id = f"ec-test-{uuid.uuid4()}"
     return vllm_config
