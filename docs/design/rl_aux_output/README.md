@@ -39,17 +39,17 @@ This folder specifies how vLLM delivers these **aux outputs** for long multi-tur
 
 ## PR stack
 
-The stack lands on the `rl/aux-output` branch:
+Each layer is one pull request on `main`, in this order:
 
 | # | Layer | Content |
 | --- | --- | --- |
 | 1 | Per-segment cache salts (generic) | `cache_salt_segments: list[(start, salt)]` on `EngineCoreRequest` and `Request`; `Request.add_cache_salt_segment`. A hash block's extra keys include the segments overlapping it, with starts relative to the block. Requests without segments hash as before. |
-| 2 | Session objects | `aux_session` and `aux_version_segments`; the session salt; salts at admission, at weight updates and when a waiting request is scheduled; full and tail objects; per-stage objects under pipeline parallelism; `aux_output_keys` and `aux_version_segments` in the response; the Mooncake object store, `read_aux_rows` and `aux_session_pattern`; writes drained at every pause; startup checks. |
-| 3 | Hidden states | `enable_return_hidden_states`: field `hidden_states` of session objects. |
-| 4 | Top-k logprobs | `return_topk_logprobs = k`: fields `topk_token_ids` and `topk_logprobs` of session objects, computed only for session rows, in bounded chunks. |
-| 5 | Objects without routed experts | `object_key_prefix` with any enabled output, so dense models can deliver hidden states and top-k logprobs. |
+| 2 | Session objects | `aux_session` and `aux_version_segments`; the session salt; salts at admission and at weight updates; full and tail objects; per-stage objects under pipeline parallelism; `aux_output_keys` and `aux_version_segments` in the response; the Mooncake object store, `read_aux_rows` and `aux_session_pattern`; writes drained at every pause; startup checks. |
+| 3 | Hidden states and top-k logprobs | `enable_return_hidden_states`: field `hidden_states` of session objects. `return_topk_logprobs = k`: fields `topk_token_ids` and `topk_logprobs` of session objects, computed only for session rows, in bounded chunks. |
+| 4 | Objects without routed experts | `object_key_prefix` with any enabled output, so dense models can deliver hidden states and top-k logprobs. |
+| 5 | Recomputed positions | Just before a waiting request is scheduled, the positions it will compute are salted with the current version. The offloading connector derives its offload keys again from the first chunk whose block hash changed. |
 
-Fixes from review sit on top of each layer as their own commits. One KV connector change belongs to layer 2: the offloading connector derives its offload keys again from the first chunk whose block hash changed.
+A fix to `collective_rpc` that steps with more than one worker need comes before layer 2, and these documents come before layer 5.
 
 Deferred: a vocab-parallel top-k path that avoids gathering full-vocabulary logits.
 
