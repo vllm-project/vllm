@@ -28,15 +28,18 @@ def refusal_model_config():
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--dtype", "float32", "--max-model-len", "256", "--enforce-eager"]
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-        env_dict={
-            "VLLM_USE_RUST_FRONTEND": "0",
-            "VLLM_CPU_KVCACHE_SPACE": "1",
-        },
-    ) as remote_server:
+    args = [
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "256",
+        "--enforce-eager",
+        # Bound the KV cache: the CPU backend otherwise reserves a fraction
+        # of total host memory at startup.
+        "--kv-cache-memory-bytes",
+        str(256 << 20),
+    ]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
