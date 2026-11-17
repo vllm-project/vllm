@@ -237,6 +237,7 @@ if TYPE_CHECKING:
     VLLM_K31_BEAT_K2SYNC: bool = True
     VLLM_K31_BEAT_EAGERPREP: bool = True
     VLLM_K31_BEAT_KDAK1: bool = True
+    VLLM_K31_DRAFT_FLYDSL_ATTN: bool = True
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1856,6 +1857,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # instead of draining from L2 at kernel end. Bit-exact. Under
     # decode_backend=latency_specialized only.
     "VLLM_K31_BEAT_KDAK1": lambda: bool(int(os.getenv("VLLM_K31_BEAT_KDAK1", "1"))),
+    # Kimi-K3.1 on ROCm: a GQA sliding-window draft (the release DSpark) gets
+    # KIMI_K3_FLYDSL_SWA_GQA, TRITON_ATTN with a FlyDSL decode/verify kernel
+    # (gfx950; calls outside it fall back to Triton and log why). 0 keeps
+    # TRITON_ATTN.
+    "VLLM_K31_DRAFT_FLYDSL_ATTN": lambda: bool(
+        int(os.getenv("VLLM_K31_DRAFT_FLYDSL_ATTN", "1"))
+    ),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the

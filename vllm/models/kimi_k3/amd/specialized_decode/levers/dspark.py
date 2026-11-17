@@ -14,8 +14,9 @@ cache, which these launches honour.
 the drafter's layers, so the target step skips the attention groups that hold
 only them (``KimiK3ModelState.target_attn_groups``), and logs the drafter's
 attention: an MLA draft's AITER MLA groups take the bs1 planner
-(``levers.mla``), a GQA draft's groups (TRITON_ATTN on ROCm) plan no
-persistent schedule, so there is nothing for it to replace."""
+(``levers.mla``), a GQA draft's groups (KIMI_K3_FLYDSL_SWA_GQA or
+TRITON_ATTN on ROCm) plan no persistent schedule, so there is nothing for it
+to replace."""
 
 import functools
 

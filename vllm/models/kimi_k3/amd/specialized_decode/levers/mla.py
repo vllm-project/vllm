@@ -10,9 +10,10 @@ duration of ``_build_decode`` only, and the wrapper takes just the call it
 reproduces: the plain (no DCP round-robin, no asm DCP verify) schedule of one
 request into the builder's own buffers, checked against AITER once per shape.
 Only AITER MLA groups reach it: on Kimi-K3.1 that is the preview's dense MLA
-draft. The release's GQA sliding-window draft decodes with TRITON_ATTN, which
-plans no persistent schedule, so the planner never runs for it
-(``levers.dspark.log_draft_attn`` says which at startup).
+draft. The release's GQA sliding-window draft decodes with
+KIMI_K3_FLYDSL_SWA_GQA (or TRITON_ATTN), which plans no persistent schedule,
+so the planner never runs for it (``levers.dspark.log_draft_attn`` says which
+at startup).
 
 ``VLLM_K31_BEAT_EAGERPREP``: ``ROCMAiterMLASparseMetadataBuilder.build`` writes
 the sparse paged-KV indptr (sparse seqlen, cumsum, tail fill) in one launch."""

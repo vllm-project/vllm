@@ -4,12 +4,14 @@
 
 Dense EAGLE3 and DSpark drafts keep their own fp8 MLA cache and decode with
 FLASHINFER_MLA, or ROCM_AITER_MLA on ROCm (``configure_dense_draft``). GQA drafts
-keep their own model-dtype cache and decode with FLASH_ATTN, or TRITON_ATTN on
-ROCm.
+keep their own model-dtype cache and decode with FLASH_ATTN, or on ROCm with
+KIMI_K3_FLYDSL_SWA_GQA (TRITON_ATTN with a FlyDSL decode/verify kernel; Triton
+itself under VLLM_K31_DRAFT_FLYDSL_ATTN=0).
 """
 
 from typing import Any
 
+import vllm.envs as envs
 from vllm.config import SpeculativeConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -18,7 +20,8 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 def configure_dense_draft(spec_config: SpeculativeConfig, text_config: Any) -> None:
     """Default an EAGLE3/DSpark draft's attention backend and KV dtype on a
     KDA-hybrid DSA target: dense MLA + fp8 for MLA drafts, FLASH_ATTN +
-    model dtype for GQA drafts (TRITON_ATTN on ROCm). MTP is unchanged."""
+    model dtype for GQA drafts (KIMI_K3_FLYDSL_SWA_GQA or TRITON_ATTN on ROCm).
+    MTP is unchanged."""
     if (
         spec_config.method not in ("eagle3", "dspark")
         or getattr(text_config, "linear_attn_config", None) is None
@@ -41,12 +44,15 @@ def configure_dense_draft(spec_config: SpeculativeConfig, text_config: Any) -> N
         # forward fails), and ROCM_ATTN / ROCM_AITER_FA / ROCM_AITER_UNIFIED_ATTN
         # exclude the block-outermost (BLHNC) layout the DSA indexer pins the
         # worker to. TRITON_ATTN is stride-aware, serves sliding windows and skips
-        # the tiles before the window.
-        backend = (
-            AttentionBackendEnum.TRITON_ATTN
-            if current_platform.is_rocm()
-            else AttentionBackendEnum.FLASH_ATTN
-        )
+        # the tiles before the window; KIMI_K3_FLYDSL_SWA_GQA is TRITON_ATTN with
+        # a FlyDSL kernel for the draft's decode/verify calls
+        # (VLLM_K31_DRAFT_FLYDSL_ATTN).
+        if not current_platform.is_rocm():
+            backend = AttentionBackendEnum.FLASH_ATTN
+        elif envs.VLLM_K31_DRAFT_FLYDSL_ATTN:
+            backend = AttentionBackendEnum.KIMI_K3_FLYDSL_SWA_GQA
+        else:
+            backend = AttentionBackendEnum.TRITON_ATTN
         kv_cache_dtype = "auto"
     spec_config.attention_backend = spec_config.attention_backend or backend
     spec_config.kv_cache_dtype = spec_config.kv_cache_dtype or kv_cache_dtype

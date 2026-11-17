@@ -148,6 +148,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     KIMI_K3_KV_BALANCED_MLA = (
         "vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend.KimiK3KvBalancedMLABackend"
     )
+    KIMI_K3_FLYDSL_SWA_GQA = (
+        "vllm.models.kimi_k3.amd.flydsl_swa_gqa_attn.KimiK3FlyDSLSwaGqaBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     # HPC Attention Backend:

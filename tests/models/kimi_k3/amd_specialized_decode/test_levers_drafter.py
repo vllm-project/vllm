@@ -238,7 +238,14 @@ def test_dense_draft_backends(monkeypatch):
     from vllm.v1.attention.backends.registry import AttentionBackendEnum as B
 
     s = _dense_draft(monkeypatch, rocm=True, mla=False)
+    assert (s.attention_backend, s.kv_cache_dtype) == (
+        B.KIMI_K3_FLYDSL_SWA_GQA,
+        "auto",
+    )
+    monkeypatch.setenv("VLLM_K31_DRAFT_FLYDSL_ATTN", "0")
+    s = _dense_draft(monkeypatch, rocm=True, mla=False)
     assert (s.attention_backend, s.kv_cache_dtype) == (B.TRITON_ATTN, "auto")
+    monkeypatch.delenv("VLLM_K31_DRAFT_FLYDSL_ATTN")
     s = _dense_draft(monkeypatch, rocm=False, mla=False)
     assert (s.attention_backend, s.kv_cache_dtype) == (B.FLASH_ATTN, "auto")
     s = _dense_draft(monkeypatch, rocm=True, mla=True)
@@ -258,8 +265,9 @@ def test_rocm_gqa_draft_backend_fits_the_dsa_layout():
     """The DSA indexer pins the worker to BLHNC: the ROCm GQA draft's default
     backend must allow it (the worker intersects every backend's layouts)."""
     from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
-    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum as B
 
     indexer = KimiK3IndexerBackend.supported_kv_cache_layouts()
-    draft = TritonAttentionBackend.supported_kv_cache_layouts()
-    assert draft is None or set(indexer) <= set(draft)
+    for backend in (B.KIMI_K3_FLYDSL_SWA_GQA, B.TRITON_ATTN):
+        draft = backend.get_class().supported_kv_cache_layouts()
+        assert draft is None or set(indexer) <= set(draft)

@@ -74,17 +74,21 @@ DSpark drafts are served:
 - **Release** (`Inferact/Kimi-K3.1-Pro-DSpark`, a speculators checkpoint served
   as `Qwen3DSparkForCausalLM`): 5 GQA layers (96 query / 16 KV heads, head dim
   64, 12 / 2 a TP rank) with a 2048-token sliding window, their own bf16
-  sliding-window cache on `TRITON_ATTN`, and a confidence head (read only by
-  adaptive verification, which is refused).
+  sliding-window cache on `KIMI_K3_FLYDSL_SWA_GQA` (below), and a confidence
+  head (read only by adaptive verification, which is refused).
 
 `configure_dense_draft` (`kimi_k3/nvidia/dense_draft.py`) picks the draft's
 backend and cache dtype unless `--speculative-config` sets
-`attention_backend` / `kv_cache_dtype`. On ROCm a GQA draft gets `TRITON_ATTN`:
-`FLASH_ATTN` (the default elsewhere) needs vllm_flash_attn, and `ROCM_ATTN`,
-`ROCM_AITER_FA` and `ROCM_AITER_UNIFIED_ATTN` exclude the block-outermost
-(BLHNC) layout the DSA indexer pins the worker to. Do not pick the draft's
-backend with the global `--attention-backend`: that applies to the target's
-DSA layers too.
+`attention_backend` / `kv_cache_dtype`. On ROCm a GQA draft gets
+`KIMI_K3_FLYDSL_SWA_GQA` (`kimi_k3/amd/flydsl_swa_gqa_attn.py`): `TRITON_ATTN`
+whose forward runs a FlyDSL split-K kernel (`ops/flydsl_swa_gqa*.py`, gfx950,
+up to 16 query rows a request) for the draft's decode/verify calls; any other
+call, or a layer it cannot serve, falls back to Triton and logs why.
+`VLLM_K31_DRAFT_FLYDSL_ATTN=0` keeps plain `TRITON_ATTN`. `FLASH_ATTN` (the
+default elsewhere) needs vllm_flash_attn, and `ROCM_ATTN`, `ROCM_AITER_FA` and
+`ROCM_AITER_UNIFIED_ATTN` exclude the block-outermost (BLHNC) layout the DSA
+indexer pins the worker to. Do not pick the draft's backend with the global
+`--attention-backend`: that applies to the target's DSA layers too.
 
 The levers by drafter:
 
@@ -95,8 +99,9 @@ The levers by drafter:
   vLLM's loop. Other drafts keep vLLM's loop and startup logs why.
 - `VLLM_K31_BEAT_DRAFTMETA`: the target step skips the draft-only attention
   groups for both. The bs1 MLA planner replaces AITER's MLA schedule, which only
-  the preview's MLA draft builds. The release's `TRITON_ATTN` plans none, so the
-  planner is not used. Startup logs the draft's backend and which applies.
+  the preview's MLA draft builds. The release's GQA backend (Triton or FlyDSL)
+  plans none, so the planner is not used. Startup logs the draft's backend and
+  which applies.
 - `VLLM_K31_BEAT_K2SYNC`, `_EAGERPREP`, `_KDAK1`, `VLLM_K3_INDEXER_SAMPLED_TOPK`
   and the DSA prologue indexer touch only the target.
 
