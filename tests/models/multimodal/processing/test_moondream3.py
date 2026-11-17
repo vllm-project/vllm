@@ -139,7 +139,7 @@ def test_multi_crop_tiling(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     # Create a large image that requires multiple crops
     large_image = Image.new("RGB", (1000, 1000), color="blue")
@@ -170,7 +170,7 @@ def test_tiling_various_sizes(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     width, height = image_size
     image = Image.new("RGB", (width, height), color="red")
@@ -195,7 +195,7 @@ def test_pixel_normalization(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     # Create test image
     image = Image.new("RGB", (378, 378), color="green")
@@ -337,7 +337,7 @@ def test_processor_with_small_image(
 
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
 
     # Small image (smaller than crop size)
     small_image = Image.new("RGB", (100, 100), color="yellow")
@@ -365,7 +365,7 @@ def test_preprocess_image_accepts_non_pil_inputs(
 ):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    processor = Moondream3Processor.from_pretrained(model_id)
     pil_image = image_assets[0].pil_image.convert("RGB")
     hwc_array = np.asarray(pil_image)
     expected_pixel_values, expected_tiling = processor.preprocess_image(pil_image)

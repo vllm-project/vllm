@@ -1839,35 +1839,27 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     if hasattr(sampled_indices, "tolist"):
                         sampled_indices = sampled_indices.tolist()
                     metadata["frames_indices"] = [int(idx) for idx in sampled_indices]
-                input_ids = video_outputs.pop("input_ids")
-
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id
-                )
-                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
-                prompt_text = prompt_text.replace(
-                    "<|begin_of_video|><|video|><|end_of_video|>",
-                    video_placeholder,
-                    1,
-                )
-
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
             )
+
+            # Videos were processed above, so drop their placeholders from the text.
+            mm_counts = {**mm_items.get_all_counts(), "video": 0}
+            prompt_text = self._get_hf_mm_text(mm_counts)
         else:
             video_outputs = dict()
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_kwargs),
-            dict(text=prompt_text, **hf_data),
-            hf_kwargs,
-        )
-        input_ids = processed_data["input_ids"]
-        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-        processed_data["input_ids"] = input_ids
+        if hf_data:
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_kwargs),
+                dict(text=prompt_text, **hf_data),
+                hf_kwargs,
+            )
+        else:
+            processed_data = BatchFeature()
 
         processed_data.update(video_outputs)
         return self._with_video_timestamps(

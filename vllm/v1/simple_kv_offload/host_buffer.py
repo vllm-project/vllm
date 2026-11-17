@@ -8,6 +8,7 @@ import os
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     _get_populate_write_fn,
@@ -55,6 +56,7 @@ def alloc_host_buffer(nbytes: int, hugepage_size: int | None = None) -> torch.Te
         ) from e
     # Keep pinned pages out of fork() children.
     buf.madvise(mmap.MADV_DONTFORK)
+    exclude_from_core_dump(buf)
     if not hugepage_size and os.environ.get("THP_MEM_ALLOC_ENABLE") == "1":
         try:
             buf.madvise(mmap.MADV_HUGEPAGE)
