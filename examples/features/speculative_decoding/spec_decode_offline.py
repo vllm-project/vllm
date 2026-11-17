@@ -216,7 +216,9 @@ def main(args):
     # print acceptance at each token position, over the drafts that reached it
     for i in range(len(acceptance_counts)):
         drafted = draft_counts[i]
-        acceptance_rate = acceptance_counts[i] / drafted if drafted > 0 else 0
+        acceptance_rate = (
+            acceptance_counts[i] / drafted if drafted > 0 else float("nan")
+        )
         print(f"acceptance at token {i}: {acceptance_rate:.2f}")
 
     return acceptance_length

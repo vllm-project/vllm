@@ -28,13 +28,19 @@ class Counter(Metric):
     value: int
 
 
+# Counters labeled with 'position', collected as one `Vector` each.
+_PER_POS_COUNTERS = (
+    "vllm:spec_decode_num_accepted_tokens_per_pos",
+    "vllm:spec_decode_num_draft_tokens_per_pos",
+)
+
+
 @dataclass
 class Vector(Metric):
     """An ordered array of integer counters.
 
-    This type - which doesn't exist in Prometheus - models two very
-    specific metrics, vllm:spec_decode_num_accepted_tokens_per_pos and
-    vllm:spec_decode_num_draft_tokens_per_pos.
+    This type - which doesn't exist in Prometheus - models the per-position
+    speculative decoding counters in `_PER_POS_COUNTERS`.
     """
 
     values: list[int]
@@ -97,12 +103,9 @@ def get_metrics_snapshot() -> list[Metric]:
                 )
         elif metric.type == "counter":
             samples = _get_samples(metric, "_total")
-            if metric.name in (
-                "vllm:spec_decode_num_accepted_tokens_per_pos",
-                "vllm:spec_decode_num_draft_tokens_per_pos",
-            ):
+            if metric.name in _PER_POS_COUNTERS:
                 #
-                # Ugly vllm:num_{accepted,draft}_tokens_per_pos special case.
+                # Ugly special case for the per-position counters.
                 #
                 # These metrics are vectors of counters - for each spec
                 # decoding token position, we observe the number of

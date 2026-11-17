@@ -206,7 +206,6 @@ class SpecDecodeMetrics:
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
     num_verified_tokens: int
-    # Empty when the server predates vllm:spec_decode_num_draft_tokens_per_pos.
     draft_per_pos: dict[int, int]
 
 
@@ -1170,14 +1169,9 @@ async def benchmark(
             for pos in positions:
                 before_val = before_m.accepted_per_pos.get(pos, 0)
                 after_val = after_m.accepted_per_pos.get(pos, before_val)
-                # Over the drafts that reached this position; servers without
-                # the per-position draft counter only report num_drafts.
-                if after_m.draft_per_pos:
-                    drafted = after_m.draft_per_pos.get(
-                        pos, 0
-                    ) - before_m.draft_per_pos.get(pos, 0)
-                else:
-                    drafted = delta_drafts
+                # over the drafts that reached this position
+                before_drafted = before_m.draft_per_pos.get(pos, 0)
+                drafted = after_m.draft_per_pos.get(pos, 0) - before_drafted
                 per_pos_rates.append(
                     (after_val - before_val) / drafted if drafted > 0 else math.nan
                 )

@@ -137,8 +137,12 @@ class SpecDecodingLogging:
         # A position no draft reached reports nan.
         accepted_per_pos = np.sum(self.accepted_tokens_per_pos_lists, axis=0)
         drafted_per_pos = np.sum(self.draft_tokens_per_pos_lists, axis=0)
-        with np.errstate(invalid="ignore"):
-            acceptance_rates = accepted_per_pos / drafted_per_pos
+        acceptance_rates = np.divide(
+            accepted_per_pos,
+            drafted_per_pos,
+            out=np.full(drafted_per_pos.shape, np.nan),
+            where=drafted_per_pos > 0,
+        )
         rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
 
         log_fn(

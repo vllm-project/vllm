@@ -99,7 +99,6 @@ pub(crate) struct SpecDecodeMetrics {
     num_accepted_tokens: u64,
     accepted_per_pos: HashMap<u64, u64>,
     num_verified_tokens: u64,
-    /// Empty when the server predates `vllm:spec_decode_num_draft_tokens_per_pos`.
     draft_per_pos: HashMap<u64, u64>,
 }
 
@@ -255,15 +254,10 @@ pub(crate) fn compute_spec_decode_stats(
             let before_val = before.accepted_per_pos.get(&pos).copied().unwrap_or(0);
             let after_val = after.accepted_per_pos.get(&pos).copied().unwrap_or(before_val);
             let delta_pos = after_val.saturating_sub(before_val);
-            // Over the drafts that reached this position; servers without the
-            // per-position draft counter only report num_drafts.
-            let drafted = if after.draft_per_pos.is_empty() {
-                delta_drafts
-            } else {
-                let after_drafted = after.draft_per_pos.get(&pos).copied().unwrap_or(0);
-                let before_drafted = before.draft_per_pos.get(&pos).copied().unwrap_or(0);
-                after_drafted.saturating_sub(before_drafted)
-            };
+            // Over the drafts that reached this position.
+            let after_drafted = after.draft_per_pos.get(&pos).copied().unwrap_or(0);
+            let before_drafted = before.draft_per_pos.get(&pos).copied().unwrap_or(0);
+            let drafted = after_drafted.saturating_sub(before_drafted);
             per_pos_rates.push(if drafted > 0 {
                 delta_pos as f64 / drafted as f64
             } else {
@@ -2138,7 +2132,8 @@ vllm:num_requests_running{engine=\"1\"} 16
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
             num_verified_tokens: 0,
-            draft_per_pos: HashMap::new(),
+            // fixed-length drafts: every draft reaches every position
+            draft_per_pos: per_pos.iter().map(|&(pos, _)| (pos, drafts)).collect(),
         }
     }
 
@@ -2263,7 +2258,11 @@ vllm:prefix_cache_queries_total{model_name=\"m\"} 0
 
     #[test]
     fn test_compute_spec_decode_stats_new_positions_in_after() {
-        let before = make_metrics(50, 150, 100, &[(0, 40)]);
+        // position 1 accepted nothing before, so it has no accepted series yet
+        let before = SpecDecodeMetrics {
+            draft_per_pos: [(0, 50), (1, 50)].into_iter().collect(),
+            ..make_metrics(50, 150, 100, &[(0, 40)])
+        };
         let after = make_metrics(150, 450, 320, &[(0, 130), (1, 80)]);
 
         let stats = compute_spec_decode_stats(&before, &after).unwrap();
