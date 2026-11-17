@@ -8,6 +8,7 @@ use std::io::Cursor;
 
 use llm_multimodal::ImageDetail;
 use llm_multimodal::tracker::{MAX_SAMPLE_FPS, MIN_SAMPLE_FPS};
+use prost::Message;
 use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tonic::Status;
@@ -24,8 +25,10 @@ use vllm_engine_core_client::protocol::tensor::WireTensor;
 use super::convert::proto_struct_to_json;
 use super::pb;
 
-/// Maximum total serialized kwargs size accepted in one gRPC request.
+/// Maximum inline feature payload accepted in one gRPC request.
+/// Kwargs, `.npy` tensor bytes, and serialized metadata all count.
 const MAX_INLINE_MM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MSGPACK_DEPTH: usize = 32;
 
 /// Adapt a request containing either raw media or preprocessed features.
 ///
@@ -45,8 +48,7 @@ pub(super) fn from_proto(
     for item in &media {
         match &item.source {
             Some(pb::media_item::Source::Features(feature)) => {
-                encoded_bytes =
-                    encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
+                encoded_bytes = encoded_bytes.saturating_add(inline_feature_payload_bytes(feature));
             }
             _ if item.marker_offset.is_none() => return Err(mixed_media_error()),
             _ => {}
@@ -438,6 +440,8 @@ pub(super) fn feature_to_proto(
                 length: feature.mm_position.length as u64,
                 mm_hash: feature.mm_hash,
                 is_embed,
+                metadata: None,
+                tensors: Default::default(),
             },
         )),
         ..Default::default()
@@ -452,6 +456,24 @@ pub(super) fn check_inline_kwargs_size(encoded_bytes: usize) -> Result<(), Statu
         )));
     }
     Ok(())
+}
+
+fn inline_feature_payload_bytes(feature: &pb::PreprocessedMediaFeatures) -> usize {
+    let mut total = feature.kwargs.as_ref().map_or(0, Vec::len);
+    for bytes in feature.tensors.values() {
+        total = total.saturating_add(bytes.len());
+    }
+    if let Some(metadata) = &feature.metadata {
+        total = total.saturating_add(metadata.encoded_len());
+    }
+    total
+}
+
+fn raw_bytes_option_error(index: usize, fields: &str, mime: &str) -> Status {
+    Status::invalid_argument(format!(
+        "media[{index}]: {fields} are not supported on raw_bytes; \
+         base64-encode the bytes and send a data URI (data:{mime};base64,<base64>) or an http(s) URL"
+    ))
 }
 
 fn mixed_media_error() -> Status {
@@ -524,6 +546,13 @@ fn raw_part_from_proto(
                 max_long_side_pixel,
             },
             (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
+                if max_long_side_pixel.is_some() {
+                    return Err(raw_bytes_option_error(
+                        index,
+                        "max_long_side_pixel",
+                        "image/png",
+                    ));
+                }
                 MediaContentPart::ImageData {
                     data,
                     mime_type,
@@ -540,12 +569,14 @@ fn raw_part_from_proto(
                 fps,
                 max_long_side_pixel,
             },
-            (pb::Modality::Video, pb::media_item::Source::RawBytes(_)) if video_fps.is_some() => {
-                return Err(Status::invalid_argument(format!(
-                    "media[{index}]: media_io_kwargs.video.fps requires a url or data_uri source"
-                )));
-            }
             (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
+                if fps.is_some() || max_long_side_pixel.is_some() {
+                    return Err(raw_bytes_option_error(
+                        index,
+                        "fps and max_long_side_pixel",
+                        "video/mp4",
+                    ));
+                }
                 MediaContentPart::VideoData {
                     data,
                     mime_type,
@@ -795,7 +826,7 @@ mod tests {
                 "invalid media_io_kwargs.video.fps: 30 is outside [0.2, 5]",
                 "invalid media_io_kwargs: invalid type: string \"1\", expected f64; only video.fps and video.num_frames are supported",
                 "invalid media_io_kwargs: video must be a map of options",
-                "media[0]: media_io_kwargs.video.fps requires a url or data_uri source",
+                "media[0]: fps and max_long_side_pixel are not supported on raw_bytes; base64-encode the bytes and send a data URI (data:video/mp4;base64,<base64>) or an http(s) URL",
             ]
         "#]].assert_debug_eq(&messages);
     }
@@ -854,8 +885,60 @@ mod tests {
             unreachable!()
         };
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
-        let error = from_proto(vec![item.clone(), item], None, false).unwrap_err();
+        let error = from_proto(vec![item.clone(), item.clone()], None, false).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+
+        let mut tensors = item;
+        let Some(pb::media_item::Source::Features(feature)) = &mut tensors.source else {
+            unreachable!()
+        };
+        feature.kwargs = None;
+        feature.mm_hash = Some("hash-a".to_owned());
+        feature.tensors.insert("embedding".to_owned(), vec![0; MAX_INLINE_MM_BYTES + 1]);
+        let error = from_proto(vec![tensors], None, true).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[test]
+    fn inline_payload_counts_tensor_bytes_and_serialized_metadata() {
+        let metadata = prost_types::Struct {
+            fields: std::iter::once((
+                "image_grid_thw".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::NumberValue(1.0)),
+                },
+            ))
+            .collect(),
+        };
+        let feature = pb::PreprocessedMediaFeatures {
+            kwargs: Some(vec![0; 4]),
+            tensors: [("pixel".to_owned(), vec![0; 8])].into(),
+            metadata: Some(metadata.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            inline_feature_payload_bytes(&feature),
+            4 + 8 + metadata.encoded_len()
+        );
+    }
+
+    #[test]
+    fn raw_bytes_reject_fps_and_max_long_side_pixel() {
+        let mut video_item = video(pb::media_item::Source::RawBytes(vec![1]));
+        video_item.fps = Some(2.0);
+        let image_item = pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::RawBytes(vec![1])),
+            max_long_side_pixel: Some(512),
+            ..Default::default()
+        };
+        for item in [video_item, image_item] {
+            let error = from_proto(vec![item], None, false).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("data:"), "{}", error.message());
+        }
+        let plain = video(pb::media_item::Source::RawBytes(vec![1]));
+        assert!(from_proto(vec![plain], None, false).is_ok());
     }
 
     #[test]
