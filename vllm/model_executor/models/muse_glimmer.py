@@ -259,6 +259,17 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         )
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
+        num_frames = self._get_max_num_frames(seq_len, num_videos)
+        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
+        if video_options and video_options.num_frames:
+            video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+            temporal_patch_size = int(video_kwargs["temporal_patch_size"])
+            num_frames = min(
+                num_frames, round_up(video_options.num_frames, temporal_patch_size)
+            )
+        return num_frames
+
+    def _get_max_num_frames(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
         video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
         temporal_patch_size = int(video_kwargs["temporal_patch_size"])
@@ -334,14 +345,20 @@ class MuseGlimmerMultiModalProcessor(
         hf_kwargs = {**hf_kwargs, "do_sample_frames": False}
         processed = super()._call_hf_processor(hf_data, hf_kwargs)
         mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
+        video_kwargs = mm_kwargs["videos_kwargs"]
         max_group_tokens = {
             "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
-            "video": int(mm_kwargs["videos_kwargs"]["max_video_frame_tokens"]),
+            "video": int(video_kwargs["max_video_frame_tokens"]),
         }
-        max_tokens = self.info.get_mm_max_tokens_per_item(
-            seq_len=self.info.ctx.model_config.max_model_len,
-            mm_counts={"image": 1, "video": 1},
+        max_num_frames = self.info._get_max_num_frames(
+            self.info.ctx.model_config.max_model_len, 1
         )
+        max_tokens = {
+            "image": max_group_tokens["image"],
+            "video": max_num_frames
+            // int(video_kwargs["temporal_patch_size"])
+            * max_group_tokens["video"],
+        }
         merge_length = self.info.get_hf_config().vision_config.merge_size ** 2
         for modality in ("image", "video"):
             grid_thw = processed.get(f"{modality}_grid_thw")
