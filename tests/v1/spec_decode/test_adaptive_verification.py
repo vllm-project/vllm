@@ -258,6 +258,35 @@ def test_manager_checks_target_varlen_cudagraph_bound(
         assert manager is created
 
 
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="needs an accelerator device"
+)
+def test_manager_uses_accelerator_generic_events_and_stream() -> None:
+    """The manager must not call CUDA-only APIs; NPU/XPU builds use torch.Event
+    and torch.accelerator streams."""
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    device = torch.device(accelerator.type, torch.accelerator.current_device_index())
+    req_states = SimpleNamespace(
+        device=device,
+        num_speculative_steps=2,
+        max_num_reqs=2,
+    )
+    manager = AdaptiveVerificationManager(
+        req_states,
+        torch.zeros(3, dtype=torch.int32, device=device),
+        num_bonus_tokens=1,
+        max_total_logits=16,
+        copy_admitted_drafts_to_host=True,
+    )
+
+    manager._copy_events[0].record()
+    manager._copy_events[0].synchronize()
+    assert manager._admitted_drafts_event is not None
+    manager._admitted_drafts_event.record()
+    manager._admitted_drafts_event.synchronize()
+
+
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     # Verification is cheap up to two extra tokens, then jumps 100x; only the
     # highest-confidence draft is worth the cheap slot.

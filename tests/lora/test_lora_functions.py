@@ -9,6 +9,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -69,6 +70,17 @@ def test_lora_functions_sync():
     run_check(llm.remove_lora, 12, [10, 11])
     run_check(llm.remove_lora, 11, [10])
     run_check(llm.remove_lora, 10, [])
+
+    # An id in use by another adapter is rejected instead of silently serving
+    # that adapter's weights; removing the adapter frees the id.
+    run_check(llm.add_lora, make_lora_request(1), [1])
+    other = LoRARequest("other", lora_int_id=1, lora_path=LORA_MODULE_PATH)
+    with pytest.raises(VLLMValidationError, match="already used"):
+        llm.add_lora(other)
+    with pytest.raises(VLLMValidationError, match="already used"):
+        llm.add_request("req", "Hi", SamplingParams(max_tokens=1), lora_request=other)
+    run_check(llm.remove_lora, 1, [])
+    run_check(llm.add_lora, other, [1])
 
 
 @pytest.mark.asyncio
