@@ -3,35 +3,50 @@
 """Dense attention dispatch for RDNA4 Octave."""
 
 from .geometry import OctaveGeometry
-from .hip import HipOctave, build_library, get_geometry_engine
+from .hip import HipOctave, get_geometry_engine, load_library
 from .splits import recommend_splits
 
 
 class TunedHipOctave(HipOctave):
-    """Choose the packed 256/64 or general geometry kernel from host shapes."""
+    """Choose precompiled scalar/decode or matrix kernels for D=256/R=64."""
 
     def __init__(self, head_dim: int, rope_dim: int, arch: str):
         geometry = OctaveGeometry(head_dim, rope_dim)
-        specialized = (head_dim, rope_dim) == (256, 64)
-        super().__init__(
-            build_library(geometry, arch, specialized=specialized),
-            geometry,
-            sparse=not specialized,
-        )
-        self._geometry_backend = (
-            get_geometry_engine(head_dim, rope_dim, arch) if specialized else None
-        )
+        super().__init__(load_library("decode", arch), geometry, sparse=False)
+        self._geometry_backend = get_geometry_engine(head_dim, rope_dim, arch)
 
     def _use_geometry(self, query, cache, table, prefill):
-        if self._geometry_backend is None:
-            return True
         heads, kv_heads = query.shape[1], cache.shape[1]
         if kv_heads <= 0 or heads % kv_heads:
             return False
         group = heads // kv_heads
         if prefill:
             tokens, requests = query.shape[0], table.shape[0]
+            if requests == 0:
+                return True
             capacity = table.shape[1] * cache.shape[2]
+            compact = cache.shape[-1] == self.layout("octave_k3v3_compact").slot_bytes
+            if (
+                (group in (1, 2) or (compact and group in (4, 8)))
+                and tokens >= 256
+                and tokens // requests >= 32
+            ):
+                return False
+            # Reuse one packed KV tile across six long-prefill queries.
+            if (
+                group == 6
+                and tokens >= 256
+                and cache.shape[-1] == self.layout("octave_k3v4").slot_bytes
+                and capacity >= (tokens + requests - 1) // requests + 1024
+                and (requests == 1 or tokens // requests >= 128)
+            ):
+                return False
+            # A single matrix family handles every GQA and prefill length.
+            # Retain scalar latency for the small chunks below.
+            if group == 6 and tokens >= 2 and tokens > requests:
+                return True
+            if tokens >= 256 and tokens // max(1, requests) >= 32:
+                return True
             # Very small per-request MHA chunks underfill the query tile.
             if group == 1 and tokens < 32 and tokens // max(1, requests) < 8:
                 return False
@@ -52,6 +67,14 @@ class TunedHipOctave(HipOctave):
             ):
                 return True
             return group not in (1, 2, 4, 6, 8)
+        if group == 6 and 2 <= query.shape[0] <= 4:
+            paired_verify = (
+                query.shape[0] == 4
+                and table.shape[0] == 1
+                and table.shape[1] * cache.shape[2] >= 1024
+                and cache.shape[-1] == self.layout("octave_k3v4").slot_bytes
+            )
+            return not paired_verify
         if group in (1, 2, 3, 6):
             return False
         capacity = table.shape[1] * cache.shape[2]
@@ -111,8 +134,7 @@ class TunedHipOctave(HipOctave):
     ):
         engine = (
             self._geometry_backend
-            if self._geometry_backend is not None
-            and self._use_geometry(query, cache, table, key is not None)
+            if self._use_geometry(query, cache, table, key is not None)
             else self
         )
         attention = super()._attention if engine is self else engine._attention

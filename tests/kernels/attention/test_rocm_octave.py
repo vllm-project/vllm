@@ -94,15 +94,16 @@ def _fill(cache, block_ids, k, v, k_signs, v_signs, fmt, kernel=None):
 
 
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
-def test_store_matches_reference(cache_dtype, kernel):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_store_matches_reference(cache_dtype, dtype, kernel):
     torch.manual_seed(0)
     dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
     t, hkv = 1024, 2
     k = torch.randn(t, hkv, HEAD, device=dev)
     k[..., 100] *= 8  # an outlier channel is spread by the rotation
-    k = k.bfloat16()
-    v = torch.randn(t, hkv, HEAD, device=dev).bfloat16()
+    k = k.to(dtype)
+    v = torch.randn(t, hkv, HEAD, device=dev).to(dtype)
     nblk = t // BLOCK + 4
     cache = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
     slots = _fill(cache, torch.randperm(nblk, device=dev), k, v, ksg, vsg, fmt, kernel)
@@ -152,7 +153,7 @@ def test_store_skips_padding_slots(cache_dtype, kernel):
 
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_group", [1, 4])
-@pytest.mark.parametrize("num_splits", [1, 7, 64])
+@pytest.mark.parametrize("num_splits", [1, 37])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("use_wmma", [True] if ARCH == "rdna4" else [True, False])
 def test_decode_matches_reference(
@@ -166,7 +167,7 @@ def test_decode_matches_reference(
     dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
     hkv, group = 1, 6
-    lens = [1, 16, 37, 700, 3000]
+    lens = [1, 16, 37, 700, 4096]
     cache = torch.zeros(512, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
     max_blocks = max(math.ceil(n / BLOCK) for n in lens)
     block_table = torch.zeros(len(lens), max_blocks, dtype=torch.int32, device=dev)
@@ -217,57 +218,84 @@ def test_decode_matches_reference(
     assert out[-1].abs().max().item() == 0
 
 
-@pytest.mark.skipif(ARCH != "rdna4", reason="padded heads require RDNA4 Octave")
-def test_padded_head_matches_reference():
-    """The packed layout pads RoPE and NoPE independently of the query."""
-    from vllm.v1.attention.ops.rocm_octave_rdna4 import TunedHipOctave
-
-    torch.manual_seed(2)
-    dev, dtype, cache_dtype = "cuda", torch.bfloat16, "octave_k3v4"
-    arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-    kernel = TunedHipOctave(96, 24, arch)
-    fmt = sq.OctaveFormat.from_cache_dtype(cache_dtype, 192, 64)
-    dims = torch.cat((torch.arange(24, device=dev), torch.arange(64, 136, device=dev)))
-
-    def pad(x):
-        padded = x.new_zeros((*x.shape[:-1], fmt.head_size))
-        padded[..., dims] = x
-        return padded
-
-    key, value = (
-        torch.randn(2 * BLOCK, 1, 96, dtype=dtype, device=dev) for _ in range(2)
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 MTP decode path")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_splits", [1, 37])
+def test_rdna4_mtp_four_token_k3v4_matches_reference(dtype, num_splits, kernel):
+    """Cover the native four-row MTP WMMA path for K3V4 GQA6."""
+    torch.manual_seed(13)
+    dev, fmt, hkv, group, length = "cuda", _format("octave_k3v4"), 1, 6, 1024
+    signs = sq.sign_bits(HEAD).to(dev)
+    nblocks = math.ceil(length / BLOCK)
+    cache = torch.zeros(
+        nblocks, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev
     )
-    query = torch.randn(2, 8, 96, dtype=dtype, device=dev)
-    signs = sq.sign_bits(fmt.head_size).to(dev)
-    cache = torch.empty(2, 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
-    table = torch.tensor([[0, 1]], dtype=torch.int32, device=dev)
-    requests = torch.zeros(2, dtype=torch.int32, device=dev)
-    lengths = torch.tensor([17, 32], dtype=torch.int32, device=dev)
-    kernel.store(
-        key, value, cache, torch.arange(2 * BLOCK, device=dev), signs, cache_dtype
+    pages = torch.arange(nblocks, dtype=torch.int32, device=dev)
+    table = pages.view(1, -1).contiguous()
+    key = torch.randn(length, hkv, HEAD, device=dev).to(dtype)
+    value = torch.randn_like(key)
+    _fill(cache, pages, key, value, signs, signs, fmt, kernel)
+
+    q = torch.randn(4, hkv * group, HEAD, device=dev).to(dtype)
+    q_to_req = torch.zeros(4, dtype=torch.int32, device=dev)
+    q_to_klen = torch.arange(length - 3, length + 1, dtype=torch.int32, device=dev)
+    out = _decode(
+        cache,
+        q,
+        table,
+        q_to_req,
+        q_to_klen,
+        signs,
+        fmt,
+        True,
+        kernel,
+        num_splits=num_splits,
+        query_group=4,
     )
-    out = kernel.decode(
-        query, cache, table, requests, lengths, signs, cache_dtype, splits=2
-    )
-    packed = sq.reference_quantize(pad(key).float(), pad(value).float(), fmt)
-    ref_cache = packed.view(2, BLOCK, 1, -1).transpose(1, 2).contiguous()
     ref = sq.reference_attention(
-        pad(query).float(), ref_cache, table, requests, lengths, fmt, 96**-0.5
+        q.float(), cache, table, q_to_req, q_to_klen, fmt, 1 / 16
     )
-    assert _rel(out, ref[..., dims]) < 2e-2
+    assert _rel(out, ref) < 2e-2
 
 
-@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
-@pytest.mark.parametrize("query_lens", [[300], [129, 1, 517]])
-def test_prefill_matches_reference(cache_dtype, query_lens, kernel):
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 Octave geometry contract")
+@pytest.mark.parametrize(
+    "head_dim,rope_dim",
+    [(128, 32), (192, 48), (512, 128), (128, 64), (256, 32), (256, 128)],
+)
+def test_rdna4_geometry_rejects_unsupported_head_and_rope(head_dim, rope_dim):
+    """RDNA4 Octave must reject every geometry outside the shipped 256/64 ABI."""
+    from vllm.v1.attention.ops.rocm_octave_rdna4 import OctaveGeometry, TunedHipOctave
+
+    with pytest.raises(ValueError, match="only head dimension 256 with 64 RoPE"):
+        OctaveGeometry(head_dim, rope_dim)
+    with pytest.raises(ValueError, match="only head dimension 256 with 64 RoPE"):
+        TunedHipOctave(head_dim, rope_dim, "gfx1201")
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "cache_dtype,query_lens,group",
+    [
+        (cache_dtype, query_lens, group)
+        for cache_dtype in CACHE_DTYPES
+        for query_lens in ([256], [512], [129, 1, 517])
+        for group in (1, 2, 6)
+    ]
+    + [
+        ("octave_k3v3_compact", [256], 4),
+        ("octave_k3v3_compact", [256], 8),
+    ],
+)
+def test_prefill_matches_reference(cache_dtype, query_lens, dtype, group, kernel):
     """Chunked prefill: each request's chunk attends causally to itself
     (unquantized K/V) and to its cached prefix (packed cache), in the rotated
     space the backend runs it in."""
     torch.manual_seed(3)
     dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
-    hkv, group = 1, 6
-    ctx_lens = [2500, 0, 4100][: len(query_lens)]
+    hkv = 1
+    ctx_lens = [4096, 0, 4096][: len(query_lens)]
     seq_lens = [c + n for c, n in zip(ctx_lens, query_lens)]
     max_blocks = max(math.ceil(n / BLOCK) for n in seq_lens)
     nblk = sum(math.ceil(n / BLOCK) for n in seq_lens) + 8
@@ -279,15 +307,15 @@ def test_prefill_matches_reference(cache_dtype, query_lens, kernel):
         nb = math.ceil(n / BLOCK)
         block_table[i, :nb] = free[used : used + nb].int()
         used += nb
-        k = torch.randn(n, hkv, HEAD, device=dev).half()
-        v = torch.randn(n, hkv, HEAD, device=dev).half()
+        k = torch.randn(n, hkv, HEAD, device=dev).to(dtype)
+        v = torch.randn(n, hkv, HEAD, device=dev).to(dtype)
         _fill(cache, block_table[i, :nb], k, v, ksg, vsg, fmt, kernel)
         ks.append(k)
         vs.append(v)
 
     qsl = torch.tensor([0, *query_lens], device=dev).cumsum(0).int()
     total = int(qsl[-1])
-    q = (torch.randn(total, hkv * group, HEAD, device=dev) * 2).half()
+    q = (torch.randn(total, hkv * group, HEAD, device=dev) * 2).to(dtype)
     k_new = torch.cat([k[c:] for k, c in zip(ks, ctx_lens)])
     v_new = torch.cat([v[c:] for v, c in zip(vs, ctx_lens)])
     out = _prefill(
@@ -413,6 +441,138 @@ def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt, kernel=None
     )
     torch.ops._C.octave_rotate(out, signs, False, True)
     return out
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="concurrent test targets RDNA4 runtime")
+def test_rdna4_concurrent_decode_has_per_call_state(kernel):
+    """Two HIP streams can use the shared geometry engine without state leaks."""
+    torch.manual_seed(11)
+    dev, fmt, hkv, group, n = "cuda", _format("octave_k3v4"), 1, 6, 73
+    signs = sq.sign_bits(HEAD).to(dev)
+    cache = torch.zeros(8, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+    key = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
+    value = torch.randn_like(key)
+    pages = torch.arange(cache.shape[0], dtype=torch.int32, device=dev)
+    _fill(cache, pages, key, value, signs, signs, fmt, kernel)
+    table = pages[: math.ceil(n / BLOCK)].view(1, -1).contiguous()
+    req, lengths = (
+        torch.zeros(1, dtype=torch.int32, device=dev),
+        torch.tensor([n], dtype=torch.int32, device=dev),
+    )
+    queries = [
+        torch.randn(1, hkv * group, HEAD, device=dev).to(dtype)
+        for dtype in (torch.float16, torch.bfloat16)
+    ]
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    outputs = []
+    torch.accelerator.synchronize()
+    for stream, query in zip(streams, queries):
+        with torch.cuda.stream(stream):
+            outputs.append(
+                _decode(
+                    cache,
+                    query,
+                    table,
+                    req,
+                    lengths,
+                    signs,
+                    fmt,
+                    True,
+                    kernel,
+                    num_splits=37,
+                )
+            )
+    for stream in streams:
+        stream.synchronize()
+    for query, actual in zip(queries, outputs):
+        expected = sq.reference_attention(
+            query.float(), cache, table, req, lengths, fmt, 1 / 16
+        )
+        assert _rel(actual, expected) < 2e-2
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="precompiled loader targets RDNA4")
+def test_rdna4_precompiled_runtime_never_invokes_a_compiler(monkeypatch):
+    """Store, attention, prefill and graph replay work with compilers disabled."""
+    import subprocess
+
+    from vllm.v1.attention.ops.rocm_octave_rdna4 import TunedHipOctave
+    from vllm.v1.attention.ops.rocm_octave_rdna4 import hip as octave_hip
+
+    def compiler_forbidden(*args, **kwargs):
+        raise AssertionError("runtime Octave must not launch a compiler")
+
+    monkeypatch.setattr(subprocess, "run", compiler_forbidden)
+    monkeypatch.setattr(subprocess, "Popen", compiler_forbidden)
+    arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    for kind in ("geometry", "decode"):
+        assert octave_hip.load_library(kind, arch).is_file()
+    runtime = TunedHipOctave(HEAD, ROPE, arch)
+
+    torch.manual_seed(12)
+    dev, fmt, cache_dtype = "cuda", _format("octave_k3v4"), "octave_k3v4"
+    signs = sq.sign_bits(HEAD).to(dev)
+    cache = torch.zeros(4, 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+    table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32, device=dev)
+    key, value = (
+        torch.randn(32, 1, HEAD, device=dev).bfloat16(),
+        torch.randn(32, 1, HEAD, device=dev).bfloat16(),
+    )
+    _store(key, value, cache, torch.arange(32, device=dev), signs, signs, fmt, runtime)
+    q = torch.randn(1, 6, HEAD, device=dev).bfloat16()
+    req = torch.zeros(1, dtype=torch.int32, device=dev)
+    lengths = torch.tensor([32], dtype=torch.int32, device=dev)
+    eager = runtime.decode(
+        q, cache, table, req, lengths, signs, cache_dtype, scale=1 / 16, splits=37
+    )
+    ref = sq.reference_attention(q.float(), cache, table, req, lengths, fmt, 1 / 16)
+    assert _rel(eager, ref) < 2e-2
+
+    k_new, v_new = (
+        torch.randn(2, 1, HEAD, device=dev).bfloat16(),
+        torch.randn(2, 1, HEAD, device=dev).bfloat16(),
+    )
+    prefill = runtime.prefill(
+        q.expand(2, -1, -1).contiguous(),
+        k_new,
+        v_new,
+        cache,
+        table,
+        torch.tensor([0, 2], dtype=torch.int32, device=dev),
+        torch.tensor([34], dtype=torch.int32, device=dev),
+        signs,
+        cache_dtype,
+        scale=1 / 16,
+    )
+    assert prefill.shape == (2, 6, HEAD)
+    assert torch.isfinite(prefill).all()
+
+    out = torch.empty((1, 6, HEAD), dtype=torch.float32, device=dev)
+    scratch = torch.empty((1, 6, 37, HEAD + 2), dtype=torch.float32, device=dev)
+
+    def graph_decode():
+        runtime.decode(
+            q,
+            cache,
+            table,
+            req,
+            lengths,
+            signs,
+            cache_dtype,
+            scale=1 / 16,
+            splits=37,
+            out=out,
+            scratch=scratch,
+        )
+
+    graph_decode()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_decode()
+    q.add_(0.5)
+    graph.replay()
+    ref = sq.reference_attention(q.float(), cache, table, req, lengths, fmt, 1 / 16)
+    assert _rel(out, ref) < 2e-2
 
 
 @pytest.mark.parametrize(

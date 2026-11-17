@@ -142,8 +142,6 @@ class RocmOctaveAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        if _on_rdna4():
-            return list(range(1, 1025))
         return [_KERNEL_HEAD_SIZE]
 
     @classmethod

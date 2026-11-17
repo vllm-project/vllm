@@ -15,13 +15,11 @@ class OctaveGeometry:
     rope_dim: int
 
     def __post_init__(self) -> None:
-        if not 1 <= self.head_dim <= 1024 or not 0 <= self.rope_dim <= self.head_dim:
+        if (self.head_dim, self.rope_dim) != (256, 64):
             raise ValueError(
-                f"Unsupported RDNA4 Octave geometry: D={self.head_dim}, "
-                f"RoPE={self.rope_dim}"
+                "RDNA4 Octave currently supports only head dimension 256 with "
+                f"64 RoPE dimensions; got D={self.head_dim}, RoPE={self.rope_dim}"
             )
-        if self._blocked_dims()[0] > 1024:
-            raise ValueError("Padded Octave RoPE/NoPE dimensions exceed 1024")
 
     def _blocked_dims(self) -> tuple[int, int]:
         rope = round_up(self.rope_dim, HADAMARD_BLOCK)

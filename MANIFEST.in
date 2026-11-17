@@ -8,4 +8,3 @@ include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *
-recursive-include vllm/v1/attention/ops/rocm_octave_rdna4/native *.hip

@@ -1,69 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build and call the standalone RDNA4 HIP Octave kernels on a Torch stream."""
+"""Load the packaged RDNA4 HIP Octave libraries and call them on Torch streams."""
 
 import ctypes as ct
-import fcntl
-import hashlib
-import shutil
-import subprocess
-import sys
 from functools import cache
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from typing import Literal
 
 import torch
 
-from vllm import envs
 from vllm.v1.attention.ops.rocm_octave import OctaveFormat
 
 from .geometry import OctaveGeometry
 
-_NATIVE = Path(__file__).resolve().parent / "native"
 DTYPES = {torch.float16: 0, torch.bfloat16: 1}
 _ARCHES = ("gfx1200", "gfx1201")
+_LIBRARIES = {
+    "geometry": "_octave_rdna4_geometry.so",
+    "decode": "_octave_rdna4_decode.so",
+}
 
 
-def build_library(
-    geometry: OctaveGeometry, arch: str, *, specialized: bool = False
-) -> Path:
-    """Build the packaged HIP source before graph capture."""
+def load_library(kind: Literal["geometry", "decode"], arch: str) -> Path:
+    """Locate a CMake-built RDNA4 Octave library shipped with vLLM."""
     if arch not in _ARCHES:
         raise ValueError(f"Unsupported RDNA4 target {arch}")
-    source = (
-        _NATIVE
-        / ("specialized_d256_r64" if specialized else "geometry")
-        / "octave_rdna4.hip"
-    )
-    build_dir = Path(envs.VLLM_CACHE_ROOT) / "octave_rdna4"
-    hipcc = shutil.which("hipcc") or str(Path(sys.executable).with_name("hipcc"))
-    flags = [f"--offload-arch={arch}", "-std=c++17", "-O3", "-fPIC", "-shared"]
-    if not specialized:
-        flags += [
-            f"-DOCTAVE_LOGICAL_HEAD={geometry.head_dim}",
-            f"-DOCTAVE_LOGICAL_ROPE={geometry.rope_dim}",
-        ]
-    digest = hashlib.sha256(repr((hipcc, torch.version.hip, flags)).encode())
-    digest.update(source.read_bytes())
-    build_dir.mkdir(parents=True, exist_ok=True)
-    library = build_dir / f"octave-{arch}-{digest.hexdigest()[:20]}.so"
-    with library.with_suffix(".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if not library.is_file():
-            with TemporaryDirectory(dir=build_dir) as temp:
-                target = Path(temp) / library.name
-                try:
-                    subprocess.run(
-                        [hipcc, "-x", "hip", *flags, str(source), "-o", str(target)],
-                        check=True,
-                    )
-                except FileNotFoundError as exc:
-                    raise RuntimeError(
-                        "RDNA4 Octave requires hipcc for its first build. "
-                        "Install the ROCm development tools and put hipcc on PATH."
-                    ) from exc
-                target.replace(library)
-    return library.resolve()
+    try:
+        filename = _LIBRARIES[kind]
+    except KeyError as exc:
+        raise ValueError(f"Unknown RDNA4 Octave library kind: {kind}") from exc
+    library = Path(__file__).resolve().parents[4] / filename
+    if not library.is_file():
+        raise RuntimeError(
+            f"Precompiled RDNA4 Octave library {filename} is missing for {arch}. "
+            "Rebuild and reinstall vLLM with ROCm support for gfx1200 or gfx1201."
+        )
+    return library
 
 
 class _Activation(ct.Structure):
@@ -600,4 +572,4 @@ class HipOctave:
 @cache
 def get_geometry_engine(head_dim: int, rope_dim: int, arch: str) -> HipOctave:
     geometry = OctaveGeometry(head_dim, rope_dim)
-    return HipOctave(build_library(geometry, arch), geometry, sparse=True)
+    return HipOctave(load_library("geometry", arch), geometry, sparse=True)

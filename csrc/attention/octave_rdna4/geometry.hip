@@ -1,26 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-// Geometry-aware Octave kernels. Logical padding is fused into loads/stores.
+// Fixed D=256/R=64 Octave matrix attention and sparse-cache kernels.
 #include <cmath>
 #include <cstdint>
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
-#ifndef OCTAVE_LOGICAL_HEAD
-  #define OCTAVE_LOGICAL_HEAD 256
-#endif
-#ifndef OCTAVE_LOGICAL_ROPE
-  #define OCTAVE_LOGICAL_ROPE 64
-#endif
 namespace {
-constexpr int LD = OCTAVE_LOGICAL_HEAD, LR = OCTAVE_LOGICAL_ROPE, W = 32,
-              Partial = LD + 2;
-constexpr int ceil64(int n) { return (n + 63) / 64 * 64; }
-constexpr int pow2(int n) {
-  int x = 64;
-  while (x < n) x *= 2;
-  return x;
-}
+constexpr int LD = 256, LR = 64, W = 32, Partial = LD + 2;
 struct Activation {
   const void* data;
   int64_t token_stride, head_stride;
@@ -37,8 +24,7 @@ template <bool C, int VB>
 struct Format {
   static constexpr bool compact = C;
   static constexpr int vbits = VB;
-  static constexpr int D = C ? pow2(LD) : ceil64(LR) + ceil64(LD - LR),
-                       R = C ? 0 : ceil64(LR);
+  static constexpr int D = LD, R = C ? 0 : LR;
   static constexpr int VL = D / 32, KS = C ? 1 : D / 64, KOff = R / 2,
                        VOff = KOff + (D - R) * 3 / 8;
   static constexpr int SOff = VOff + D * VB / 8, Align = C ? 4 : 8,
@@ -375,10 +361,27 @@ __global__ __launch_bounds__(32) void scalar(
     float* out, float* partials, Activation q, Activation k, Activation v,
     PagedCache c, const int32_t* table, int64_t stride, const int32_t* map,
     const int32_t* lengths, int requests, const uint32_t* sgn, float scale,
-    int tokens, int heads) {
+    int tokens, int heads, bool repair_only) {
+  const int qid = repair_only ? blockIdx.y : blockIdx.x;
+  const int head = repair_only ? blockIdx.x : blockIdx.y;
+  if constexpr (!Shuffle) {
+    if (repair_only) {
+      int req, prefix, length, start;
+      metadata<P>(qid, map, lengths, requests, req, prefix, length, start);
+      if (length > 0) {
+        const float* current =
+            gridDim.z == 1
+                ? out + (int64_t(qid) * heads + head) * LD
+                : partials +
+                      ((int64_t(qid) * heads + head) * gridDim.z + blockIdx.z) *
+                          Partial;
+        if (!__builtin_isnan(current[0])) return;
+      }
+    }
+  }
   scalar_row<F, T, P, Shuffle>(
       out, partials, q, k, v, c, table, stride, map, lengths, requests, sgn,
-      scale, blockIdx.x, blockIdx.y, blockIdx.z, heads, gridDim.z, threadIdx.x);
+      scale, qid, head, blockIdx.z, heads, gridDim.z, threadIdx.x);
 }
 using H8 = _Float16 __attribute__((ext_vector_type(8)));
 using F8 = float __attribute__((ext_vector_type(8)));
@@ -418,12 +421,12 @@ struct alignas(16) Shared {
   uint32_t unsafe, valid, kv_unsafe;
   int boundary;
 };
-template <class F, class T, bool P, bool Parallel, bool RequestTiles = false>
+template <class F, class T, bool P, bool Parallel>
 __global__ __launch_bounds__(32 * F::Waves) void matrix(
     float* out, float* partials, Activation query, Activation key,
     Activation value, PagedCache cache, const int32_t* table, int64_t stride,
     const int32_t* map, const int32_t* lengths, int requests,
-    const uint32_t* sgn, float scale, int tokens, int heads) {
+    const uint32_t* sgn, float scale, int tokens, int heads, bool request_tiles) {
   static_assert(sizeof(Shared<F>) <= 65536, "geometry LDS bound");
   __shared__ Shared<F> s;
   const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32,
@@ -434,16 +437,20 @@ __global__ __launch_bounds__(32 * F::Waves) void matrix(
             hbase = (blockIdx.y % ht) * bh;
   const int tile_queries = P ? F::Rows / bh : 1;
   int queries = tile_queries, qbase = blockIdx.x * tile_queries;
-  if constexpr (P && RequestTiles) {
-    const int regular = (tokens + tile_queries - 1) / tile_queries;
-    if (blockIdx.x < regular) {
-      const int req = request_for(map, requests, qbase);
-      queries = min(tile_queries, map[req + 1] - qbase);
-    } else {
-      const int req = blockIdx.x - regular;
-      qbase = map[req];
-      if (qbase == map[req + 1] || qbase % tile_queries == 0) return;
-      queries = min(map[req + 1] - qbase, tile_queries - qbase % tile_queries);
+  // Request boundaries change tile assignment, not the matrix calculation.
+  if constexpr (P) {
+    if (request_tiles) {
+      const int regular = (tokens + tile_queries - 1) / tile_queries;
+      if (blockIdx.x < regular) {
+        const int req = request_for(map, requests, qbase);
+        queries = min(tile_queries, map[req + 1] - qbase);
+      } else {
+        const int req = blockIdx.x - regular;
+        qbase = map[req];
+        if (qbase == map[req + 1] || qbase % tile_queries == 0) return;
+        queries = min(map[req + 1] - qbase,
+                      tile_queries - qbase % tile_queries);
+      }
     }
   }
   if (tid == 0) {
@@ -764,27 +771,6 @@ __global__ __launch_bounds__(32 * F::Waves) void matrix(
     matrix_lds_barrier();
   }
 }
-template <class F, class T, bool P>
-__global__ __launch_bounds__(32) void unsafe_rows(
-    float* out, float* partials, Activation query, Activation key,
-    Activation value, PagedCache cache, const int32_t* table, int64_t stride,
-    const int32_t* map, const int32_t* lengths, int requests,
-    const uint32_t* sgn, float scale, int tokens, int heads) {
-  int q = blockIdx.y, h = blockIdx.x, lane = threadIdx.x, req, prefix, length,
-      start;
-  metadata<P>(q, map, lengths, requests, req, prefix, length, start);
-  if (length > 0) {
-    const float* current =
-        gridDim.z == 1
-            ? out + (int64_t(q) * heads + h) * LD
-            : partials +
-                  ((int64_t(q) * heads + h) * gridDim.z + blockIdx.z) * Partial;
-    if (!__builtin_isnan(current[0])) return;
-  }
-  scalar_row<F, T, P>(out, partials, query, key, value, cache, table, stride,
-                      map, lengths, requests, sgn, scale, q, h, blockIdx.z,
-                      heads, gridDim.z, lane);
-}
 __global__ void merge(float* out, const float* partial, int splits) {
   int q = blockIdx.x, h = blockIdx.y, heads = gridDim.y, lane = threadIdx.x;
   const float* src = partial + (int64_t(q) * heads + h) * splits * Partial;
@@ -896,13 +882,13 @@ int attention(float* out, float* partial, Activation q, Activation k,
         if (int64_t(tokens) * heads > 256) {
           scalar<F, T, P, true><<<dim3(tokens, heads, splits), 32, 0, stream>>>(
               out, partial, q, k, v, cache, table, stride, map, lengths,
-              requests, signs, scale, tokens, heads);
+              requests, signs, scale, tokens, heads, false);
           return;
         }
       }
       scalar<F, T, P, false><<<dim3(tokens, heads, splits), 32, 0, stream>>>(
           out, partial, q, k, v, cache, table, stride, map, lengths, requests,
-          signs, scale, tokens, heads);
+          signs, scale, tokens, heads, false);
     };
     // Tiny requests and independent one-query prefill avoid matrix setup.
     bool mat = P ? (tokens >= 16 && tokens > requests) : (group >= 4);
@@ -913,26 +899,27 @@ int attention(float* out, float* partial, Activation q, Activation k,
     } else if (mat) {
       if constexpr (P) {
         if (qs > 1 && requests > 1)
-          matrix<F, T, P, true, true><<<dim3((tokens + qs - 1) / qs + requests,
-                                             cache.heads * tiles, splits),
-                                        32 * F::Waves, 0, stream>>>(
+          matrix<F, T, P, true>
+              <<<dim3((tokens + qs - 1) / qs + requests,
+                      cache.heads * tiles, splits),
+                 32 * F::Waves, 0, stream>>>(
               out, partial, q, k, v, cache, table, stride, map, lengths,
-              requests, signs, scale, tokens, heads);
+              requests, signs, scale, tokens, heads, true);
         else
-          matrix<F, T, P, true, false>
+          matrix<F, T, P, true>
               <<<dim3((tokens + qs - 1) / qs, cache.heads * tiles, splits),
                  32 * F::Waves, 0, stream>>>(
                   out, partial, q, k, v, cache, table, stride, map, lengths,
-                  requests, signs, scale, tokens, heads);
+                  requests, signs, scale, tokens, heads, false);
       } else {
-        matrix<F, T, P, true, false>
+        matrix<F, T, P, true>
             <<<dim3(tokens, cache.heads * tiles, splits), 32 * F::Waves, 0,
                stream>>>(out, partial, q, k, v, cache, table, stride, map,
-                         lengths, requests, signs, scale, tokens, heads);
+                         lengths, requests, signs, scale, tokens, heads, false);
       }
-      unsafe_rows<F, T, P><<<dim3(heads, tokens, splits), 32, 0, stream>>>(
+      scalar<F, T, P, false><<<dim3(heads, tokens, splits), 32, 0, stream>>>(
           out, partial, q, k, v, cache, table, stride, map, lengths, requests,
-          signs, scale, tokens, heads);
+          signs, scale, tokens, heads, true);
     } else
       launch_scalar();
   });
@@ -1119,7 +1106,12 @@ __global__ __launch_bounds__(32) void sparse(
     int pages, const int32_t* mapping, const int32_t* indices,
     int64_t index_stride, int topk, const uint32_t* sgn,
     const int32_t* positions, Shadow recent, Shadow sinks, int heads,
-    float scale) {
+    float scale, bool repair) {
+  const int64_t row = int64_t(blockIdx.x) * heads + blockIdx.y;
+  const float* dst = gridDim.z == 1
+                         ? out + row * LD
+                         : partial + (row * gridDim.z + blockIdx.z) * Partial;
+  if (repair && __builtin_isfinite(dst[0])) return;
   sparse_row<F, T>(out, partial, query, cache, table, table_stride, columns,
                    requests, pages, mapping, indices, index_stride, topk, sgn,
                    positions, recent, sinks, heads, scale, blockIdx.x,
@@ -1145,12 +1137,16 @@ __global__ __launch_bounds__(128) void sparse_wmma(
             splits = gridDim.z, group = heads / cache.heads;
   const int req = mapping[q], width = (topk + splits - 1) / splits,
             begin = split * width, end = min(topk, begin + width);
+  // The following scalar launch repairs marked rows. Inlining sparse_row
+  // here keeps both algorithms' cache metadata live and spills SGPRs on 7.2.
+  auto mark = [&](int h) {
+    const int64_t row = int64_t(q) * heads + kv * group + h;
+    float* dst = splits == 1 ? out + row * LD
+                             : partial + (row * splits + split) * Partial;
+    if (lane == 0) dst[0] = __builtin_nanf("");
+  };
   auto fallback = [&] {
-    for (int h = wave; h < group; h += 4)
-      sparse_row<F, T>(out, partial, query, cache, table, table_stride, columns,
-                       requests, pages, mapping, indices, index_stride, topk,
-                       sgn, positions, recent, sinks, heads, scale, q,
-                       kv * group + h, split, splits, lane);
+    for (int h = wave; h < group; h += 4) mark(h);
   };
   if (req < 0 || req >= requests || begin >= end) {
     fallback();
@@ -1321,10 +1317,7 @@ __global__ __launch_bounds__(128) void sparse_wmma(
       largest = fmaxf(largest, fabsf(v[i] * inv));
     }
     if (!__all(finite) || (mass > 0 && maximum(largest) < 1.e-4f)) {
-      sparse_row<F, T>(out, partial, query, cache, table, table_stride, columns,
-                       requests, pages, mapping, indices, index_stride, topk,
-                       sgn, positions, recent, sinks, heads, scale, q,
-                       kv * group + h, split, splits, lane);
+      mark(h);
       continue;
     }
     const int64_t output_row = int64_t(q) * heads + kv * group + h;
@@ -1370,23 +1363,19 @@ extern "C" int octave_rdna4_decode_sparse(
     hipStream_t stream) {
   if (tokens == 0) return hipSuccess;
   const int group = heads / cache.heads;
-  const bool use_wmma = LD == 256 && LR == 64 && group >= 8 && group <= 16;
+  const bool use_wmma = group >= 8 && group <= 16;
   int rc = dispatch(dtype, format, [&](auto t, auto f) {
-    if constexpr (LD == 256 && LR == 64) {
-      if (use_wmma) {
-        sparse_wmma<decltype(f), decltype(t)>
-            <<<dim3(tokens, cache.heads, splits), 128, 0, stream>>>(
-                out, partial, q, cache, table, table_stride, columns, requests,
-                pages, mapping, indices, index_stride, topk, sgn, positions,
-                recent, sinks, heads, scale);
-        return;
-      }
-    }
+    if (use_wmma)
+      sparse_wmma<decltype(f), decltype(t)>
+          <<<dim3(tokens, cache.heads, splits), 128, 0, stream>>>(
+              out, partial, q, cache, table, table_stride, columns, requests,
+              pages, mapping, indices, index_stride, topk, sgn, positions,
+              recent, sinks, heads, scale);
     sparse<decltype(f), decltype(t)>
         <<<dim3(tokens, heads, splits), 32, 0, stream>>>(
             out, partial, q, cache, table, table_stride, columns, requests,
             pages, mapping, indices, index_stride, topk, sgn, positions, recent,
-            sinks, heads, scale);
+            sinks, heads, scale, use_wmma);
   });
   if (rc != hipSuccess || splits == 1) return rc;
   if (use_wmma && splits >= 32 && int64_t(tokens) * heads <= 256)

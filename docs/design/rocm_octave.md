@@ -20,19 +20,28 @@ HIP_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen3.8-27B-FP8 \
     --max-model-len 32768 --max-num-batched-tokens 8192 --max-num-seqs 4
 ```
 
-The packaged HIP sources require ROCm `hipcc` on `PATH` for the first build.
-Workers compile before graph capture and reuse libraries under
-`VLLM_CACHE_ROOT/octave_rdna4`. No graph-mode or vision flags are required.
+The RDNA4 path is validated with ROCm 10. CMake builds the HIP libraries for
+the selected `gfx1200` and/or `gfx1201` targets and installs them in the `vllm`
+package.
+The Python runtime only loads those precompiled libraries; it does not invoke
+`hipcc` or compile kernels on first use. A ROCm development toolchain is needed
+when building vLLM, not when serving with the installed wheel.
 
-The `specialized_d256_r64` native source provides optimized dense kernels for
-head size 256 and rotary dimension 64. The `geometry` source supports general
-dimensions and QSA. Dense attention selects between them by workload shape.
+RDNA4 currently supports head size 256 with 64 rotary dimensions. This applies
+to dense attention and the QSA path. Other head-size/RoPE combinations are
+rejected during geometry validation. The precompiled decode library provides
+cache storage and a small fixed set of scalar and WMMA kernels for decode,
+verification, and prefill. This includes grouped-prefill fast paths for GQA
+groups 1 and 2 and the GQA-6 V=4 reuse path. The geometry library provides the
+matrix kernels for the remaining multi-query prefill cases plus sparse QSA
+attention. Both use the existing Octave wire formats and causal metadata. QSA
+supports tagged exact K/V for selected tokens among the first four and last 64;
+a missing tag uses packed KV.
 
-The dense path supports FP16/BF16, integer GQA ratios and equal Q/K/V head
-sizes from 1 to 1024, provided the separately padded RoPE and non-RoPE
-dimensions fit in 1024. It uses the existing Octave wire formats and
-causal metadata. The QSA path also supports tagged exact K/V for selected
-tokens among the first four and last 64; a missing tag uses packed KV.
+To limit the number of compiled variants, scalar kernels also handle unsafe
+decode and matrix rows, and geometry prefill selects request tiling at runtime.
+The grouped-prefill guard remains separate to preserve ragged-request
+performance. These choices retain the tuned WMMA paths and numerical checks.
 
 Sliding windows, ALiBi, attention sinks, soft caps, unequal QK/V dimensions
 and fused output quantization are unsupported. Runtime validation was on
@@ -65,8 +74,8 @@ backends, which serve only models with multi-head latent attention, Octave KV is
 tied to an attention shape, not to a model.
 
 Models with full RoPE (Llama, Qwen3, Mistral, ...) or other head sizes are
-rejected by these tiers with an explicit error. RDNA4 supports the wider
-geometry described above. Sliding window, ALiBi, attention
+rejected by these tiers with an explicit error. RDNA4 currently has the same
+256/64 Octave attention shape. Sliding window, ALiBi, attention
 sinks, soft-capping and encoder attention are not supported.
 
 The decode kernels cover GQA groups of 1, 2, 4, 6 or 8 query heads per KV
