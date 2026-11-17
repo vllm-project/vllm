@@ -1,17 +1,24 @@
 #include "marlin.cuh"
 
-#include "core/registration.h"
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include "torch_utils.h"
 
 namespace marlin {
 
-template <int const num_threads, int const num_bits, bool is_a_8bit>
+template <int const num_threads, int const num_bits>
 __global__ void awq_marlin_repack_kernel(
     uint32_t const* __restrict__ b_q_weight_ptr, uint32_t* __restrict__ out_ptr,
     int size_k, int size_n) {
   constexpr int pack_factor = 32 / num_bits;
 
-  constexpr int target_tile_n_size = tile_n_size / (is_a_8bit ? 2 : 1);
-  constexpr int target_tile_k_size = tile_k_size * (is_a_8bit ? 2 : 1);
+  constexpr int target_tile_n_size = tile_n_size;
+  constexpr int target_tile_k_size = tile_k_size;
   int k_tiles = size_k / target_tile_k_size;
   int n_tiles = size_n / target_tile_n_size;
   int block_k_tiles = div_ceil(k_tiles, gridDim.x);
@@ -80,11 +87,11 @@ __global__ void awq_marlin_repack_kernel(
     }
 
     int tc_col = th_id / 4;
-    int tc_row = (th_id % 4) * (is_a_8bit ? 4 : 2);
+    int tc_row = (th_id % 4) * 2;
 
     constexpr int tc_offsets[4] = {0, 1, 8, 9};
 
-    int cur_n = (warp_id / (is_a_8bit ? 2 : 1)) * 16 + tc_col;
+    int cur_n = warp_id * 16 + tc_col;
     int cur_n_packed = cur_n / pack_factor;
     int cur_n_pos = cur_n % pack_factor;
 
@@ -107,29 +114,14 @@ __global__ void awq_marlin_repack_kernel(
     uint32_t vals[8];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-      if constexpr (is_a_8bit) {
-        int cur_elem = tc_row + i;
+      int cur_elem = tc_row + tc_offsets[i];
 
-        int packed_src_0 =
-            sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) * (warp_id % 2) +
-                             sh_stride * cur_elem];
-        int packed_src_1 =
-            sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) * (warp_id % 2) +
-                             sh_stride * (cur_elem + 16)];
+      int packed_src_0 = sh_stage_int_ptr[cur_n_packed + sh_stride * cur_elem];
+      int packed_src_1 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) +
+                                          sh_stride * cur_elem];
 
-        vals[i] = (packed_src_0 >> (cur_n_pos_unpacked * num_bits)) & mask;
-        vals[4 + i] = (packed_src_1 >> (cur_n_pos_unpacked * num_bits)) & mask;
-      } else {
-        int cur_elem = tc_row + tc_offsets[i];
-
-        int packed_src_0 =
-            sh_stage_int_ptr[cur_n_packed + sh_stride * cur_elem];
-        int packed_src_1 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) +
-                                            sh_stride * cur_elem];
-
-        vals[i] = (packed_src_0 >> (cur_n_pos_unpacked * num_bits)) & mask;
-        vals[4 + i] = (packed_src_1 >> (cur_n_pos_unpacked * num_bits)) & mask;
-      }
+      vals[i] = (packed_src_0 >> (cur_n_pos_unpacked * num_bits)) & mask;
+      vals[4 + i] = (packed_src_1 >> (cur_n_pos_unpacked * num_bits)) & mask;
     }
 
     constexpr int tile_size =
@@ -138,19 +130,8 @@ __global__ void awq_marlin_repack_kernel(
 
     // Result of:
     // https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
-    if constexpr (!is_a_8bit && num_bits == 4) {
+    if constexpr (num_bits == 4) {
       int pack_idx[8] = {0, 2, 4, 6, 1, 3, 5, 7};
-
-      uint32_t res = 0;
-#pragma unroll
-      for (int i = 0; i < 8; i++) {
-        res |= vals[pack_idx[i]] << (i * 4);
-      }
-
-      out_ptr[out_offset + th_id * 4 + warp_id] = res;
-
-    } else if constexpr (is_a_8bit && num_bits == 4) {
-      int pack_idx[8] = {0, 4, 1, 5, 2, 6, 3, 7};
 
       uint32_t res = 0;
 #pragma unroll
@@ -167,7 +148,7 @@ __global__ void awq_marlin_repack_kernel(
       uint32_t res2 = 0;
 #pragma unroll
       for (int i = 0; i < 4; i++) {
-        const int ii = is_a_8bit ? i : pack_idx[i];
+        const int ii = pack_idx[i];
         res1 |= vals[ii] << (i * 8);
         res2 |= vals[4 + ii] << (i * 8);
       }
@@ -206,83 +187,77 @@ __global__ void awq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-#define CALL_IF(NUM_BITS, IS_A_8BIT)                                       \
-  else if (num_bits == NUM_BITS && is_a_8bit == IS_A_8BIT) {               \
-    cudaFuncSetAttribute(                                                  \
-        marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
-                                         IS_A_8BIT>,                       \
-        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);      \
-    marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
-                                     IS_A_8BIT>                            \
-        <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(      \
-            b_q_weight_ptr, out_ptr, size_k, size_n);                      \
+#define CALL_IF(NUM_BITS)                                                   \
+  else if (num_bits == NUM_BITS) {                                          \
+    cudaFuncSetAttribute(                                                   \
+        marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS>, \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
+    marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS>      \
+        <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
+            b_q_weight_ptr, out_ptr, size_k, size_n);                       \
   }
 
-torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
-                                int64_t size_n, int64_t num_bits,
-                                bool is_a_8bit) {
+torch::stable::Tensor awq_marlin_repack(torch::stable::Tensor& b_q_weight,
+                                        int64_t size_k, int64_t size_n,
+                                        int64_t num_bits) {
   // Verify compatibility with marlin tile of 16x64
-  TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
-              " is not divisible by tile_k_size = ", marlin::tile_k_size);
-  TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
-              " is not divisible by tile_n_size = ", marlin::tile_n_size);
+  STD_TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
+                  " is not divisible by tile_k_size = ", marlin::tile_k_size);
+  STD_TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
+                  " is not divisible by tile_n_size = ", marlin::tile_n_size);
 
-  TORCH_CHECK(num_bits == 4 || num_bits == 8,
-              "num_bits must be 4 or 8. Got = ", num_bits);
+  STD_TORCH_CHECK(num_bits == 4 || num_bits == 8,
+                  "num_bits must be 4 or 8. Got = ", num_bits);
   int const pack_factor = 32 / num_bits;
 
   // Verify B
-  TORCH_CHECK(b_q_weight.size(0) == size_k,
-              "b_q_weight.size(0) = ", b_q_weight.size(0),
-              " is not size_k = ", size_k);
-  TORCH_CHECK((size_n / pack_factor) == b_q_weight.size(1),
-              "Shape mismatch: b_q_weight.size(1) = ", b_q_weight.size(1),
-              ", size_n = ", size_n, ", pack_factor = ", pack_factor);
+  STD_TORCH_CHECK(b_q_weight.size(0) == size_k,
+                  "b_q_weight.size(0) = ", b_q_weight.size(0),
+                  " is not size_k = ", size_k);
+  STD_TORCH_CHECK((size_n / pack_factor) == b_q_weight.size(1),
+                  "Shape mismatch: b_q_weight.size(1) = ", b_q_weight.size(1),
+                  ", size_n = ", size_n, ", pack_factor = ", pack_factor);
 
   // Verify device and strides
-  TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
-  TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
-  TORCH_CHECK(b_q_weight.dtype() == at::kInt, "b_q_weight type is not kInt");
+  STD_TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight is not on GPU");
+  STD_TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
+  STD_TORCH_CHECK(
+      b_q_weight.scalar_type() == torch::headeronly::ScalarType::Int,
+      "b_q_weight type is not kInt");
+
+  const int32_t device_index = b_q_weight.get_device_index();
+  torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  const cudaStream_t stream = get_current_cuda_stream(device_index);
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(b_q_weight));
-  auto options = torch::TensorOptions()
-                     .dtype(b_q_weight.dtype())
-                     .device(b_q_weight.device());
-  torch::Tensor out = torch::empty(
+  torch::stable::Tensor out = torch::stable::empty(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
-      options);
+      b_q_weight.scalar_type(), std::nullopt, b_q_weight.device());
 
   // Get ptrs
   uint32_t const* b_q_weight_ptr =
-      reinterpret_cast<uint32_t const*>(b_q_weight.data_ptr());
-  uint32_t* out_ptr = reinterpret_cast<uint32_t*>(out.data_ptr());
+      reinterpret_cast<uint32_t const*>(b_q_weight.const_data_ptr());
+  uint32_t* out_ptr = reinterpret_cast<uint32_t*>(out.mutable_data_ptr());
 
-  // Get dev info
-  int dev = b_q_weight.get_device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(dev);
   int blocks;
-  cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
+  cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, device_index);
 
   int max_shared_mem = 0;
   cudaDeviceGetAttribute(&max_shared_mem,
-                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-  TORCH_CHECK(max_shared_mem > 0);
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device_index);
+  STD_TORCH_CHECK(max_shared_mem > 0);
 
   if (false) {
   }
-  CALL_IF(4, false)
-  CALL_IF(8, false)
-  CALL_IF(4, true)
-  CALL_IF(8, true)
+  CALL_IF(4)
+  CALL_IF(8)
   else {
-    TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits,
-                ", is_a_8bit = ", is_a_8bit);
+    STD_TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits);
   }
 
   return out;
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("awq_marlin_repack", &awq_marlin_repack);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("awq_marlin_repack", TORCH_BOX(&awq_marlin_repack));
 }

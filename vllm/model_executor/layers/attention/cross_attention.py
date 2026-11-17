@@ -18,9 +18,10 @@ from vllm.v1.attention.backend import (
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.kv_cache_interface import (
-    CrossAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 
@@ -30,11 +31,10 @@ logger = init_logger(__name__)
 def _get_cross_slot_mapping(
     encoder_seq_lens: np.ndarray,
     block_table_tensor: torch.Tensor,
-    kv_cache_spec: CrossAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     device: torch.device,
 ) -> torch.Tensor:
     """Get cross-attention slot mappings."""
-
     block_size = kv_cache_spec.block_size
     slot_mappings = []
 
@@ -72,7 +72,7 @@ def _get_cross_slot_mapping(
 
 @functools.lru_cache
 def create_cross_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "CrossAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -87,17 +87,26 @@ def create_cross_attention_backend(
         ) -> AttentionMetadata:
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
+            assert new_metadata.encoder_seq_lens_cpu is not None
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Any computed tokens indicated decode step>1 (no chunked prefill)
-            num_cache_decodes = (
-                (common_attn_metadata.num_computed_tokens_cpu > 0).sum().item()
+            # Any computed tokens indicates decode step>1 (no chunked prefill).
+            # The upper bound is exact for this `> 0` test - prefill rows have
+            # num_computed == 0 and decode rows have num_computed > 0.
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
             )
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            num_computed_tokens_cpu = (
+                common_attn_metadata.seq_lens_cpu_upper_bound - query_lens_cpu
+            )
+            num_cache_decodes = (num_computed_tokens_cpu > 0).sum().item()
             if num_cache_decodes > 0:
                 # CrossAttn KV cache has already been populated on first decoder step,
                 # skip slot_mapping calculation for requests that do not need
                 # reshape_and_cache.
-                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
+                num_tokens = num_computed_tokens_cpu.numpy()
                 new_metadata.encoder_seq_lens_cpu = np.where(
                     num_tokens > 0, 0, new_metadata.encoder_seq_lens_cpu
                 )
@@ -106,7 +115,7 @@ def create_cross_attention_backend(
             # needed here to know how many tokens to attend to from the cached
             # cross-attention KV cache.
             new_metadata.seq_lens = common_attn_metadata.encoder_seq_lens
-            new_metadata._seq_lens_cpu = torch.from_numpy(
+            new_metadata.seq_lens_cpu_upper_bound = torch.from_numpy(
                 common_attn_metadata.encoder_seq_lens_cpu
             )
 
@@ -118,12 +127,10 @@ def create_cross_attention_backend(
                 self.device,
             )
             attn_metadata = super().build(common_prefix_len, new_metadata, fast_build)
-            attn_metadata.slot_mapping = slot_mapping
+            attn_metadata.slot_mapping = slot_mapping  # type: ignore[attr-defined]
             return attn_metadata
 
-    # NOTE(Lucas): we need a custom impl so we can use the slot-mapping computed by
-    # `CrossAttentionBuilder` instead of the one computed by `BlockTable`
-    # (gpu_model_runner)
+    # Use the slot mapping computed by CrossAttentionBuilder.
     class CrossAttentionImpl(underlying_impl):  # type: ignore[valid-type,misc]
         def forward(
             self,
@@ -144,8 +151,12 @@ def create_cross_attention_backend(
                 and key is not None
                 and value is not None
             ):
-                self.do_kv_cache_update(
-                    layer, key, value, kv_cache, attn_metadata.slot_mapping
+                self.do_kv_cache_update(  # type: ignore[attr-defined]
+                    layer,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata.slot_mapping,  # type: ignore[attr-defined]
                 )
 
             return super().forward(
@@ -174,8 +185,7 @@ def create_cross_attention_backend(
 
 
 class CrossAttention(Attention):
-    """
-    Cross-attention for encoder-decoder models.
+    """Cross-attention for encoder-decoder models.
     Handles attention between decoder queries and encoder keys/values.
     """
 
@@ -218,11 +228,12 @@ class CrossAttention(Attention):
             **kwargs,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return CrossAttentionSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return CrossAttentionManager.layer_config(spec)

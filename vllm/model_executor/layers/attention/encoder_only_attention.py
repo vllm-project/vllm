@@ -16,12 +16,12 @@ from vllm.v1.attention.backend import (
     subclass_attention_backend,
 )
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 
 @functools.lru_cache
 def create_encoder_only_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "EncoderOnlyAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -49,9 +49,7 @@ def create_encoder_only_attention_backend(
 
 
 class EncoderOnlyAttention(Attention):
-    """
-    Encoder attention is a special case that doesn't need a KV Cache.
-    """
+    """Encoder attention is a special case that doesn't need a KV Cache."""
 
     def __init__(
         self,
@@ -93,6 +91,6 @@ class EncoderOnlyAttention(Attention):
             **kwargs,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Does not need KV cache
         return None

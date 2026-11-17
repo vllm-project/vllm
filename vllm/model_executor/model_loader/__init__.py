@@ -9,10 +9,11 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
+from vllm.model_executor.model_loader.modelexpress_loader import (
+    ModelExpressModelLoader,
+)
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
@@ -23,6 +24,10 @@ from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     get_model_cls,
 )
+from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
+    PeerModelLoader,
+)
 
 logger = init_logger(__name__)
 
@@ -31,13 +36,14 @@ logger = init_logger(__name__)
 LoadFormats = Literal[
     "auto",
     "hf",
-    "bitsandbytes",
     "dummy",
     "fastsafetensors",
-    "gguf",
     "instanttensor",
+    "ipc_cache",
     "mistral",
+    "modelexpress",
     "npcache",
+    "peer_cache",
     "pt",
     "runai_streamer",
     "runai_streamer_sharded",
@@ -48,13 +54,14 @@ LoadFormats = Literal[
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
     "hf": DefaultModelLoader,
-    "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
-    "gguf": GGUFModelLoader,
     "instanttensor": DefaultModelLoader,
+    "ipc_cache": IpcModelLoader,
     "mistral": DefaultModelLoader,
+    "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
+    "peer_cache": PeerModelLoader,
     "pt": DefaultModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
     "runai_streamer_sharded": ShardedStateLoader,
@@ -92,6 +99,7 @@ def register_model_loader(load_format: str):
         >>> load_config = LoadConfig(load_format="my_loader")
         >>> type(get_model_loader(load_config))
         <class 'MyModelLoader'>
+
     """  # noqa: E501
 
     def _wrapper(model_loader_cls):
@@ -148,10 +156,11 @@ __all__ = [
     "get_model_cls",
     "register_model_loader",
     "BaseModelLoader",
-    "BitsAndBytesModelLoader",
-    "GGUFModelLoader",
+    "ModelExpressModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",
+    "IpcModelLoader",
+    "PeerModelLoader",
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",
     "TensorizerLoader",

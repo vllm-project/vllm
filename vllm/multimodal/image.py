@@ -1,7 +1,64 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from PIL import Image
+import contextlib
+from typing import Any
+
+from PIL import Image, ImageOps
+
+# Formats accepted by Image.open for untrusted multimodal media.
+#
+# Audited against Pillow's registered open plugins (python -m PIL / Image.OPEN):
+# Allowed: native still-image / raster readers that decode in-process.
+# Denied:
+#   EPS — may invoke Ghostscript on untrusted PostScript
+#   WMF — Windows GDI / stub-handler path
+#   BUFR / GRIB / HDF5 — stub drivers requiring external handlers
+#   MPEG — identify-only; not a decodable still image
+ALLOWED_IMAGE_FORMATS: tuple[str, ...] = (
+    "AVIF",
+    "BLP",
+    "BMP",
+    "CUR",
+    "DCX",
+    "DDS",
+    "DIB",
+    "FITS",
+    "FLI",
+    "FTEX",
+    "GBR",
+    "GIF",
+    "ICNS",
+    "ICO",
+    "IM",
+    "IMT",
+    "IPTC",
+    "JPEG",
+    "JPEG2000",
+    "MCIDAS",
+    "MSP",
+    "PCD",
+    "PCX",
+    "PIXAR",
+    "PNG",
+    "PPM",
+    "PSD",
+    "QOI",
+    "SGI",
+    "SPIDER",
+    "SUN",
+    "TGA",
+    "TIFF",
+    "WEBP",
+    "XBM",
+    "XPM",
+    "XVTHUMB",
+)
+
+
+def open_image(fp: Any) -> Image.Image:
+    """Open image bytes/files with the serving format allowlist."""
+    return Image.open(fp, formats=ALLOWED_IMAGE_FORMATS)
 
 
 def rescale_image_size(
@@ -16,6 +73,13 @@ def rescale_image_size(
     return image
 
 
+def normalize_image(image: Image.Image) -> Image.Image:
+    """Normalize EXIF orientation so the pixel data matches visual display."""
+    with contextlib.suppress(Exception):
+        image = ImageOps.exif_transpose(image)
+    return image
+
+
 def rgba_to_rgb(
     image: Image.Image,
     background_color: tuple[int, int, int] | list[int] = (255, 255, 255),
@@ -27,10 +91,25 @@ def rgba_to_rgb(
     return converted
 
 
-def convert_image_mode(image: Image.Image, to_mode: str):
+def _has_transparency(image: Image.Image) -> bool:
+    """Detect whether an image carries transparency data (RGBA, LA, PA,
+    or tRNS chunk in P/L/RGB PNGs)."""
+    if image.mode in ("RGBA", "LA", "PA"):
+        return True
+    return "transparency" in getattr(image, "info", {})
+
+
+def convert_image_mode(
+    image: Image.Image,
+    to_mode: str,
+    background_color: tuple[int, int, int] | list[int] = (255, 255, 255),
+) -> Image.Image:
+    if to_mode == "RGB" and _has_transparency(image):
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
+        return rgba_to_rgb(image, background_color)
+
     if image.mode == to_mode:
         return image
-    elif image.mode == "RGBA" and to_mode == "RGB":
-        return rgba_to_rgb(image)
-    else:
-        return image.convert(to_mode)
+
+    return image.convert(to_mode)

@@ -7,20 +7,16 @@ from typing import TYPE_CHECKING
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
-logger = init_logger(__name__)
-
 
 class GraniteReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for IBM Granite.
+    """Reasoning parser for IBM Granite.
 
     IBM granite models currently use "Here is my thought process:"
     and "Here is my response:" to separate its thinking / response outputs.
@@ -68,6 +64,7 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the
             reasoning content and non-reasoning content.
+
         """
         re_match = self.reasoning_regex.findall(model_output)
         if not re_match:
@@ -111,6 +108,7 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             Union[DeltaMessage, None]
                 DeltaMessage with either reasoning content or content, or None.
+
         """
         reasoning, resp_seq_len, content = self._get_content_sections(current_text)
         # Either we haven't finished the start of the reasoning sequence,
@@ -145,6 +143,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Returns:
             bool: True if any of the possible reasoning start seqs match.
+
         """
         return any(
             think_start.startswith(text) for think_start in self.valid_think_starts
@@ -158,6 +157,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Returns:
             bool: True if any of the possible response start seqs match.
+
         """
         return any(
             response_start.startswith(text)
@@ -178,6 +178,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Returns:
             DeltaMessage: Message containing the parsed content.
+
         """
         prev_longest_length = len(current_text) - len(delta_text)
         is_substr = self._is_reasoning_start_substr(current_text)
@@ -216,6 +217,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Returns:
             DeltaMessage: Message containing the parsed content.
+
         """
         # If we have no reasoning content or explicitly end with the start of
         # response sequence, we are in transition to the response; need to be
@@ -296,6 +298,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Returns:
             DeltaMessage: Message containing the parsed content.
+
         """
         # Always have content; take length to the end
         delta_content = delta_text[-len(response_content) :]
@@ -332,6 +335,7 @@ class GraniteReasoningParser(ReasoningParser):
             tuple[Optional[str], Optional[int], Optional[str]]: Tuple of len 3
             containing the reasoning content, the length of the response seq
             (if there is one) and the non-reasoning content.
+
         """
         current_chunk_start = 0
         start_reasoning = None

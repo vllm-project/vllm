@@ -8,8 +8,17 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-from vllm.triton_utils import tl, triton
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    launch_autotuned,
+)
+from vllm.triton_utils import (
+    tensor_descriptor_compatible,
+    tl,
+    triton,
+    use_tensor_descriptor,
+)
+from vllm.triton_utils.allocation import set_triton_allocator
 
 from .mamba_ssm import softplus
 
@@ -35,7 +44,6 @@ def _chunk_cumsum_fwd_kernel(
     dA_cumsum_ptr,
     cu_chunk_seqlens_ptr,
     # Matrix dimension
-    seqlen,
     nheads: tl.constexpr,
     chunk_size: tl.constexpr,
     dt_min: tl.constexpr,
@@ -191,7 +199,7 @@ def _chunk_cumsum_fwd_kernel(
             num_warps=2,
         ),
     ],
-    key=["hdim", "dstate", "chunk_size"],
+    key=["hdim", "dstate", "chunk_size", "USE_TD"],
 )
 @triton.jit
 def _chunk_state_fwd_kernel(
@@ -206,7 +214,6 @@ def _chunk_state_fwd_kernel(
     hdim: tl.constexpr,
     dstate: tl.constexpr,
     chunk_size: tl.constexpr,
-    seqlen,
     nheads_ngroups_ratio: tl.constexpr,
     # Strides
     stride_x_seqlen: tl.int64,
@@ -229,6 +236,10 @@ def _chunk_state_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    # Load/store the 2D tiles through tensor descriptors (TMA on NVIDIA
+    # sm90+, 2D block IO on Intel); the pointer-path branches are then
+    # compiled out.
+    USE_TD: tl.constexpr = False,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
@@ -262,18 +273,40 @@ def _chunk_state_fwd_kernel(
 
     chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
+    if USE_TD:
+        # Descriptors zero-pad outside `shape`, which replaces the masks.
+        # x is stored [seqlen, hdim], so load it that way and transpose the tile.
+        x_desc = tl.make_tensor_descriptor(
+            x_ptr,
+            shape=[chunk_size_limit, hdim],
+            strides=[stride_x_seqlen, 1],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_M],
+        )
+        b_desc = tl.make_tensor_descriptor(
+            b_ptr,
+            shape=[chunk_size_limit, dstate],
+            strides=[stride_b_seqlen, 1],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+        )
+
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
-        x = tl.load(
-            x_ptrs,
-            mask=(offs_m[:, None] < hdim) & (offs_k[None, :] < chunk_size_limit - k),
-            other=0.0,
-        )
-        b = tl.load(
-            b_ptrs,
-            mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate),
-            other=0.0,
-        ).to(tl.float32)
+        if USE_TD:
+            x = tl.trans(x_desc.load([k, pid_m * BLOCK_SIZE_M]))
+            b = b_desc.load([k, pid_n * BLOCK_SIZE_N]).to(tl.float32)
+        else:
+            x = tl.load(
+                x_ptrs,
+                mask=(offs_m[:, None] < hdim)
+                & (offs_k[None, :] < chunk_size_limit - k),
+                other=0.0,
+            )
+            b = tl.load(
+                b_ptrs,
+                mask=(offs_k[:, None] < chunk_size_limit - k)
+                & (offs_n[None, :] < dstate),
+                other=0.0,
+            ).to(tl.float32)
         dA_cs_k = tl.load(
             dA_cumsum_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0
         ).to(tl.float32)
@@ -285,21 +318,33 @@ def _chunk_state_fwd_kernel(
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
 
-        x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
-        b_ptrs += BLOCK_SIZE_K * stride_b_seqlen
+        if not USE_TD:
+            # TD loads take absolute tile offsets instead.
+            x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
+            b_ptrs += BLOCK_SIZE_K * stride_b_seqlen
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
 
     states = acc.to(states_ptr.dtype.element_ty)
 
     states_ptr += pid_c * stride_states_chunk + pid_h * stride_states_head
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    states_ptrs = states_ptr + (
-        offs_m[:, None] * stride_states_hdim + offs_n[None, :] * stride_states_dstate
-    )
-    c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
-    tl.store(states_ptrs, states, mask=c_mask)
+    if USE_TD:
+        states_desc = tl.make_tensor_descriptor(
+            states_ptr,
+            shape=[hdim, dstate],
+            strides=[stride_states_hdim, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        )
+        states_desc.store([pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N], states)
+    else:
+        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        states_ptrs = states_ptr + (
+            offs_m[:, None] * stride_states_hdim
+            + offs_n[None, :] * stride_states_dstate
+        )
+        c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
+        tl.store(states_ptrs, states, mask=c_mask)
 
 
 def _chunk_cumsum_fwd(
@@ -323,33 +368,33 @@ def _chunk_cumsum_fwd(
         nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32
     )
     grid_chunk_cs = lambda META: (nchunks, triton.cdiv(nheads, META["BLOCK_SIZE_H"]))
-    with torch.accelerator.device_index(dt.device.index):
-        _chunk_cumsum_fwd_kernel[grid_chunk_cs](
-            dt_ptr=dt,
-            A_ptr=A,
-            dt_bias_ptr=dt_bias,
-            dt_out_ptr=dt_out,
-            dA_cumsum_ptr=dA_cumsum,
-            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            seqlen=seqlen,
-            nheads=nheads,
-            chunk_size=chunk_size,
-            dt_min=dt_limit[0],
-            dt_max=dt_limit[1],
-            stride_dt_seqlen=dt.stride(0),
-            stride_dt_head=dt.stride(1),
-            stride_A_head=A.stride(0),
-            stride_dt_bias_head=dt_bias.stride(0) if dt_bias is not None else 0,
-            stride_dt_out_head=dt_out.stride(0),
-            stride_dt_out_chunk=dt_out.stride(1),
-            stride_dt_out_csize=dt_out.stride(2),
-            stride_dA_cs_head=dA_cumsum.stride(0),
-            stride_dA_cs_chunk=dA_cumsum.stride(1),
-            stride_dA_cs_csize=dA_cumsum.stride(2),
-            DT_SOFTPLUS=dt_softplus,
-            HAS_DT_BIAS=dt_bias is not None,
-            BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
-        )
+    launch_autotuned(
+        _chunk_cumsum_fwd_kernel,
+        grid_chunk_cs,
+        dt_ptr=dt,
+        A_ptr=A,
+        dt_bias_ptr=dt_bias,
+        dt_out_ptr=dt_out,
+        dA_cumsum_ptr=dA_cumsum,
+        cu_chunk_seqlens_ptr=cu_chunk_seqlens,
+        nheads=nheads,
+        chunk_size=chunk_size,
+        dt_min=dt_limit[0],
+        dt_max=dt_limit[1],
+        stride_dt_seqlen=dt.stride(0),
+        stride_dt_head=dt.stride(1),
+        stride_A_head=A.stride(0),
+        stride_dt_bias_head=dt_bias.stride(0) if dt_bias is not None else 0,
+        stride_dt_out_head=dt_out.stride(0),
+        stride_dt_out_chunk=dt_out.stride(1),
+        stride_dt_out_csize=dt_out.stride(2),
+        stride_dA_cs_head=dA_cumsum.stride(0),
+        stride_dA_cs_chunk=dA_cumsum.stride(1),
+        stride_dA_cs_csize=dA_cumsum.stride(2),
+        DT_SOFTPLUS=dt_softplus,
+        HAS_DT_BIAS=dt_bias is not None,
+        BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
+    )
     return dA_cumsum, dt_out
 
 
@@ -372,40 +417,49 @@ def _chunk_state_fwd(
             (nchunks, nheads, headdim, dstate), device=x.device, dtype=states_dtype
         )
 
+    # Any operand a descriptor cannot cover sends the whole launch down the
+    # pointer path.
+    use_td = use_tensor_descriptor() and tensor_descriptor_compatible(x, B, states)
+    if use_td:
+        # On every launch: Triton's allocator is a per-thread ContextVar, and
+        # DBO runs forwards on fresh threads.
+        set_triton_allocator(x.device)
+
     grid = lambda META: (
         triton.cdiv(headdim, META["BLOCK_SIZE_M"])
         * triton.cdiv(dstate, META["BLOCK_SIZE_N"]),
         nchunks,
         nheads,
     )
-    with torch.accelerator.device_index(x.device.index):
-        _chunk_state_fwd_kernel[grid](
-            x_ptr=x,
-            b_ptr=B,
-            states_ptr=states,
-            dt_ptr=dt,
-            dA_cumsum_ptr=dA_cumsum,
-            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            hdim=headdim,
-            dstate=dstate,
-            chunk_size=chunk_size,
-            seqlen=seqlen,
-            nheads_ngroups_ratio=nheads // ngroups,
-            stride_x_seqlen=x.stride(0),
-            stride_x_head=x.stride(1),
-            stride_x_hdim=x.stride(2),
-            stride_b_seqlen=B.stride(0),
-            stride_b_head=B.stride(1),
-            stride_b_dstate=B.stride(2),
-            stride_states_chunk=states.stride(0),
-            stride_states_head=states.stride(1),
-            stride_states_hdim=states.stride(2),
-            stride_states_dstate=states.stride(3),
-            stride_dt_head=dt.stride(0),
-            stride_dt_chunk=dt.stride(1),
-            stride_dt_csize=dt.stride(2),
-            stride_dA_cs_head=dA_cumsum.stride(0),
-            stride_dA_cs_chunk=dA_cumsum.stride(1),
-            stride_dA_cs_csize=dA_cumsum.stride(2),
-        )
+    launch_autotuned(
+        _chunk_state_fwd_kernel,
+        grid,
+        x_ptr=x,
+        b_ptr=B,
+        states_ptr=states,
+        dt_ptr=dt,
+        dA_cumsum_ptr=dA_cumsum,
+        cu_chunk_seqlens_ptr=cu_chunk_seqlens,
+        hdim=headdim,
+        dstate=dstate,
+        chunk_size=chunk_size,
+        nheads_ngroups_ratio=nheads // ngroups,
+        stride_x_seqlen=x.stride(0),
+        stride_x_head=x.stride(1),
+        stride_x_hdim=x.stride(2),
+        stride_b_seqlen=B.stride(0),
+        stride_b_head=B.stride(1),
+        stride_b_dstate=B.stride(2),
+        stride_states_chunk=states.stride(0),
+        stride_states_head=states.stride(1),
+        stride_states_hdim=states.stride(2),
+        stride_states_dstate=states.stride(3),
+        stride_dt_head=dt.stride(0),
+        stride_dt_chunk=dt.stride(1),
+        stride_dt_csize=dt.stride(2),
+        stride_dA_cs_head=dA_cumsum.stride(0),
+        stride_dA_cs_chunk=dA_cumsum.stride(1),
+        stride_dA_cs_csize=dA_cumsum.stride(2),
+        USE_TD=use_td,
+    )
     return states

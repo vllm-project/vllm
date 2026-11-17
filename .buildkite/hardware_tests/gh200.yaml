@@ -1,10 +1,16 @@
 group: Hardware
 steps:
   - label: "GH200 Test"
+    key: gh200-test
+    timeout_in_minutes: 30
     soft_fail: true
     device: gh200
-    no_plugin: true
     optional: true
-    commands: 
-    - nvidia-smi 
-    - bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
+    working_dir: "/vllm-workspace"
+    depends_on:
+    - arm64-image-build
+    env:
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+    commands:
+    - nvidia-smi
+    - python3 examples/basic/offline_inference/generate.py --model meta-llama/Llama-3.2-1B

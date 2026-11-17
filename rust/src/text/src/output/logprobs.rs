@@ -1,0 +1,349 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use itertools::Itertools as _;
+use serde::{Deserialize, Serialize};
+use vllm_llm::{Logprobs, PositionLogprobs};
+use vllm_tokenizer::Tokenizer;
+
+use crate::error::Error;
+
+/// One decoded token candidate and its logprob metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodedTokenLogprob {
+    /// Original vocabulary token ID for this candidate.
+    pub token_id: u32,
+    /// Best-effort decoded token string for this candidate; empty when the
+    /// request outputs no text.
+    pub token: String,
+    /// Log probability of this token candidate.
+    pub logprob: f32,
+    /// Vocabulary rank of this token candidate.
+    pub rank: u32,
+}
+
+/// One position's decoded token candidates and their logprobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodedPositionLogprobs {
+    /// Candidate tokens for this position.
+    pub entries: Vec<DecodedTokenLogprob>,
+}
+
+/// Decoded sample logprobs for generated token positions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodedLogprobs {
+    /// Generated token positions covered by this payload.
+    pub positions: Vec<DecodedPositionLogprobs>,
+}
+
+/// Decoded prompt logprobs for prompt token positions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodedPromptLogprobs {
+    /// Original vocabulary token ID for the first prompt token.
+    pub first_token_id: u32,
+    /// Best-effort decoded string for the first prompt token; empty when the
+    /// request outputs no text.
+    ///
+    /// The first prompt token has no left context to score against, so it is
+    /// stored separately instead of appearing in `scored_positions`.
+    pub first_token: String,
+    /// Scored prompt positions after the first prompt token.
+    ///
+    /// `scored_positions[i]` corresponds to the prompt token at position `i +
+    /// 1`.
+    pub scored_positions: Vec<DecodedPositionLogprobs>,
+}
+
+/// Decode generated-token logprobs from the raw `llm` token-ID shape into the
+/// text-layer decoded-token representation.
+///
+/// Each returned position corresponds to one generated token position from the
+/// same `llm` update.
+pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
+    tokenizer: Option<&T>,
+    logprobs: &Logprobs,
+) -> Result<DecodedLogprobs, Error> {
+    Ok(DecodedLogprobs {
+        positions: logprobs
+            .positions
+            .iter()
+            .map(|position| decode_position_logprobs(tokenizer, position))
+            .try_collect()?,
+    })
+}
+
+/// Decode prompt logprobs from the raw `llm` token-ID shape into the text-layer
+/// decoded-token representation.
+///
+/// The returned payload stores the first prompt token separately and decodes
+/// the remaining scored prompt positions into `scored_positions`, matching
+/// vLLM's prompt-logprobs semantics.
+pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
+    tokenizer: Option<&T>,
+    prompt_token_ids: &[u32],
+    logprobs: &Logprobs,
+) -> Result<DecodedPromptLogprobs, Error> {
+    let first_token_id = prompt_token_ids
+        .first()
+        .copied()
+        .expect("prompt logprobs require at least one prompt token");
+    // The first prompt token starts the sequence, so plain decoding rightly drops
+    // a SentencePiece dummy-prefix space. Python echoes it with `decode` as well,
+    // which keeps the echoed prompt's `text_offset` aligned.
+    let first_token = tokenizer.map_or(Ok(String::new()), |tokenizer| {
+        tokenizer.decode(&[first_token_id], false)
+    })?;
+    let scored_positions = logprobs
+        .positions
+        .iter()
+        .map(|position| decode_position_logprobs(tokenizer, position))
+        .try_collect()?;
+
+    Ok(DecodedPromptLogprobs {
+        first_token_id,
+        first_token,
+        scored_positions,
+    })
+}
+
+/// Decode one token position's raw candidate set into decoded token strings
+/// plus logprob metadata.
+///
+/// With a tokenizer, every candidate token ID is decoded independently through
+/// the active text backend.
+fn decode_position_logprobs<T: Tokenizer + ?Sized>(
+    tokenizer: Option<&T>,
+    position: &PositionLogprobs,
+) -> Result<DecodedPositionLogprobs, Error> {
+    Ok(DecodedPositionLogprobs {
+        entries: position
+            .entries
+            .iter()
+            .map(|entry| {
+                decode_token(tokenizer, entry.token_id).map(|token| DecodedTokenLogprob {
+                    token_id: entry.token_id,
+                    token,
+                    logprob: entry.logprob,
+                    rank: entry.rank,
+                })
+            })
+            .try_collect()?,
+    })
+}
+
+/// Decode one logprob token on its own.
+///
+/// Special tokens keep their spelling whatever the request's
+/// `skip_special_tokens`, which only applies to the output text, like Python's
+/// `convert_ids_list_to_tokens`. Without a tokenizer the request outputs no
+/// text, so the token string stays empty.
+fn decode_token<T: Tokenizer + ?Sized>(
+    tokenizer: Option<&T>,
+    token_id: u32,
+) -> vllm_tokenizer::Result<String> {
+    tokenizer.map_or(Ok(String::new()), |tokenizer| {
+        tokenizer.decode_token(token_id)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tempfile::tempdir;
+    use vllm_llm::{Logprobs, PositionLogprobs, TokenLogprob};
+    use vllm_tokenizer::{HuggingFaceTokenizer, test_utils::TestTokenizer};
+
+    use super::*;
+
+    #[test]
+    fn decode_logprobs_decodes_every_candidate_token() {
+        let tokenizer = TestTokenizer::new();
+        let logprobs = Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: b'a' as u32,
+                        logprob: -0.1,
+                        rank: 3,
+                    },
+                    TokenLogprob {
+                        token_id: b'b' as u32,
+                        logprob: -0.2,
+                        rank: 1,
+                    },
+                ],
+            }],
+        };
+
+        assert_eq!(
+            decode_logprobs(Some(&tokenizer), &logprobs).unwrap(),
+            DecodedLogprobs {
+                positions: vec![DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token_id: b'a' as u32,
+                            token: "a".to_string(),
+                            logprob: -0.1,
+                            rank: 3,
+                        },
+                        DecodedTokenLogprob {
+                            token_id: b'b' as u32,
+                            token: "b".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        },
+                    ],
+                }],
+            }
+        );
+    }
+
+    fn metaspace_tokenizer(sequenced: bool) -> HuggingFaceTokenizer {
+        let metaspace = json!({
+            "type": "Metaspace",
+            "replacement": "▁",
+            "prepend_scheme": "always",
+            "split": true
+        });
+        let pre_tokenizer = if sequenced {
+            json!({
+                "type": "Sequence",
+                "pretokenizers": [metaspace]
+            })
+        } else {
+            metaspace
+        };
+        let config = json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": pre_tokenizer,
+            "post_processor": null,
+            "decoder": {
+                "type": "Metaspace",
+                "replacement": "▁",
+                "prepend_scheme": "always",
+                "split": true
+            },
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": "<unk>",
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "ignore_merges": false,
+                "vocab": {"<unk>": 0, "▁the": 1, "the": 2, "▁": 3, "▁▁": 4},
+                "merges": []
+            }
+        });
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&config).expect("serialize tokenizer"),
+        )
+        .expect("write tokenizer");
+        HuggingFaceTokenizer::new(&path).expect("load metaspace tokenizer")
+    }
+
+    #[test]
+    fn decode_logprobs_preserves_metaspace_leading_spaces() {
+        let logprobs = Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: 1,
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: 2,
+                        logprob: -0.2,
+                        rank: 2,
+                    },
+                    TokenLogprob {
+                        token_id: 3,
+                        logprob: -0.3,
+                        rank: 3,
+                    },
+                    TokenLogprob {
+                        token_id: 4,
+                        logprob: -0.4,
+                        rank: 4,
+                    },
+                ],
+            }],
+        };
+
+        for sequenced in [false, true] {
+            let tokenizer = metaspace_tokenizer(sequenced);
+            assert_eq!(tokenizer.decode(&[1], false).unwrap(), "the");
+            assert_eq!(tokenizer.decode(&[2], false).unwrap(), "the");
+            assert_eq!(tokenizer.decode(&[3], false).unwrap(), "");
+
+            let decoded = decode_logprobs(Some(&tokenizer), &logprobs).unwrap();
+            assert_eq!(
+                decoded.positions[0]
+                    .entries
+                    .iter()
+                    .map(|entry| entry.token.as_str())
+                    .collect::<Vec<_>>(),
+                [" the", "the", " ", "  "],
+                "sequenced={sequenced}",
+            );
+        }
+    }
+
+    #[test]
+    fn decode_prompt_logprobs_keeps_first_metaspace_token_undecorated() {
+        let tokenizer = metaspace_tokenizer(false);
+        let logprobs = Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![TokenLogprob {
+                    token_id: 1,
+                    logprob: -0.1,
+                    rank: 1,
+                }],
+            }],
+        };
+
+        let decoded = decode_prompt_logprobs(Some(&tokenizer), &[1, 1], &logprobs).unwrap();
+        assert_eq!(decoded.first_token, "the");
+        assert_eq!(decoded.scored_positions[0].entries[0].token, " the");
+    }
+
+    #[test]
+    fn decode_prompt_logprobs_separates_first_prompt_token() {
+        let tokenizer = TestTokenizer::new();
+        let logprobs = Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![TokenLogprob {
+                    token_id: b'x' as u32,
+                    logprob: -0.4,
+                    rank: 1,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            decode_prompt_logprobs(Some(&tokenizer), &[b'p' as u32, b'x' as u32], &logprobs)
+                .unwrap(),
+            DecodedPromptLogprobs {
+                first_token_id: b'p' as u32,
+                first_token: "p".to_string(),
+                scored_positions: vec![DecodedPositionLogprobs {
+                    entries: vec![DecodedTokenLogprob {
+                        token_id: b'x' as u32,
+                        token: "x".to_string(),
+                        logprob: -0.4,
+                        rank: 1,
+                    }],
+                }],
+            }
+        );
+    }
+}

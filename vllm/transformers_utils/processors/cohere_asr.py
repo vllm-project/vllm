@@ -4,11 +4,11 @@ import logging
 import math
 import random
 
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchaudio.functional import melscale_fbanks
 from transformers import AutoFeatureExtractor, AutoProcessor, BatchFeature
 from transformers.feature_extraction_sequence_utils import (
     SequenceFeatureExtractor,
@@ -129,17 +129,15 @@ class FilterbankFeatures(nn.Module):
         self.pad_min_duration = 0.0
         self.pad_direction = "both"
 
-        filterbanks = torch.tensor(
-            librosa.filters.mel(
-                sr=sample_rate,
-                n_fft=self.n_fft,
-                n_mels=nfilt,
-                fmin=lowfreq,
-                fmax=highfreq,
-                norm=mel_norm,
-            ),
-            dtype=torch.float,
-        ).unsqueeze(0)
+        filterbanks = melscale_fbanks(
+            n_freqs=self.n_fft // 2 + 1,
+            f_min=lowfreq,
+            f_max=highfreq,
+            n_mels=nfilt,
+            sample_rate=sample_rate,
+            norm=mel_norm,
+            mel_scale="slaney",
+        ).T.unsqueeze(0)
         self.register_buffer("fb", filterbanks)
 
         # Calculate maximum sequence length
@@ -171,7 +169,7 @@ class FilterbankFeatures(nn.Module):
             else:
                 self._nb_max_fft_bin = int((nb_max_freq / sample_rate) * n_fft)
 
-        # log_zero_guard_value is the the small we want to use, we support
+        # log_zero_guard_value is the small we want to use, we support
         # an actual number, or "tiny", or "eps"
         self.log_zero_guard_type = log_zero_guard_type
 
@@ -230,7 +228,7 @@ class FilterbankFeatures(nn.Module):
         return self.fb
 
     def splice_frames(self, x, frame_splicing):
-        """Stacks frames together across feature dim
+        """Stacks frames together across feature dim.
 
         input is batch_size, feature_dim, num_frames
         output is batch_size, feature_dim*frame_splicing, num_frames

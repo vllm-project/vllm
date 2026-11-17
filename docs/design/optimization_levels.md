@@ -16,7 +16,7 @@ User-set flags take precedence over optimization level defaults.
 
 ```bash
 # CLI usage
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
+vllm serve RedHatAI/Llama-3.2-1B-FP8 -O1
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
@@ -37,7 +37,7 @@ Settings:
 - `-cc.cudagraph_mode=NONE`
 - `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["none"]`)
 - `-cc.pass_config.fuse_...=False` (all fusions disabled)
-- `--kernel-config.enable_flashinfer_autotune=False`
+- `--disable-flashinfer-autotune`
 
 ### `-O1`: Fast Optimization
 
@@ -49,13 +49,14 @@ Settings:
 
 - `-cc.cudagraph_mode=PIECEWISE`
 - `-cc.mode=VLLM_COMPILE`
-- `--kernel-config.enable_flashinfer_autotune=True`
+- `--enable-flashinfer-autotune`
 
 Fusions:
 
 - `-cc.pass_config.fuse_norm_quant=True`*
 - `-cc.pass_config.fuse_act_quant=True`*
 - `-cc.pass_config.fuse_act_padding=True`†
+- `-cc.pass_config.fuse_mla_dual_rms_norm=True`†
 
 \* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
 † These fusions are ROCm-only and require AITER.
@@ -83,6 +84,6 @@ in the future that are more time-consuming or experimental.
 
 ### Common Issues
 
-1. **Startup Time Too Long**: Use `-O0` or `-O1` for faster startup
+1. **Startup Time Too Long**: Use `-O0` or `-O1` for faster startup, or pass `--disable-flashinfer-autotune` to skip only FlashInfer autotuning
 2. **Compilation Errors**: Use `debug_dump_path` for additional debugging information
 3. **Performance Issues**: Ensure using `-O2` for production

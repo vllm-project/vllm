@@ -1,9 +1,9 @@
 #pragma once
 
 #include "cutlass/numeric_conversion.h"
-#include "cutlass_extensions/vllm_custom_types.cuh"
-#include "cutlass_extensions/cute_utils.cuh"
-#include "cutlass_extensions/vllm_type_utils.cuh"
+#include "vllm_custom_types.cuh"
+#include "cute_utils.cuh"
+#include "vllm_type_utils.cuh"
 
 // this file extends:
 //   https://github.com/NVIDIA/cutlass/blob/cutlass-3.5.0/include/cutlass/numeric_conversion.h

@@ -4,6 +4,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
+- [Serving with gRPC](#serving-with-grpc)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -216,7 +217,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
               image: vllm/vllm-openai:latest
               command: ["/bin/sh", "-c"]
               args: [
-                "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+                "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max-num-batched-tokens 1024"
               ]
               env:
               - name: HF_TOKEN
@@ -305,7 +306,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                   - SYS_PTRACE
               command: ["/bin/sh", "-c"]
               args: [
-                "vllm serve mistralai/Mistral-7B-v0.3 --port 8000 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+                "vllm serve mistralai/Mistral-7B-v0.3 --port 8000 --trust-remote-code --enable-chunked-prefill --max-num-batched-tokens 1024"
               ]
               env:
               - name: HF_TOKEN
@@ -386,6 +387,86 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Serving with gRPC
+
+vLLM can serve models over gRPC instead of HTTP by passing the `--grpc` flag. This requires the optional gRPC dependencies:
+
+```bash
+pip install vllm[grpc]
+```
+
+When using `--grpc`, the server exposes the standard [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md) (`grpc.health.v1.Health`), which integrates with Kubernetes [native gRPC probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#define-a-grpc-liveness-probe) (available since Kubernetes 1.24).
+
+To deploy with gRPC, change the `vllm serve` command to include `--grpc` and replace `httpGet` probes with `grpc` probes:
+
+```yaml
+containers:
+- name: mistral-7b
+  image: vllm/vllm-openai:latest
+  command: ["/bin/sh", "-c"]
+  args: [
+    "pip install vllm[grpc] && vllm serve mistralai/Mistral-7B-Instruct-v0.3 --grpc --port 50051 --trust-remote-code"
+  ]
+  ports:
+  - containerPort: 50051
+  livenessProbe:
+    grpc:
+      port: 50051
+    initialDelaySeconds: 120
+    periodSeconds: 10
+  readinessProbe:
+    grpc:
+      port: 50051
+    initialDelaySeconds: 120
+    periodSeconds: 5
+```
+
+!!! note
+    The gRPC health service checks the engine status on every probe. If the engine is unhealthy or the server is shutting down, the probe returns `NOT_SERVING`.
+
+You can also verify the health service manually with `grpcurl`:
+
+```bash
+grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
+```
+
+### Rust frontend gRPC health checks
+
+The Rust frontend is a separate server from `--grpc` above. Start it with `VLLM_USE_RUST_FRONTEND=1 vllm serve <model> --grpc-port 50051` or `vllm-rs serve <model> --grpc-port 50051`. Its gRPC port serves `grpc.health.v1.Health` and reports engine liveness and inference readiness under separate service names, so a paused engine can leave the load balancer without being restarted:
+
+| Service | Reports `NOT_SERVING` when |
+| --- | --- |
+| `liveness` | The engine has failed. Pause, sleep, weight updates, and orderly shutdown do not affect it until the listener closes. |
+| `readiness` and `vllm.Inference` | The engine has failed, shutdown has started, the engine is paused (including for a process checkpoint), asleep, or partially awake, or a weight update has not finished successfully. |
+| `vllm.Control` and `""` | The engine has failed or shutdown has started. |
+
+Point the startup and liveness probes at `liveness` and the readiness probe at `readiness`. A liveness probe on `readiness` or `vllm.Inference` restarts an engine that stays paused longer than the probe's failure threshold. The listener stops accepting connections when shutdown starts, so probes see the endpoint as unavailable while `--shutdown-timeout` drains in-flight requests.
+
+```yaml
+startupProbe:
+  grpc:
+    port: 50051
+    service: liveness
+  periodSeconds: 10
+  failureThreshold: 120 # Allow for model loading.
+livenessProbe:
+  grpc:
+    port: 50051
+    service: liveness
+readinessProbe:
+  grpc:
+    port: 50051
+    service: readiness
+```
+
+A paused or sleeping pod leaves the endpoints of its Services, so send resume, wake-up, and weight-update calls to the pod directly, for example through a headless Service with `publishNotReadyAddresses: true`. After a process checkpoint fails, the engine stays paused and `liveness` stays `SERVING`, so whatever drives the checkpoint must restart the pod when `/checkpoint/status` reports the failure.
+
+This server does not enable gRPC reflection, so check a service manually with [`grpc_health_probe`](https://github.com/grpc-ecosystem/grpc-health-probe):
+
+```bash
+grpc_health_probe -addr=localhost:50051 -service=readiness
+```
 
 ## Troubleshooting
 

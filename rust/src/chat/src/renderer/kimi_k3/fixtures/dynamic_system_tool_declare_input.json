@@ -1,0 +1,67 @@
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "weather",
+        "strict": true,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "days": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "hi"
+    },
+    {
+      "role": "developer",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "calc",
+            "strict": false,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "default": null
+                }
+              },
+              "required": [
+                "x"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "use calc"
+    }
+  ],
+  "add_generation_prompt": true,
+  "template_kwargs": {
+    "thinking": true
+  }
+}

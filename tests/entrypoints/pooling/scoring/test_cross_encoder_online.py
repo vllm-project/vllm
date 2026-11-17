@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
-from vllm.platforms import current_platform
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "half"
@@ -31,10 +30,6 @@ TEXTS_2 = [
 @pytest.fixture(scope="module")
 def server():
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -121,35 +116,6 @@ async def test_score_api_queries_str_1_documents_str_n(
 async def test_score_api_queries_str_n_documents_str_n(
     hf_model, server: RemoteOpenAIServer
 ):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
-
-    score_response = requests.post(
-        server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1,
-            "documents": TEXTS_2,
-        },
-    )
-    score_response.raise_for_status()
-    score = ScoreResponse.model_validate(score_response.json())
-
-    assert score.id is not None
-    assert score.data is not None
-    assert len(score.data) == 2
-
-    vllm_outputs = [d.score for d in score.data]
-    hf_outputs = hf_model.predict(text_pairs).tolist()
-
-    for i in range(len(vllm_outputs)):
-        assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
-
-
-@pytest.mark.asyncio
-async def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServer):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -453,25 +419,6 @@ async def test_pooling_classify(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_pooling_token_classify(server: RemoteOpenAIServer):
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": MODEL_NAME,
-            "task": "token_classify",
-            "input": input_text,
-            "encoding_format": "float",
-        },
-    )
-
-    poolings = PoolingResponse.model_validate(response.json())
-
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == len(input_tokens)
-    assert len(poolings.data[0].data[0]) == 1
-
-
-@pytest.mark.asyncio
 async def test_rerank_max_tokens_per_doc(
     server: RemoteOpenAIServer,
 ):
@@ -544,7 +491,7 @@ async def test_rerank_max_tokens_per_doc_validation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "token_classify", "plugin"])
 async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
     response = requests.post(
         server.url_for("pooling"),
@@ -558,6 +505,8 @@ async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
     assert response.json()["error"]["type"] == "BadRequestError"
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "token_classify":
+        err_msg = "Try switching the model's pooling_task via"
     else:
         err_msg = f"Unsupported task: {task!r}"
     assert response.json()["error"]["message"].startswith(err_msg)

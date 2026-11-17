@@ -17,8 +17,19 @@ from vllm.config.compilation import (
 )
 from vllm.config.scheduler import SchedulerConfig
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 
 MLP_SIZE = 64
+DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.fixture(autouse=True, scope="module")
+def reset_default_device():
+    """Tests here set the default device and leave it set, as they always
+    have, so later tests in this file run on it. Reset it when the file ends,
+    so other files run in the same pytest start from the default device."""
+    yield
+    torch.set_default_device(None)
 
 
 @support_torch_compile
@@ -58,6 +69,7 @@ class TraceStructuredCapture:
         Args:
             event_type: The event type to filter by (e.g., "artifact", "graph_dump")
             name_pattern: Regex pattern to match against the artifact name
+
         """
         regex = re.compile(name_pattern)
         return [
@@ -71,7 +83,7 @@ class TraceStructuredCapture:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
     """Test that all expected vLLM artifacts are logged during compilation."""
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     capture = TraceStructuredCapture()
 

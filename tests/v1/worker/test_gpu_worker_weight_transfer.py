@@ -1,0 +1,327 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Tests for GPUWorker weight-transfer pass-through behavior.
+
+The worker no longer contains transport, layerwise, or sparse logic: it only
+delegates to the configured weight transfer engine and tracks whether an update
+session is active. These tests verify that delegation and the session guard.
+"""
+
+from contextlib import ExitStack
+
+import pytest
+import torch
+import torch.nn as nn
+
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
+from vllm.v1.worker import gpu_worker
+from vllm.v1.worker.gpu_worker import Worker
+
+
+class _RecordingEngine:
+    """Minimal stand-in for a weight transfer engine."""
+
+    def __init__(self, raise_on_update: bool = False, raise_on_finish: bool = False):
+        self.raise_on_update = raise_on_update
+        self.raise_on_finish = raise_on_finish
+        self.started = False
+        self.finished = False
+        self.closed = False
+        self.reset_count = 0
+        self.supports_draft_weight_update = False
+        self.update_calls: list[dict] = []
+        self.seen_configs: list[VllmConfig] = []
+
+    def _record_config(self) -> None:
+        self.seen_configs.append(get_current_vllm_config())
+
+    def start_weight_update(self) -> None:
+        self._record_config()
+        self.started = True
+
+    def update_weights(self, update_info: dict) -> None:
+        self._record_config()
+        self.update_calls.append(update_info)
+        if self.raise_on_update:
+            raise ValueError("boom")
+
+    def finish_weight_update(self) -> None:
+        self._record_config()
+        if self.raise_on_finish:
+            raise ValueError("boom")
+        self.finished = True
+
+    def reset_weight_update_target(self) -> None:
+        self.reset_count += 1
+
+    def shutdown(self) -> None:
+        self.closed = True
+
+
+class _RecordingModelRunner:
+    def __init__(self) -> None:
+        self.seen_config: VllmConfig | None = None
+        self.target_hook_calls = 0
+
+    def reload_weights(self, *args) -> None:
+        self.seen_config = get_current_vllm_config()
+
+    def get_model(self) -> nn.Module:
+        return nn.Module()
+
+    def on_target_weights_replaced(self) -> None:
+        self.target_hook_calls += 1
+
+    def get_draft_model(self) -> nn.Module | None:
+        return None
+
+
+def _make_worker(engine: _RecordingEngine | None) -> Worker:
+    worker = object.__new__(Worker)
+    worker.vllm_config = VllmConfig()
+    worker.weight_transfer_engine = engine
+    worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
+    worker._weight_update_is_draft = False
+    worker._kv_cache_reclaimable = False
+    worker._weight_update_kv_cache_loan = ExitStack()
+    worker.model_runner = _RecordingModelRunner()
+    return worker
+
+
+def test_reload_weights_sets_current_config():
+    worker = _make_worker(None)
+    model_runner = _RecordingModelRunner()
+    worker.model_runner = model_runner
+
+    Worker.reload_weights(worker)
+
+    assert model_runner.seen_config is worker.vllm_config
+
+
+@pytest.mark.parametrize(
+    "enabled,active", [(True, False), (True, True), (False, False)]
+)
+def test_shutdown_weight_transfer_engine_preserves_inference(enabled, active):
+    engine = _RecordingEngine() if enabled else None
+    worker = _make_worker(engine)
+    worker._weight_update_active = active
+    model_runner = worker.model_runner
+    if active:
+        with pytest.raises(RuntimeError, match="during a weight update"):
+            worker.shutdown_weight_transfer_engine()
+    else:
+        worker.shutdown_weight_transfer_engine()
+    if engine is not None:
+        assert engine.closed is not active
+    assert worker.weight_transfer_engine is engine
+    assert worker.model_runner is model_runner
+
+
+def test_reload_parameter_lookup_preserves_lora_module_names():
+    base_layer = nn.Module()
+    qweight = nn.Parameter(torch.ones(1))
+    base_layer.register_parameter("qweight", qweight)
+    wrapper = BaseLayerWithLoRA()
+    wrapper.base_layer = base_layer
+    model = nn.Module()
+    model.proj = wrapper
+
+    named_parameters = dict(model.named_parameters())
+    assert set(named_parameters) == {"proj.base_layer.qweight"}
+    assert named_parameters["proj.base_layer.qweight"] is qweight
+    assert model.get_parameter("proj.base_layer.qweight") is qweight
+    assert get_parameter_for_reload(model, "proj.qweight") is qweight
+
+
+def test_start_update_finish_delegates_to_engine():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+
+    Worker.start_weight_update(worker)
+    assert engine.started is True
+    assert worker._weight_update_active is True
+
+    Worker.update_weights(worker, {"names": ["w"]})
+    assert engine.update_calls == [{"names": ["w"]}]
+    assert worker._weight_update_active is True
+
+    Worker.finish_weight_update(worker)
+    assert engine.finished is True
+    assert engine.reset_count == 1
+    assert worker._weight_update_active is False
+    assert not Worker.has_incomplete_weight_update(worker)
+    assert engine.seen_configs == [worker.vllm_config] * 3
+    assert worker.model_runner.target_hook_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("rank", "expected"),
+    [(1, {"names": ["rank-1"]}), (2, {"names": []})],
+)
+def test_rank_local_update_selects_worker_payload(rank, expected):
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.rank = rank
+    Worker.start_weight_update(worker)
+
+    Worker.update_weights(
+        worker, [{"names": ["rank-0"]}, {"names": ["rank-1"]}, {"names": []}]
+    )
+
+    assert engine.update_calls == [expected]
+    assert worker._weight_update_active is True
+
+
+def test_rank_local_update_uses_data_parallel_index_after_reconfigure():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.rank = 0
+    parallel_config = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_rank=2,
+    )
+    assert parallel_config.data_parallel_rank == 2
+    assert parallel_config.data_parallel_index == 2
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_index == 2
+
+    worker.vllm_config.parallel_config = parallel_config
+    Worker.start_weight_update(worker)
+
+    Worker.update_weights(
+        worker,
+        [
+            {"names": ["dp-0"]},
+            {"names": ["dp-1"]},
+            {"names": ["dp-2"]},
+            {"names": ["dp-3"]},
+        ],
+    )
+
+    assert engine.update_calls == [{"names": ["dp-2"]}]
+    assert worker._weight_update_active is True
+
+
+def test_finish_draft_session_skips_the_target_hook(monkeypatch):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    # Stub the bound method on a hand-built worker: retargeting needs a real model.
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
+
+    Worker.start_draft_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
+    assert worker.model_runner.target_hook_calls == 0
+
+
+def test_refused_draft_start_keeps_weights_complete(monkeypatch):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+
+    def refuse() -> None:
+        raise RuntimeError("no draft model")
+
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", refuse)
+    with pytest.raises(RuntimeError, match="no draft model"):
+        Worker.start_draft_weight_update(worker)
+
+    assert not Worker.has_incomplete_weight_update(worker)
+
+
+def test_draft_update_keeps_failed_base_load_incomplete(monkeypatch):
+    engine = _RecordingEngine(raise_on_update=True)
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
+
+    Worker.start_weight_update(worker)
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+    Worker.start_draft_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert Worker.has_incomplete_weight_update(worker)
+
+
+def test_failed_draft_finish_keeps_weights_incomplete(monkeypatch):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    draft_model = nn.Linear(1, 1)
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
+    monkeypatch.setattr(worker, "get_draft_model", lambda: draft_model)
+    monkeypatch.setattr(gpu_worker, "share_source_lm_heads", lambda model: None)
+
+    def fail_restore(model: nn.Module, refresh: bool = True) -> None:
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(gpu_worker, "restore_quantized_lm_heads", fail_restore)
+
+    Worker.start_draft_weight_update(worker)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        Worker.finish_weight_update(worker)
+
+    assert Worker.has_incomplete_weight_update(worker)
+
+
+def test_double_start_raises():
+    worker = _make_worker(_RecordingEngine())
+    Worker.start_weight_update(worker)
+    with pytest.raises(RuntimeError, match="already"):
+        Worker.start_weight_update(worker)
+
+
+def test_update_without_start_raises():
+    worker = _make_worker(_RecordingEngine())
+    with pytest.raises(RuntimeError, match="start_weight_update must be called"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+
+def test_finish_without_start_raises():
+    worker = _make_worker(_RecordingEngine())
+    with pytest.raises(RuntimeError, match="without a matching"):
+        Worker.finish_weight_update(worker)
+
+
+def test_update_resets_active_on_error():
+    engine = _RecordingEngine(raise_on_update=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+    # A failed update ends the session so the next start is clean.
+    assert engine.reset_count == 1
+    assert worker._weight_update_active is False
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.finish_weight_update(worker)
+
+    # a failed direct finish cannot be retried, so the next start must work;
+    # a failed layerwise finish stays active and can be retried
+    direct = mode == "direct"
+    assert worker._weight_update_active is not direct
+    assert engine.reset_count == int(direct)
+
+
+def test_missing_engine_raises():
+    worker = _make_worker(None)
+    with pytest.raises(RuntimeError, match="Weight transfer not configured"):
+        Worker.start_weight_update(worker)

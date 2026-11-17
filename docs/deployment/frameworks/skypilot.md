@@ -37,7 +37,7 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       pip install vllm==0.4.0.post1
@@ -59,7 +59,7 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
 
       echo 'Starting gradio server...'
       git clone https://github.com/vllm-project/vllm.git || true
-      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+      python vllm/examples/applications/chatbot/gradio_openai_chatbot_webserver.py \
         -m $MODEL_NAME \
         --port 8811 \
         --model-url http://localhost:8081/v1 \
@@ -136,7 +136,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       pip install vllm==0.4.0.post1
@@ -248,7 +248,7 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       pip install vllm==0.4.0.post1
@@ -293,7 +293,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
       cpus: 2
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       # Install Gradio for web UI.
@@ -305,7 +305,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
 
       echo 'Starting gradio server...'
       git clone https://github.com/vllm-project/vllm.git || true
-      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+      python vllm/examples/applications/api_client/gradio_openai_chatbot_webserver.py \
         -m $MODEL_NAME \
         --port 8811 \
         --model-url http://$ENDPOINT/v1 \

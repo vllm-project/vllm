@@ -53,6 +53,8 @@ Every plugin has three parts:
 
 - **Stat logger plugins** (with group name `vllm.stat_logger_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree loggers into vLLM. The entry point should be a class that subclasses StatLoggerBase.
 
+- **Endpoint plugins** (with group name `vllm.endpoint_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree HTTP routes on the OpenAI compatible API server. Unlike the other plugin groups above, endpoint plugins are loaded only in the API server front end process and are **not loaded by default**. See [Endpoint Plugins](endpoint_plugins.md) for the interface and [Security](../usage/security.md#endpoint-plugins) for the opt-in and trust model.
+
 ## Guidelines for Writing Plugins
 
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
@@ -109,7 +111,7 @@ Every plugin has three parts:
     - `init_device`: This function is called to set up the device for the worker.
     - `initialize_cache`: This function is called to set cache config for the worker.
     - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
+    - `get_kv_cache_layer_configs`: This function is called to collect each layer's KV cache manager, allocation policy, and cache layout.
     - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
     - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
     - `execute_model`: This function is called every step to inference the model.
@@ -140,6 +142,12 @@ Every plugin has three parts:
 
     - triton ops
       Custom way doesn't work for triton ops now.
+
+    Fused MoE routers, routed experts, and runners use `PluggableLayer` for whole-class replacement. Register a compatible subclass with, for example, `FusedTopKRouter.register_oot(MyFusedTopKRouter)` before model construction.
+
+    Registration matches the concrete class name. A registration for `MoERunner` or `RoutedExperts` does not replace model-specific subclasses or `SubstitutedRoutedExperts`; register those classes separately when supported. Without a matching registration, the selected class is used unchanged. A router instance explicitly supplied to `FusedMoEFactory` is used directly.
+
+    Replacements must subclass the class they replace and preserve its constructor arguments, routing semantics, model-specific weight loading, and EPLB state. Routers are PyTorch modules, so a shared correction-bias `Parameter` also appears under the router in `state_dict()`. Preserve the shared parameter object and the model's canonical checkpoint names; models that load the bias through the gate should register the gate before constructing the MoE layer.
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 

@@ -19,13 +19,19 @@ vLLM will take all the available factors into consideration, and decide a direct
 
 The factors considered include:
 
-- All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](../../vllm/config))
-- PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](../../vllm/compilation/compiler_interface.py))
+- All the related configs (see the `compile_factors` methods in their respective configs in the [config folder](../../vllm/config))
+- PyTorch configs (see the `compile_factors` methods in the [compiler_interface.py](../../vllm/compilation/compiler_interface.py))
 - The model's forward function and the relevant functions called by the forward function (see below)
 
 With all these factors taken into consideration, usually we can guarantee that the cache is safe to use, and will not cause any unexpected behavior. Therefore, the cache is enabled by default. If you want to debug the compilation process, or if you suspect the cache is causing some issues, you can disable it by setting the environment variable `VLLM_DISABLE_COMPILE_CACHE=1`.
 
 A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all the compilation finishes before we serve any requests. No requests will trigger new compilations. Otherwise, the engine would be blocked on that request, and the response time will have unexpected spikes.
+
+An explicit `TRITON_CACHE_DIR` is preserved, allowing processes and model
+configurations to reuse Triton artifacts. The directory can start empty: the
+first compilation populates it and later matching specializations reuse it.
+When copying compilation caches, also copy this directory if set. Cold-cache
+tests should set it to a fresh directory.
 
 By default, the cache saves compiled artifacts as binary files. If you would like to interact with the generated code for debugging purposes, set the field `compile_cache_save_format=unpacked` in the compilation config, or omit this and set the env variable `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`.
 
@@ -255,6 +261,24 @@ vllm serve meta-llama/Llama-3.2-1B \
 ```
 
 Then it will only capture cudagraph for the specified sizes. It can be useful to have fine-grained control over the cudagraph capture.
+
+With model runner V2, `cudagraph_capture_sizes` and `max_cudagraph_capture_size` are deprecated. Two independent pairs set the graphs instead, and setting one never changes the other:
+
+- `prefill_cudagraph_capture_token_sizes` and `max_prefill_cudagraph_capture_tokens`, in **tokens**: graphs for batches with a prefill, and for any batch whose requests have different query lengths.
+- `decode_cudagraph_capture_request_sizes` and `max_decode_cudagraph_capture_requests`, in **requests**: FULL graphs for uniform decode batches, whose requests all have the same query length `q` (1 + `num_speculative_tokens` for the target model; K or K + 1 for DSpark, DFlash and multi-module MTP drafters). A graph of `n` requests holds `n * q` tokens.
+
+`max_decode_cudagraph_capture_tokens` (default 8192 on SM100, the default prefill ceiling; no budget elsewhere) also bounds each uniform decode graph at `n * q` tokens, so a large `num_speculative_tokens` does not spend KV cache memory on very wide decode graphs. Wider decode batches take the prefill graphs.
+
+One-token draft decodes (the EAGLE, EAGLE3 and MTP draft steps after the first) take the default request-count grid up to `max_num_seqs`, whatever the decode request sizes are (`[]` still turns them off): their graphs are small, and an eager draft step costs its host launch time.
+
+With adaptive verification, the target model's decode batches mix query lengths, so they take token-keyed graphs. Those graphs reach `max_decode_cudagraph_capture_requests * (1 + num_speculative_tokens)` tokens, within `max_decode_cudagraph_capture_tokens`; the decode request sizes then set only the draft decode graphs.
+
+Set either a list or a cap; a cap captures the default grid of sizes up to it. Larger caps and longer lists capture more and wider graphs, which take memory from the KV cache and lengthen startup. Decode graphs no wider than the widest prefill graph mostly reuse its memory in the shared graph pool. For example, a prefill instance of a disaggregated deployment can skip decode graphs:
+
+```bash
+vllm serve meta-llama/Llama-3.2-1B \
+  --compilation-config '{"decode_cudagraph_capture_request_sizes": []}'
+```
 
 ### Full Cudagraph capture
 

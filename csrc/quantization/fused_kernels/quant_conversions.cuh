@@ -4,9 +4,9 @@
  * __device__ helper functions to deal with float -> quant datatype conversion
  */
 
-#include "libtorch_stable/quantization/vectorization.cuh"
+#include "quantization/vectorization.cuh"
 // TODO(luka/varun):refactor common.cuh to use this file instead
-#include "../w8a8/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
 
@@ -59,6 +59,16 @@ struct ScaledQuant<
       return float_to_int8_rn(x / scale);
     }
   }
+
+  template <int N>
+  static __device__ __forceinline__ void quant_vec_fn(quant_type_t* dst,
+                                                      const float* x,
+                                                      float const scale) {
+#pragma unroll
+    for (int i = 0; i < N; ++i) {
+      dst[i] = quant_fn(x[i], scale);
+    }
+  }
 };
 
 template <typename quant_type_t, bool is_scale_inverted>
@@ -74,17 +84,21 @@ struct ScaledQuant<quant_type_t, is_scale_inverted,
       return float_to_fp8<quant_type_t>(x / scale);
     }
   }
-};
 
-template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
-__device__ void scaled_quant_conversion(quant_type_t* __restrict__ output,
-                                        scalar_t const* __restrict__ input,
-                                        float const scale, int const tid,
-                                        int const num_elements,
-                                        int const step) {
-  for (int i = tid; i < num_elements; i += step) {
-    output[i] = ScaledQuant<quant_type_t, is_scale_inverted>(input[i], scale);
+  template <int N>
+  static __device__ __forceinline__ void quant_vec_fn(quant_type_t* dst,
+                                                      const float* x,
+                                                      float const scale) {
+#if VLLM_FP8_CVT_X2
+    scaled_fp8_conversion_vec<is_scale_inverted, quant_type_t, N>(dst, x,
+                                                                  scale);
+#else
+  #pragma unroll
+    for (int i = 0; i < N; ++i) {
+      dst[i] = quant_fn(x[i], scale);
+    }
+#endif
   }
-}
+};
 
 }  // namespace vllm

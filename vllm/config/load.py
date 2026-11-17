@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
+
+DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
+DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
+SafetensorsLoadStrategy: TypeAlias = Literal["lazy", "eager", "prefetch", "torchao"]
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 else:
-    LoadFormats = Any
+    LoadFormats = str
     TensorizerConfig = Any
 
 logger = init_logger(__name__)
@@ -34,6 +37,12 @@ class LoadConfig:
     - "instanttensor" will load the Safetensors weights on CUDA devices using
       InstantTensor, which enables distributed loading with pipelined prefetching
       and fast direct I/O.
+    - "ipc_cache" will map post-quantized weights from a local weight cache
+      daemon via CUDA IPC for fast engine restarts. Launch the daemon with
+      `vllm preload` first.
+    - "peer_cache" will build the model on meta and pull post-processed
+      weights from a source replica's weight cache daemon. Set internally
+      by `vllm preload --weight-cache-seed`; not for engine use.
     - "npcache" will load the weights in pytorch format and store a numpy cache
       to speed up the loading.
     - "dummy" will initialize the weights with random values, which is mainly
@@ -45,24 +54,22 @@ class LoadConfig:
       Streamer.
     - "runai_streamer_sharded" will load weights from pre-sharded checkpoint
       files using Run:ai Model Streamer.
-    - "bitsandbytes" will load the weights using bitsandbytes quantization.
     - "sharded_state" will load weights from pre-sharded checkpoint files,
       supporting efficient loading of tensor-parallel models.
-    - "gguf" will load weights from GGUF format files (details specified in
-      https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
     - "mistral" will load weights from consolidated safetensors files used by
       Mistral models.
+    - "modelexpress" will load weights using ModelExpress.
     - Other custom values can be supported via plugins.
     """
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: str | None = None
+    safetensors_load_strategy: SafetensorsLoadStrategy | None = None
     """
     Specifies the loading strategy for safetensors weights.
 
     - None (default): Uses memory-mapped (lazy) loading. When an NFS
-      filesystem is detected and the total checkpoint size fits within 90%%
+      filesystem is detected and the total checkpoint size fits within 90%
       of available RAM, prefetching is enabled automatically.
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
@@ -79,6 +86,15 @@ class LoadConfig:
       was quantized using torchao and saved using safetensors.
       Needs `torchao >= 0.14.0`.
     """
+    safetensors_prefetch_num_threads: int = Field(
+        default=DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS, ge=1
+    )
+    """Number of worker threads used to prefetch safetensors checkpoint files
+    into the OS page cache when safetensors prefetching is enabled."""
+    safetensors_prefetch_block_size: int = Field(
+        default=DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE, ge=1
+    )
+    """Read size in bytes for each safetensors checkpoint file prefetch."""
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
@@ -101,24 +117,24 @@ class LoadConfig:
     need to be double quoted for json parsing. For more details, see
     the original doc for `map_location` parameter in [`torch.load`][] parameter.
     """
+    shuffle_safetensors_files: bool = False
+    """
+    Whether to shuffle the safetensors checkpoint files during loading.
+    When enabled, files are randomly shuffled based on the distributed rank,
+    which can help with load balancing and improve weight loading speed in
+    startup scenarios. This reduces I/O contention by ensuring different ranks
+    load different files in a randomized order.
+    Set to True to enable shuffling. Default is False.
+    """
 
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     @field_validator("load_format", mode="after")
     def _lowercase_load_format(cls, load_format: str) -> str:

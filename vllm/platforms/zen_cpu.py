@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.platforms.cpu import CpuPlatform
 
@@ -22,3 +24,11 @@ class ZenCpuPlatform(CpuPlatform):
     def is_zen_cpu(self) -> bool:
         # is_cpu() also returns True for this platform (inherited from CpuPlatform).
         return True
+
+    # fp16 compute needs AVX512-FP16, which AMD ships from Venice (6th Gen
+    # EPYC) onwards; Turin (5th Gen EPYC) and earlier have no fp16 kernels.
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        if torch.ops.zentorch.zentorch_is_fp16_supported():
+            return [torch.bfloat16, torch.float32, torch.float16]
+        return [torch.bfloat16, torch.float32]
