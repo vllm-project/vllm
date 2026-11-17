@@ -28,6 +28,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
   - pytest -v -s distributed/aux_output_connector/test_store.py
+  - pytest -v -s distributed/aux_output_connector/test_object_store.py
   - pytest -v -s model_executor/test_indexer_capture.py
   - pytest -v -s model_executor/test_routed_experts_capture.py
   - pytest -v -s distributed/test_pipeline_partition.py
@@ -53,6 +54,7 @@ steps:
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
       - pytest -v -s distributed/aux_output_connector/test_store.py
+      - pytest -v -s distributed/aux_output_connector/test_object_store.py
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer

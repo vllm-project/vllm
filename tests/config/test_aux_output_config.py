@@ -154,3 +154,64 @@ def test_indexer_only_does_not_require_moe_routing():
     config = _config(is_moe=False)
     config.aux_output_config = AuxOutputConfig(enable_return_indexer_topk=True)
     VllmConfig._verify_aux_output_compatibility(config)
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"object_key_prefix": "run-1"}, None),
+        ({"object_key_prefix": ""}, "non-empty"),
+        ({"object_key_prefix": "runs/1"}, "without '/'"),
+        (
+            {
+                "object_key_prefix": "run-1",
+                "enable_return_routed_experts": False,
+                "enable_return_indexer_topk": True,
+            },
+            None,
+        ),
+    ],
+    ids=["valid", "empty-prefix", "slash", "indexer-only"],
+)
+def test_object_key_prefix_is_validated(kwargs, error):
+    kwargs = {"enable_return_routed_experts": True, **kwargs}
+    if error is None:
+        AuxOutputConfig(**kwargs)
+        return
+    with pytest.raises(ValueError, match=error):
+        AuxOutputConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "name,value", [("mooncake_config_path", "objects.json")], ids=["mooncake-config"]
+)
+def test_session_fields_require_object_key_prefix(name, value):
+    with pytest.raises(ValueError, match=f"{name} requires object_key_prefix"):
+        AuxOutputConfig(enable_return_routed_experts=True, **{name: value})
+    AuxOutputConfig(
+        enable_return_routed_experts=True, object_key_prefix="run-1", **{name: value}
+    )
+
+
+@pytest.mark.parametrize(
+    "legacy_flag,error",
+    [(True, None), (False, "object_key_prefix requires")],
+    ids=["legacy-flag", "no-output"],
+)
+def test_object_key_prefix_takes_its_output_from_the_legacy_flag(legacy_flag, error):
+    config = _config()
+    config.aux_output_config = EngineArgs(
+        aux_output_config={"object_key_prefix": "job"},
+        enable_return_routed_experts=legacy_flag,
+    ).aux_output_config
+    if error is None:
+        VllmConfig._verify_aux_output_compatibility(config)
+        return
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._verify_aux_output_compatibility(config)
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1.0], ids=["zero", "negative"])
+def test_object_put_stall_timeout_must_be_positive(timeout_s):
+    with pytest.raises(ValueError):
+        AuxOutputConfig(object_put_stall_timeout_s=timeout_s)

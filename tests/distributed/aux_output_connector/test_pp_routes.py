@@ -94,7 +94,9 @@ def test_only_the_last_stage_output_rank_owns_the_data_plane(tp_first, pp_last, 
     worker._buffer = None
     worker._vllm_config = SimpleNamespace(
         aux_output_config=SimpleNamespace(
-            enable_return_routed_experts=True, enable_return_indexer_topk=False
+            enable_return_routed_experts=True,
+            enable_return_indexer_topk=False,
+            object_key_prefix=None,
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=8),
         max_concurrent_batches=1,

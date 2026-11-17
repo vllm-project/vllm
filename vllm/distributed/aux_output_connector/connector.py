@@ -6,17 +6,26 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from vllm.distributed.aux_output_connector.session_objects import (
+    aux_object_key,
+    aux_tail_key,
+    session_version_segments,
+)
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_bytes_per_token,
 )
+from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import (
+    generate_block_hash_extra_keys,
+    hash_block_tokens,
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
@@ -71,6 +80,10 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
+    sessions: dict[str, str] = field(default_factory=dict)
+    session_tails: dict[str, tuple[str, int, int]] = field(default_factory=dict)
+    session_object_size: int = 0
+    flushed_block_hashes: dict[str, PackedBlockHashes] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -94,8 +107,14 @@ class AuxRequestOutput:
         return row_counts.pop()
 
 
+@dataclass(slots=True)
+class _SessionRequest:
+    request: Request
+    session: str
+
+
 class AuxOutputSchedulerConnector:
-    """Build worker metadata without owning auxiliary output payloads or stores."""
+    """Build worker metadata without owning auxiliary output stores."""
 
     def __init__(
         self,
@@ -104,6 +123,8 @@ class AuxOutputSchedulerConnector:
         *,
         enable_routed_experts: bool = True,
         enable_indexer: bool = False,
+        key_prefix: str | None = None,
+        hash_algo: str = "sha256",
     ) -> None:
         self._output_fields = tuple(
             (rows, prompt_start)
@@ -136,6 +157,75 @@ class AuxOutputSchedulerConnector:
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
+        if key_prefix is not None:
+            from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+            if (
+                coordinator.enable_partial_hash_hits
+                or self._block_pool.num_hash_lookahead_tokens > 1
+                or type(self._manager) is not FullAttentionManager
+                or any(
+                    group.prefix_replay_tokens
+                    for group in kv_cache_manager.kv_cache_config.kv_cache_groups
+                )
+            ):
+                raise ValueError(
+                    "AuxOutputConfig.object_key_prefix needs a plain full-attention "
+                    "KV cache group, prefix-cache hits on KV block boundaries, at "
+                    "most one hash look-ahead token and no prefix replay."
+                )
+        self._key_prefix = key_prefix
+        self._hash_fn = get_hash_fn_by_name(hash_algo)
+        self._weight_version = "default"
+        self._session_requests: dict[str, _SessionRequest] = {}
+        self._session_tails: dict[str, tuple[str, int, int]] = {}
+        self._flushed_hashes: dict[str, PackedBlockHashes] = {}
+
+    def _session(self, request: Request) -> str | None:
+        params = request.sampling_params
+        if self._key_prefix is None or params is None:
+            return None
+        return params.aux_session
+
+    def add_request(self, request: Request) -> None:
+        """Salt a session request's positions before any KV connector sees its
+        block hashes: with the versions of its `aux_version_segments` up to the
+        last full hash block of the prompt they cover, then with the current
+        weight version."""
+        session = self._session(request)
+        if session is None:
+            return
+        self._session_requests[request.request_id] = _SessionRequest(request, session)
+        assert request.sampling_params is not None
+        end, segments = session_version_segments(
+            request.sampling_params.aux_version_segments,
+            request.num_prompt_tokens,
+            self._block_size,
+            self._weight_version,
+        )
+        if segments != request.cache_salt_segments:
+            request.cache_salt_segments = segments
+            del request.block_hashes[end // self._hash_block_size :]
+            request.update_block_hashes()
+
+    def set_weight_version(self, weight_version: str) -> None:
+        """Set the weight version of later steps; call while no step runs.
+        Positions of live session requests that are neither computed nor
+        hashed yet are salted with it."""
+        if self._key_prefix is not None and not (
+            isinstance(weight_version, str) and weight_version
+        ):
+            raise VLLMValidationError(
+                "weight version must be a non-empty string",
+                parameter="weight_version",
+            )
+        self._weight_version = weight_version
+        for state in self._session_requests.values():
+            state.request.add_cache_salt_segment(
+                state.request.num_computed_tokens,
+                weight_version,
+                self._hash_block_size,
+            )
 
     def build_connector_meta(
         self,
@@ -145,9 +235,14 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
+        sessions: dict[str, str] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            state = self._session_requests.get(request_id)
+            if request_id not in self._sent_hash_counts:
+                self._sent_hash_counts[request_id] = 0
+                if state is not None:
+                    sessions[request_id] = state.session
             self._computed_from.setdefault(request_id, request.num_computed_tokens)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
@@ -155,7 +250,9 @@ class AuxOutputSchedulerConnector:
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
             self._loading.pop(request_id, None)
-            scheduled_requests[request_id] = self._emit_start(request)
+            scheduled_requests[request_id] = (
+                0 if state is not None else self._emit_start(request)
+            )
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
@@ -166,6 +263,27 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
+        metadata = self._take_events(
+            scheduled_requests, block_hashes_by_request, sessions
+        )
+        for request_id in scheduler_output.finished_req_ids or ():
+            self._session_requests.pop(request_id, None)
+        return metadata
+
+    def drain_metadata(self) -> AuxOutputConnectorMetadata | None:
+        if self._key_prefix is None:
+            return None
+        return self._take_events({}, {}, {})
+
+    def finishing(self, request_ids: set[str]) -> bool:
+        return not self._finished_requests.keys().isdisjoint(request_ids)
+
+    def _take_events(
+        self,
+        scheduled_requests: dict[str, int],
+        block_hashes_by_request: dict[str, PackedBlockHashes],
+        sessions: dict[str, str],
+    ) -> AuxOutputConnectorMetadata:
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -181,8 +299,14 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            sessions,
+            self._session_tails,
+            self._block_size,
+            self._flushed_hashes,
         )
+        self._flushed_hashes = {}
         self._retained_hashes, self._released_hashes = [], []
+        self._session_tails = {}
         return metadata
 
     def _emit_start(self, request: Request) -> int:
@@ -196,6 +320,8 @@ class AuxOutputSchedulerConnector:
         return min(prompt_start, request.num_prompt_tokens)
 
     def max_cache_hit(self, request: Request) -> int:
+        if self._session(request) is not None:
+            return (request.num_tokens - 1) // self._block_size * self._block_size
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -211,7 +337,7 @@ class AuxOutputSchedulerConnector:
         self, request: Request, num_local: int, num_external: int
     ) -> int:
         num_hit = num_local + num_external
-        if num_hit <= self._emit_start(request):
+        if self._session(request) is None and num_hit <= self._emit_start(request):
             for block, keys in islice(
                 self._kv_blocks(request.block_hashes),
                 num_local // self._block_size,
@@ -316,18 +442,76 @@ class AuxOutputSchedulerConnector:
             accepted[row_field] = rows[start:local_end]
         return accepted.get("routed_rows"), accepted.get("indexer_rows")
 
+    def take_rows_and_keys(
+        self,
+        request: Request,
+        output: dict[str, AuxRequestOutput] | None,
+        stopped: bool,
+    ) -> tuple[
+        np.ndarray | None,
+        np.ndarray | None,
+        list[str] | None,
+        list[tuple[int, str | None]] | None,
+    ]:
+        """Rows of one output, or for a stopped session request the keys of
+        the objects that hold its rows and the version segments of their
+        names."""
+        state = self._session_requests.get(request.request_id)
+        if state is None:
+            return *self.take_output(request, output), None, None
+        if not stopped or request.request_id not in self._sent_hash_counts:
+            return None, None, None, None
+        size = self._block_size
+        hash_size = self._hash_block_size
+        token_end = request.num_tokens - 1
+        block_hashes = request.block_hashes
+        computed = request.num_computed_tokens - request.num_in_flight_tokens
+        num_sent = self._sent_hash_counts[request.request_id] * hash_size
+        end = min(num_sent, computed) // size * size
+        boundary = min(token_end, end)
+        step = size // hash_size
+        keys = [
+            aux_object_key(self._key_prefix, state.session, block_hashes[last].hex())
+            for last in range(step - 1, boundary // hash_size, step)
+        ]
+        if boundary < token_end:
+            parent = block_hashes[boundary // hash_size - 1] if boundary else None
+            extra_keys, _ = generate_block_hash_extra_keys(
+                request, boundary, token_end, 0
+            )
+            tail_hash = hash_block_tokens(
+                self._hash_fn,
+                parent,
+                request.all_token_ids[boundary:token_end],
+                ("aux_tail", extra_keys),
+            )
+            key = aux_tail_key(self._key_prefix, state.session, tail_hash.hex())
+            self._session_tails[request.request_id] = (key, boundary, token_end)
+            keys.append(key)
+        segments: list[tuple[int, str | None]] = [
+            segment for segment in request.cache_salt_segments if segment[0] < end
+        ]
+        segments.append((end, None))
+        return None, None, keys, segments
+
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
         self._loading.pop(request_id, None)
+        session = request_id in self._session_requests
+        num_computed = request.num_computed_tokens
+        if session:
+            num_computed -= request.num_in_flight_tokens
         if request_id in self._sent_hash_counts:
             # The next metadata delivers this terminal event to the worker.
             self._finished_requests[request_id] = self._take_new_hashes(
-                request, request.num_computed_tokens
+                request, num_computed
             )
             del self._sent_hash_counts[request_id]
         computed_from = self._computed_from.pop(request_id, request.num_tokens)
         num_blocks = request.num_computed_tokens // self._block_size
+        if self._session(request) is not None:
+            num_blocks = 0
         blocks = islice(self._kv_blocks(request.block_hashes), num_blocks)
         for index, (block, keys) in enumerate(blocks):
             if index * self._block_size >= computed_from:
@@ -364,7 +548,16 @@ class AuxOutputSchedulerConnector:
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
         self._computed_from.clear()
-        self._finished_requests.clear()
+        finished = {}
+        for request_id, block_hashes in self._finished_requests.items():
+            state = self._session_requests.get(request_id)
+            if state is None:
+                continue
+            if state.request.is_finished():
+                finished[request_id] = block_hashes
+            elif block_hashes is not None:
+                self._flushed_hashes[request_id] = block_hashes
+        self._finished_requests = finished
         self._generation += 1
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()

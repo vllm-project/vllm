@@ -23,6 +23,9 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputConnectorMetadata,
+    )
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 else:
@@ -147,6 +150,11 @@ class WorkerBase:
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def drain_aux_output(self, metadata: "AuxOutputConnectorMetadata") -> None:
+        connector = getattr(self.model_runner, "aux_output_connector", None)
+        if connector is not None:
+            connector.drain(metadata)
 
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside

@@ -467,6 +467,8 @@ class Scheduler(SchedulerInterface):
                 retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0],
                 enable_routed_experts=vllm_config.aux_output_config.enable_return_routed_experts,
                 enable_indexer=vllm_config.aux_output_config.enable_return_indexer_topk,
+                key_prefix=vllm_config.aux_output_config.object_key_prefix,
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
             )
             if vllm_config.aux_output_config.enabled
             else None
@@ -1029,7 +1031,14 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+        if (
+            not preempted_reqs
+            and self._pause_state != PauseState.PAUSED_ALL
+            and not (
+                self.aux_output_connector is not None
+                and self.aux_output_connector.finishing(self.reset_preempted_req_ids)
+            )
+        ):
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
 
@@ -2451,14 +2460,19 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
-            routed_experts = None
-            indexer_topk = None
+            routed_experts = indexer_topk = None
+            aux_output_keys = aux_version_segments = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
             if self.aux_output_connector is not None and should_emit_output:
-                routed_experts, indexer_topk = self.aux_output_connector.take_output(
-                    request, model_runner_output.aux_output_connector_output
+                (
+                    routed_experts,
+                    indexer_topk,
+                    aux_output_keys,
+                    aux_version_segments,
+                ) = self.aux_output_connector.take_rows_and_keys(
+                    request, model_runner_output.aux_output_connector_output, stopped
                 )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
@@ -2552,6 +2566,8 @@ class Scheduler(SchedulerInterface):
                         indexer_topk=indexer_topk,
                         num_nans_in_logits=request.num_nans_in_logits,
                         watermarking=watermarking,
+                        aux_output_keys=aux_output_keys,
+                        aux_version_segments=aux_version_segments,
                     )
                 )
             else:
@@ -3028,6 +3044,8 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if self.aux_output_connector is not None:
+                self.aux_output_connector.add_request(request)
             if request.resumable:
                 request.streaming_queue = deque()
             if self.connector is not None:

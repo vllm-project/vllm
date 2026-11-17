@@ -450,6 +450,13 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    aux_session: str | None = None
+    """Session whose routed experts are delivered as shared objects
+    (`AuxOutputConfig.object_key_prefix`), listed in `aux_output_keys`. Only
+    requests of the same session share prefix-cache blocks."""
+    aux_version_segments: list[tuple[int, str | None]] | None = None
+    """`aux_version_segments` of the session's previous response: the weight
+    versions of the prompt positions it covers."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -493,6 +500,8 @@ class SamplingParams(
         logprob_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
         indexer_topk_prompt_start: int = 0,
+        aux_session: str | None = None,
+        aux_version_segments: list[tuple[int, str | None]] | None = None,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
@@ -562,6 +571,8 @@ class SamplingParams(
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
             indexer_topk_prompt_start=indexer_topk_prompt_start,
+            aux_session=aux_session,
+            aux_version_segments=aux_version_segments,
             trace_decode_token_ids=trace_decode_token_ids,
         )
 

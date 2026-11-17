@@ -127,6 +127,77 @@ def test_aux_output_offset_validated_before_engine_submission(offset, field):
     assert getattr(request.sampling_params, field) == getattr(params, field)
 
 
+SEG = [[0, "v1"], [16, "v2"], [32, None]]
+
+
+def _segments(segments):
+    return {"aux_session": "s", "aux_version_segments": segments}
+
+
+@pytest.mark.parametrize(
+    "key_prefix,params,resumable,error",
+    [
+        ("job", {"aux_session": "s", "stop_token_ids": [2]}, False, None),
+        (None, {"aux_session": "s"}, False, "requires AuxOutputConfig"),
+        ("job", {"aux_session": ""}, False, "non-empty"),
+        ("job", {"aux_session": "a/b"}, False, "without '/'"),
+        ("job", {"aux_session": "s", "stop": ["</s>"]}, False, "stop strings"),
+        ("job", {"aux_session": "s"}, True, "streaming input"),
+        ("job", {"aux_session": "s", "aux_version_segments": SEG}, False, None),
+        ("job", _segments([[0, None]]), False, None),
+        ("job", {"aux_version_segments": SEG}, False, "requires aux_session"),
+        ("job", _segments([[1, "v1"], [16, None]]), False, "increase from 0"),
+        ("job", _segments([[0, "v1"], [0, None]]), False, "increase from 0"),
+        ("job", _segments([[0, "v1"]]), False, "increase from 0"),
+        ("job", _segments([[0, None], [16, None]]), False, "increase from 0"),
+        ("job", _segments([[0, "v1"], [16, "v2"]]), False, "increase from 0"),
+        ("job", _segments([[0, "v1", 1], [16, None]]), False, "increase from 0"),
+        ("job", _segments([[0, ""], [16, None]]), False, "increase from 0"),
+        ("job", _segments([[0, "v1"], [16, "v1"], [32, None]]), False, "differ"),
+        ("job", _segments([]), False, "increase from 0"),
+    ],
+    ids=[
+        "valid",
+        "no-key-prefix",
+        "empty",
+        "slash",
+        "stop-string",
+        "resumable",
+        "segments",
+        "no-coverage",
+        "segments-without-session",
+        "first-start-not-0",
+        "start-not-increasing",
+        "no-closing-entry",
+        "null-version-not-last",
+        "closing-entry-with-version",
+        "not-a-pair",
+        "empty-version",
+        "repeated-version",
+        "no-segments",
+    ],
+)
+def test_aux_session_validated_before_engine_submission(
+    key_prefix, params, resumable, error
+):
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    processor.vllm_config.aux_output_config.object_key_prefix = key_prefix
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    args = ("request", prompt, SamplingParams(**params), ("generate",))
+
+    if error is None:
+        request = InputProcessor.process_inputs(processor, *args)
+        assert request.sampling_params.aux_session == "s"
+        return
+    with pytest.raises(VLLMValidationError, match=error):
+        InputProcessor.process_inputs(processor, *args, resumable=resumable)
+
+
 def _process_inputs_with_max_model_len(
     params: SamplingParams, max_model_len: int = 2048
 ):

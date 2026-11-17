@@ -4139,6 +4139,25 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                         watermarking: Some(
                             true,
                         ),
+                        aux_output_keys: Some(
+                            [
+                                "job/s/ab",
+                            ],
+                        ),
+                        aux_version_segments: Some(
+                            [
+                                (
+                                    0,
+                                    Some(
+                                        "v1",
+                                    ),
+                                ),
+                                (
+                                    16,
+                                    None,
+                                ),
+                            ],
+                        ),
                     },
                 ],
                 scheduler_stats: None,
