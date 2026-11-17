@@ -20,6 +20,7 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_dtype_size,
+    get_kv_cache_torch_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -44,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
+    from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
@@ -52,7 +54,20 @@ if current_platform.is_rocm():
     def num_programs(total_tokens):
         return min(total_tokens, num_compute_units())
 
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=[
+            "num_heads",
+            "head_size",
+            "x",
+            "max_block_num",
+            "k_cache_stride0",
+            "k_cache_stride1",
+            "k_cache_stride2",
+            "v_cache_stride0",
+            "v_cache_stride1",
+            "v_cache_stride2",
+        ]
+    )
     def cp_mha_gather_cache_kernel(
         key_cache_ptr,  # [num_blocks, page_size, num_head, head_size]
         value_cache_ptr,  # [num_blocks, page_size, num_head, head_size]
@@ -224,6 +239,90 @@ if current_platform.is_rocm():
             CACHE_FORMAT=kv_cache_layout,
             BLOCK_SIZE=head_dim,
         )
+
+    @dataclass(frozen=True)
+    class GatherCacheCompileKey:
+        head_dim: int
+        page_size: int
+        layout: str
+        dequant: bool
+        cache_dtype: torch.dtype
+        out_dtype: torch.dtype
+
+    def gather_cache_warmup_keys(
+        *,
+        head_dim: int,
+        page_size: int,
+        dequant: bool,
+        cache_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+        shuffle_enabled: bool,
+    ) -> list[GatherCacheCompileKey]:
+        # Sliding-window extend always gathers NHD. The other extend paths
+        # gather SHUFFLE when that KV layout is enabled.
+        layouts = ("NHD", "SHUFFLE") if shuffle_enabled else ("NHD",)
+        return [
+            GatherCacheCompileKey(
+                head_dim=head_dim,
+                page_size=page_size,
+                layout=layout,
+                dequant=dequant,
+                cache_dtype=cache_dtype,
+                out_dtype=out_dtype,
+            )
+            for layout in layouts
+        ]
+
+    class _GatherCacheWarmup(VllmJitKernel[GatherCacheCompileKey]):
+        def get_warmup_keys(
+            self, key: GatherCacheCompileKey
+        ) -> list[GatherCacheCompileKey]:
+            return [key]
+
+        def compile(self, compile_key: GatherCacheCompileKey) -> None:
+            from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+                TritonWarmupTensor,
+            )
+
+            # A real KV cache is one pool, usually past Triton's 2 GB
+            # pointer-range split. The gathered workspace stays under it.
+            cache = TritonWarmupTensor(
+                compile_key.cache_dtype,
+                ptr_range_bytes=2**31 + 1,
+            )
+            out = TritonWarmupTensor(compile_key.out_dtype)
+            i32 = TritonWarmupTensor(torch.int32)
+            scale = TritonWarmupTensor(torch.float32)
+            cp_mha_gather_cache_kernel.warmup(
+                cache,
+                cache,
+                out,
+                out,
+                i32,
+                i32,
+                i32,
+                i32,
+                scale,
+                scale,
+                1,
+                compile_key.head_dim,
+                8,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                DEQUANT=compile_key.dequant,
+                PAGE_SIZE=compile_key.page_size,
+                CACHE_FORMAT=compile_key.layout,
+                BLOCK_SIZE=compile_key.head_dim,
+                grid=(1,),
+            )
+            self._compiled_cache[compile_key] = True
+
+    _GATHER_CACHE_WARMUP = _GatherCacheWarmup()
 
     @triton.jit
     def reshape_and_cache_shuffle_kernel(
@@ -485,6 +584,15 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
+        warm_gather = (
+            vllm_config.kernel_config.enable_jit_warmup and current_platform.is_rocm()
+        )
+        if warm_gather:
+            gather_cache_dtype = get_kv_cache_torch_dtype(
+                self.cache_config.cache_dtype, self.model_config.dtype
+            )
+            gather_dequant = is_quantized_kv_cache(self.cache_config.cache_dtype)
+            gather_shuffle = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -494,6 +602,16 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            if warm_gather:
+                for key in gather_cache_warmup_keys(
+                    head_dim=layer.impl.head_size,
+                    page_size=self.block_size,
+                    dequant=gather_dequant,
+                    cache_dtype=gather_cache_dtype,
+                    out_dtype=self.model_config.dtype,
+                    shuffle_enabled=gather_shuffle,
+                ):
+                    _GATHER_CACHE_WARMUP.register_warmup(key)
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
