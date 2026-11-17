@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from itertools import groupby
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -267,16 +267,23 @@ def parse_score_messages(
 
 
 def truncate_score_content(
-    content: str | list[dict[str, str]],
+    content: str | list[Any],
     tokenizer,
     max_tokens: int,
-) -> str | list[dict[str, str]]:
+) -> str | list[Any]:
     """Limit text tokens across content blocks without dropping media blocks."""
     if isinstance(content, str):
         return truncate_text_to_tokens(content, tokenizer, max_tokens)
 
+    def is_text_part(part: Any) -> bool:
+        return (
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+
     result = []
-    for is_text, group in groupby(content, key=lambda part: part["type"] == "text"):
+    for is_text, group in groupby(content, key=is_text_part):
         parts = list(group)
         if not is_text:
             result.extend(parts)
