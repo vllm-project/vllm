@@ -685,17 +685,26 @@ def kernel_unified_attention(
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
             dist = context_len + qpos_lo - seq_offset[:, None]
+            if USE_PER_SEQ_CAUSAL or not USE_CAUSAL:
+                qpos_hi = tl.minimum(
+                    qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
+                    cur_batch_query_len - 1,
+                )
+                # Keep every V column used by any query row in this tile.
+                right_mask_v = (
+                    context_len + qpos_hi - seq_offset[:, None] > -SLIDING_WINDOW
+                )
             if USE_PER_SEQ_CAUSAL:
                 is_causal_seq = tl.load(per_seq_causal_ptr + seq_idx)
                 sw_mask_v = tl.where(
                     is_causal_seq,
                     dist < SLIDING_WINDOW,
-                    (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW),
+                    (dist < SLIDING_WINDOW) & right_mask_v,
                 )
             elif USE_CAUSAL:
                 sw_mask_v = dist < SLIDING_WINDOW
             else:
-                sw_mask_v = (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW)
+                sw_mask_v = (dist < SLIDING_WINDOW) & right_mask_v
             V = tl.where(sw_mask_v, V, 0.0)
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
