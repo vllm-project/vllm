@@ -92,7 +92,11 @@ impl SingleWriterShmRingBuffer {
         let file = File::from(fd);
         let map = match file
             .set_len((data_buffer_size + DATA_OFFSET) as u64)
-            // SAFETY: `file` is a fresh shm file of at least the mapped size.
+            // SAFETY: other processes only modify the 4-byte reader counts of
+            // chunks whose handles were handed out. The writer reads those only
+            // atomically through raw pointers (see `reader_count`), never
+            // through slices, and every other byte is written only by this
+            // process.
             .and_then(|()| unsafe { MmapMut::map_mut(&file) })
         {
             Ok(map) => map,
