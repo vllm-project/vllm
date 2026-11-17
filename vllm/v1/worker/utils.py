@@ -772,39 +772,24 @@ def reserve_encoder_cache_residency(
     encoder_outputs: dict[str, torch.Tensor],
     dummy_outputs: Sequence[torch.Tensor],
     encoder_cache_size: int,
-    target_bytes: int | None = None,
 ) -> int:
     """Reserve the encoder cache's resident footprint during profiling, in bytes.
 
     The dummy run only materialises one compute batch, so a cache larger than the
     compute budget would be under-reserved and the surplus handed to the KV cache.
-
-    `target_bytes` is the user byte budget. It is reserved directly, after
-    subtracting dummy outputs that are already materialized. Token capacity is
-    that budget floored to a whole number of embeddings, so the difference is
-    less than one embedding.
     """
     if not dummy_outputs:
         return 0
 
     # `sanity_check_mm_encoder_outputs` guarantees 2-D (tokens, hidden) outputs.
     ref = dummy_outputs[0]
-    if target_bytes is None:
-        bytes_per_token = ref.element_size() * ref.shape[1]
-        shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
-        if shortfall > 0:
-            encoder_outputs["tmp_residency"] = torch.empty(
-                (shortfall, ref.shape[1]), dtype=ref.dtype, device=ref.device
-            )
-        return encoder_cache_size * bytes_per_token
-
-    materialized = sum(int(out.numel()) * out.element_size() for out in dummy_outputs)
-    shortfall_bytes = target_bytes - materialized
-    if shortfall_bytes > 0:
+    bytes_per_token = ref.element_size() * ref.shape[1]
+    shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
+    if shortfall > 0:
         encoder_outputs["tmp_residency"] = torch.empty(
-            shortfall_bytes, dtype=torch.uint8, device=ref.device
+            (shortfall, ref.shape[1]), dtype=ref.dtype, device=ref.device
         )
-    return target_bytes
+    return encoder_cache_size * bytes_per_token
 
 
 def request_memory(

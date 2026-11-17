@@ -505,29 +505,6 @@ def test_residency_reservation_is_a_noop_when_the_batch_already_fills_the_cache(
     assert cache_bytes == 200 * 16 * 2
 
 
-def test_residency_reservation_pads_to_the_conservative_byte_cost():
-    """A narrower dummy modality must not under-reserve a max-width budget."""
-    cache: dict[str, torch.Tensor] = {}
-    outputs = _dummy_outputs(num_items=1, tokens=4, hidden=8)
-    # Dummy cost is 8 * 2 = 16 bytes. The budget was resolved at 32.
-    cache_bytes = reserve_encoder_cache_residency(
-        cache, outputs, encoder_cache_size=4, target_bytes=4 * 32
-    )
-    assert cache_bytes == 4 * 32
-    assert cache["tmp_residency"].dtype == torch.uint8
-    assert cache["tmp_residency"].numel() == 4 * 32 - 4 * 16
-
-
-def test_residency_reservation_does_not_pad_when_dummies_cover_the_budget():
-    cache: dict[str, torch.Tensor] = {}
-    outputs = _dummy_outputs(num_items=1, tokens=4, hidden=16)
-    cache_bytes = reserve_encoder_cache_residency(
-        cache, outputs, encoder_cache_size=4, target_bytes=4 * 32
-    )
-    assert cache == {}
-    assert cache_bytes == 4 * 32
-
-
 def test_residency_reservation_tolerates_no_dummy_outputs():
     cache: dict[str, torch.Tensor] = {}
     assert reserve_encoder_cache_residency(cache, [], 1000) == 0

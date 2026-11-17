@@ -114,7 +114,6 @@ class EncoderRunner:
             self.encoder_cache.encoder_outputs,
             dummy_encoder_outputs,
             budget.encoder_cache_size,
-            target_bytes=budget.scheduler_config.encoder_cache_bytes,
         )
 
     @torch.inference_mode()
