@@ -155,6 +155,17 @@ def unpad_and_flat_audio_features(
     return torch.cat(unpadded_features, dim=-1)
 
 
+def may_interleave_audio_video(multimodal_embeddings: Sequence[torch.Tensor]) -> bool:
+    """Whether the batch may hold interleaved audio-in-video tokens.
+
+    Judged from the modality the encoder gather sets on each embedding, so it
+    needs no host read of `input_ids`. Untagged embeddings count as possibly
+    interleaved.
+    """
+    modalities = {getattr(embed, "modality", None) for embed in multimodal_embeddings}
+    return None in modalities or {"audio", "video"} <= modalities
+
+
 def check_interleaved_audio_video(
     is_video: torch.Tensor,
     is_audio: torch.Tensor,
@@ -1642,6 +1653,13 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         # needed; otherwise fall back to the default parent implementation.
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
+
+        if not may_interleave_audio_video(multimodal_embeddings):
+            return super().embed_input_ids(
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+            )
 
         with gpu_sync_allowed():
             input_ids_cpu = input_ids.cpu()

@@ -113,6 +113,7 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniThinkerProcessingInfo,
     _get_feature_tensor,
     check_interleaved_audio_video,
+    may_interleave_audio_video,
     merge_interleaved_embeddings,
 )
 from .qwen2_5_vl import (
@@ -1868,19 +1869,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         # Detect interleaved audio-in-video early, since it affects
         # both the deepstack path and the final embedding merge.
-        video_token_id = self.config.video_token_id
-        audio_token_id = self.config.audio_token_id
-        image_token_id = self.config.image_token_id
-        input_ids_cpu = input_ids.cpu()
-        is_video = is_multimodal & (input_ids_cpu == video_token_id)
-        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
-        is_image = is_multimodal & (input_ids_cpu == image_token_id)
-        num_video = is_video.sum().item()
-        num_audio = is_audio.sum().item()
-
-        is_interleaved = check_interleaved_audio_video(
-            is_video, is_audio, num_video, num_audio
-        )
+        is_interleaved = False
+        if may_interleave_audio_video(multimodal_embeddings):
+            with gpu_sync_allowed():
+                input_ids_cpu = input_ids.cpu()
+                is_video = is_multimodal & (input_ids_cpu == self.config.video_token_id)
+                is_audio = is_multimodal & (input_ids_cpu == self.config.audio_token_id)
+                is_image = is_multimodal & (input_ids_cpu == self.config.image_token_id)
+                num_video = is_video.sum().item()
+                num_audio = is_audio.sum().item()
+            is_interleaved = check_interleaved_audio_video(
+                is_video, is_audio, num_video, num_audio
+            )
 
         deepstack_input_embeds = None
         # split the feat dim to obtain multi-scale visual feature
