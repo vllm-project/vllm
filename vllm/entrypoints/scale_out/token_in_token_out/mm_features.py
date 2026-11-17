@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import cast
 
 import torch
 
@@ -18,12 +17,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.inputs import (
-    EngineInput,
-    MultiModalHashes,
-    MultiModalInput,
-    MultiModalPlaceholders,
-)
+from vllm.inputs import EngineInput
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
@@ -144,12 +138,9 @@ def placeholder_ranges_from_engine_input(
     engine_input: EngineInput,
 ) -> dict[str, list[PlaceholderRangeInfo]] | None:
     """Return per-modality placeholder ranges, or `None` for text-only prompts."""
-    if engine_input.get("type") != "multimodal":
+    if engine_input["type"] != "multimodal":
         return None
 
-    raw_placeholders: MultiModalPlaceholders = cast(MultiModalInput, engine_input)[
-        "mm_placeholders"
-    ]
     return {
         modality: [
             PlaceholderRangeInfo(
@@ -159,7 +150,19 @@ def placeholder_ranges_from_engine_input(
             )
             for p in ranges
         ]
-        for modality, ranges in raw_placeholders.items()
+        for modality, ranges in engine_input["mm_placeholders"].items()
+    }
+
+
+def mm_hashes_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[str]] | None:
+    """Return per-modality processor cache keys, or `None` for text-only prompts."""
+    if engine_input["type"] != "multimodal":
+        return None
+
+    return {
+        modality: list(hashes) for modality, hashes in engine_input["mm_hashes"].items()
     }
 
 
@@ -177,18 +180,16 @@ def extract_mm_features(
     `keep_on_cpu` (for example M-RoPE grid dims). With
     `mm_payload="none"` neither is serialized.
     """
-    if engine_input.get("type") != "multimodal":
+    if engine_input["type"] != "multimodal":
         return None
 
-    mm_engine_input = cast(MultiModalInput, engine_input)
-    mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
     mm_placeholders = placeholder_ranges_from_engine_input(engine_input)
     assert mm_placeholders is not None
 
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
     if mm_payload == "tensors":
-        raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+        raw_mm_kwargs = engine_input.get("mm_kwargs")
         if raw_mm_kwargs:
             kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
                 raw_mm_kwargs,
@@ -196,7 +197,7 @@ def extract_mm_features(
             )
 
     return MultiModalFeatures(
-        mm_hashes=mm_hashes,
+        mm_hashes=engine_input["mm_hashes"],
         mm_placeholders=mm_placeholders,
         kwargs_data=kwargs_data,
         mm_metadata=mm_metadata,
