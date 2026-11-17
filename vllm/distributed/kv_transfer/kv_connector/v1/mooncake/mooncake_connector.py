@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends_and_specs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    ExportRelease,
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
@@ -910,18 +911,15 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
-    def holds_blocks_only_for_remote_readers(self) -> bool:
-        return True
-
-    def drop_exports(self, requests: list["Request"]) -> bool:
+    def cancel_kv_transfers(
+        self, exports: list["Request"], imports: list["Request"]
+    ) -> ExportRelease:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.drop_exports(requests)
-        # The worker reports each in finished_sending once no send reads it.
-        return True
-
-    def withdraw_imports(self, requests: list["Request"]) -> None:
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.withdraw_imports(requests)
+        self.connector_scheduler.drop_exports(exports)
+        self.connector_scheduler.withdraw_imports(imports)
+        # The worker reports each export in finished_sending once no send
+        # reads it.
+        return ExportRelease.FREE_ON_FINISHED_SENDING
 
     def request_finished(
         self,

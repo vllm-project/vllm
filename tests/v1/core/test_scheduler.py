@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.connector import (
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.base import ExportRelease
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -6745,10 +6746,9 @@ def test_abort_drops_only_remote_read_exports(monkeypatch, remote_readers_only):
         monkeypatch.setattr(
             scheduler.connector, name, lambda *a, **k: (True, None), raising=False
         )
+    release = ExportRelease.FREE_NOW if remote_readers_only else ExportRelease.KEPT
     monkeypatch.setattr(
-        scheduler.connector,
-        "holds_blocks_only_for_remote_readers",
-        lambda: remote_readers_only,
+        scheduler.connector, "cancel_kv_transfers", lambda exports, imports: release
     )
     scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
     assert scheduler.ledger.pins_blocks()
@@ -6775,14 +6775,13 @@ def test_abort_all_frees_dropped_exports_when_connector_reports(monkeypatch):
         monkeypatch.setattr(
             scheduler.connector, name, lambda *a, **k: (True, None), raising=False
         )
-    monkeypatch.setattr(
-        scheduler.connector, "holds_blocks_only_for_remote_readers", lambda: True
-    )
     dropped: list[Request] = []
     monkeypatch.setattr(
         scheduler.connector,
-        "drop_exports",
-        lambda requests: dropped.extend(requests) or True,
+        "cancel_kv_transfers",
+        lambda exports, imports: (
+            dropped.extend(exports) or ExportRelease.FREE_ON_FINISHED_SENDING
+        ),
     )
     # The prefill finished; its blocks are kept for a remote reader.
     scheduler.finish_requests(
@@ -6822,17 +6821,17 @@ def test_retract_again_drops_late_exports_and_skips_retracted_loads(monkeypatch)
         monkeypatch.setattr(
             scheduler.connector, name, lambda *a, **k: (True, None), raising=False
         )
-    monkeypatch.setattr(
-        scheduler.connector, "holds_blocks_only_for_remote_readers", lambda: True
-    )
     dropped: list[Request] = []
     withdrawn: list[Request] = []
     monkeypatch.setattr(
         scheduler.connector,
-        "drop_exports",
-        lambda requests: dropped.extend(requests) or False,
+        "cancel_kv_transfers",
+        lambda exports, imports: (
+            dropped.extend(exports)
+            or withdrawn.extend(imports)
+            or ExportRelease.FREE_NOW
+        ),
     )
-    monkeypatch.setattr(scheduler.connector, "withdraw_imports", withdrawn.extend)
     # The decode's remote load is in flight.
     scheduler.ledger.import_started(decode)
 

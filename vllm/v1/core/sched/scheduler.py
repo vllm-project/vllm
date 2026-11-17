@@ -28,7 +28,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    ExportRelease,
+    KVConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -3202,7 +3205,7 @@ class Scheduler(SchedulerInterface):
         if loads_in_flight and self.connector is not None:
             # The remote need not hold (or wait to produce) KV nobody wants:
             # the load then settles quickly and frees its blocks.
-            self.connector.withdraw_imports(loads_in_flight)
+            self.connector.cancel_kv_transfers([], loads_in_flight)
         if finish_all and finished_status == RequestStatus.FINISHED_ABORTED:
             # Aborting everything also stops holding finished requests' blocks
             # for remote readers, which may be paused or gone as well.
@@ -3243,12 +3246,7 @@ class Scheduler(SchedulerInterface):
         if connector_delay_free_blocks:
             # A remote reader (or an async save) still needs the blocks.
             self.ledger.open_export(
-                request,
-                droppable=(
-                    not ec_delay_free
-                    and self.connector is not None
-                    and self.connector.holds_blocks_only_for_remote_readers()
-                ),
+                request, droppable=not ec_delay_free and self.connector is not None
             )
         if delay_free_blocks:
             # An import is in flight; its completion frees the blocks.
@@ -3397,16 +3395,21 @@ class Scheduler(SchedulerInterface):
         of all requests, or a pause that clears the cache). Exports a
         connector also holds for other reasons (e.g. an async save) are kept.
 
-        A connector that can fail the reads not started yet reports each
-        dropped export in finished_sending once no read in flight uses its
-        blocks; they stay pinned until then. Otherwise they are freed now, and
-        a completion the connector reports later is ignored (no entry).
+        The connector decides how their blocks are freed (`ExportRelease`).
+        Freed now, a completion it reports later is ignored (no entry).
         Returns how many exports were dropped."""
-        entries = self.ledger.drop_exports()
+        entries = self.ledger.droppable_exports()
         if not entries:
             return 0
         assert self.connector is not None
-        if self.connector.drop_exports([e.request for e in entries]):
+        release = self.connector.cancel_kv_transfers([e.request for e in entries], [])
+        if release == ExportRelease.KEPT:
+            for entry in entries:
+                entry.droppable = False
+            return 0
+        for entry in entries:
+            entry.state = TransferState.DROPPING
+        if release == ExportRelease.FREE_ON_FINISHED_SENDING:
             return len(entries)
         for entry in entries:
             self.ledger.close(entry.request_id, TransferDirection.EXPORT)
@@ -3455,7 +3458,7 @@ class Scheduler(SchedulerInterface):
                 # The load is in flight; restart once it settles.
                 self.ledger.retract(request_id)
         if retracted and self.connector is not None:
-            self.connector.withdraw_imports(retracted)
+            self.connector.cancel_kv_transfers([], retracted)
 
     def _restart_import_locally(self, request: Request) -> None:
         """Discard a retracted import's KV and queue its request to prefill

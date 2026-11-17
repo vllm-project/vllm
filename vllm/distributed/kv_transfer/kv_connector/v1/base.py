@@ -145,6 +145,20 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
+class ExportRelease(enum.Enum):
+    """How the blocks of cancelled exports may be freed
+    (see `KVConnectorBase_V1.cancel_kv_transfers`)."""
+
+    # The connector still needs them (e.g. an async save): it reports each
+    # export in finished_sending as usual.
+    KEPT = enum.auto()
+    # Only remote readers needed them: the scheduler frees them now.
+    FREE_NOW = enum.auto()
+    # The connector fails the reads that have not started and reports each
+    # export in finished_sending once no read in flight uses its blocks.
+    FREE_ON_FINISHED_SENDING = enum.auto()
+
+
 class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """Metadata used for out of band connector handshake between
     P/D workers. This needs to serializable.
@@ -731,33 +745,27 @@ class KVConnectorBase_V1(ABC):
         """Whether pending transfers can release blocks instead of preemption."""
         return False
 
-    def holds_blocks_only_for_remote_readers(self) -> bool:
-        """Whether every delayed free this connector requests (from
-        `request_finished()` or `register_finished_partial_tail()`) only keeps
-        blocks for a remote engine to read. If so, an abort-mode pause may
-        free them without waiting; otherwise (e.g. an async save in flight)
-        the pause waits for the connector to report them finished."""
-        return False
+    def cancel_kv_transfers(
+        self, exports: list["Request"], imports: list["Request"]
+    ) -> ExportRelease:
+        """The scheduler no longer wants these transfers (an abort, or a
+        pause that clears the cache).
 
-    def drop_exports(self, requests: list["Request"]) -> bool:
-        """Stop keeping these finished requests' blocks for remote readers
-        (an abort, or a pause that clears the cache). Called only when
-        `holds_blocks_only_for_remote_readers()` is True.
+        Args:
+            exports: finished requests whose blocks were kept (delayed free
+                from `request_finished()`) for remote readers.
+            imports: requests whose remote KV is no longer wanted: aborted
+                while their load was in flight, or turned into local
+                prefills. The remote engine may stop holding it; a load in
+                flight still reports `finished_recving` (possibly as failed)
+                before its blocks are freed.
 
-        Return True if the connector fails the reads that have not started
-        and reports each request in `finished_sending` once no read in flight
-        uses its blocks; the scheduler frees them then. Return False (the
-        default) to let the scheduler free them now.
+        Returns:
+            How the exports' blocks may be freed. The default keeps them
+            until the connector reports them finished, as before.
+
         """
-        return False
-
-    def withdraw_imports(self, requests: list["Request"]) -> None:
-        """The scheduler no longer wants the remote KV of these requests:
-        they were aborted while their load was in flight, or a pause that
-        clears the cache retracted them. Tell the remote engine to stop
-        holding it. A load in flight still reports `finished_recving`
-        (possibly as failed) before its blocks are freed."""
-        return
+        return ExportRelease.KEPT
 
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires
