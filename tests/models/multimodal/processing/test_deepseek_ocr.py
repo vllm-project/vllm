@@ -24,10 +24,13 @@ from vllm.model_executor.models.deepseek_ocr import (
     DeepseekOCRImagePixelInputs,
 )
 from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.processors.deepseek_ocr import (
     DeepseekOCRProcessor,
     ImageTransform,
 )
+
+from ...utils import build_model_context
 
 MODEL_ID = "deepseek-ai/DeepSeek-OCR"
 
@@ -250,10 +253,6 @@ class TestDeepseekOCRZeroSumPixelsAccepted:
 @pytest.mark.parametrize("prompt_as_tokens", [False, True])
 def test_crop_kwargs_match_processed_image_tokens(model_id, kwargs, prompt_as_tokens):
     """Crop overrides must reserve the tokens actually emitted by the processor."""
-    from vllm.multimodal import MULTIMODAL_REGISTRY
-
-    from ...utils import build_model_context
-
     images = [Image.new("RGB", (1600, 1200)), Image.new("RGB", (400, 300))]
     results = []
     for on_engine in (False, True):

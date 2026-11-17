@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+from PIL import Image
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -56,8 +57,6 @@ def test_lightonocr_image_embeddings_preserve_lengths_and_values(
 @pytest.mark.parametrize("prompt_as_tokens", [False, True])
 def test_resize_kwargs_match_image_features(longest_edge, prompt_as_tokens):
     """Resized images reserve one placeholder per projected vision feature."""
-    from PIL import Image
-
     images = [Image.new("RGB", (1600, 1200)), Image.new("RGB", (300, 800))]
     kwargs = {"size": {"longest_edge": longest_edge}}
     results = []

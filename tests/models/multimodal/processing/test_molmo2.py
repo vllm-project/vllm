@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image
 
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.model_executor.models.molmo2 import (
@@ -12,6 +13,9 @@ from vllm.model_executor.models.molmo2 import (
     Molmo2VisionBackbone,
     build_flat_image_bool_length,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from ...utils import build_model_context
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -151,12 +155,6 @@ def test_vision_pooling_means_preserve_batch_indices_and_drop_invalid_groups(
 @pytest.mark.parametrize("prompt_as_tokens", [False, True])
 def test_crop_kwargs_match_processed_image_tokens(max_crops, prompt_as_tokens):
     """Crop counts and placeholders follow the actual processor output."""
-    from PIL import Image
-
-    from vllm.multimodal import MULTIMODAL_REGISTRY
-
-    from ...utils import build_model_context
-
     images = [Image.new("RGB", (1600, 1200)), Image.new("RGB", (400, 300))]
     kwargs = {"max_crops": max_crops}
     results = []

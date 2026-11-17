@@ -10,6 +10,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 
+from ...utils import build_model_context
+
 
 @pytest.fixture
 def processor():
@@ -74,8 +76,6 @@ def test_image_embedding_cache_identity_ignores_image_count(processor, use_uuid:
 @pytest.mark.parametrize("prompt_as_tokens", [False, True])
 def test_request_candidate_resolutions_match_engine(prompt_as_tokens):
     """A request crop limit must change placeholders along with image features."""
-    from ...utils import build_model_context
-
     kwargs = {"candidate_resolutions": ((384, 384),)}
     image = Image.new("RGB", (1600, 1200))
     results = []
