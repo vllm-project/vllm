@@ -1735,6 +1735,30 @@ def test_engine_core_pause_writes_the_objects_of_the_requests_it_preempts():
     engine.worker.close()
 
 
+def test_session_request_preempted_by_a_failed_pause_reset_resumes():
+    engine = _tier_engine(connector=None)
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 40, 6)
+    engine.scheduler.add_request(request)
+    for _ in range(2):
+        engine.step(engine.schedule(), {"r": [0]})
+    block_pool = engine.scheduler.kv_cache_manager.block_pool
+    held = block_pool.get_new_blocks(1)
+    core = object.__new__(EngineCore)
+    core.scheduler = engine.scheduler
+    core.model_executor = Mock()
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
+    with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
+        core.pause_scheduler(mode="keep")
+    assert request.status == RequestStatus.PREEMPTED
+    block_pool.free_blocks(held)
+    core.resume_scheduler()
+    engine.run()
+    engine.close()
+    assert engine.segments["r"] == [(0, "v1"), (32, None)]
+
+
 def test_session_key_of_a_block_whose_hash_follows_the_stop_is_a_tail():
     engine = _tier_engine(connector=None)
     _run_turn(engine, 0, "first", 48, lookahead=1)

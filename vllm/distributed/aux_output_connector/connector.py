@@ -315,6 +315,9 @@ class AuxOutputSchedulerConnector:
             return None
         return self._take_events({}, {}, {})
 
+    def finishing(self, request_ids: set[str]) -> bool:
+        return not self._finished_requests.keys().isdisjoint(request_ids)
+
     def _take_events(
         self,
         scheduled_requests: dict[str, int],

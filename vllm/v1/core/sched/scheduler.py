@@ -1031,7 +1031,14 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+        if (
+            not preempted_reqs
+            and self._pause_state != PauseState.PAUSED_ALL
+            and not (
+                self.aux_output_connector is not None
+                and self.aux_output_connector.finishing(self.reset_preempted_req_ids)
+            )
+        ):
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
 
