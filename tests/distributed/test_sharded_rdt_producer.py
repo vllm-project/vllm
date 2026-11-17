@@ -460,6 +460,28 @@ class TestFailure:
         assert s.end_sync() == [0]
 
 
+def test_strided_boxes_of_consecutive_experts_pack_as_one_copy():
+    """Column slices of consecutive experts' weights (one storage, evenly
+    spaced, back to back in the bucket) are one run, one strided copy."""
+    w = torch.arange(4 * 3 * 8, dtype=torch.float32).view(4, 3, 8)
+    boxes = [((e, e + 1), (0, 3), (2, 6)) for e in range(4)]
+    views = [w[e, :, 2:6] for e in range(4)]
+    layout = trainer_mod.flat_layout(boxes, [torch.float32] * 4)
+    src = trainer_mod._sources(0, views, layout)
+    assert src.typed_idx == ((0, 4),) and src.typed_srcs[0].shape == (4, 3, 4)
+    assert torch.equal(src.typed_srcs[0], w[:, :, 2:6])
+
+
+def test_aligned_contiguous_boxes_copy_as_words():
+    w = torch.zeros(8, 8, dtype=torch.bfloat16)
+    views = [w[0:4], w[4:8].view(-1)[:3].view(1, 3)]  # 64 B; 6 B
+    boxes = [((0, 4), (0, 8)), ((4, 5), (0, 3))]
+    layout = trainer_mod.flat_layout(boxes, [torch.bfloat16] * 2)
+    src = trainer_mod._sources(0, views, layout)
+    assert src.word_idx == (0,) and src.word_srcs[0].dtype == torch.int64
+    assert src.byte_idx == (1,) and src.byte_srcs[0].dtype == torch.uint8
+
+
 def test_a_bucket_is_freed_when_ray_drops_it(server):
     """The free is Ray dropping its last reference to the served block: while
     Ray holds it the block and its unit stay taken, however long that is."""

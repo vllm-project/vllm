@@ -19,7 +19,7 @@ import time
 import uuid
 import weakref
 from collections import Counter
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar, Self
@@ -125,27 +125,78 @@ class _ServedBucket:
 @dataclass(frozen=True, slots=True)
 class _Sources:
     """One bucket's source boxes for one generation of its unit: the
-    contiguous ones as bytes and the strided ones as they are, with the index
-    of the piece each fills."""
+    contiguous ones as 8-byte words where aligned, else as bytes, with the
+    index of the piece each fills; and the strided ones as runs `(first
+    piece, count)`, each one strided view."""
 
     gen: int
+    word_idx: tuple[int, ...]
+    word_srcs: tuple[torch.Tensor, ...]
     byte_idx: tuple[int, ...]
     byte_srcs: tuple[torch.Tensor, ...]
-    typed_idx: tuple[int, ...]
+    typed_idx: tuple[tuple[int, int], ...]
     typed_srcs: tuple[torch.Tensor, ...]
 
 
-def _sources(gen: int, views: list[torch.Tensor]) -> _Sources:
-    byte_idx, byte_srcs, typed_idx, typed_srcs = [], [], [], []
+def _sources(
+    gen: int, views: list[torch.Tensor], layout: Sequence[FlatPiece]
+) -> _Sources:
+    """Split a bucket's source boxes into contiguous ones and runs of strided
+    ones. A run is consecutive strided boxes of one shape and stride from one
+    storage, at evenly spaced offsets, landing back to back in the bucket:
+    e.g. the TP column slices of consecutive experts' weights. It is copied
+    as one view with a leading run dimension, one kernel instead of one per
+    box. Contiguous boxes copy as 8-byte words when their address and size
+    allow (pieces start on 16 B in the bucket), which moves far more bytes
+    per element than a byte copy."""
+    word_idx, word_srcs, byte_idx, byte_srcs, runs = [], [], [], [], []
     for i, view in enumerate(views):
         if view.is_contiguous():
-            byte_idx.append(i)
-            byte_srcs.append(view.view(-1).view(torch.uint8))
-        else:
-            typed_idx.append(i)
-            typed_srcs.append(view)
+            raw = view.view(-1).view(torch.uint8)
+            if raw.data_ptr() % 8 == 0 and raw.numel() % 8 == 0:
+                word_idx.append(i)
+                word_srcs.append(raw.view(torch.int64))
+            else:
+                byte_idx.append(i)
+                byte_srcs.append(raw)
+            continue
+        if runs:
+            first, count, step = runs[-1]
+            last, base = first + count - 1, views[first]
+            spacing = view.storage_offset() - views[last].storage_offset()
+            if (
+                i == last + 1
+                and layout[i][0] == layout[last][0] + layout[last][1]
+                and view.dtype == base.dtype
+                and view.shape == base.shape
+                and view.stride() == base.stride()
+                and view.untyped_storage().data_ptr()
+                == base.untyped_storage().data_ptr()
+                and spacing > 0
+                and step in (None, spacing)
+            ):
+                runs[-1] = (first, count + 1, spacing)
+                continue
+        runs.append((i, 1, None))
+    typed_srcs = []
+    for first, count, step in runs:
+        base = views[first]
+        if count > 1:
+            base = torch.as_strided(
+                base,
+                (count, *base.shape),
+                (step, *base.stride()),
+                base.storage_offset(),
+            )
+        typed_srcs.append(base)
     return _Sources(
-        gen, tuple(byte_idx), tuple(byte_srcs), tuple(typed_idx), tuple(typed_srcs)
+        gen,
+        tuple(word_idx),
+        tuple(word_srcs),
+        tuple(byte_idx),
+        tuple(byte_srcs),
+        tuple((first, count) for first, count, _ in runs),
+        tuple(typed_srcs),
     )
 
 
@@ -488,7 +539,9 @@ class _RDTProducerServer:
                 torch.cuda.current_stream(self._device_index).wait_event(ready)
             if sources is None or sources.gen != gen:
                 sources = self._sources[key] = _sources(
-                    gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
+                    gen,
+                    [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)],
+                    spec.layout,
                 )
             del tensors
             flat = self._pack(sources, spec, offset)
@@ -521,7 +574,7 @@ class _RDTProducerServer:
         box on the per-tensor path, a kernel each. Caller holds `_pack_lock`
         and synchronizes the device."""
         if self._arena is None:  # warmup_nixl never ran (tests)
-            some = (sources.byte_srcs or sources.typed_srcs)[0]
+            some = (sources.word_srcs or sources.byte_srcs or sources.typed_srcs)[0]
             self._arena = torch.empty(
                 self._arena_bytes, dtype=torch.uint8, device=some.device
             )
@@ -529,19 +582,25 @@ class _RDTProducerServer:
         # every piece's bytes, from one split; per piece tensor ops are what
         # a busy producer pays for, and a MoE bucket has hundreds of pieces
         chunks = flat.split(spec.splits)[::2]
+        if sources.word_srcs:
+            torch._foreach_copy_(
+                [chunks[i].view(torch.int64) for i in sources.word_idx],
+                list(sources.word_srcs),
+            )
         if sources.byte_srcs:
             torch._foreach_copy_(
                 [chunks[i] for i in sources.byte_idx], list(sources.byte_srcs)
             )
         if sources.typed_srcs:
-            layout = spec.layout
-            torch._foreach_copy_(
-                [
-                    chunks[i].view(layout[i][2]).view(layout[i][3])
-                    for i in sources.typed_idx
-                ],
-                list(sources.typed_srcs),
-            )
+            dsts = []
+            for first, count in sources.typed_idx:
+                start, nbytes, dtype, shape = spec.layout[first]
+                if count == 1:
+                    dsts.append(chunks[first].view(dtype).view(shape))
+                else:
+                    run = flat[start : start + count * nbytes]
+                    dsts.append(run.view(dtype).view(count, *shape))
+            torch._foreach_copy_(dsts, list(sources.typed_srcs))
         return flat
 
     def _track_free(self, flat: torch.Tensor, *key: int) -> None:
