@@ -365,6 +365,24 @@ steps:
         - pytest -v -s models/step5
         - pytest -v -s models/test_initialization.py -k Step5ForConditionalGeneration
 
+# gfx942 is the only fnuz GPU, so only MI300 compiles the fnuz branch of this
+# kernel. The MI355 Step5 mirror above runs the same test on e4m3fn.
+- label: ":amd: (MI300 DPX) Step5 CSA Indexer"
+  key: amd-step5-csa-indexer-mi300
+  dind: false
+  device: mi300_dpx
+  num_devices: 1
+  timeout_in_minutes: 20
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/step5/amd/ops/indexer_scores.py
+  - vllm/platforms/rocm.py
+  - tests/models/step5/test_amd_csa_indexer_scores.py
+  commands:
+  - pytest -v -s models/step5/test_amd_csa_indexer_scores.py
+
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
   automatic_shard: true
