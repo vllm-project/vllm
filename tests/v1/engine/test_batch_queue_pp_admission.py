@@ -22,6 +22,7 @@ from vllm.v1.engine.core import EngineCore
 )
 def test_empty_step_admission(pp_size, num_tokens, awaiting_cadence, waits):
     core = object.__new__(EngineCore)
+    core._idle_step = None
     core.batch_queue_size = pp_size + 1
     core.batch_queue = deque(maxlen=core.batch_queue_size)
     core._pp_admission = pp_size > 1
@@ -50,5 +51,10 @@ def test_empty_step_admission(pp_size, num_tokens, awaiting_cadence, waits):
         core._handle_inputs_while_waiting.assert_called_once_with(
             core.batch_queue[-1][0], stop_on_add=True
         )
+        # While that idle step is in flight, no more empty steps are scheduled.
+        assert core._idle_step is core.batch_queue[0][0]
+        assert core.step_with_batch_queue() == (None, False)
+        assert core.scheduler.schedule.call_count == 1
     else:
         core._handle_inputs_while_waiting.assert_not_called()
+        assert core._idle_step is None
