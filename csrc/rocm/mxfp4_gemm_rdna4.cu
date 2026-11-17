@@ -105,101 +105,135 @@ __device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
 // keeps PF groups of B/A/scale loads in flight in a register ring. Per group a
 // lane loads its 8-byte B word pair (octets 2*hi, 2*hi+1) and 16 A bytes per
 // row tile, and issues 2*MT WMMAs.
-template <typename T, int MT, int KW, int PF>
+template <typename T, int MT, int NT, int KW, int PF>
 __global__ void __launch_bounds__(32 * KW)
     gemm_mxfp4_wmma_fp8_skinny(const uint8_t* __restrict__ aq,
                                const float* __restrict__ ascale,
                                const uint32_t* __restrict__ b_q,
                                const uint8_t* __restrict__ b_scales,
                                T* __restrict__ c, int M, int N, int K) {
+  // Block = MT row tiles (rows blockIdx.y*16*MT ..) x NT column tiles
+  // (blockIdx.x*16*NT ..), KW waves splitting K. NT > 1 amortises the A
+  // fragment loads over more columns: at M=64 with MT=4/NT=1 each lane issued
+  // four 16-byte A loads per 8-byte B load and every 16-column block re-read
+  // all 64 rows, which lost to hipBLASLt at N=5120; MT=2 x NT=2 over two
+  // row-half blocks halves the A traffic at ~100 VGPRs.
   const int wave = threadIdx.x >> 5;
   const int lane = threadIdx.x & 31;
   const int lo = lane & 15;
   const int hi = lane >> 4;
-  const int n_col = blockIdx.x * 16 + lo;
-  const bool n_ok = n_col < N;
+  const int row0 = blockIdx.y * (16 * MT);
+  int n_col[NT];
+  bool n_ok[NT];
+  #pragma unroll
+  for (int u = 0; u < NT; u++) {
+    n_col[u] = (blockIdx.x * NT + u) * 16 + lo;
+    n_ok[u] = n_col[u] < N;
+  }
   const int ngroups = K / kGroup;
   const int g_begin = (ngroups * wave) / KW;
   const int g_end = (ngroups * (wave + 1)) / KW;
 
   bool a_ok[MT];
   #pragma unroll
-  for (int t = 0; t < MT; t++) a_ok[t] = (16 * t + lo) < M;
+  for (int t = 0; t < MT; t++) a_ok[t] = (row0 + 16 * t + lo) < M;
 
+  // Only the B words + E8M0 scale ride the PF-deep register ring (the weight
+  // stream is what needs latency hiding); A is small and L2-resident and is
+  // fetched one group ahead. Per tile a single 8-float group accumulator is
+  // live. With A in the ring MT=4 needed 170+ VGPRs (occupancy 8).
   struct Slot {
-    unsigned long long b;
-    uint4 a[MT];
-    float ws;
+    unsigned long long b[NT];
+    float ws[NT];
   };
   Slot ring[PF];
-  auto load = [&](int g, Slot& sl) {
-    const int k_g = g * kGroup;
-    sl.b = 0ull;
-    sl.ws = 0.0f;
-    if (n_ok) {
-      const auto* bp = reinterpret_cast<const unsigned long long*>(
-          b_q + ((size_t)g * N + n_col) * 4 + 2 * hi);
-      sl.b = __builtin_nontemporal_load(bp);
-      sl.ws = mxfp4_e8m0_to_f32(b_scales[(size_t)g * N + n_col]);
+  auto load_b = [&](int g, Slot& sl) {
+  #pragma unroll
+    for (int u = 0; u < NT; u++) {
+      sl.b[u] = 0ull;
+      sl.ws[u] = 0.0f;
+      if (n_ok[u]) {
+        const auto* bp = reinterpret_cast<const unsigned long long*>(
+            b_q + ((size_t)g * N + n_col[u]) * 4 + 2 * hi);
+        sl.b[u] = __builtin_nontemporal_load(bp);
+        sl.ws[u] = mxfp4_e8m0_to_f32(b_scales[(size_t)g * N + n_col[u]]);
+      }
     }
+  };
+  auto load_a = [&](int g, uint4(&a)[MT]) {
+    const int k_g = g * kGroup;
   #pragma unroll
     for (int t = 0; t < MT; t++) {
       uint4 aw = {0u, 0u, 0u, 0u};
       if (a_ok[t])
-        __builtin_memcpy(&aw, aq + (size_t)(16 * t + lo) * K + k_g + 16 * hi,
-                         16);
-      sl.a[t] = aw;
+        __builtin_memcpy(
+            &aw, aq + (size_t)(row0 + 16 * t + lo) * K + k_g + 16 * hi, 16);
+      a[t] = aw;
     }
   };
 
-  v8f32 acc[MT];
+  v8f32 acc[MT][NT];
   #pragma unroll
-  for (int t = 0; t < MT; t++) acc[t] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (int t = 0; t < MT; t++)
+  #pragma unroll
+    for (int u = 0; u < NT; u++) acc[t][u] = {0, 0, 0, 0, 0, 0, 0, 0};
 
   #pragma unroll
   for (int d = 0; d < PF; d++)
-    if (g_begin + d < g_end) load(g_begin + d, ring[d]);
+    if (g_begin + d < g_end) load_b(g_begin + d, ring[d]);
+  uint4 a_cur[MT], a_nx[MT];
+  if (g_begin < g_end) load_a(g_begin, a_cur);
 
   for (int g0 = g_begin; g0 < g_end; g0 += PF) {
   #pragma unroll
     for (int d = 0; d < PF; d++) {
       const int g = g0 + d;
       if (g >= g_end) break;
-      const Slot& sl = ring[d];
-      v8f32 grp[MT];
+      const bool has_next = (g + 1 < g_end);
+      if (has_next) load_a(g + 1, a_nx);
+      const Slot sl = ring[d];
+      if (g + PF < g_end) load_b(g + PF, ring[d]);  // refill in flight
   #pragma unroll
-      for (int t = 0; t < MT; t++) grp[t] = {0, 0, 0, 0, 0, 0, 0, 0};
+      for (int u = 0; u < NT; u++) {
+        v2i32 bf[2];
   #pragma unroll
-      for (int s = 0; s < 2; s++) {  // step s, half hi -> K-octet 2*hi + s
-        uint32_t blo, bhi;
-        dequant_mxfp4_8_e4m3((uint32_t)(s == 0 ? sl.b : (sl.b >> 32)), blo,
-                             bhi);
-        v2i32 bf;
-        bf[0] = (int)blo;
-        bf[1] = (int)bhi;
+        for (int st = 0; st < 2; st++) {  // step st, half hi -> octet 2*hi+st
+          uint32_t blo, bhi;
+          dequant_mxfp4_8_e4m3((uint32_t)(st == 0 ? sl.b[u] : (sl.b[u] >> 32)),
+                               blo, bhi);
+          bf[st][0] = (int)blo;
+          bf[st][1] = (int)bhi;
+        }
   #pragma unroll
         for (int t = 0; t < MT; t++) {
-          v2i32 af;
-          af[0] = (int)(s == 0 ? sl.a[t].x : sl.a[t].z);
-          af[1] = (int)(s == 0 ? sl.a[t].y : sl.a[t].w);
-          grp[t] = wmma_fp8(af, bf, grp[t]);
+          v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
+          v2i32 af0, af1;
+          af0[0] = (int)a_cur[t].x;
+          af0[1] = (int)a_cur[t].y;
+          af1[0] = (int)a_cur[t].z;
+          af1[1] = (int)a_cur[t].w;
+          grp = wmma_fp8(af0, bf[0], grp);
+          grp = wmma_fp8(af1, bf[1], grp);
+  #pragma unroll
+          for (int q = 0; q < 8; q++)
+            acc[t][u][q] = fmaf(grp[q], sl.ws[u], acc[t][u][q]);
         }
       }
-      const float ws = sl.ws;
+      if (has_next) {
   #pragma unroll
-      for (int t = 0; t < MT; t++)
-  #pragma unroll
-        for (int i = 0; i < 8; i++) acc[t][i] = fmaf(grp[t][i], ws, acc[t][i]);
-      if (g + PF < g_end) load(g + PF, ring[d]);
+        for (int t = 0; t < MT; t++) a_cur[t] = a_nx[t];
+      }
     }
   }
 
   if constexpr (KW > 1) {
-    __shared__ float red[KW][MT][32][8];
+    __shared__ float red[KW][MT][NT][32][8];
   #pragma unroll
     for (int t = 0; t < MT; t++)
   #pragma unroll
-      for (int i = 0; i < 8; i++) red[wave][t][lane][i] = acc[t][i];
+      for (int u = 0; u < NT; u++)
+  #pragma unroll
+        for (int i = 0; i < 8; i++) red[wave][t][u][lane][i] = acc[t][u][i];
     __syncthreads();
     if (wave != 0) return;
   #pragma unroll
@@ -207,17 +241,23 @@ __global__ void __launch_bounds__(32 * KW)
   #pragma unroll
       for (int t = 0; t < MT; t++)
   #pragma unroll
-        for (int i = 0; i < 8; i++) acc[t][i] += red[w][t][lane][i];
+        for (int u = 0; u < NT; u++)
+  #pragma unroll
+          for (int i = 0; i < 8; i++) acc[t][u][i] += red[w][t][u][lane][i];
   }
-  if (!n_ok) return;
   // gfx12 accumulator: lane -> n = lo, slot i -> m = 8*hi + i.
   #pragma unroll
-  for (int t = 0; t < MT; t++) {
+  for (int u = 0; u < NT; u++) {
+    if (!n_ok[u]) continue;
   #pragma unroll
-    for (int i = 0; i < 8; i++) {
-      const int m_row = 16 * t + 8 * hi + i;
-      if (m_row >= M) continue;
-      c[(size_t)m_row * N + n_col] = from_f<T>(acc[t][i] * ascale[m_row]);
+    for (int t = 0; t < MT; t++) {
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int m_row = row0 + 16 * t + 8 * hi + i;
+        if (m_row >= M) continue;
+        c[(size_t)m_row * N + n_col[u]] =
+            from_f<T>(acc[t][u][i] * ascale[m_row]);
+      }
     }
   }
 }
@@ -515,7 +555,7 @@ __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t*, const float*,
                                           const uint32_t*, const uint8_t*, T*,
                                           int, int, int, float*, int) {}
 
-template <typename T, int MT, int KW, int PF>
+template <typename T, int MT, int NT, int KW, int PF>
 __global__ void gemm_mxfp4_wmma_fp8_skinny(const uint8_t*, const float*,
                                            const uint32_t*, const uint8_t*, T*,
                                            int, int, int) {}
@@ -706,43 +746,48 @@ void launch_wmma(const uint8_t* aqp, const float* asp, const uint32_t* bq,
   // 5 128x64/8w (32x32 per wave, LDS only), 6 32x16/2w (LDS only).
   if (M <= 64 && skinny_wmma_enabled()) {
     const int mt = (M + 15) / 16;
-    const int kw = skinny_kw(mt, N), pf = skinny_pf();
+    // One block covers all rows (MT row tiles) of a 16-column tile. An MT=2 x
+    // NT=2 (32x32) variant over two row-half blocks was measured slower at
+    // M=64 (5120x6144: 75.8 vs 67.0us; 5120x3072: 45.1 vs 38.5us): the extra
+    // B stream and per-lane B words cost more than the halved A traffic.
+    const int kw = skinny_kw(mt, N);
+    const int pf = skinny_pf();
     const dim3 grd((N + 15) / 16);
-#define SKW_LAUNCH(MT_, KW_, PF_)               \
-  gemm_mxfp4_wmma_fp8_skinny<TT, MT_, KW_, PF_> \
+#define SKW_LAUNCH(MT_, NT_, KW_, PF_)               \
+  gemm_mxfp4_wmma_fp8_skinny<TT, MT_, NT_, KW_, PF_> \
       <<<grd, 32 * (KW_), 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K)
-#define SKW_PF(MT_, KW_)       \
-  do {                         \
-    if (pf == 2)               \
-      SKW_LAUNCH(MT_, KW_, 2); \
-    else if (pf == 8)          \
-      SKW_LAUNCH(MT_, KW_, 8); \
-    else                       \
-      SKW_LAUNCH(MT_, KW_, 4); \
+#define SKW_PF(MT_, NT_, KW_)       \
+  do {                              \
+    if (pf == 2)                    \
+      SKW_LAUNCH(MT_, NT_, KW_, 2); \
+    else if (pf == 8)               \
+      SKW_LAUNCH(MT_, NT_, KW_, 8); \
+    else                            \
+      SKW_LAUNCH(MT_, NT_, KW_, 4); \
   } while (0)
-#define SKW_KW(MT_)   \
-  do {                \
-    if (kw == 1)      \
-      SKW_PF(MT_, 1); \
-    else if (kw == 2) \
-      SKW_PF(MT_, 2); \
-    else if (kw == 8) \
-      SKW_PF(MT_, 8); \
-    else              \
-      SKW_PF(MT_, 4); \
+#define SKW_KW(MT_, NT_)   \
+  do {                     \
+    if (kw == 1)           \
+      SKW_PF(MT_, NT_, 1); \
+    else if (kw == 2)      \
+      SKW_PF(MT_, NT_, 2); \
+    else if (kw == 8)      \
+      SKW_PF(MT_, NT_, 8); \
+    else                   \
+      SKW_PF(MT_, NT_, 4); \
   } while (0)
     switch (mt) {
       case 1:
-        SKW_KW(1);
+        SKW_KW(1, 1);
         break;
       case 2:
-        SKW_KW(2);
+        SKW_KW(2, 1);
         break;
       case 3:
-        SKW_KW(3);
+        SKW_KW(3, 1);
         break;
       default:
-        SKW_KW(4);
+        SKW_KW(4, 1);
         break;
     }
 #undef SKW_KW
