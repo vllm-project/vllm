@@ -7,7 +7,9 @@
 # device". Once the Docker root filesystem crosses DISK_USAGE_THRESHOLD percent,
 # drop images that no container uses and that were built more than
 # IMAGE_MAX_AGE ago.
-if [[ "${BUILDKITE_PLUGIN_DOCKER_IMAGE:-}" == *-arm64-cpu ]]; then
+# Plugin settings reach only the plugin's own hooks; BUILDKITE_PLUGINS (the
+# step's plugin JSON) is visible here.
+if [[ "${BUILDKITE_PLUGINS:-}" == *-arm64-cpu\"* ]]; then
     DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-80}
     IMAGE_MAX_AGE=${IMAGE_MAX_AGE:-2h}
     docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
