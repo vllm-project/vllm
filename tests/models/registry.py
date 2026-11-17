@@ -391,9 +391,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "vllm-project/tiny-random-LlamaForCausalLM",
         },
     ),
-    "LLaMAForCausalLM": _HfExamplesInfo(
-        "decapoda-research/llama-7b-hf", is_available_online=False
-    ),
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
@@ -1331,6 +1328,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-35B-A3B",
+        max_model_len=4096,
+    ),
+    "Qwen3_5ForSlotDecision": _HfExamplesInfo(
+        "baselabs/elephant-1",
+        extras={"mammoth": "baselabs/mammoth-1"},
         max_model_len=4096,
     ),
     "Qwen4ExpForConditionalGeneration": _HfExamplesInfo(
