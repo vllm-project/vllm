@@ -140,11 +140,6 @@ class AttentionConfig:
     MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
     on SM90 and ROCm, independently of this setting."""
 
-    indexer_tp_shard_min_rows: int | None = None
-    """Deprecated and has no effect: TP row sharding of the sparse-attention
-    indexer was replaced by `sparse_mla_shard_q`. It will be removed in
-    v0.34.0."""
-
     sparse_mla_shard_q: bool = True
     """Under tensor parallelism, shard sparse-MLA (DSA) prefill by token
     instead of by head: each TP rank runs the indexer and the sparse attention
@@ -217,12 +212,6 @@ class AttentionConfig:
     versions."""
 
     def __post_init__(self) -> None:
-        if self.indexer_tp_shard_min_rows is not None:
-            logger.warning(
-                "indexer_tp_shard_min_rows is deprecated and has no effect "
-                "since sparse_mla_shard_q replaced indexer TP row sharding. "
-                "It will be removed in v0.34.0."
-            )
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
             AttentionBackendEnum.CUTLASS_MSA: "cutlass",
             AttentionBackendEnum.TRITON_MSA: "triton",
