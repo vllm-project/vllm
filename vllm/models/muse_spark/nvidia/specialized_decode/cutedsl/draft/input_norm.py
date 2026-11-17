@@ -6,7 +6,8 @@ BF16 input rows) as one CuTe kernel, bit for bit the stock norm
 
 It is the row norm of `common/row_norm.py` at 8192 columns, one CTA of 256
 threads per row; the weight loads before the PDL wait and the dependents
-launch at the grid's end.
+launch right after it: the first layer's QKV front then fills its weight ring
+during the norm, and waits for the norm's grid before it reads the rows.
 """
 
 import torch
@@ -20,7 +21,7 @@ def input_norm_constants(norm: nn.Module, *, enable_pdl: bool) -> RowNormConstan
     """The constants of the stock norm `norm` (a MuseSparkRMSNorm or its
     input-scaled variant over 8192 columns), or ValueError where the kernel
     does not reproduce it or does not take its weight."""
-    return row_norm_constants(norm, enable_pdl=enable_pdl)
+    return row_norm_constants(norm, enable_pdl=enable_pdl, release_early=True)
 
 
 class InputNorm:

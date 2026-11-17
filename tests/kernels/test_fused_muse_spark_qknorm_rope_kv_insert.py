@@ -528,3 +528,164 @@ def test_attention_accepts_fused_fp8_query_without_requantizing(monkeypatch):
     monkeypatch.setattr(attention_module, "unified_attention_with_output", attend)
     result = layer(query, None, None, output_dtype=torch.bfloat16)
     torch.testing.assert_close(result, query.bfloat16(), rtol=0, atol=0)
+
+
+requires_sm100 = pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="the specialized decode's attention kernels run on SM100-family GPUs",
+)
+
+
+@requires_sm100
+@pytest.mark.parametrize("rope", [True, False])
+@pytest.mark.parametrize("m", range(1, 9))
+@torch.inference_mode()
+def test_specialized_qkv_front_matches_projection_norm_rope_and_insert(m, rope):
+    """At the TP8 shard (16 q and 2 KV heads per rank): q and k normalized and
+    rotated, v and the o-gate as projected (FP32 references), the k | v rows
+    in the cache at the valid slots and the rest of the cache untouched."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.cutedsl.attention import (
+        qkv_front as front,
+    )
+
+    torch.manual_seed(620 + m)
+    hq, hkv, d, pages = 16, 2, front.HEAD_DIM, 4
+    n, qn, kn = (2 * hq + 2 * hkv) * d, hq * d, hkv * d
+    with torch.device("cuda"):
+        x = torch.randn(m, front.HIDDEN).bfloat16()
+        weight = (torch.randn(n, front.HIDDEN) / front.HIDDEN**0.5).bfloat16()
+        positions = torch.randint(0, 1 << 16, (m,))
+        cos_sin = make_cos_sin_cache(1 << 16, d, 10000.0, "cuda") if rope else None
+        slots = torch.randperm(pages * front.BLOCK_SIZE)[:m]
+        slots[1::3] = -1
+        cache = torch.full((pages, hkv, front.BLOCK_SIZE, 2 * d), 7.0).bfloat16()
+        out = torch.empty(m, n, dtype=torch.bfloat16)
+    front.prepare(n, [m])
+    front.qkv_front(x, weight, positions, cos_sin, slots, cache, out, 1e-6)
+
+    q, k, v, gate = (x.float() @ weight.float().T).split([qn, kn, kn, qn], dim=1)
+    got_q, got_k, got_v, got_gate = out.float().split([qn, kn, kn, qn], dim=1)
+    for got, ref, heads in ((got_q, q, hq), (got_k, k, hkv)):
+        ref = qk_norm_rope_ref(ref.view(m, heads, d), positions, cos_sin, d, 1e-6)
+        torch.testing.assert_close(got, ref.view(m, -1), rtol=1e-2, atol=1e-2)
+    for got, ref in ((got_v, v), (got_gate, gate)):
+        torch.testing.assert_close(got, ref, rtol=2**-8, atol=1e-3)
+
+    entries = cache.permute(0, 2, 1, 3).reshape(-1, hkv, 2 * d)
+    valid = slots >= 0
+    written = out[:, qn : qn + 2 * kn].view(m, 2, hkv, d).transpose(1, 2)
+    torch.testing.assert_close(
+        entries[slots[valid]], written.flatten(2)[valid], rtol=0, atol=0
+    )
+    untouched = torch.ones(entries.shape[0], dtype=torch.bool, device="cuda")
+    untouched[slots[valid]] = False
+    assert bool((entries[untouched] == 7.0).all())
+
+
+def _attn2_reference(q, gate, kv, pages, length, window):
+    """FP32 attn2 of one request: its query rows are the last `q.shape[0]` of
+    its `length` cache entries, causal and windowed (0: no window), then the
+    weightless per-head RMS norm and the sigmoid gate."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime import cute_ops
+
+    rows, hkv, d = q.shape[0], kv.shape[1], cute_ops.HEAD_DIM
+    hq = q.shape[1] // d
+    cache = kv[pages.long()].permute(1, 0, 2, 3).reshape(hkv, -1, 2 * d)
+    keys, values = cache[:, :length, :d].float(), cache[:, :length, d:].float()
+    pos = torch.arange(length - rows, length, device=q.device)[:, None]
+    key = torch.arange(length, device=q.device)[None]
+    visible = (key <= pos) & ((key > pos - window) if window else True)
+    qh = q.float().view(rows, hkv, hq // hkv, d)
+    scores = torch.einsum("tkhd,ksd->tkhs", qh, keys) * cute_ops.SM_SCALE
+    scores = scores.masked_fill(~visible[:, None, None], float("-inf"))
+    o = torch.einsum("tkhs,ksd->tkhd", scores.softmax(-1), values).reshape(rows, hq, d)
+    o = o * torch.rsqrt(o.square().mean(-1, keepdim=True) + cute_ops.ATTN2_EPS)
+    return (o * gate.float().view(rows, hq, d).sigmoid()).view(rows, -1)
+
+
+@requires_sm100
+@pytest.mark.parametrize(
+    "max_len,window,lengths",
+    [
+        (2048, 0, (8, 2048, 17, 2048, 300, 9, 1000, 2048)),
+        (1 << 20, 0, (8, 4000, 17, 2100, 300, 9, 1000, 2048)),
+        (1 << 20, 2048, (8, 4000, 17, 2100, 300, 9, 1000, 2048)),
+        (1 << 20, 0, (9000, 16384, 8193, 12000, 8192, 20000, 4000, 12345)),
+    ],
+    ids=["one_cluster", "split_full", "split_sliding", "split_full_page_ring"],
+)
+@pytest.mark.parametrize("requests", range(1, 9))
+@torch.inference_mode()
+def test_specialized_attn2_matches_fp32_verify_attention(
+    requests, max_len, window, lengths
+):
+    """The verify step at the TP8 shard's 2 KV heads: per request its 8 query
+    rows are the last 8 of its cache entries, for 1-8 requests of lengths from
+    one page to past the window, the one-cluster limit and (page ring) 8192."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime import cute_ops
+
+    torch.manual_seed(620 + requests)
+    hkv, d, page = 2, cute_ops.HEAD_DIM, cute_ops.BLOCK_SIZE
+    hq, rows = cute_ops.HEADS_PER_KV_HEAD * hkv, cute_ops.QUERY_LEN
+    lengths = lengths[:requests]
+    per_request = -(-max(lengths) // page)
+    splits = cute_ops.attn2_splits(max_len, window, hkv)
+    cute_ops.prepare_attn2(max_len, window, hkv, splits)
+    with torch.device("cuda"):
+        kv = torch.randn(requests * per_request, hkv, page, 2 * d).bfloat16()
+        qkv = torch.randn(requests * rows, 2 * hq * d + 2 * hkv * d).bfloat16()
+        table = torch.randperm(requests * per_request, dtype=torch.int32)
+        table = table.view(requests, per_request)
+        seq_lens = torch.tensor(lengths, dtype=torch.int32)
+        out = torch.empty(requests * rows, hq * d, dtype=torch.bfloat16)
+        workspace = torch.zeros(
+            cute_ops.attn2_workspace_bytes(requests, hkv, splits), dtype=torch.uint8
+        )
+    q, gate = cute_ops.split_qkv(qkv, hkv)
+    cute_ops.attn2(
+        q,
+        kv,
+        table,
+        seq_lens,
+        gate,
+        out,
+        hkv,
+        max_seq_len=max_len,
+        window=window,
+        num_splits=splits,
+        workspace=workspace,
+    )
+    for r, length in enumerate(lengths):
+        span = slice(r * rows, (r + 1) * rows)
+        ref = _attn2_reference(q[span], gate[span], kv, table[r], length, window)
+        got = out[span].float()
+        torch.testing.assert_close(got, ref, rtol=0, atol=6e-2)
+        assert (got - ref).abs().mean() < 4e-3
+
+
+def test_attn2_layers_share_one_workspace_sized_for_every_layer():
+    """The attn2 layers of a model share one zeroed workspace, sized once for
+    the largest of them, and a binding it is too small for raises."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime import cute_ops
+
+    def layer(num_kv_heads, window=None):
+        return SimpleNamespace(
+            num_kv_heads=num_kv_heads,
+            attn=SimpleNamespace(sliding_window=window),
+            qkv_proj=SimpleNamespace(weight=torch.empty(0)),
+        )
+
+    max_len, requests = 8192, 2
+    layers = [layer(1), layer(2), layer(2, window=128)]
+    workspace = cute_ops.attn2_workspace(layers, max_len, requests)
+    size = max(
+        cute_ops.attn2_workspace_bytes(
+            requests, hkv, cute_ops.attn2_splits(max_len, 0, hkv)
+        )
+        for hkv in (1, 2)
+    )
+    assert workspace is not None and workspace.numel() == size
+    assert not workspace.any()
+    assert cute_ops.attn2_workspace(layers[:2], 2048, requests) is None
+    with pytest.raises(ValueError, match="workspace"):
+        cute_ops.bind_attn2(layer(2), max_len, requests, workspace[:-1])

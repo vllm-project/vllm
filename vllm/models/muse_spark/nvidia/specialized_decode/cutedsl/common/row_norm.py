@@ -17,7 +17,6 @@ from typing import NamedTuple
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
 from cutlass import BFloat16, Float32, Int32, Int64, const_expr
 from cutlass.cute.runtime import make_fake_compact_tensor
@@ -33,7 +32,6 @@ from .primitives import (
     make_fake_dynamic_compact_tensor,
     mul_rn,
     regs,
-    rsqrt_approx_ftz,
     store_bf16x8_rn,
     store_f32x8,
     to_cute,
@@ -188,9 +186,7 @@ def thread_square_sum(x: list, fused: bool) -> Float32:
 
 def warp_sum(total: Float32) -> Float32:
     """The reference's butterfly over the warp; every lane gets the sum."""
-    for offset in (16, 8, 4, 2, 1):
-        total = add_rn(total, cute.arch.shuffle_sync_bfly(total, offset=offset))
-    return total
+    return cute.arch.warp_reduction(total, add_rn)
 
 
 def warps_sum(w: list) -> Float32:
@@ -233,7 +229,7 @@ def rms_norm_row(
     if gamma is not None and input_scale:
         x = [mul_rn(x[i], gamma[i]) for i in range(len(x))]
     total = row_sum(thread_square_sum(x, fused), sums, warp, lane)
-    r = rsqrt_approx_ftz(fma_rn(total, Float32(1.0 / width), eps))
+    r = cute.math.rsqrt(fma_rn(total, Float32(1.0 / width), eps), approx=True, ftz=True)
     y = [mul_rn(v, r) for v in x]
     if gamma is not None and not input_scale:
         y = [mul_rn(y[i], gamma[i]) for i in range(len(y))]
@@ -361,7 +357,7 @@ class _RowNormKernel:
         row, _, _ = cute.arch.block_idx()
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         sums = smem.allocate_array(Float32, WARPS)
         has_weight = constants.gain_center is not None
         passes = constants.width // CHUNK

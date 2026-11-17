@@ -12,7 +12,12 @@ bitwise equal to the stock eager layers; a boundary (or the first norm) the
 kernels do not cover keeps its stock modules (`plan_fused_boundaries`). On 1
 to 16 tokens each layer's QKV projection, QK-norm, RoPE and KV insert are the
 QKV front CuTe kernel (`cutedsl/attention/qkv_front.py`), equal to the stock
-layers up to the projection GEMM's summation order. At TP8 the o_proj and
+layers up to the projection GEMM's summation order. For one request's 7
+draft tokens the attention, its o-norm and sigmoid gate are the target's
+attn2 CuTe kernel (`cutedsl/attention/attn2.py`) on 8 rows: a zero row
+before the draft rows, as row t of attn2 sees the keys up to L - 8 + t (not
+bitwise to the stock decode + gate: attn2 rounds the softmax weights to
+BF16). At TP8 the o_proj and
 down_proj partials run on the package GEMM (`cutedsl/gemm/unpooler.py`), which
 publishes them into the boundary's mailbox: not bitwise to cuBLAS (summation
 order).
@@ -69,9 +74,11 @@ if TYPE_CHECKING:
         ContextNormConstants,
         ContextNorms,
     )
+    from ..cutedsl.draft.fp4_mlp import DraftW4A16Mlp
     from ..cutedsl.draft.input_norm import InputNorm
     from ..cutedsl.gemm.unpooler import Unpooler
     from ..cutedsl.oproj.draft_all_reduce_boundary import BoundDraftBoundary
+    from .draft_fp4_mlp import DraftMlpCalibration, DraftMlpNvfp4Setup
 
 logger = init_logger(__name__)
 
@@ -629,15 +636,17 @@ def may_fuse_qkv_front(attn: nn.Module) -> bool:
     )
 
 
-def _fused_qkv_projection(
-    layer: "MuseSparkDSparkDecoderLayer",
-    positions: torch.Tensor,
+def _front_operands(
+    attn: nn.Module,
     hidden_states: torch.Tensor,
-) -> torch.Tensor | None:
-    """The projection with QK-norm/RoPE applied and K/V inserted, or None
-    when the call is outside what the fused kernel covers."""
-    attn = layer.self_attn
-    _, _, kv_cache, slot_mapping = get_attention_context(attn.attn.layer_name)
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
+    kv_cache: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, cute_ops.KvQuant | None] | None:
+    """The QKV front's `(weight, cos_sin_cache, kv_quant)` for this call of
+    `attn`, or None when the front does not take it (`cute_ops.supports_call`,
+    with `out` its full check)."""
     if slot_mapping is None or kv_cache.numel() == 0:
         return None
     cos_sin_cache = None
@@ -654,12 +663,31 @@ def _fused_qkv_projection(
         slot_mapping,
         kv_cache,
         attn.num_kv_heads,
-        kv_quant=kv_quant,
+        out,
+        kv_quant,
     ):
         return None
+    return weight, cos_sin_cache, kv_quant
+
+
+def _fused_qkv_projection(
+    layer: "MuseSparkDSparkDecoderLayer",
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The q and o-gate of the projection with QK-norm/RoPE applied and K/V
+    inserted (q dense, as attention takes it), or None when the call is
+    outside what the fused kernel covers."""
+    attn = layer.self_attn
+    _, _, kv_cache, slot_mapping = get_attention_context(attn.attn.layer_name)
+    operands = _front_operands(attn, hidden_states, positions, slot_mapping, kv_cache)
+    if operands is None:
+        return None
+    weight, cos_sin_cache, kv_quant = operands
     # Allocated only for a call the front takes; the checked launch also
     # checks this output.
-    out = hidden_states.new_empty((hidden_states.shape[0], weight.shape[0]))
+    m, n = hidden_states.shape[0], weight.shape[0]
+    out = hidden_states.new_empty((m, n))
     cute_ops.qkv_front(
         hidden_states,
         weight,
@@ -670,8 +698,95 @@ def _fused_qkv_projection(
         out,
         attn.rms_norm_eps,
         kv_quant,
+        q_planar=True,
     )
-    return out
+    flat = out.view(-1)
+    q = flat[: m * attn.q_size].view(m, attn.q_size)
+    rest = flat[m * attn.q_size :].view(m, n - attn.q_size)
+    return q, rest[:, 2 * attn.kv_size :]
+
+
+class DraftAttn2(NamedTuple):
+    """One draft layer's attn2 launch for one request's draft tokens: the
+    QKV front writes rows 1.. of `qkv` (row 0 stays zero, the row attn2
+    attends before the draft rows) and attn2 writes `out`."""
+
+    qkv: torch.Tensor
+    out: torch.Tensor
+    binding: cute_ops.Attn2Binding
+
+
+def build_draft_attn2(
+    attn: nn.Module, max_model_len: int, workspace: torch.Tensor | None
+) -> DraftAttn2:
+    """Compile and bind attn2 for a draft layer `cute_ops.unsupported_attn2`
+    takes, for one request, to the `workspace` the layers share. The cache's
+    page size is not known yet: the default layout here, any other compiles
+    at the warmup run before capture."""
+    device = attn.qkv_proj.weight.device
+    rows = cute_ops.QUERY_LEN
+    return DraftAttn2(
+        torch.zeros(
+            rows, attn.qkv_proj.weight.shape[0], dtype=torch.bfloat16, device=device
+        ),
+        torch.empty(
+            rows, attn.num_heads * attn.head_dim, dtype=torch.bfloat16, device=device
+        ),
+        cute_ops.bind_attn2(
+            attn,
+            max_model_len,
+            1,
+            workspace,
+            cute_ops.default_kv_layout(attn.attn),
+        ),
+    )
+
+
+def _draft_attn2(
+    layer: "MuseSparkDSparkDecoderLayer",
+    plan: DraftAttn2,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor | None:
+    """The attention output (o-normed and gated) of one request's draft
+    tokens through the QKV front and attn2, or None when the call is not
+    one request's QUERY_LEN - 1 tokens in the TRT-LLM decode form."""
+    m = hidden_states.shape[0]
+    if m != cute_ops.QUERY_LEN - 1:
+        return None
+    attn = layer.self_attn
+    md, _, kv_cache, slot_mapping = get_attention_context(attn.attn.layer_name)
+    if (
+        md is None
+        or md.num_prefills
+        or md.num_decodes != 1
+        or md.num_decode_tokens != m
+        or not flashinfer_ops.trtllm_decode(md)
+    ):
+        return None
+    qkv = plan.qkv[1:]
+    operands = _front_operands(
+        attn, hidden_states, positions, slot_mapping, kv_cache, qkv
+    )
+    if operands is None:
+        return None
+    weight, cos_sin_cache, kv_quant = operands
+    cute_ops.run_front_attn2(
+        plan.binding,
+        hidden_states,
+        weight,
+        positions,
+        cos_sin_cache,
+        slot_mapping,
+        kv_cache,
+        attn.rms_norm_eps,
+        qkv,
+        plan.qkv,
+        md.decode,
+        plan.out,
+        kv_quant,
+    )
+    return plan.out[1:]
 
 
 def _partial(linear: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -697,11 +812,20 @@ def _plain_row_parallel(linear: nn.Module | None, tp: int, width: int) -> bool:
     )
 
 
-def _ffn_partial(mlp: nn.Module, x: torch.Tensor, project: _Projection) -> _Partial:
+def _ffn_partial(
+    mlp: nn.Module,
+    x: torch.Tensor,
+    project: _Projection,
+    observe: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
+) -> _Partial:
     """`LlamaMLP.forward` without the down projection's all-reduce, the down
-    projection run by `project`."""
+    projection run by `project`. `observe(input, activation)` sees both, if
+    given."""
+    rows = x
     x, _ = mlp.gate_up_proj(x)
     x = maybe_fused_act_quant(mlp.act_fn, x, mlp.down_proj)
+    if observe is not None:
+        observe(rows, x)
     return project(mlp.down_proj, x)
 
 
@@ -847,11 +971,14 @@ class DraftAllReduce:
         self,
         boundaries: list[_Boundary],
         constants: list["DraftBoundaryConstants"],
+        fp4_mlps: bool = False,
     ) -> None:
         """Bind the draft's boundaries (one per `bind_gemms` GEMM) to their
         constants (`all_reduce_boundaries_unsupported` takes them) and
         compile the kernel variants `DraftDecode.run` launches (the first
-        boundary also on a BF16 stream, for a BF16 embedding)."""
+        boundary also on a BF16 stream, for a BF16 embedding; with
+        `fp4_mlps`, the MLP boundaries also for a partial no GEMM published,
+        the NVFP4 bodies')."""
         assert len(boundaries) == len(constants) == len(self.gemms)
         self.bound = []
         for index, ((post, conn, pre), kind, gemm) in enumerate(
@@ -865,10 +992,14 @@ class DraftAllReduce:
                 pre.weight if pre.has_weight else None,
             )
             store = index + 1 < len(boundaries)
-            published = gemm is not None
-            bound.prepare(False, store, published)
-            if index == 0:
-                bound.prepare(True, store, published)
+            variants = {gemm is not None}
+            if fp4_mlps and index % 2 == 1:
+                # An NVFP4 body's partial, which no GEMM published.
+                variants.add(False)
+            for published in variants:
+                bound.prepare(False, store, published)
+                if index == 0:
+                    bound.prepare(True, store, published)
             self.bound.append(bound)
 
     def takes(self, partial: torch.Tensor) -> bool:
@@ -907,22 +1038,28 @@ def _attention(
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
     project: _Projection | None = None,
+    attn2: DraftAttn2 | None = None,
 ) -> torch.Tensor | _Partial:
-    """Attention over the normalized input: the fused QKV front where it
-    covers the call, else the stock attention module. Returns the all-reduced
-    output; with `project` the fused front's output is this rank's o_proj
-    partial instead, from `project(o_proj, x)`."""
-    qkv = None
-    if fused_qkv:
-        qkv = _fused_qkv_projection(layer, positions, hidden_states)
-    if qkv is None:
-        return layer.self_attn(positions=positions, hidden_states=hidden_states)
+    """Attention over the normalized input: the QKV front and attn2 where
+    `attn2` covers the call, else the fused QKV front where it covers the
+    call, else the stock attention module. Returns the all-reduced output;
+    with `project` a fused front's output is this rank's o_proj partial
+    instead, from `project(o_proj, x)`."""
     attn = layer.self_attn
-    q, _, _, og = qkv.split(
-        [attn.q_size, attn.kv_size, attn.kv_size, attn.q_size], dim=-1
-    )
+    if attn2 is not None:
+        gated = _draft_attn2(layer, attn2, positions, hidden_states)
+        if gated is not None:
+            if project is not None:
+                return project(attn.o_proj, gated)
+            return attn._project_output(gated)
+    q_og = None
+    if fused_qkv:
+        q_og = _fused_qkv_projection(layer, positions, hidden_states)
+    if q_og is None:
+        return layer.self_attn(positions=positions, hidden_states=hidden_states)
+    q, og = q_og
     # The front inserted K/V; the attention layer must not rewrite them.
-    attn_output = attn.attn(q, None, None, output_dtype=qkv.dtype)
+    attn_output = attn.attn(q, None, None, output_dtype=q.dtype)
     # The o-norm and sigmoid gate of MuseSparkAttention.forward.
     attn_output = attn_output.reshape(-1, attn.num_heads, attn.head_dim)
     og = og.reshape(-1, attn.num_heads, attn.head_dim)
@@ -959,8 +1096,16 @@ class DraftDecode:
         fused_qkv: list[bool],
         context: ContextKV | None = None,
         all_reduce: DraftAllReduce | None = None,
+        fp4_mlps: "list[DraftW4A16Mlp] | None" = None,
+        calibration: "DraftMlpCalibration | None" = None,
+        max_model_len: int | None = None,
     ) -> None:
         self.layers = list(model.layers)
+        # Per layer: its MLP as an NVFP4 body (`draft_fp4_mlp`), or None.
+        self.fp4_mlps: list[DraftW4A16Mlp | None] = (
+            [None] * len(self.layers) if fp4_mlps is None else list(fp4_mlps)
+        )
+        self.calibration = calibration
         self.default_dtype = model.default_dtype
         self.plan = plan
         self.boundaries = plan.boundaries
@@ -972,6 +1117,10 @@ class DraftDecode:
         self.fused: list[DraftBoundary | None] = []
         # The first layer's input norm (prepare), or None (the stock norm).
         self.input_norm: InputNorm | None = None
+        # Per layer (prepare): its attn2 launch, or None.
+        self.attn2: list[DraftAttn2 | None] = [None] * len(self.layers)
+        # The context length attn2 is sized for; None without attn2.
+        self.max_model_len = max_model_len
 
     def prepare(self) -> None:
         """Bind the first layer's input norm and every planned boundary's
@@ -987,10 +1136,11 @@ class DraftDecode:
                 attn = layer.self_attn
                 # The cache's page size is not known yet: the default layout
                 # here, any other compiles at the warmup run before capture.
-                kind = cute_ops.KV_CACHE_KINDS[attn.attn.kv_cache_dtype]
                 cute_ops.prepare_qkv_front(
-                    attn.qkv_proj.weight.shape[0], fmt=cute_ops.KvLayout(kind)
+                    attn.qkv_proj.weight.shape[0],
+                    fmt=cute_ops.default_kv_layout(attn.attn),
                 )
+        self._prepare_attn2()
         plan = self.plan
         if plan.input_norm is not None:
             # InputNorm compiles its kernel at construction.
@@ -1018,6 +1168,39 @@ class DraftDecode:
                 if index == 0:
                     fused.prepare(True, store, late)
             self.fused.append(fused)
+
+    def _prepare_attn2(self) -> None:
+        """Bind attn2 to every layer on the QKV front it takes."""
+        taken = []
+        for i, (fused_qkv, layer) in enumerate(zip(self.fused_qkv, self.layers)):
+            if not fused_qkv:
+                continue
+            reason = (
+                cute_ops.unavailable("attn2")
+                if not cute_ops.attn2_available()
+                else cute_ops.unsupported_attn2(layer.self_attn)
+            )
+            if reason is not None:
+                logger.info_once(
+                    "The Muse Spark DSpark draft keeps the stock attention: %s.",
+                    reason,
+                )
+                continue
+            taken.append(i)
+        if not taken:
+            return
+        assert self.max_model_len is not None
+        attns = [self.layers[i].self_attn for i in taken]
+        workspace = cute_ops.attn2_workspace(attns, self.max_model_len, 1)
+        for i, attn in zip(taken, attns):
+            self.attn2[i] = build_draft_attn2(attn, self.max_model_len, workspace)
+        logger.info_once(
+            "The Muse Spark DSpark draft runs attn2 in %d of its %d layers "
+            "for one request.",
+            len(taken),
+            len(self.layers),
+            scope="process",
+        )
 
     def store_context_kv(
         self,
@@ -1090,14 +1273,28 @@ class DraftDecode:
                 positions,
                 hidden_states,
                 self._projection(2 * i),
+                self.attn2[i],
             )
             stream, ffn_in = self._residual_boundary(attn_out, stream, 2 * i, True)
             project = self._projection(2 * i + 1)
-            ffn_out = (
-                layer.feed_forward(ffn_in)
-                if project is None
-                else _ffn_partial(layer.feed_forward, ffn_in, project)
-            )
+            fp4 = self.fp4_mlps[i]
+            ffn_out: torch.Tensor | _Partial
+            if project is None:
+                ffn_out = layer.feed_forward(ffn_in)
+            elif (
+                fp4 is not None
+                and fp4.takes(ffn_in)
+                and self.all_reduce is not None
+                and self.all_reduce.takes(ffn_in)
+            ):
+                ffn_out = _Partial(fp4.run(ffn_in), False)
+            else:
+                observe = (
+                    None
+                    if self.calibration is None
+                    else functools.partial(self.calibration.observe, i)
+                )
+                ffn_out = _ffn_partial(layer.feed_forward, ffn_in, project, observe)
             stream, hidden_states = self._residual_boundary(
                 ffn_out, stream, 2 * i + 1, i + 1 < num_layers
             )
@@ -1142,10 +1339,14 @@ def _own_context_rope(model: "MuseSparkDSparkModel", fused_qkv: list[bool]) -> N
 
 
 def build_draft_decode(
-    model: "MuseSparkDSparkModel", compilation_mode: CompilationMode
+    model: "MuseSparkDSparkModel",
+    compilation_mode: CompilationMode,
+    max_model_len: int,
+    mlp_nvfp4: "DraftMlpNvfp4Setup | None" = None,
 ) -> DraftDecode | None:
     """The draft's specialized decode once its weights are loaded, or None
-    where the draft keeps its stock layers (and says why)."""
+    where the draft keeps its stock layers (and says why). `mlp_nvfp4` runs
+    or calibrates the NVFP4 MLP bodies (`draft_mlp_nvfp4`)."""
     if compilation_mode != CompilationMode.NONE:
         # The fused kernels are exact to the eager layers, not to an
         # Inductor-compiled draft, and the QKV front's call checks would be
@@ -1206,6 +1407,7 @@ def build_draft_decode(
         )
     reason = all_reduce_unsupported(model) or all_reduce_boundaries_unsupported(plan)
     all_reduce = None
+    fp4_mlps = None
     if reason is not None:
         logger.info_once(
             "The Muse Spark DSpark draft all-reduces its residual branches "
@@ -1216,7 +1418,12 @@ def build_draft_decode(
         # Collective: every rank plans the same layers.
         all_reduce = DraftAllReduce(model.layers[0].self_attn.o_proj.weight.device)
         gemms = all_reduce.bind_gemms(list(model.layers))
-        all_reduce.prepare(boundaries, [c for c in plan.constants if c is not None])
+        fp4_mlps = _fp4_mlps(model, mlp_nvfp4, all_reduce)
+        all_reduce.prepare(
+            boundaries,
+            [c for c in plan.constants if c is not None],
+            fp4_mlps is not None,
+        )
         logger.info_once(
             "The Muse Spark DSpark draft fuses the all-reduce of its residual "
             "branches into its CuTe boundary kernel (%s sum).",
@@ -1233,6 +1440,95 @@ def build_draft_decode(
                 len(boundaries),
                 scope="process",
             )
-    draft = DraftDecode(model, plan, fused_qkv, context, all_reduce)
+    calibration = None
+    if mlp_nvfp4 is not None:
+        if all_reduce is None:
+            raise ValueError(
+                f"draft_mlp_nvfp4 needs the fused draft all-reduce: {reason}"
+            )
+        calibration = mlp_nvfp4.calibration(
+            len(model.layers), model.layers[0].self_attn.o_proj.weight.device
+        )
+        if calibration is not None:
+            logger.info_once(
+                "The Muse Spark DSpark draft records its MLP amax into %s.*.json.",
+                mlp_nvfp4.option.prefix,
+                scope="process",
+            )
+    draft = DraftDecode(
+        model,
+        plan,
+        fused_qkv,
+        context,
+        all_reduce,
+        fp4_mlps,
+        calibration,
+        max_model_len,
+    )
     draft.prepare()
     return draft
+
+
+def fp4_mlp_unsupported(model: "MuseSparkDSparkModel") -> str | None:
+    """Why some layer's MLP cannot run as an NVFP4 W4A16 body, or None.
+    `scales` runs every layer's MLP as one, so `calibrate` must record every
+    layer: both refuse a draft this returns a reason for."""
+    from ..cutedsl.draft.fp4_mlp import DraftW4A16Mlp
+
+    for i, layer in enumerate(model.layers):
+        mlp = layer.feed_forward
+        gate_up = getattr(getattr(mlp, "gate_up_proj", None), "weight", None)
+        down = getattr(getattr(mlp, "down_proj", None), "weight", None)
+        if not isinstance(gate_up, torch.Tensor) or not isinstance(down, torch.Tensor):
+            return f"layer {i} has no dense gate_up/down MLP"
+        if gate_up.dtype != torch.bfloat16 or down.dtype != torch.bfloat16:
+            return f"layer {i} has a non-BF16 MLP"
+        two_i, hidden = gate_up.shape
+        if tuple(down.shape) != (hidden, two_i // 2):
+            return f"layer {i} has unexpected MLP shapes"
+        reason = DraftW4A16Mlp.unsupported(hidden, two_i // 2)
+        if reason is not None:
+            return f"layer {i}: {reason}"
+    return None
+
+
+def _fp4_mlps(
+    model: "MuseSparkDSparkModel",
+    mlp_nvfp4: "DraftMlpNvfp4Setup | None",
+    all_reduce: DraftAllReduce,
+) -> "list[DraftW4A16Mlp] | None":
+    """Every layer's MLP as the NVFP4 W4A16 kernels where `mlp_nvfp4`
+    (`draft_mlp_nvfp4`) runs `scales` (on 1 to `MAX_ROWS` rows, within the
+    fused boundary's), else None. Raises `ValueError` when `mlp_nvfp4` is
+    set and some layer's MLP cannot run as one (`fp4_mlp_unsupported`)."""
+    if mlp_nvfp4 is None:
+        return None
+    reason = fp4_mlp_unsupported(model)
+    if reason is not None:
+        raise ValueError(f"draft_mlp_nvfp4: {reason}")
+    if mlp_nvfp4.amax is None:
+        return None
+    amax = mlp_nvfp4.amax
+    assert len(amax) == len(model.layers)
+    from ..cutedsl.draft.fp4_mlp import MAX_ROWS, DraftW4A16Mlp
+
+    max_tokens = min(MAX_ROWS, all_reduce.mailbox.capacity)
+    bodies = [
+        DraftW4A16Mlp(
+            layer.feed_forward.gate_up_proj.weight,
+            layer.feed_forward.down_proj.weight,
+            input_amax,
+            inter_amax,
+            max_tokens,
+        )
+        for layer, (input_amax, inter_amax) in zip(model.layers, amax)
+    ]
+    logger.info_once(
+        "The Muse Spark DSpark draft runs its %d MLPs as NVFP4 W4A16 bodies "
+        "(static scales %s.*.json) on 1 to %d rows.",
+        len(bodies),
+        mlp_nvfp4.option.prefix,
+        max_tokens,
+        scope="process",
+    )
+    return bodies

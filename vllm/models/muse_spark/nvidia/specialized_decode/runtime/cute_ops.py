@@ -42,7 +42,8 @@ checks that decide where each one runs.
     traced.
 """
 
-from typing import NamedTuple
+from collections.abc import Sequence
+from typing import Any, NamedTuple
 
 import torch
 
@@ -173,6 +174,12 @@ def kv_layout(attention: torch.nn.Module, kv_cache: torch.Tensor) -> KvLayout:
     return _kvf.layout_of(kv_cache, KV_CACHE_KINDS[attention.kv_cache_dtype])
 
 
+def default_kv_layout(attention: torch.nn.Module) -> KvLayout:
+    """The 16-slot page layout of this layer's cache format: what the
+    kernels compile for before the cache is bound."""
+    return KvLayout(KV_CACHE_KINDS[attention.kv_cache_dtype])
+
+
 def kv_cache_layout_ok(attention: torch.nn.Module, kv_cache: torch.Tensor) -> bool:
     """Whether the layer's bound cache has a layout the kernels read."""
     kind = KV_CACHE_KINDS[attention.kv_cache_dtype]
@@ -194,6 +201,8 @@ def unsupported_attn2(layer: torch.nn.Module) -> str | None:
         return f"softmax scale {layer.scaling} (the kernel is built for {SM_SCALE})"
     if fp32(layer.rms_norm_eps) != fp32(ATTN2_EPS):
         return f"o-norm eps {layer.rms_norm_eps} (the kernel is built for {ATTN2_EPS})"
+    if layer.use_attn_temperature_tuning:
+        return "attention temperature tuning"
     return None
 
 
@@ -225,6 +234,135 @@ def attn2_workspace_bytes(num_reqs: int, num_kv_heads: int, num_splits: int) -> 
     cluster."""
     rows = num_reqs * QUERY_LEN * HEADS_PER_KV_HEAD * num_kv_heads
     return _attn2.workspace_bytes(rows, num_splits)
+
+
+class Attn2Binding(NamedTuple):
+    """A layer's attn2 launch settings (`bind_attn2`)."""
+
+    num_kv_heads: int
+    max_seq_len: int
+    window: int
+    num_splits: int
+    workspace: torch.Tensor | None
+
+
+def _attn2_workspace_size(
+    attn: torch.nn.Module, max_model_len: int, num_reqs: int
+) -> int:
+    """Workspace bytes attn2 needs for `attn` and `num_reqs` requests: 0
+    without the split kernel, else at the full-attention split count (a
+    window only lowers it)."""
+    hkv = attn.num_kv_heads
+    window = attn2_window(attn.attn.sliding_window, max_model_len)
+    if not attn2_split_kernel(max_model_len, window):
+        return 0
+    return attn2_workspace_bytes(num_reqs, hkv, attn2_splits(max_model_len, 0, hkv))
+
+
+def attn2_workspace(
+    attns: Sequence[torch.nn.Module], max_model_len: int, num_reqs: int
+) -> torch.Tensor | None:
+    """The split merge's workspace the attention layers `attns` share (they
+    run in order), sized once for every one of them for `num_reqs` requests
+    and zeroed once (every launch leaves its counters zero); None when none
+    launches the split kernel."""
+    size = max(
+        (_attn2_workspace_size(attn, max_model_len, num_reqs) for attn in attns),
+        default=0,
+    )
+    if not size:
+        return None
+    return torch.zeros(size, dtype=torch.uint8, device=attns[0].qkv_proj.weight.device)
+
+
+def bind_attn2(
+    attn: torch.nn.Module,
+    max_model_len: int,
+    num_reqs: int,
+    workspace: torch.Tensor | None,
+    fmt: KvLayout | None = None,
+) -> Attn2Binding:
+    """Bind the attn2 launch of the attention layer `attn` to the shared
+    `workspace` (`attn2_workspace`; raises `ValueError` when it is too small
+    for `num_reqs` requests) and, with a cache layout `fmt`, compile it
+    (otherwise `prepare_bound_attn2` does, once the cache is bound).
+
+    attn2 splits a long context over a fixed number of clusters (the
+    deployment's, so a captured launch fits every step).
+    """
+    size = _attn2_workspace_size(attn, max_model_len, num_reqs)
+    if size and (workspace is None or workspace.numel() < size):
+        raise ValueError(
+            f"attn2 needs a shared workspace of {size} bytes, not "
+            f"{0 if workspace is None else workspace.numel()}"
+        )
+    hkv = attn.num_kv_heads
+    window = attn2_window(attn.attn.sliding_window, max_model_len)
+    num_splits = attn2_splits(max_model_len, window, hkv)
+    binding = Attn2Binding(
+        hkv, max_model_len, window, num_splits, workspace if size else None
+    )
+    if fmt is not None:
+        prepare_bound_attn2(binding, fmt)
+    return binding
+
+
+def prepare_bound_attn2(binding: Attn2Binding, fmt: KvLayout) -> None:
+    """Compile the attn2 variant `binding` launches on a cache of layout
+    `fmt`."""
+    prepare_attn2(
+        binding.max_seq_len,
+        binding.window,
+        binding.num_kv_heads,
+        binding.num_splits,
+        fmt=fmt,
+    )
+
+
+def run_front_attn2(
+    binding: Attn2Binding,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor | None,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    eps: float,
+    front_out: torch.Tensor,
+    qkv: torch.Tensor,
+    decode: Any,
+    out: torch.Tensor,
+    kv_quant: KvQuant | None = None,
+) -> None:
+    """The QKV front of `x` into `front_out` (rows of `qkv`), then attn2 of
+    `qkv` over the `decode` metadata's pages into `out`, on a cache quantized
+    as `kv_quant` (None: BF16)."""
+    launch_qkv_front(
+        x,
+        weight,
+        positions,
+        cos_sin_cache,
+        slot_mapping,
+        kv_cache,
+        front_out,
+        eps,
+        kv_quant,
+    )
+    q, gate = split_qkv(qkv, binding.num_kv_heads)
+    attn2(
+        q,
+        kv_cache,
+        decode.block_tables,
+        decode.seq_lens,
+        gate,
+        out,
+        binding.num_kv_heads,
+        max_seq_len=binding.max_seq_len,
+        window=binding.window,
+        num_splits=binding.num_splits,
+        workspace=binding.workspace,
+        kv_quant=kv_quant,
+    )
 
 
 def split_qkv(
@@ -307,16 +445,19 @@ class RoutingMetadata(NamedTuple):
 
 class MuseRouting:
     """The routing of one Muse Spark MoE layer for 1 to 8 tokens, bound to its
-    router's bias and route scale at build time, when the kernel compiles. A
-    call allocates nothing, so it can be captured in a CUDA graph."""
+    router's bias and route scale at build time, when the kernel compiles, and
+    to the router's K split: the logits are `splits` K-split partials
+    (`routing.route`). A call allocates nothing, so it can be captured
+    in a CUDA graph."""
 
-    def __init__(self, router: MuseSparkRouter):
+    def __init__(self, router: MuseSparkRouter, splits: int):
         reason = unsupported_router(router)
         if reason is not None:
             raise ValueError(f"Muse Spark routing does not support {reason}")
         self.bias = router.expert_bias
         self.route_scale = float(router.route_scale)
-        routing.prepare()
+        self.splits = splits
+        routing.prepare(splits=splits)
 
     def __call__(
         self,
@@ -331,7 +472,9 @@ class MuseRouting:
         experts; returns (ids, weights). Raises ValueError on arguments outside
         `routing.route`'s contract."""
         if metadata is None:
-            routing.route(logits, self.bias, ids, weights, self.route_scale)
+            routing.route(
+                logits, self.bias, ids, weights, self.route_scale, splits=self.splits
+            )
         else:
             routing.route(
                 logits,
@@ -343,6 +486,7 @@ class MuseRouting:
                 local_expert_offset=metadata.local_expert_offset,
                 num_local_experts=metadata.num_local_experts,
                 tile_n=metadata.tile_n,
+                splits=self.splits,
             )
         return ids, weights
 

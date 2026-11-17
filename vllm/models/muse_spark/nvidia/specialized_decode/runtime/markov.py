@@ -13,9 +13,11 @@ vocab shard. On a row with a NaN the eager loop's pick depends on its block
 layout, so the two can differ there.
 
 With a vocab-parallel Markov w2 each rank samples its own vocab range
-(`VocabParallelMarkovHead`) and the ranks exchange one packet per request
-and step. The draft model builds it on the first call of its
-`sample_sequential` hook, from the speculator's sampling state.
+(`VocabParallelMarkovHead`), the ranks exchange one packet per request and
+step inside the step kernel, and every step stores its draft-logits shard
+into every rank's mailbox cache by multicast. The draft model builds it on
+the first call of its `sample_sequential` hook, from the speculator's sampling
+state.
 """
 
 import dataclasses
@@ -31,6 +33,7 @@ import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -41,7 +44,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 
@@ -83,6 +85,10 @@ class MarkovVocabShard:
 # so that its blocks start while the w2 GEMV runs. Measured on GB300, the
 # overlap pays at one and two rows and costs from three rows on.
 STEP_PDL_MAX_ROWS = 2
+
+# Rows per GEMM of the Markov bias table's build (build_bias_table): the
+# served call's most rows at TP8 decode.
+BIAS_TABLE_ROWS = 8
 
 # markov_step's vocab entries per CTA, by row count; other row counts take
 # MARKOV_BLOCK. Smaller blocks spread a step over more SMs; on GB300 at the
@@ -165,6 +171,36 @@ class VocabParallelMarkovHead(DSparkMarkovHead):
         )[:, :rows]
 
 
+def build_bias_table(head: VocabParallelMarkovHead, w1: torch.Tensor) -> torch.Tensor:
+    """`local_bias` of every w1 row, `[V, padded shard]` with `local_bias`'s
+    row stride, computed by the served GEMM over BIAS_TABLE_ROWS rows at a
+    time (its sums do not depend on the row count up to there)."""
+    assert head._local_w2 is not None
+    rows = head.markov_w2.weight.shape[0]
+    table = w1.new_zeros((w1.shape[0], head._local_w2.shape[0]))
+    with torch.no_grad():
+        for start in range(0, w1.shape[0], BIAS_TABLE_ROWS):
+            end = min(start + BIAS_TABLE_ROWS, w1.shape[0])
+            table[start:end, :rows].copy_(head.local_bias(w1[start:end]))
+    return table
+
+
+def load_bias_table(model: Any) -> torch.Tensor:
+    """`build_bias_table` over the loaded draft's vocab-parallel Markov
+    head, at weight load so that the memory profile counts it."""
+    if markov_vocab_shard(model) is None:
+        raise ValueError("markov_bias_table needs a vocab-parallel Markov w2")
+    head = model.model.markov_head
+    table = build_bias_table(head, head.markov_w1.weight)
+    logger.info_once(
+        "Muse Spark Markov bias table: %d x %d shard (%.2f GiB).",
+        *table.shape,
+        table.nbytes / 2**30,
+        scope="process",
+    )
+    return table
+
+
 def markov_vocab_shard(model: Any) -> tuple[int, int] | None:
     """This rank's `[start, end)` draft-vocab range of a vocab-parallel
     Markov w2, or None when the w2 is replicated.
@@ -212,16 +248,27 @@ def markov_vocab_shard(model: Any) -> tuple[int, int] | None:
 
 
 def compute_local_draft_logits(model: Any, hidden_states: torch.Tensor) -> torch.Tensor:
-    """This rank's vocab shard of `model.compute_draft_logits`, ungathered."""
-    return model.logits_processor(
-        model.lm_head, hidden_states.to(model.lm_head.weight.dtype), skip_gather=True
+    """This rank's ungathered logits, retaining the head's padded row stride."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.nvfp4_lm_head import (
+        Nvfp4LMHeadMethod,
+        padded_head_logits,
+        processor_is_identity,
     )
+
+    head, processor = model.lm_head, model.logits_processor
+    if (
+        isinstance(head.quant_method, Nvfp4LMHeadMethod)
+        and processor_is_identity(processor)
+        and processor.head_dtype in (None, head.weight.dtype)
+    ):
+        return padded_head_logits(head, hidden_states)
+    return processor(head, hidden_states.to(head.weight.dtype), skip_gather=True)
 
 
 def vocab_shard(params: FusedMarkovParams, start: int, end: int) -> MarkovVocabShard:
     """The sharded loop's view of this rank's draft-vocab range.
 
-    The packets and cache shards are gathered in TP rank order, so rank k
+    The packets and cache shards are combined in TP rank order, so rank k
     must hold the k-th equal slice of the draft vocabulary. The w2 is
     never replicated in this mode, so a draft the loop does not take fails
     at its first draft step instead of running the eager loop on gathered
@@ -326,6 +373,7 @@ def build_markov_sampler(
     sample_from_anchor: bool,
     max_num_reqs: int,
     num_steps: int,
+    bias_table: torch.Tensor | None = None,
 ) -> "MarkovSampler":
     """The fused loop over `model`, which the specialized decode's draft
     runs: a draft it does not reproduce fails at its first draft step, as the
@@ -354,7 +402,9 @@ def build_markov_sampler(
             scope="process",
         )
     logger.info_once("Using the fused DSpark Markov sampling loop.", scope="process")
-    return MarkovSampler(model, params, max_num_reqs, num_steps, draft_logits)
+    return MarkovSampler(
+        model, params, max_num_reqs, num_steps, draft_logits, bias_table
+    )
 
 
 class MarkovCall(NamedTuple):
@@ -368,11 +418,8 @@ class MarkovCall(NamedTuple):
     """`[rows, n_spec, width]` BF16."""
     markov_bias: Callable[[torch.Tensor], torch.Tensor]
     cache: torch.Tensor
-    """The draft-logits cache, or with a shard `[rows, n_spec, width]`."""
-    flat_cache: torch.Tensor | None
-    """With a shard, the flat cache the all-gather moves (else None)."""
-    packets: torch.Tensor
-    """`[rows, 4]` FP32: a row's packet (with a shard)."""
+    """The draft-logits cache, or with a shard `[rows, n_spec, width]` of
+    this rank's slot of the mailbox cache."""
     idx_map: torch.Tensor
     pos: torch.Tensor
     markov_embeds: torch.Tensor
@@ -395,6 +442,7 @@ class MarkovSampler:
         max_num_reqs: int,
         num_steps: int,
         draft_logits: torch.Tensor,
+        bias_table: torch.Tensor | None = None,
     ) -> None:
         self.model = model
         self.params = params
@@ -417,35 +465,55 @@ class MarkovSampler:
         self._markov_block_max = empty(rows * num_blocks, torch.float32)
         # Blocks of each row that finished their step, zeroed per call.
         self._markov_arrivals = empty(rows, torch.int32)
-        # The rows' packets, exchanged with a vocab shard; with it also the
-        # draft-logits shard the custom all-gather moves in 16-byte vectors.
-        sharded = shard is not None
-        self._markov_packets = empty(rows * 4, torch.float32)
-        self._markov_cache = empty(
-            round_up(rows * n_spec * width, 8) if sharded else 0, torch.bfloat16
+        # With a vocab shard, the rank's slot of the mailbox cache (the
+        # multicast stores move 16-byte vectors).
+        cache_shard = 0 if shard is None else round_up(rows * n_spec * width, 8)
+        self._markov_cache = empty(0, torch.bfloat16)
+        # With a bias table each step reads its rows' bias from the table
+        # at their tokens: step 0 at the anchors' (stored by the anchor
+        # kernel here), step i at step i - 1's.
+        self._bias_table = bias_table
+        self._anchor_tokens = empty(rows, torch.int64)
+        assert bias_table is None or (
+            shard is not None and bias_table.shape[0] == w1.shape[0]
         )
         from ..cutedsl.draft import markov as kernels
 
         self._kernels = kernels
         self._loop: Any = None
+        # With a vocab shard each step picks the winner over the ranks
+        # itself, through this mailbox, and stores its cache shard in it.
+        self._chain: Any = None
         if not w1.is_cuda:
             return
+        if shard is not None:
+            self._chain = kernels.PacketMailbox(
+                get_tp_group().device_group,
+                tp=shard.tp_size,
+                rank=get_tensor_model_parallel_rank(),
+                steps=n_spec,
+                rows=rows,
+                vocab=params.vocab_size,
+                device=w1.device,
+                cache_shard=cache_shard,
+            )
+            self._markov_cache = self._chain.cache[0, self._chain.rank]
         # The CuTe kernels compile here, before any CUDA graph capture: the
         # step at every (block, PDL, vector) a call over 1 to max_num_reqs
         # rows takes.
+        steps = self._step_variants(rows, width, draft_logits)
         self._loop = kernels.MarkovKernels(
             w1,
             self._markov_embeds,
             width=width,
             has_cap=params.soft_cap is not None,
-            tp=None if shard is None else shard.tp_size,
-            steps=self._step_variants(rows, width, draft_logits),
-            pick_pdl=self._pdl,
-            fill_vector=kernels.fill_vectorized(
-                # The gathered shards: a fresh all-gather output, its rank
-                # stride the padded flat shard (a multiple of 8 elements).
-                gathered=0,
-                src_s0=round_up(n_spec * width, 8),
+            steps=steps,
+            chain=self._chain,
+            table=bias_table is not None,
+            fill_vector=self._chain is not None
+            and kernels.fill_vectorized(
+                gathered=self._chain.cache.data_ptr(),
+                src_s0=cache_shard,
                 cache=kernels.Operand.of(draft_logits),
                 shard=width,
                 vocab=params.vocab_size,
@@ -482,6 +550,8 @@ class MarkovSampler:
             bias_probe = bias_head(w1.new_zeros(2, w1.shape[1]))
         base_row = base_probe.stride(0)
         bias = kernels.Operand(bias_probe.data_ptr(), (bias_probe.stride(0), 1))
+        if self._bias_table is not None:
+            bias = kernels.Operand.of(self._bias_table)
         if self.params.vocab_shard is not None:
             cache = kernels.Operand(
                 self._markov_cache.data_ptr(), (n_spec * width, width, 1)
@@ -526,16 +596,13 @@ class MarkovSampler:
         rank = self.params.w1.shape[1]
         base_head, markov_bias = self._heads()
         base_logits = base_head(head_hidden[sample_indices[:num_sample]])
-        flat_cache = None
         if shard is None:
             width, offset = self.params.vocab_size, 0
             cache = draft_logits
         else:
             width, offset = shard.size, shard.offset
-            # The custom all-gather moves 16-byte vectors: pad the flat shard.
             numel = num_sample * width
-            flat_cache = self._markov_cache[: round_up(numel, 8)]
-            cache = flat_cache[:numel].view(num_reqs, n_spec, width)
+            cache = self._markov_cache[:numel].view(num_reqs, n_spec, width)
         block = step_block(num_reqs)
         num_blocks = cdiv(width, block)
         call = MarkovCall(
@@ -544,8 +611,6 @@ class MarkovSampler:
             base_logits=base_logits.view(num_reqs, n_spec, width),
             markov_bias=markov_bias,
             cache=cache,
-            flat_cache=flat_cache,
-            packets=self._markov_packets[: num_reqs * 4].view(num_reqs, 4),
             idx_map=sample_idx_mapping[:num_sample].view(num_reqs, n_spec),
             pos=sample_pos[:num_sample].view(num_reqs, n_spec),
             # Row i holds the Markov embedding that step i reads.
@@ -591,8 +656,10 @@ class MarkovSampler:
         verification, so there is no confidence head to run.)
 
         With a vocab shard each rank samples its own vocab range, the ranks
-        exchange one packet per request and step, and one all-gather after the
-        loop fills the full-vocab draft-logits cache.
+        exchange one packet per request and step inside the step kernel
+        (`PacketMailbox`), every step stores its shard in the mailbox cache
+        by multicast, and the cache fill after the loop scatters the ranks'
+        shards from it into the full-vocab draft-logits cache.
         """
         params = self.params
         call = self.call_views(
@@ -610,12 +677,24 @@ class MarkovSampler:
         ):
             assert tensor.dtype == dtype, (tensor.dtype, dtype)
         loop = self._loop
-        markov_embeds, packets = call.markov_embeds, call.packets
+        markov_embeds = call.markov_embeds
+        table = self._bias_table
+        anchor_tokens = None if table is None else self._anchor_tokens[:num_reqs]
         self._kernels.anchor_embed(
-            input_ids, anchor_idx, params.w1, markov_embeds[0], call.arrivals
+            input_ids,
+            anchor_idx,
+            params.w1,
+            markov_embeds[0],
+            call.arrivals,
+            anchor_tokens,
         )
         for i in range(self.num_steps):
-            bias = call.markov_bias(markov_embeds[i])
+            bias_token = None
+            if table is None:
+                bias = call.markov_bias(markov_embeds[i])
+            else:
+                bias = table
+                bias_token = anchor_tokens if i == 0 else draft_tokens[:num_reqs, i - 1]
             assert bias.dtype == torch.bfloat16, bias.dtype
             loop.step(
                 call.base_logits[:, i],
@@ -631,28 +710,18 @@ class MarkovSampler:
                 call.arrivals,
                 draft_tokens,
                 markov_embeds[i + 1],
-                packets.view(torch.int32),
                 call.offset,
                 params.output_multiplier,
                 params.inv_soft_cap,
                 1.0 if params.soft_cap is None else params.soft_cap,
                 block=call.block,
                 pdl=call.step_pdl,
-            )
-            if call.flat_cache is None:
-                continue
-            loop.pick(
-                sp_all_gather(packets).view(torch.int32),
-                num_reqs,
-                draft_tokens,
-                i,
-                markov_embeds[i + 1],
+                bias_token=bias_token,
             )
 
-        if call.flat_cache is not None:
+        if self._chain is not None:
             self._kernels.cache_fill(
-                sp_all_gather(call.flat_cache),
-                call.flat_cache.numel(),
+                self._chain,
                 draft_logits,
                 sample_idx_mapping,
                 num_reqs,

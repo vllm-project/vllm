@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuTe DSL kernels of the fused DSpark Markov sampling loop.
 
-Per draft step the Markov w2 GEMV runs unchanged, then `markov_step`
-(bias, output transform, cache store, Gumbel block argmax, and in the row's
-last block the final argmax, token and next w1 row). With a vocab-parallel w2
-each rank works on its vocab range, its last block writes a packet instead of
-the token, and `markov_pick` picks the winner from the gathered per-rank
-packets; `cache_fill` scatters the gathered draft-logits shards after the
-loop. `anchor_embed` starts a call.
+Per draft step the Markov w2 GEMV runs unchanged, then the step kernel
+(`MarkovKernels.step`: bias, output transform, cache store, Gumbel block
+argmax, and in the row's last block the final argmax, token and next w1 row).
+With a vocab-parallel w2 each rank works on its vocab range and the last
+block exchanges the ranks' (value, id) packets through a `PacketMailbox` and
+picks the winner itself (chained); the steps store their draft-logits shards
+into every rank's mailbox cache by multicast, and `cache_fill` scatters them
+into the full-vocab cache after the loop. `anchor_embed` starts a call.
 
 The arithmetic is bit for bit that of the speculator's eager loop: its
 output transform (BF16 add, multiplier, optional soft cap
@@ -32,7 +33,7 @@ blocks' (value, id) results with the same combine.
 A token's w1 row is read at the token clamped to the table's last row, so a
 corrupt id never reads past the table; valid ids are unchanged. Fixed
 pointers and host grids keep the loop capturable. Where the GPU has
-programmatic dependent launch, the step and pick kernels can launch with it:
+programmatic dependent launch, the step kernels can launch with it:
 until the dependency wait they read only inputs written before the loop and
 store nothing; they never trigger their dependents early.
 """
@@ -44,27 +45,39 @@ from typing import Any, NamedTuple
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
-from cutlass import Float32, Int32, Int64, Uint32, const_expr
+import torch.distributed as dist
+from cutlass import Float32, Int32, Int64, Uint32, Uint64, const_expr
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
 from ..common.host import assert_not_capturing
+from ..common.mailbox import SPIN_TIMEOUT_NS, spin_deadline
 from ..common.primitives import (
     _asm,
-    atomic_add1_acq_rel_u32_address,
+    _ir,
+    _unpack,
     current_cu_stream,
+    f32_bits,
+    f32_from_bits,
+    global_ptr,
     load_global_s64_address,
     load_global_u32_address,
+    load_shared_u32,
     store_global_u32_address,
+    store_shared_u32,
 )
+from ..common.sequenced import (
+    generation,
+    load_relaxed_sys_b64,
+    next_sequence,
+    stmc_b64,
+)
+from ..common.symmetric import ARENA_ALIGN, multicast_arena, symmetric_buffer
 
-# The step and cache-fill kernels' threads (4 warps); the pick kernel's (one
-# warp).
+# The step and cache-fill kernels' threads (4 warps).
 THREADS = 128
 WARP = 32
-PICK_THREADS = WARP
 # The cache fill's vocab entries per CTA.
 FILL_BLOCK = 1024
 # Bytes of the widest access of one thread.
@@ -72,20 +85,22 @@ VECTOR_BYTES = 16
 NEG_INF = float("-inf")
 # Larger than every vocab id: the id of the finish's padding results.
 BIG_INDEX = 2147483647
-
-
-def _values(x, *, loc, ip) -> list:
-    return [v.ir_value(loc=loc, ip=ip) for v in x]
-
-
-def _pair(struct, types, *, loc, ip):
-    return tuple(
-        kind(llvm.extractvalue(kind.mlir_type, struct, [index], loc=loc, ip=ip))
-        for index, kind in enumerate(types)
-    )
+# A `PacketMailbox` slot's value word while the slot is empty: a NaN that no
+# packet carries (a packet's value with these bits goes as `PACKET_NAN`).
+EMPTY_VALUE = 0xFFFFFFFF
+PACKET_NAN = 0x7FFFFFFF
 
 
 # Global memory, by address. A false predicate loads zero and stores nothing.
+
+
+@dsl_user_op
+def _w1_row(token: Int64, last: int, *, loc=None, ip=None) -> Int64:
+    """The w1 row a token's embedding is copied from: the token, clamped to
+    `last` (the table's last row) as an unsigned value, so an id outside
+    the table (negative included) reads its last row instead of memory
+    around it. A valid id is unchanged."""
+    return Int64(cutlass.min(Uint64(token), Uint64(last), loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -93,7 +108,7 @@ def _ld_u16(address: Int64, predicate: Int32, *, loc=None, ip=None) -> Uint32:
     return Uint32(
         _asm(
             T.i32(),
-            _values((Int64(address), Int32(predicate)), loc=loc, ip=ip),
+            _ir((Int64(address), Int32(predicate)), loc=loc, ip=ip),
             "{\n\t.reg .pred p;\n\t.reg .b16 h;\n\tsetp.ne.s32 p, $2, 0;\n\t"
             "mov.u16 h, 0;\n\t@p ld.global.b16 h, [$1];\n\tcvt.u32.u16 $0, h;\n\t}",
             "=r,l,r",
@@ -112,7 +127,7 @@ def _ld_volatile_b32_or(
     return Uint32(
         _asm(
             T.i32(),
-            _values((Int64(address), Int32(predicate), Uint32(other)), loc=loc, ip=ip),
+            _ir((Int64(address), Int32(predicate), Uint32(other)), loc=loc, ip=ip),
             "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.u32 $0, $3;\n\t"
             "@p ld.volatile.global.b32 $0, [$1];\n\t}",
             "=r,l,r,r",
@@ -129,7 +144,7 @@ def _st_u16(
 ) -> None:
     _asm(
         None,
-        _values((Int64(address), Uint32(bits), Int32(predicate)), loc=loc, ip=ip),
+        _ir((Int64(address), Uint32(bits), Int32(predicate)), loc=loc, ip=ip),
         "{\n\t.reg .pred p;\n\t.reg .b16 h;\n\tsetp.ne.s32 p, $2, 0;\n\t"
         "cvt.u16.u32 h, $1;\n\t@p st.global.b16 [$0], h;\n\t}",
         "l,r,r",
@@ -140,12 +155,62 @@ def _st_u16(
 
 
 @dsl_user_op
-def _st_b64(address: Int64, value: Int64, *, loc=None, ip=None) -> None:
+def _fence_alias(sem: str, *, loc=None, ip=None) -> None:
+    """`fence.proxy.alias.{sem}.sys`: orders this thread's accesses through
+    the multicast and unicast aliases of a location (`sem` release before a
+    flag, acquire after it)."""
     _asm(
         None,
-        _values((Int64(address), Int64(value)), loc=loc, ip=ip),
-        "st.global.b64 [$0], $1;",
-        "l,l",
+        [],
+        f"fence.proxy.alias.{sem}.sys;",
+        "~{memory}",
+        side_effects=True,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@cute.jit
+def _release_cache_at(col: Int32, last_col: Int32) -> None:
+    """In the call's last step: the cache stores (multicast alias) at
+    system scope before the packet."""
+    if col == last_col:
+        cute.arch.fence_acq_rel_sys()
+        _fence_alias("release")
+
+
+@cute.jit
+def _acquire_cache_at(col: Int32, last_col: Int32) -> None:
+    """In the call's last step: the polled packets before the cache fill's
+    loads (unicast alias)."""
+    if col == last_col:
+        _fence_alias("acquire")
+        cute.arch.fence_acq_rel_sys()
+
+
+@dsl_user_op
+def _store_words_multicast(
+    destination: Int64,
+    words: list,
+    nbytes: cutlass.Constexpr[int],
+    predicate: Int32,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """`_store_words` to a multicast address (weak: ordered by a fence).
+    Kept as asm: the weak `nvvm.multimem_st` (via `_stmc_words` and
+    `predicated`) has no `.bf16x2` type, branches around the store instead
+    of predicating it, and reorders the step kernel (+40-48 SASS)."""
+    kind, count = _MULTICAST_OPS[nbytes]
+    ins = ", ".join(f"${i + 2}" for i in range(count))
+    braced = f"{{{ins}}}" if count > 1 else ins
+    _asm(
+        None,
+        _ir((Int64(destination), Int32(predicate), *words), loc=loc, ip=ip),
+        "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $1, 0;\n\t"
+        f"@p multimem.st.global.{kind} [$0], {braced};\n\t}}",
+        ",".join(["l", "r"] + ["r"] * count),
         side_effects=True,
         loc=loc,
         ip=ip,
@@ -154,6 +219,8 @@ def _st_b64(address: Int64, value: Int64, *, loc=None, ip=None) -> None:
 
 # A copy's PTX vector type and 32-bit words by its bytes (2: one b16).
 _COPY_OPS = {16: ("v4.b32", 4), 8: ("v2.b32", 2), 4: ("b32", 1), 2: ("b16", 1)}
+# The multicast stores of a thread's BF16 pairs (no 2-byte form).
+_MULTICAST_OPS = {16: ("v4.bf16x2", 4), 8: ("v2.bf16x2", 2), 4: ("bf16x2", 1)}
 
 
 @dsl_user_op
@@ -177,7 +244,7 @@ def _load_words(
         body = f"{zero}@p ld.global.{kind} {braced}, [${words}];"
     struct = _asm(
         llvm.StructType.get_literal([T.i32()] * words),
-        _values((Int64(source), Int32(predicate)), loc=loc, ip=ip),
+        _ir((Int64(source), Int32(predicate)), loc=loc, ip=ip),
         "{\n\t.reg .pred p;\n\t.reg .b16 h;\n\t"
         f"setp.ne.s32 p, ${words + 1}, 0;\n\t{body}\n\t}}",
         ",".join(["=r"] * words + ["l", "r"]),
@@ -185,7 +252,7 @@ def _load_words(
         loc=loc,
         ip=ip,
     )
-    return list(_pair(struct, (Uint32,) * words, loc=loc, ip=ip))
+    return list(_unpack(struct, (Uint32,) * words, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -208,7 +275,7 @@ def _store_words(
         body = f"@p st.global.{kind} [$0], {braced};"
     _asm(
         None,
-        _values((Int64(destination), Int32(predicate), *words), loc=loc, ip=ip),
+        _ir((Int64(destination), Int32(predicate), *words), loc=loc, ip=ip),
         f"{{\n\t.reg .pred p;\n\t.reg .b16 h;\n\tsetp.ne.s32 p, $1, 0;\n\t{body}\n\t}}",
         ",".join(["l", "r"] + ["r"] * count),
         side_effects=True,
@@ -230,61 +297,8 @@ def _copy(copies: list, nbytes: int) -> None:
 
 
 @dsl_user_op
-def _st_shared_b32(address: Int32, value: Uint32, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        _values((Int32(address), Uint32(value)), loc=loc, ip=ip),
-        "st.shared.b32 [$0], $1;",
-        "r,r",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def _ld_shared_b32(address: Int32, *, loc=None, ip=None) -> Uint32:
-    return Uint32(
-        _asm(
-            T.i32(),
-            _values((Int32(address),), loc=loc, ip=ip),
-            "ld.shared.b32 $0, [$1];",
-            "=r,r",
-            side_effects=True,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
 def _bits(value: Float32, *, loc=None, ip=None) -> Uint32:
-    return Uint32(
-        _asm(
-            T.i32(),
-            _values((Float32(value),), loc=loc, ip=ip),
-            "mov.b32 $0, $1;",
-            "=r,f",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@dsl_user_op
-def _float(bits: Uint32, *, loc=None, ip=None) -> Float32:
-    return Float32(
-        _asm(
-            T.f32(),
-            _values((Uint32(bits),), loc=loc, ip=ip),
-            "mov.b32 $0, $1;",
-            "=f,r",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return Uint32(f32_bits(value, loc=loc, ip=ip))
 
 
 # The argmax combines on (value, index): the first NaN, else the first
@@ -299,7 +313,7 @@ def _combine_in_order(
     or `v1 >= v2` (ordered), else the second."""
     struct = _asm(
         llvm.StructType.get_literal([T.f32(), T.i32()]),
-        _values((Float32(v1), Int32(i1), Float32(v2), Int32(i2)), loc=loc, ip=ip),
+        _ir((Float32(v1), Int32(i1), Float32(v2), Int32(i2)), loc=loc, ip=ip),
         "{\n\t.reg .pred pn, p;\n\tsetp.nan.f32 pn, $2, $2;\n\t"
         "setp.ge.or.f32 p, $2, $4, pn;\n\t"
         "selp.f32 $0, $2, $4, p;\n\tselp.b32 $1, $3, $5, p;\n\t}",
@@ -308,7 +322,7 @@ def _combine_in_order(
         loc=loc,
         ip=ip,
     )
-    return _pair(struct, (Float32, Int32), loc=loc, ip=ip)
+    return _unpack(struct, (Float32, Int32), loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -318,7 +332,7 @@ def _combine(v1: Float32, i1: Int32, v2: Float32, i2: Int32, *, loc=None, ip=Non
     else the second."""
     struct = _asm(
         llvm.StructType.get_literal([T.f32(), T.i32()]),
-        _values((Float32(v1), Int32(i1), Float32(v2), Int32(i2)), loc=loc, ip=ip),
+        _ir((Float32(v1), Int32(i1), Float32(v2), Int32(i2)), loc=loc, ip=ip),
         "{\n\t.reg .pred pl, pk, pn;\n\t"
         "setp.lt.s32 pl, $3, $5;\n\t"
         "setp.eq.and.f32 pk, $2, $4, pl;\n\tsetp.gt.or.f32 pk, $2, $4, pk;\n\t"
@@ -330,26 +344,7 @@ def _combine(v1: Float32, i1: Int32, v2: Float32, i2: Int32, *, loc=None, ip=Non
         loc=loc,
         ip=ip,
     )
-    return _pair(struct, (Float32, Int32), loc=loc, ip=ip)
-
-
-@dsl_user_op
-def _w1_row(token: Int64, last: int, *, loc=None, ip=None) -> Int64:
-    """The w1 row a token's embedding is copied from: the token, clamped to
-    `last` (the table's last row) as an unsigned value, so an id outside
-    the table (negative included) reads its last row instead of memory
-    around it. A valid id is unchanged."""
-    return Int64(
-        _asm(
-            T.i64(),
-            _values((Int64(token),), loc=loc, ip=ip),
-            f"min.u64 $0, $1, {last};",
-            "=l,l",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _unpack(struct, (Float32, Int32), loc=loc, ip=ip)
 
 
 # The step's arithmetic, as Triton 3.8 compiles the eager loop for SM 10.x.
@@ -402,7 +397,7 @@ def _logit(
         transform = "mov.f32 w, y;\n\t"
     struct = _asm(
         llvm.StructType.get_literal([T.i32(), T.f32()]),
-        _values(
+        _ir(
             (
                 Uint32(a_bits),
                 Uint32(b_bits),
@@ -426,7 +421,7 @@ def _logit(
         loc=loc,
         ip=ip,
     )
-    return _pair(struct, (Uint32, Float32), loc=loc, ip=ip)
+    return _unpack(struct, (Uint32, Float32), loc=loc, ip=ip)
 
 
 _MURMUR_MIX = (
@@ -448,7 +443,7 @@ def _murmur_prefix(
     return Uint32(
         _asm(
             T.i32(),
-            _values((Uint32(seed_lo), Uint32(seed_hi), Uint32(pos_lo)), loc=loc, ip=ip),
+            _ir((Uint32(seed_lo), Uint32(seed_hi), Uint32(pos_lo)), loc=loc, ip=ip),
             "{\n\t.reg .b32 h, k;\n\tmov.u32 h, 0;\n\t"
             "mov.u32 k, $1;\n\t"
             + _MURMUR_MIX
@@ -518,7 +513,7 @@ def _gumbel(
     return Float32(
         _asm(
             T.f32(),
-            _values(
+            _ir(
                 (
                     Float32(logit),
                     Float32(temp),
@@ -582,7 +577,7 @@ def _nonzero_f32(value: Float32, *, loc=None, ip=None) -> Int32:
     return Int32(
         _asm(
             T.i32(),
-            _values((Float32(value),), loc=loc, ip=ip),
+            _ir((Float32(value),), loc=loc, ip=ip),
             "{\n\t.reg .pred p;\n\tsetp.eq.f32 p, $1, 0f00000000;\n\t"
             "selp.u32 $0, 0, 1, p;\n\t}",
             "=r,f",
@@ -642,9 +637,19 @@ def _load_bf16(row: Int64, offset: list, mask: list, vector: bool) -> list:
 
 
 def _store_bf16(
-    row: Int64, offset: list, store: list, bits: list, vector: bool
+    row: Int64,
+    offset: list,
+    store: list,
+    bits: list,
+    vector: bool,
+    multicast: bool = False,
 ) -> None:
-    """Store a thread's BF16 elements as `_load_bf16` loads them."""
+    """Store a thread's BF16 elements as `_load_bf16` loads them (to a
+    multicast `row`: vector only)."""
+    if multicast:
+        words = [bits[j] | (bits[j + 1] << Uint32(16)) for j in range(0, len(bits), 2)]
+        _store_words_multicast(row + offset[0], words, len(offset) * 2, store[0])
+        return
     if not vector:
         for k in range(len(offset)):
             _st_u16(row + offset[k], bits[k], store[k])
@@ -670,7 +675,7 @@ def _lane_results(
         gid = _ld_volatile_b32_or(
             block_argmax + Int64(index) * 8, valid, Uint32(BIG_INDEX)
         )
-        got.append((_float(bits), Int32(gid)))
+        got.append((f32_from_bits(bits), Int32(gid)))
     return got
 
 
@@ -710,13 +715,29 @@ class _StepKernel:
         blocks: int,
         vector: bool,
         has_cap: bool,
-        sharded: bool,
         pdl: bool,
         row_bytes: int,
         chunk: int,
         w1_rows: int,
+        chain_tp: int = 0,
+        seq_bits: int = 0,
+        table: bool = False,
     ) -> None:
         assert block % THREADS == 0 and block & (block - 1) == 0
+        # table: `bias` is a `[w1_rows, bias_s0]` table of every token's
+        # bias row, read at the row's token (`bias_token`).
+        self.table = table
+        # chain_tp: the step works on a vocab shard, exchanges its packet
+        # through a `PacketMailbox` of `chain_tp` ranks and picks the winner
+        # itself. `cache` is then a multicast address (the rank's slot of
+        # plane 0 of the mailbox cache; a row stores to the plane of its
+        # sequence number's parity, `cache_plane` bytes on); the last step
+        # orders its stores before its packet at system scope across the
+        # aliases, and its poll before the cache fill.
+        assert not chain_tp or (vector and 2 * (block // THREADS) in _MULTICAST_OPS)
+        assert not chain_tp or 0 < seq_bits < 32
+        assert chain_tp & (chain_tp - 1) == 0 and chain_tp <= WARP
+        self.chain_tp, self.seq_bits = chain_tp, seq_bits
         self.block, self.blocks = block, blocks
         # Thread t holds per_thread of the block's elements: with vector the
         # ones from t * per_thread on, else t, t + THREADS, ...
@@ -728,7 +749,7 @@ class _StepKernel:
         # The warps of the row's last block that reduce the blocks' results
         # (and copy the w1 row).
         self.finish_warps = finish_warps(blocks)
-        self.has_cap, self.sharded, self.pdl = has_cap, sharded, pdl
+        self.has_cap, self.sharded, self.pdl = has_cap, chain_tp > 0, pdl
         # The last block's warp 0 copies the w1 row in chunk-byte accesses,
         # from one of the table's w1_rows rows.
         self.row_bytes, self.chunk, self.w1_rows = row_bytes, chunk, w1_rows
@@ -740,9 +761,12 @@ class _StepKernel:
         base_s0: Int64,
         bias: Int64,
         bias_s0: Int64,
+        bias_token: Int64,
+        bias_token_s0: Int64,
         cache: Int64,
         cache_s0: Int64,
         cache_s1: Int64,
+        cache_plane: Int64,
         col: Int32,
         idx_map: Int64,
         idx_map_s0: Int64,
@@ -757,12 +781,17 @@ class _StepKernel:
         tokens_s0: Int64,
         w1: Int64,
         emb: Int64,
-        packets: Int64,
         width: Int32,
         vocab_offset: Int32,
         mult: Float32,
         inv_cap: Float32,
         cap: Float32,
+        mailbox: Int64,
+        multicast: Int64,
+        seqs: Int64,
+        slot_rows: Int32,
+        last_col: Int32,
+        rank: Int32,
         rows: Int32,
         stream: cuda.CUstream,
     ) -> None:
@@ -771,9 +800,12 @@ class _StepKernel:
             base_s0,
             bias,
             bias_s0,
+            bias_token,
+            bias_token_s0,
             cache,
             cache_s0,
             cache_s1,
+            cache_plane,
             col,
             idx_map,
             idx_map_s0,
@@ -788,12 +820,17 @@ class _StepKernel:
             tokens_s0,
             w1,
             emb,
-            packets,
             width,
             vocab_offset,
             mult,
             inv_cap,
             cap,
+            mailbox,
+            multicast,
+            seqs,
+            slot_rows,
+            last_col,
+            rank,
         ).launch(
             grid=(rows, self.blocks, 1),
             block=(THREADS, 1, 1),
@@ -808,9 +845,12 @@ class _StepKernel:
         base_s0: Int64,
         bias: Int64,
         bias_s0: Int64,
+        bias_token: Int64,
+        bias_token_s0: Int64,
         cache: Int64,
         cache_s0: Int64,
         cache_s1: Int64,
+        cache_plane: Int64,
         col: Int32,
         idx_map: Int64,
         idx_map_s0: Int64,
@@ -825,12 +865,17 @@ class _StepKernel:
         tokens_s0: Int64,
         w1: Int64,
         emb: Int64,
-        packets: Int64,
         width: Int32,
         vocab_offset: Int32,
         mult: Float32,
         inv_cap: Float32,
         cap: Float32,
+        mailbox: Int64,
+        multicast: Int64,
+        seqs: Int64,
+        slot_rows: Int32,
+        last_col: Int32,
+        rank: Int32,
     ) -> None:
         block, blocks = self.block, self.blocks
         per_thread = self.per_thread
@@ -838,7 +883,7 @@ class _StepKernel:
         r, blk, _ = cute.arch.block_idx()
         warp = tidx // WARP
         lane = tidx % WARP
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         warp_values = smem.allocate_array(Uint32, 4)
         warp_indices = smem.allocate_array(Uint32, 4)
         word = smem.allocate_array(Uint32, 4)
@@ -879,22 +924,35 @@ class _StepKernel:
         # arrived; the loads issue in program order, so without PDL they
         # follow the bias loads instead of holding them back.
         if const_expr(self.pdl):
-            temp = _float(
+            temp = f32_from_bits(
                 load_global_u32_address(temperature + req * 4, valid, ordered=True)
             )
             seed = load_global_s64_address(seeds + req * 8, valid, ordered=True)
-            # The bias is the GEMV's output; every store also waits for it.
+            # The bias is the GEMV's output (with a table, its token the
+            # previous kernel's); every store also waits for it.
             cute.arch.griddepcontrol_wait()
+            if const_expr(self.table):
+                bias_row = self._table_row(
+                    bias, bias_s0, bias_token, bias_token_s0, row
+                )
             b_bits = _load_bf16(bias_row, offset, mask, self.vector)
         else:
+            if const_expr(self.table):
+                bias_row = self._table_row(
+                    bias, bias_s0, bias_token, bias_token_s0, row
+                )
             b_bits = _load_bf16(bias_row, offset, mask, self.vector)
-            temp = _float(
+            temp = f32_from_bits(
                 load_global_u32_address(temperature + req * 4, valid, ordered=True)
             )
             seed = load_global_s64_address(seeds + req * 8, valid, ordered=True)
         values = cute.make_rmem_tensor(cute.make_layout((per_thread,)), Float32)
         if const_expr(self.sharded):
             cache_row = cache + (row * cache_s0 + Int64(col) * cache_s1) * 2
+            # After the dependency wait (the last step of the previous call
+            # advanced it).
+            seq = load_global_u32_address(seqs + row * 4, Int32(1), ordered=True)
+            cache_row = cache_row + Int64(generation(seq)) * cache_plane
         else:
             cache_row = cache + (req * cache_s0 + Int64(col) * cache_s1) * 2
         cache_bits, store = [], []
@@ -905,7 +963,7 @@ class _StepKernel:
             values[k] = logit
             cache_bits.append(bits)
             store.append(mask[k] if const_expr(self.sharded) else mask[k] & valid)
-        _store_bf16(cache_row, offset, store, cache_bits, self.vector)
+        _store_bf16(cache_row, offset, store, cache_bits, self.vector, self.sharded)
 
         if _nonzero_f32(temp) != Int32(0):
             # The step seed of gumbel_block_argmax when it writes a logits
@@ -928,25 +986,35 @@ class _StepKernel:
         )
         value, idx = _warp_argmax(value, idx, WARP // 2)
         # Every lane holds its warp's pair and stores it to the warp's slot.
-        _st_shared_b32(Int32(warp_values.toint()) + warp * 4, _bits(value))
-        _st_shared_b32(Int32(warp_indices.toint()) + warp * 4, Uint32(idx))
+        store_shared_u32(Int32(warp_values.toint()) + warp * 4, _bits(value))
+        store_shared_u32(Int32(warp_indices.toint()) + warp * 4, Uint32(idx))
         cute.arch.barrier()
-        value = _float(_ld_shared_b32(Int32(warp_values.toint()) + (tidx % 4) * 4))
-        idx = Int32(_ld_shared_b32(Int32(warp_indices.toint()) + (tidx % 4) * 4))
+        value = f32_from_bits(
+            load_shared_u32(Int32(warp_values.toint()) + (tidx % 4) * 4)
+        )
+        idx = Int32(load_shared_u32(Int32(warp_indices.toint()) + (tidx % 4) * 4))
         value, idx = _warp_argmax(value, idx, 2)
         slot = row * Int64(blocks) + Int64(blk)
         if tidx == 0:
-            _st_b64(block_argmax + slot * 8, Int64(vocab_offset + blk * block + idx))
+            cute.arch.store(
+                global_ptr(Int64, block_argmax + slot * 8, 8),
+                Int64(vocab_offset + blk * block + idx),
+            )
             store_global_u32_address(block_max + slot * 4, _bits(value))
 
         # Release this block's result; the block that completes the row's
         # count (blocks per step, from zero per call) acquires all of them.
         cute.arch.barrier()
         if tidx == 0:
-            ticket = atomic_add1_acq_rel_u32_address(arrivals + row * 4)
-            _st_shared_b32(Int32(word.toint()), ticket)
+            ticket = cute.arch.atomic_add(
+                global_ptr(Uint32, arrivals + row * 4),
+                Uint32(1),
+                sem="acq_rel",
+                scope="gpu",
+            )
+            store_shared_u32(Int32(word.toint()), ticket)
         cute.arch.barrier()
-        arrival = Int32(_ld_shared_b32(Int32(word.toint())))
+        arrival = Int32(load_shared_u32(Int32(word.toint())))
         if ((arrival + 1) % blocks == 0) & (warp < self.finish_warps):
             self._finish(
                 tidx,
@@ -962,8 +1030,22 @@ class _StepKernel:
                 tokens_s0,
                 w1,
                 emb,
-                packets,
+                mailbox,
+                multicast,
+                seqs,
+                slot_rows,
+                last_col,
+                rank,
             )
+
+    def _table_row(
+        self, bias: Int64, bias_s0: Int64, token: Int64, token_s0: Int64, row: Int64
+    ) -> Int64:
+        """The table row of the row's token, clamped as its w1 row is."""
+        token = load_global_s64_address(
+            token + row * token_s0 * 8, Int32(1), ordered=True
+        )
+        return bias + _w1_row(token, self.w1_rows - 1) * bias_s0 * 2
 
     @cute.jit
     def _finish(
@@ -981,12 +1063,18 @@ class _StepKernel:
         tokens_s0: Int64,
         w1: Int64,
         emb: Int64,
-        packets: Int64,
+        mailbox: Int64,
+        multicast: Int64,
+        seqs: Int64,
+        slot_rows: Int32,
+        last_col: Int32,
+        rank: Int32,
     ) -> None:
         """The first `finish_warps` warps of the row's last block: the
         first NaN, else the first maximum, over the blocks' (value, global
-        id) results (a global id rises with the block), then the token and
-        next w1 row, or the packet `[value bits, global id, 0, 0]`. Every
+        id) results (a global id rises with the block), with a vocab shard
+        the winner over the ranks (`_exchange`), then the token and next w1
+        row. Every
         thread loads its share of the results at once, then reduces them,
         then the warps, then (several warps) their results in shared
         memory; the combine is a total order, so every lane ends with the
@@ -1000,114 +1088,126 @@ class _StepKernel:
         best_v, best_id = _warp_argmax(best_v, best_id, WARP // 2)
         if const_expr(self.finish_warps > 1):
             if lane == 0:
-                _st_shared_b32(warp_values + warp * 4, _bits(best_v))
-                _st_shared_b32(warp_indices + warp * 4, Uint32(best_id))
+                store_shared_u32(warp_values + warp * 4, _bits(best_v))
+                store_shared_u32(warp_indices + warp * 4, Uint32(best_id))
             cute.arch.barrier()
             best_v, best_id = _tree_argmax(
                 [
                     (
-                        _float(_ld_shared_b32(warp_values + w * 4)),
-                        Int32(_ld_shared_b32(warp_indices + w * 4)),
+                        f32_from_bits(load_shared_u32(warp_values + w * 4)),
+                        Int32(load_shared_u32(warp_indices + w * 4)),
                     )
                     for w in range(self.finish_warps)
                 ],
                 _combine,
             )
-        if const_expr(self.sharded):
-            if tidx == 0:
-                packet = packets + row * 16
-                store_global_u32_address(packet, _bits(best_v))
-                store_global_u32_address(packet + 4, Uint32(best_id))
-                store_global_u32_address(packet + 8, Uint32(0))
-                store_global_u32_address(packet + 12, Uint32(0))
-        else:
-            token = Int64(best_id)
-            if tidx == 0:
-                _st_b64(tokens + (row * tokens_s0 + Int64(col)) * 8, token)
-            _copy_row(
-                w1 + _w1_row(token, self.w1_rows - 1) * self.row_bytes,
-                emb + row * self.row_bytes,
+        if const_expr(self.chain_tp > 0):
+            best_id = self._exchange(
                 tidx,
-                threads,
-                self.row_bytes,
-                self.chunk,
+                lane,
+                best_v,
+                best_id,
+                row,
+                col,
+                mailbox,
+                multicast,
+                seqs,
+                slot_rows,
+                last_col,
+                rank,
             )
-
-
-class _PickKernel:
-    """Grid (rows,), one warp: the winner over the gathered `[tp, rows, 4]`
-    packets (the first NaN, else the first maximum, by global id: with
-    shard k holding the ids above shard k - 1's, the unsharded argmax)."""
-
-    def __init__(
-        self, *, tp: int, pdl: bool, row_bytes: int, chunk: int, w1_rows: int
-    ) -> None:
-        assert tp & (tp - 1) == 0 and 1 <= tp <= WARP
-        self.tp, self.pdl = tp, pdl
-        self.row_bytes, self.chunk, self.w1_rows = row_bytes, chunk, w1_rows
-
-    @cute.jit
-    def __call__(
-        self,
-        packets: Int64,
-        rows: Int32,
-        tokens: Int64,
-        tokens_s0: Int64,
-        step: Int32,
-        w1: Int64,
-        emb: Int64,
-        stream: cuda.CUstream,
-    ) -> None:
-        self.kernel(packets, rows, tokens, tokens_s0, step, w1, emb).launch(
-            grid=(rows, 1, 1),
-            block=(PICK_THREADS, 1, 1),
-            stream=stream,
-            use_pdl=self.pdl,
-        )
-
-    @cute.kernel
-    def kernel(
-        self,
-        packets: Int64,
-        rows: Int32,
-        tokens: Int64,
-        tokens_s0: Int64,
-        step: Int32,
-        w1: Int64,
-        emb: Int64,
-    ) -> None:
-        if const_expr(self.pdl):
-            # The packets are the all-gather's output.
-            cute.arch.griddepcontrol_wait()
-        tidx, _, _ = cute.arch.thread_idx()
-        r, _, _ = cute.arch.block_idx()
-        row = Int64(r)
-        rank = Int64(tidx % self.tp)
-        packet = packets + ((rank * Int64(rows) + row) * 4) * 4
-        value = _float(load_global_u32_address(packet, Int32(1), ordered=True))
-        gid = Int32(load_global_u32_address(packet + 4, Int32(1), ordered=True))
-        # Lane l holds rank l % tp: a butterfly over tp lanes reduces the
-        # ranks' packets in every lane.
-        _, winner = _warp_argmax(value, gid, self.tp // 2)
-        token = Int64(winner)
+        token = Int64(best_id)
         if tidx == 0:
-            _st_b64(tokens + (row * tokens_s0 + Int64(step)) * 8, token)
+            cute.arch.store(
+                global_ptr(Int64, tokens + (row * tokens_s0 + Int64(col)) * 8, 8),
+                Int64(token),
+            )
         _copy_row(
             w1 + _w1_row(token, self.w1_rows - 1) * self.row_bytes,
             emb + row * self.row_bytes,
             tidx,
-            PICK_THREADS,
+            threads,
             self.row_bytes,
             self.chunk,
         )
 
+    @cute.jit
+    def _exchange(
+        self,
+        tidx: Int32,
+        lane: Int32,
+        best_v: Float32,
+        best_id: Int32,
+        row: Int64,
+        col: Int32,
+        mailbox: Int64,
+        multicast: Int64,
+        seqs: Int64,
+        slot_rows: Int32,
+        last_col: Int32,
+        rank: Int32,
+    ) -> Int32:
+        """The chained step's pick: multicast this rank's `(value, global
+        id)` with the row's sequence number into slot `[seq & 1, col, rank,
+        row]` of every rank's `PacketMailbox`, poll the `chain_tp` slots of
+        the column until each holds that sequence number, and return the
+        winner (the first NaN, else the first maximum, by global id: with
+        shard k holding the ids above shard k - 1's, the unsharded argmax).
+        The column's last step advances the
+        row's sequence number, once every finishing thread has read it."""
+        tp, seq_bits = self.chain_tp, self.seq_bits
+        seq = load_global_u32_address(seqs + row * 4, Int32(1), ordered=True)
+        rank_stride = Int64(slot_rows) * 8
+        plane = Int64(generation(seq)) * Int64(last_col + 1) + Int64(col)
+        column = mailbox + plane * Int64(tp) * rank_stride + row * 8
+        if tidx == 0:
+            mine = multicast + (column - mailbox) + Int64(rank) * rank_stride
+            # Every block's cache stores of the call (seen through the
+            # arrivals and the steps' order) before the packet.
+            _release_cache_at(col, last_col)
+            value = _bits(best_v)
+            if value == Uint32(EMPTY_VALUE):
+                value = Uint32(PACKET_NAN)
+            stmc_b64(mine, (Uint32(best_id) << Uint32(seq_bits)) | seq, value)
+        # Lane l polls rank l % tp: the butterfly over tp lanes then
+        # reduces the ranks' packets in every lane.
+        source = column + Int64(lane % tp) * rank_stride
+        low, high = load_relaxed_sys_b64(source)
+        seq_mask = Uint32((1 << seq_bits) - 1)
+        deadline = Int64(0)
+        # Each word carries its own tag: the id word the sequence number,
+        # the value word anything but EMPTY_VALUE, so a packet whose words
+        # arrive apart is read only once both have.
+        while ((low & seq_mask) != seq) | (high == Uint32(EMPTY_VALUE)):
+            deadline = spin_deadline(deadline, SPIN_TIMEOUT_NS)
+            low, high = load_relaxed_sys_b64(source)
+        # The ranks' cache stores before this rank's cache fill.
+        _acquire_cache_at(col, last_col)
+        _, winner = _warp_argmax(
+            f32_from_bits(high), Int32(low >> Uint32(seq_bits)), tp // 2
+        )
+        if const_expr(self.finish_warps > 1):
+            cute.arch.barrier()
+        if tidx < tp:
+            # Every finishing thread has read the slot: empty it for the
+            # generation two calls on (written after this rank's next
+            # packet, which follows this grid).
+            store_global_u32_address(source + 4, Uint32(EMPTY_VALUE))
+        if (tidx == 0) & (col == last_col):
+            store_global_u32_address(seqs + row * 4, next_sequence(seq, seq_bits))
+        return winner
+
 
 class _AnchorKernel:
     """Grid (rows,), THREADS threads: step 0's Markov embedding (the w1 row
-    of the anchor token) and the row's arrival count reset."""
+    of the anchor token), with `store_token` the token too, and the row's
+    arrival count reset."""
 
-    def __init__(self, *, row_bytes: int, chunk: int, w1_rows: int) -> None:
+    def __init__(
+        self, *, row_bytes: int, chunk: int, w1_rows: int, store_token: bool
+    ) -> None:
         self.row_bytes, self.chunk, self.w1_rows = row_bytes, chunk, w1_rows
+        self.store_token = store_token
 
     @cute.jit
     def __call__(
@@ -1117,10 +1217,11 @@ class _AnchorKernel:
         w1: Int64,
         emb: Int64,
         arrivals: Int64,
+        tokens: Int64,
         rows: Int32,
         stream: cuda.CUstream,
     ) -> None:
-        self.kernel(input_ids, anchor_idx, w1, emb, arrivals).launch(
+        self.kernel(input_ids, anchor_idx, w1, emb, arrivals, tokens).launch(
             grid=(rows, 1, 1), block=(THREADS, 1, 1), stream=stream
         )
 
@@ -1132,6 +1233,7 @@ class _AnchorKernel:
         w1: Int64,
         emb: Int64,
         arrivals: Int64,
+        tokens: Int64,
     ) -> None:
         tidx, _, _ = cute.arch.thread_idx()
         r, _, _ = cute.arch.block_idx()
@@ -1150,6 +1252,8 @@ class _AnchorKernel:
         if tidx == 0:
             # markov_step counts the row's arriving blocks from zero per call.
             store_global_u32_address(arrivals + row * 4, Uint32(0))
+            if const_expr(self.store_token):
+                cute.arch.store(global_ptr(Int64, tokens + row * 8, 8), Int64(token))
 
 
 def _fill_entries(
@@ -1179,10 +1283,12 @@ def _fill_entries(
 
 class _CacheFillKernel:
     """Grid (rows * steps, vocab blocks), THREADS threads of FILL_BLOCK //
-    THREADS consecutive entries: scatter the gathered `[tp, rows, steps,
-    shard]` draft logits (rank stride `src_s0`) into the full-vocab
-    cache. `vectorized`: one 16-byte copy per thread (shard, vocab,
-    strides and pointers 16-byte aligned)."""
+    THREADS consecutive entries: scatter the ranks' `[tp, rows, steps,
+    shard]` draft logits (rank stride `src_s0`) of a `PacketMailbox` cache
+    into the full-vocab cache; row r's are in the plane (`src_plane` bytes
+    apart) its previous sequence number in `seqs` picks. `vectorized`: one
+    16-byte copy per thread (shard, vocab, strides and pointers 16-byte
+    aligned)."""
 
     def __init__(self, *, vectorized: bool) -> None:
         self.vectorized = vectorized
@@ -1196,6 +1302,8 @@ class _CacheFillKernel:
         cache_s0: Int64,
         cache_s1: Int64,
         idx_map: Int64,
+        seqs: Int64,
+        src_plane: Int64,
         steps: Int32,
         shard: Int32,
         vocab: Int32,
@@ -1204,7 +1312,17 @@ class _CacheFillKernel:
         stream: cuda.CUstream,
     ) -> None:
         self.kernel(
-            src, src_s0, cache, cache_s0, cache_s1, idx_map, steps, shard, vocab
+            src,
+            src_s0,
+            cache,
+            cache_s0,
+            cache_s1,
+            idx_map,
+            seqs,
+            src_plane,
+            steps,
+            shard,
+            vocab,
         ).launch(grid=(grid_x, grid_y, 1), block=(THREADS, 1, 1), stream=stream)
 
     @cute.kernel
@@ -1216,6 +1334,8 @@ class _CacheFillKernel:
         cache_s0: Int64,
         cache_s1: Int64,
         idx_map: Int64,
+        seqs: Int64,
+        src_plane: Int64,
         steps: Int32,
         shard: Int32,
         vocab: Int32,
@@ -1226,6 +1346,9 @@ class _CacheFillKernel:
         r = rs // steps
         i = rs - r * steps
         req = load_global_s64_address(idx_map + Int64(rs) * 8, Int32(1), ordered=True)
+        # The last step advanced the sequence number to the other parity.
+        seq = load_global_u32_address(seqs + Int64(r) * 4, Int32(1), ordered=True)
+        src = src + Int64(generation(seq) ^ Uint32(1)) * src_plane
         if req >= Int64(0):
             first = Int64(blk) * FILL_BLOCK + Int64(tidx * per_thread)
             row = Int64(rs) * Int64(shard)
@@ -1345,11 +1468,13 @@ def compile_step(
     blocks: int,
     vector: bool,
     has_cap: bool,
-    sharded: bool,
     pdl: bool,
     row_bytes: int,
     chunk: int,
     w1_rows: int,
+    chain_tp: int = 0,
+    seq_bits: int = 0,
+    table: bool = False,
 ):
     """cute.compile one step kernel (before CUDA graph capture)."""
     assert_not_capturing("the Markov step kernel")
@@ -1360,49 +1485,40 @@ def compile_step(
             blocks=blocks,
             vector=vector,
             has_cap=has_cap,
-            sharded=sharded,
             pdl=pdl,
             row_bytes=row_bytes,
             chunk=chunk,
             w1_rows=w1_rows,
+            chain_tp=chain_tp,
+            seq_bits=seq_bits,
+            table=table,
         ),
-        *([i64] * 7),
+        *([i64] * 10),
         i32,
-        *([i64] * 14),
+        *([i64] * 13),
         i32,
         i32,
         f32,
         f32,
         f32,
+        *([i64] * 3),
+        *([i32] * 3),
         Int32(1),
         current_cu_stream(),
     )
 
 
 @functools.cache
-def compile_pick(*, tp: int, pdl: bool, row_bytes: int, chunk: int, w1_rows: int):
-    assert_not_capturing("the Markov pick kernel")
-    i64, i32 = Int64(0), Int32(0)
-    return cute.compile(
-        _PickKernel(tp=tp, pdl=pdl, row_bytes=row_bytes, chunk=chunk, w1_rows=w1_rows),
-        i64,
-        Int32(1),
-        i64,
-        i64,
-        i32,
-        i64,
-        i64,
-        current_cu_stream(),
-    )
-
-
-@functools.cache
-def compile_anchor(*, row_bytes: int, chunk: int, w1_rows: int):
+def compile_anchor(
+    *, row_bytes: int, chunk: int, w1_rows: int, store_token: bool = False
+):
     assert_not_capturing("the Markov anchor kernel")
     i64 = Int64(0)
     return cute.compile(
-        _AnchorKernel(row_bytes=row_bytes, chunk=chunk, w1_rows=w1_rows),
-        *([i64] * 5),
+        _AnchorKernel(
+            row_bytes=row_bytes, chunk=chunk, w1_rows=w1_rows, store_token=store_token
+        ),
+        *([i64] * 6),
         Int32(1),
         current_cu_stream(),
     )
@@ -1414,7 +1530,7 @@ def compile_cache_fill(*, vectorized: bool):
     i64, i32 = Int64(0), Int32(1)
     return cute.compile(
         _CacheFillKernel(vectorized=vectorized),
-        *([i64] * 6),
+        *([i64] * 8),
         i32,
         i32,
         i32,
@@ -1431,6 +1547,7 @@ def _row_copy(w1: torch.Tensor, emb: torch.Tensor, threads: int) -> tuple[int, i
 
 def _launch_step(
     kernel,
+    cache_address: int,
     base: torch.Tensor,
     bias: torch.Tensor,
     cache: torch.Tensor,
@@ -1445,21 +1562,25 @@ def _launch_step(
     tokens: torch.Tensor,
     w1: torch.Tensor,
     emb: torch.Tensor,
-    packets: torch.Tensor,
     width: int,
     vocab_offset: int,
     mult: float,
     inv_cap: float,
     cap: float,
+    chain: "PacketMailbox | None" = None,
+    bias_token: tuple[int, int] = (0, 0),
 ) -> None:
     kernel(
         Int64(base.data_ptr()),
         Int64(base.stride(0)),
         Int64(bias.data_ptr()),
         Int64(bias.stride(0)),
-        Int64(cache.data_ptr()),
+        Int64(bias_token[0]),
+        Int64(bias_token[1]),
+        Int64(cache_address),
         Int64(cache.stride(0)),
         Int64(cache.stride(1)),
+        Int64(0 if chain is None else chain.cache[0].nbytes),
         Int32(col),
         Int64(idx_map.data_ptr()),
         Int64(idx_map.stride(0)),
@@ -1474,47 +1595,112 @@ def _launch_step(
         Int64(tokens.stride(0)),
         Int64(w1.data_ptr()),
         Int64(emb.data_ptr()),
-        Int64(packets.data_ptr()),
         Int32(width),
         Int32(vocab_offset),
         Float32(mult),
         Float32(inv_cap),
         Float32(cap),
+        Int64(0 if chain is None else chain.local),
+        Int64(0 if chain is None else chain.multicast),
+        Int64(0 if chain is None else chain.seqs.data_ptr()),
+        Int32(0 if chain is None else chain.rows),
+        Int32(0 if chain is None else chain.steps - 1),
+        Int32(0 if chain is None else chain.rank),
         Int32(base.shape[0]),
         current_cu_stream(),
     )
 
 
-def _launch_pick(
-    kernel,
-    packets: torch.Tensor,
-    rows: int,
-    tokens: torch.Tensor,
-    step: int,
-    w1: torch.Tensor,
-    emb: torch.Tensor,
-) -> None:
-    kernel(
-        Int64(packets.data_ptr()),
-        Int32(rows),
-        Int64(tokens.data_ptr()),
-        Int64(tokens.stride(0)),
-        Int32(step),
-        Int64(w1.data_ptr()),
-        Int64(emb.data_ptr()),
-        current_cu_stream(),
-    )
+class PacketMailbox:
+    """The chained steps' packet exchange of one TP group: `[2, steps, tp,
+    rows]` 64-bit slots in symmetric memory with a multicast mapping, and a
+    per-row sequence number.
+
+    A slot holds `{global id << seq_bits | seq, value bits}`, written by one
+    multicast store and read by unicast loads. Every 32-bit word carries
+    its own tag, so no word needs to arrive together with the other: the
+    id word the sequence number, the value word anything but `EMPTY_VALUE`
+    (the initial value, and what the reader re-arms after its read; a NaN
+    value with those bits goes as `PACKET_NAN`, an equal pick). A row's
+    sequence number advances after its last step, wrapping within 1 ..
+    `2**seq_bits - 2` (slots start at 0), and its parity picks the
+    generation. Two suffice: a rank writes a call's generation only after
+    every rank published the previous call's last step, which each rank
+    does after its reads (and re-arms) of the call before that, in stream
+    order. Every rank must run the same calls over the same rows.
+
+    Also a `[2, tp, cache_shard]` BF16 cache in symmetric memory with a
+    multicast mapping: rank k's draft-logits shard in row k of every
+    rank's, stored by the chained steps in the plane of the row's sequence
+    number parity, and read by `cache_fill` after the loop. The last step orders the
+    stores before its packet with a release alias-proxy fence, and the
+    polled packets before the fill with an acquire one. A plane is
+    rewritten two calls on, after every rank published the next call's
+    packets, which each rank does after its fill, in stream order.
+
+    Construction is collective over `group` and raises on every rank when
+    a buffer has no multicast mapping.
+    """
+
+    def __init__(
+        self,
+        group: dist.ProcessGroup,
+        *,
+        tp: int,
+        rank: int,
+        steps: int,
+        rows: int,
+        vocab: int,
+        device: torch.device,
+        cache_shard: int,
+    ) -> None:
+        if dist.get_world_size(group) != tp or dist.get_rank(group) != rank:
+            raise ValueError("process group does not match tp and rank")
+        if tp & (tp - 1) or tp > WARP:
+            raise ValueError(f"a power-of-two TP size up to {WARP}, not {tp}")
+        self.id_bits = max(1, (vocab - 1).bit_length())
+        self.seq_bits = 32 - self.id_bits
+        if self.seq_bits < 3:
+            raise ValueError(f"vocab {vocab} leaves no sequence bits")
+        self.tp, self.rank, self.steps, self.rows = tp, rank, steps, rows
+        chain_bytes = 2 * steps * tp * rows * torch.int64.itemsize
+        cache_bytes = 2 * tp * cache_shard * torch.bfloat16.itemsize
+        # One multicast object for the chain and the cache.
+        with multicast_arena(group, device, chain_bytes + ARENA_ALIGN + cache_bytes):
+            chain = symmetric_buffer(group, (2, steps, tp, rows), torch.int64, device)
+            cache = symmetric_buffer(
+                group, (2, tp, cache_shard), torch.bfloat16, device
+            )
+        self.tensor, self.multicast = chain.tensor, chain.multicast
+        if not self.multicast or self.multicast % 8:
+            raise RuntimeError("the Markov chain needs NVLink multicast memory")
+        self.local = self.tensor.data_ptr()
+        # Empty slots: sequence number 0, value EMPTY_VALUE (as int32: -1).
+        words = self.tensor.view(torch.int32).view(-1, 2)
+        words[:, 0] = 0
+        words[:, 1] = -1
+        self.cache, self.cache_multicast = cache.tensor, cache.multicast
+        if not self.cache_multicast or self.cache_multicast % 16:
+            raise RuntimeError("the Markov cache needs NVLink multicast memory")
+        self.seqs = torch.ones(rows, dtype=torch.int32, device=device)
+        torch.accelerator.synchronize(device)
+        dist.barrier(group=group)
 
 
 class MarkovKernels:
     """The kernels of one loop over the BF16 Markov w1 table `w1` `[V,
     R]` with Markov embedding rows in `embeds` and `width` vocab entries
-    per rank (a shard over `tp` ranks, or the whole vocab with `tp`
-    None), compiled here, before CUDA graph capture: the anchor, the step at
-    each `(block, PDL, vector)` of `steps`, and with a vocab shard
-    the pick (`pick_pdl`) and the cache fill (`fill_vector`). A step at
-    another `(block, PDL, vector)` compiles when it first runs (never under
-    capture)."""
+    per rank (with a `chain` mailbox a shard over its ranks, else the whole
+    vocab), compiled here, before CUDA graph capture: the anchor, the step at
+    each `(block, PDL, vector)` of `steps` (chained with a `chain`, storing
+    its cache by multicast), and with a `chain` the cache fill
+    (`fill_vector`). A step at another `(block, PDL, vector)` compiles when
+    it first runs (never under capture). With `table` the steps read their
+    bias rows from a table of every token's (`step`'s `bias_token`).
+
+    Raises `ValueError` when a `chain` comes with a step that is not
+    vectorized: the multicast cache stores move a thread's elements as one
+    access, so they need a width and operands aligned to it."""
 
     def __init__(
         self,
@@ -1523,28 +1709,29 @@ class MarkovKernels:
         *,
         width: int,
         has_cap: bool,
-        tp: int | None,
         steps: Iterable[tuple[int, bool, bool]],
-        pick_pdl: bool,
-        fill_vector: bool,
+        fill_vector: bool = False,
+        chain: "PacketMailbox | None" = None,
+        table: bool = False,
     ) -> None:
         assert w1.dtype == embeds.dtype == torch.bfloat16
+        assert chain is None or w1.shape[0] <= 1 << chain.id_bits
         self.w1, self.embeds, self.width, self.has_cap = w1, embeds, width, has_cap
-        self.sharded = tp is not None
+        self.chain, self.table = chain, table
+        steps = tuple(steps)
+        if chain is not None and not all(vector for _, _, vector in steps):
+            raise ValueError(
+                "the vocab-parallel Markov loop needs 16-byte aligned draft "
+                "logits for its multicast cache stores"
+            )
         row_bytes, chunk = _row_copy(w1, embeds, THREADS)
-        compile_anchor(row_bytes=row_bytes, chunk=chunk, w1_rows=w1.shape[0])
+        compile_anchor(
+            row_bytes=row_bytes, chunk=chunk, w1_rows=w1.shape[0], store_token=table
+        )
         self._steps: dict[tuple[int, bool, bool], Any] = {}
         for variant in steps:
             self._step(*variant)
-        if tp is not None:
-            row_bytes, chunk = _row_copy(w1, embeds, PICK_THREADS)
-            self._pick = compile_pick(
-                tp=tp,
-                pdl=pick_pdl,
-                row_bytes=row_bytes,
-                chunk=chunk,
-                w1_rows=w1.shape[0],
-            )
+        if chain is not None:
             compile_cache_fill(vectorized=fill_vector)
 
     @property
@@ -1553,22 +1740,26 @@ class MarkovKernels:
         return frozenset(self._steps)
 
     def _step(self, block: int, pdl: bool, vector: bool):
-        kernel = self._steps.get((block, pdl, vector))
+        key = (block, pdl, vector)
+        kernel = self._steps.get(key)
         if kernel is None:
+            chain = self.chain
             blocks = -(-self.width // block)
             row_bytes, chunk = _row_copy(
                 self.w1, self.embeds, WARP * finish_warps(blocks)
             )
-            kernel = self._steps[(block, pdl, vector)] = compile_step(
+            kernel = self._steps[key] = compile_step(
                 block=block,
                 blocks=blocks,
                 vector=vector,
                 has_cap=self.has_cap,
-                sharded=self.sharded,
                 pdl=pdl,
                 row_bytes=row_bytes,
                 chunk=chunk,
                 w1_rows=self.w1.shape[0],
+                chain_tp=0 if chain is None else chain.tp,
+                seq_bits=0 if chain is None else chain.seq_bits,
+                table=self.table,
             )
         return kernel
 
@@ -1587,7 +1778,6 @@ class MarkovKernels:
         arrivals: torch.Tensor,
         tokens: torch.Tensor,
         emb: torch.Tensor,
-        packets: torch.Tensor,
         vocab_offset: int,
         mult: float,
         inv_cap: float,
@@ -1595,9 +1785,28 @@ class MarkovKernels:
         *,
         block: int,
         pdl: bool,
+        bias_token: torch.Tensor | None = None,
     ) -> None:
-        """`markov_step` over this loop's w1 and width, `emb` a row view
-        of `embeds`; the caller checks the operands' dtypes."""
+        """One step over this loop's w1 and `width` vocab entries from
+        `vocab_offset` for the `base.shape[0]` rows: `base` and `bias` BF16
+        rows, `cache` the draft-logits cache `[req, step, vocab]` or, with a
+        chain, `[row, step, width]`, `idx_map` and `pos` the step's int64
+        columns, `block_argmax` int64 and `block_max` FP32 with `rows *
+        blocks` elements, `emb` a row view of `embeds`; the caller checks the
+        operands' dtypes. Writes the rows' tokens at `col` and their next w1
+        rows to `emb`. With a table, `bias` is it and `bias_token` the rows'
+        int64 tokens (a strided column): row r reads its bias from
+        `bias[bias_token[r]]`. With a chain the step picks the winner over
+        the ranks, and `cache` is a view of the chain's cache whose entries
+        the step stores in every rank's (multicast)."""
+        chain = self.chain
+        assert chain is None or base.shape[0] <= chain.rows
+        assert (bias_token is not None) == self.table
+        token = (0, 0)
+        if bias_token is not None:
+            assert bias_token.dtype == torch.int64 and bias_token.dim() == 1
+            assert bias.shape[0] == self.w1.shape[0]
+            token = (bias_token.data_ptr(), bias_token.stride(0))
         vector = vectorized(
             block,
             width=self.width,
@@ -1606,8 +1815,14 @@ class MarkovKernels:
             bias=Operand(bias.data_ptr(), bias.stride()),
             cache=Operand(cache.data_ptr(), cache.stride()),
         )
+        cache_address = cache.data_ptr()
+        if chain is not None:
+            local = chain.cache.data_ptr()
+            assert local <= cache_address < local + chain.cache[0].nbytes
+            cache_address += chain.cache_multicast - local
         _launch_step(
             self._step(block, pdl, vector),
+            cache_address,
             base,
             bias,
             cache,
@@ -1622,25 +1837,14 @@ class MarkovKernels:
             tokens,
             self.w1,
             emb,
-            packets,
             self.width,
             vocab_offset,
             mult,
             inv_cap,
             cap,
+            chain,
+            token,
         )
-
-    def pick(
-        self,
-        packets: torch.Tensor,
-        rows: int,
-        tokens: torch.Tensor,
-        step: int,
-        emb: torch.Tensor,
-    ) -> None:
-        """`markov_pick` over this loop's w1, `emb` a row view of
-        `embeds`."""
-        _launch_pick(self._pick, packets, rows, tokens, step, self.w1, emb)
 
 
 def anchor_embed(
@@ -1649,140 +1853,34 @@ def anchor_embed(
     w1: torch.Tensor,
     emb: torch.Tensor,
     arrivals: torch.Tensor,
+    tokens: torch.Tensor | None = None,
 ) -> None:
     """`emb[r] = w1[input_ids[anchor_idx[r]]]` and `arrivals[r] = 0` for
     the `arrivals.numel()` rows (int32 ids, int64 anchors, rows of `emb`
-    contiguous)."""
+    contiguous), and with `tokens` (int64, contiguous) `tokens[r] =
+    input_ids[anchor_idx[r]]`."""
     assert input_ids.dtype == torch.int32 and anchor_idx.dtype == torch.int64
+    assert tokens is None or (tokens.dtype == torch.int64 and tokens.is_contiguous())
     row_bytes, chunk = _row_copy(w1, emb, THREADS)
-    compile_anchor(row_bytes=row_bytes, chunk=chunk, w1_rows=w1.shape[0])(
+    compile_anchor(
+        row_bytes=row_bytes,
+        chunk=chunk,
+        w1_rows=w1.shape[0],
+        store_token=tokens is not None,
+    )(
         Int64(input_ids.data_ptr()),
         Int64(anchor_idx.data_ptr()),
         Int64(w1.data_ptr()),
         Int64(emb.data_ptr()),
         Int64(arrivals.data_ptr()),
+        Int64(0 if tokens is None else tokens.data_ptr()),
         Int32(arrivals.numel()),
         current_cu_stream(),
     )
 
 
-def markov_step(
-    base: torch.Tensor,
-    bias: torch.Tensor,
-    cache: torch.Tensor,
-    col: int,
-    idx_map: torch.Tensor,
-    pos: torch.Tensor,
-    seeds: torch.Tensor,
-    temperature: torch.Tensor,
-    block_argmax: torch.Tensor,
-    block_max: torch.Tensor,
-    arrivals: torch.Tensor,
-    tokens: torch.Tensor,
-    w1: torch.Tensor,
-    emb: torch.Tensor,
-    packets: torch.Tensor,
-    width: int,
-    vocab_offset: int,
-    mult: float,
-    inv_cap: float,
-    cap: float,
-    *,
-    has_cap: bool,
-    sharded: bool,
-    block: int,
-    pdl: bool,
-) -> None:
-    """One step over `width` vocab entries from `vocab_offset` for the
-    `base.shape[0]` rows: `base` and `bias` BF16 rows, `cache` the
-    draft-logits cache `[req, step, vocab]` or, sharded, `[row, step,
-    width]`, `idx_map` and `pos` the step's int64 columns,
-    `block_argmax` int64 and `block_max` FP32 with `rows * blocks`
-    elements, `packets` int32 `[rows, 4]`, `w1` and `emb` BF16."""
-    for tensor, dtype in (
-        (idx_map, torch.int64),
-        (pos, torch.int64),
-        (seeds, torch.int64),
-        (temperature, torch.float32),
-        (block_argmax, torch.int64),
-        (block_max, torch.float32),
-        (arrivals, torch.int32),
-        (tokens, torch.int64),
-        (w1, torch.bfloat16),
-        (emb, torch.bfloat16),
-        (packets, torch.int32),
-    ):
-        assert tensor.dtype == dtype, (tensor.dtype, dtype)
-    vector = vectorized(
-        block,
-        width=width,
-        col=col,
-        base=Operand.of(base),
-        bias=Operand.of(bias),
-        cache=Operand.of(cache),
-    )
-    blocks = -(-width // block)
-    row_bytes, chunk = _row_copy(w1, emb, WARP * finish_warps(blocks))
-    kernel = compile_step(
-        block=block,
-        blocks=blocks,
-        vector=vector,
-        has_cap=has_cap,
-        sharded=sharded,
-        pdl=pdl,
-        row_bytes=row_bytes,
-        chunk=chunk,
-        w1_rows=w1.shape[0],
-    )
-    _launch_step(
-        kernel,
-        base,
-        bias,
-        cache,
-        col,
-        idx_map,
-        pos,
-        seeds,
-        temperature,
-        block_argmax,
-        block_max,
-        arrivals,
-        tokens,
-        w1,
-        emb,
-        packets,
-        width,
-        vocab_offset,
-        mult,
-        inv_cap,
-        cap,
-    )
-
-
-def markov_pick(
-    packets: torch.Tensor,
-    rows: int,
-    tokens: torch.Tensor,
-    step: int,
-    w1: torch.Tensor,
-    emb: torch.Tensor,
-    *,
-    tp: int,
-    pdl: bool,
-) -> None:
-    """`tokens[r, step]` and `emb[r]` (its w1 row) of the winner over the
-    gathered int32 `[tp, rows, 4]` packets."""
-    assert packets.dtype == torch.int32 and tokens.dtype == torch.int64
-    row_bytes, chunk = _row_copy(w1, emb, PICK_THREADS)
-    kernel = compile_pick(
-        tp=tp, pdl=pdl, row_bytes=row_bytes, chunk=chunk, w1_rows=w1.shape[0]
-    )
-    _launch_pick(kernel, packets, rows, tokens, step, w1, emb)
-
-
 def cache_fill(
-    gathered: torch.Tensor,
-    src_s0: int,
+    chain: PacketMailbox,
     cache: torch.Tensor,
     idx_map: torch.Tensor,
     rows: int,
@@ -1790,11 +1888,17 @@ def cache_fill(
     shard: int,
     vocab: int,
 ) -> None:
-    """Scatter the gathered `[tp, rows, steps, shard]` BF16 draft logits
-    (rank stride `src_s0`) into the full-vocab cache rows `idx_map`
-    names (int64, one per row and step; negative: skipped)."""
+    """Scatter the `[tp, rows, steps, shard]` BF16 draft logits that a
+    call's chained steps stored in `chain`'s cache into the full-vocab cache
+    rows `idx_map` names (int64, one per row and step; negative: skipped).
+    The call must have run exactly `chain.steps` steps: only the last one
+    advances the rows' sequence numbers, which pick the plane read here."""
+    if steps != chain.steps:
+        raise ValueError(f"a chained call runs {chain.steps} steps, not {steps}")
+    gathered = chain.cache[0]
     assert gathered.dtype == cache.dtype == torch.bfloat16
     assert idx_map.dtype == torch.int64
+    src_s0 = chain.cache.shape[2]
     vector = fill_vectorized(
         gathered=gathered.data_ptr(),
         src_s0=src_s0,
@@ -1809,6 +1913,8 @@ def cache_fill(
         Int64(cache.stride(0)),
         Int64(cache.stride(1)),
         Int64(idx_map.data_ptr()),
+        Int64(chain.seqs.data_ptr()),
+        Int64(gathered.nbytes),
         Int32(steps),
         Int32(shard),
         Int32(vocab),

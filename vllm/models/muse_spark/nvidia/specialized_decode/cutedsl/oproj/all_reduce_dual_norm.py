@@ -35,6 +35,16 @@ fast math, does):
 The result is what the stock all-reduce followed by the stock dual norm
 returns, bit for bit.
 
+With `published` the consumer and the producer share a stage ticket (the
+upper 16 bits the generation, the lower the consumer CTAs that took it): the
+producer reads the generation after its own PDL wait and releases this grid
+only once every thread has it, every consumer CTA takes a ticket and the last
+advances the generation. The consumer then needs no PDL wait before its poll
+(everything older than the producer is complete when it launches, and it
+reads nothing else the producer writes) and saves the producer's grid
+completion, the flush of its remote stores; it waits at its end so that its
+own completion still implies the producer's.
+
 The mailbox needs NVLink multicast over the group (one NVLink domain);
 construction raises on every rank when it has no multicast mapping, and
 refuses the BF16 order for a group that spans nodes. Every rank must call with
@@ -48,7 +58,6 @@ from typing import NamedTuple
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
 import torch.distributed as dist
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32, const_expr
@@ -66,7 +75,12 @@ from ..common.dual_norm import (
     tree_row_sum,
 )
 from ..common.host import assert_not_capturing
-from ..common.mailbox import SPIN_TIMEOUT_NS, LamportMailbox, spin_deadline
+from ..common.mailbox import (
+    SPIN_TIMEOUT_NS,
+    LamportMailbox,
+    spin_deadline,
+    take_ticket_stage,
+)
 from ..common.policy import BF16_ADDS, FP32_ADDS, MAILBOX_CAPACITY, SUM_ORDERS
 from ..common.primitives import (
     ACTIVE_STAGE,
@@ -80,10 +94,8 @@ from ..common.primitives import (
     load_bf16x8_as_f32,
     load_f32x8,
     load_global_u32x4,
-    load_volatile_u32,
     make_fake_dynamic_compact_tensor,
     packed_u32x4_to_bf16x8,
-    round_bf16,
     store_f32x8,
     store_global_u32,
     store_global_u32x4,
@@ -144,7 +156,7 @@ def rank_order_sum(
             if const_expr(sum_order == BF16_ADDS):
                 if const_expr(ptx_round):
                     for i in cutlass.range_constexpr(VEC_BF16):
-                        total[i] = round_bf16(total[i])
+                        total[i] = Float32(BFloat16(total[i]))
                 else:
                     total.store(total.load().to(BFloat16).to(Float32))
     if cute.arch.grid_dim()[0] > Int32(one_shot_rows):
@@ -187,8 +199,8 @@ class _AllReduceDualNormKernel:
 
     Polls the `tp` slots of its 8 columns until none holds -0.0, advances the
     stage (token 0, fragment 0), sums the slots in rank order (`sum_order`),
-    re-arms them, then runs the dual norm. Dependents are
-    released after the last store, as the stock dual norm does.
+    re-arms them, then runs the dual norm. Dependents are released right
+    after the PDL wait, so their pre-wait prologue overlaps the poll.
     """
 
     def __init__(
@@ -200,7 +212,9 @@ class _AllReduceDualNormKernel:
         sum_order: str,
         router: bool,
         timeout_ns: int,
+        ticket: bool = False,
     ) -> None:
+        self.ticket = ticket
         self.tp = tp
         self.sum_order = sum_order
         self.one_shot_rows = stock_one_shot_rows(sum_order, tp, capacity)
@@ -240,7 +254,7 @@ class _AllReduceDualNormKernel:
             grid=(m, CLUSTER_N, 1),
             block=(THREADS, 1, 1),
             cluster=(1, CLUSTER_N, 1),
-            smem=SMEM_BYTES,
+            smem=SMEM_BYTES + (16 if self.ticket else 0),
             stream=stream,
             use_pdl=True,
         )
@@ -262,11 +276,13 @@ class _AllReduceDualNormKernel:
         constants = self.constants
         tidx, _, _ = cute.arch.thread_idx()
         token, cy, _ = cute.arch.block_idx()
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         mbar = smem.allocate_array(cutlass.Int64, num_elems=2)
         buf = smem.allocate_tensor(
             Float32, cute.make_layout((4, NSLOT * 2), stride=(1, 4)), byte_alignment=16
         )
+        if const_expr(self.ticket):
+            stage_slot = smem.allocate_array(Int32, 4)
         fragment = cy * THREADS + tidx
         column = Int64(fragment) * VEC_BF16
         row_element = Int64(token) * H + column
@@ -295,11 +311,29 @@ class _AllReduceDualNormKernel:
         warp = cute.arch.warp_idx()
         rank = cute.arch.block_idx_in_cluster()
 
-        # The stream was written by the previous boundary: load after the wait.
-        cute.arch.griddepcontrol_wait()
+        # The stream was written by the previous boundary: load after the wait
+        # (with the ticket, the producer released this grid after its own).
+        if const_expr(not self.ticket):
+            cute.arch.griddepcontrol_wait()
+        # Dependents order on their own wait; releasing them here lets the
+        # pooler GEMM load its weights during the mailbox poll.
+        cute.arch.griddepcontrol_launch_dependents()
         stream_values = load_f32x8(stream_in, row_element)
 
-        active_stage = load_volatile_u32(stage_state.iterator + ACTIVE_STAGE)
+        if const_expr(self.ticket):
+            if tidx == 0:
+                taken = take_ticket_stage(
+                    stage_state.iterator,
+                    Uint32(cute.arch.grid_dim()[0]) * Uint32(CLUSTER_N),
+                    LAMPORT_GENERATIONS,
+                )
+                cute.arch.store(stage_slot.llvm_ptr, Int32(taken))
+            cute.arch.barrier()
+            active_stage = Uint32(cute.arch.load(stage_slot.llvm_ptr, Int32))
+        else:
+            active_stage = cute.arch.load(
+                stage_state.iterator + ACTIVE_STAGE, Uint32, sem="relaxed", scope="sys"
+            )
         lane_packed = cute.make_rmem_tensor(cute.make_layout((self.tp, 4)), Uint32)
         lane_packed.fill(Uint32(0))
         deadline = Int64(0)
@@ -324,7 +358,7 @@ class _AllReduceDualNormKernel:
                     lane_packed[r, w] = packed[w]
             if dirty:
                 deadline = spin_deadline(deadline, self.timeout_ns)
-        if token == 0 and fragment == 0:
+        if token == 0 and fragment == 0 and const_expr(not self.ticket):
             store_global_u32(
                 stage_state.iterator + NEXT_STAGE,
                 (active_stage + Uint32(1)) % Uint32(LAMPORT_GENERATIONS),
@@ -354,9 +388,6 @@ class _AllReduceDualNormKernel:
             constants.next_eps,
             tree_row_sum(buf, mbar, tidx, lane, warp, rank),
         )
-        # No CTA may exit while a peer still reads its shared memory.
-        cute.arch.cluster_arrive()
-        cute.arch.cluster_wait()
         store_f32x8(stream_out, row_element, res)
         store_global_u32x4(
             Int64((out.iterator + row_element).toint()),
@@ -364,7 +395,8 @@ class _AllReduceDualNormKernel:
         )
         if const_expr(self.router):
             store_f32x8(router_out, row_element, result)
-        cute.arch.griddepcontrol_launch_dependents()
+        if const_expr(self.ticket):
+            cute.arch.griddepcontrol_wait()
 
 
 def compile_consumer(
@@ -376,9 +408,11 @@ def compile_consumer(
     sum_order: str,
     router: bool,
     timeout_ns: int = SPIN_TIMEOUT_NS,
+    ticket: bool = False,
 ):
     """cute.compile one consumer; the row count is a runtime argument
-    (1 <= m <= capacity). Call before CUDA graph capture."""
+    (1 <= m <= capacity). Call before CUDA graph capture. `ticket`: the stage
+    is the ticket word shared with a zero-copy producer (Int32 [1])."""
     assert_not_capturing("the all-reduce dual-norm consumer")
     weight = make_fake_compact_tensor(BFloat16, (H,), assumed_align=16)
     gate = make_fake_compact_tensor(Float32, (H,), assumed_align=32)
@@ -392,6 +426,7 @@ def compile_consumer(
             sum_order=sum_order,
             router=router,
             timeout_ns=timeout_ns,
+            ticket=ticket,
         ),
         make_fake_compact_tensor(BFloat16, (mailbox_numel,), assumed_align=16),
         rows_f32,
@@ -402,7 +437,7 @@ def compile_consumer(
         rows_f32,
         rows_bf16,
         rows_f32,
-        make_fake_compact_tensor(Int32, (2,), assumed_align=4),
+        make_fake_compact_tensor(Int32, (1 if ticket else 2,), assumed_align=4),
         Int32(capacity),
         current_cu_stream(),
     )
@@ -459,12 +494,19 @@ class AllReduceDualNorm:
             group, cpu_group, sum_order=sum_order, device=device, capacity=capacity
         )
         self.tp, self.rank = dist.get_world_size(group), dist.get_rank(group)
+        # The stage of the published boundaries, shared with their producer.
+        self.ticket = torch.zeros(1, dtype=torch.int32, device=device)
+        self.ticket_view = to_cute(self.ticket, 4)
         self.capacity = capacity
         self.sum_order = sum_order
         self.timeout_ns = timeout_ns
         # The shared-only publisher, compiled by the first bind that needs it.
         self.publisher: Callable[..., None] | None = None
-        self._consumers: dict[tuple[DualNormConstants, bool], Callable[..., None]] = {}
+        self._consumers: dict[
+            tuple[DualNormConstants, bool, bool], Callable[..., None]
+        ] = {}
+        # Published and shared-publisher boundaries keep different stages.
+        self._published: bool | None = None
 
     def bind(
         self,
@@ -475,12 +517,16 @@ class AllReduceDualNorm:
     ) -> "AllReduceDualNormBoundary":
         """One boundary's op, its consumer compiled once per constant set.
         `published`: the branch reaches the mailbox from its producer (the
-        o_proj GEMM's zero-copy epilogue), so the op runs the consumer only;
-        otherwise the publisher is compiled here (before capture) if it is not
-        yet."""
+        o_proj GEMM's zero-copy epilogue, staged by `ticket`), so the op runs
+        the consumer only; otherwise the publisher is compiled here (before
+        capture) if it is not yet. Every boundary of one mailbox is bound
+        alike."""
+        if self._published is not None and self._published != published:
+            raise ValueError("the boundaries of one mailbox are all published or none")
+        self._published = published
         if not published and self.publisher is None:
             self.publisher = self.mailbox.compile_publish()
-        key = (constants, router)
+        key = (constants, router, published)
         if key not in self._consumers:
             self._consumers[key] = compile_consumer(
                 tp=self.tp,
@@ -490,6 +536,7 @@ class AllReduceDualNorm:
                 sum_order=self.sum_order,
                 router=router,
                 timeout_ns=self.timeout_ns,
+                ticket=published,
             )
         return AllReduceDualNormBoundary(self, self._consumers[key], router, published)
 
@@ -544,7 +591,7 @@ class AllReduceDualNormBoundary(NamedTuple):
                 if router_input is not None
                 else stream_rows
             ),
-            mailbox.stage_view,
+            owner.ticket_view if self.published else mailbox.stage_view,
             Int32(m),
             current_cu_stream(),
         )

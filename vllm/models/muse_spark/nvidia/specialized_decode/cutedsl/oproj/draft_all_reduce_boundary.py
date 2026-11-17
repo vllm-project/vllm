@@ -42,7 +42,6 @@ from dataclasses import dataclass
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32, const_expr
 from cutlass.cute.runtime import make_fake_compact_tensor
@@ -60,7 +59,6 @@ from ..common.mailbox import SPIN_TIMEOUT_NS, spin_deadline
 from ..common.policy import SUM_ORDERS
 from ..common.primitives import (
     VEC_BF16,
-    atomic_add1_acq_rel_u32,
     current_cu_stream,
     fragment_has_negative_zero,
     load_bf16x8_as_f32,
@@ -68,7 +66,6 @@ from ..common.primitives import (
     load_global_u32x4,
     make_fake_dynamic_compact_tensor,
     regs,
-    round_bf16,
     sanitize_negative_zero_u32x4,
     stmc_bf16x8,
     store_f32x8,
@@ -296,7 +293,7 @@ class _DraftAllReduceBoundaryKernel:
         token, cy, _ = cute.arch.block_idx()
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         mbar = smem.allocate_array(cutlass.Int64, num_elems=2)
         stage_slot = smem.allocate_array(Int32, 4)
         # Two calls of _row_sum: 2 * THREADS pairs and CLUSTER_N sums each.
@@ -321,7 +318,11 @@ class _DraftAllReduceBoundaryKernel:
         cute.arch.griddepcontrol_launch_dependents()
         if tidx == 0:
             # Every CTA takes a ticket; the last of the call advances the stage.
-            word = atomic_add1_acq_rel_u32(ticket.iterator)
+            # `take_ticket_stage` inline: reading the grid size after the
+            # atomic, as here, keeps the kernel's SASS.
+            word = cute.arch.atomic_add(
+                ticket.iterator, Uint32(1), sem="acq_rel", scope="gpu"
+            )
             taken = word >> Uint32(16)
             ctas = Uint32(cute.arch.grid_dim()[0]) * Uint32(CLUSTER_N)
             if (word & Uint32(0xFFFF)) == ctas - Uint32(1):
@@ -396,7 +397,7 @@ class _DraftAllReduceBoundaryKernel:
         total = rank_order_sum(
             lane_packed, self.tp, self.sum_order, self.one_shot_rows, True
         )
-        x = [round_bf16(total[i]) for i in range(VEC_BF16)]
+        x = [Float32(BFloat16(total[i])) for i in range(VEC_BF16)]
 
         # The boundary on the sum, as the draft boundary's.
         store = None

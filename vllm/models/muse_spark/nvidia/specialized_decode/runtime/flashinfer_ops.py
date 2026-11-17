@@ -19,7 +19,8 @@ package names the library:
 - with expert TP (`build(..., use_expert_tp=True)`), the NVFP4 layers' routed
   op runs on TP experts (all experts at 1/tp of the intermediate width,
   resharded by `expert_tp`) at one pinned tactic (`EXPERT_TP_TACTICS`); their
-  GEMM2 rows are K-partials, which `TpTail` sums across ranks.
+  GEMM2 rows are K-partials, which `TpTail` sums across ranks. The BF16 layers
+  do the same (at the op's default tactic).
 
 The library is imported lazily inside the expert calls, as the stock experts do,
 so the package imports without it.
@@ -243,6 +244,23 @@ def tp_arguments(args: dict[str, Any], tp: expert_tp.TpExperts) -> dict[str, Any
         "output1_scale_scalar": tp.g1_scale_c,
         "output1_scale_gate_scalar": tp.g1_alphas,
         "output2_scale_scalar": tp.g2_alphas,
+        "intermediate_size": tp.intermediate,
+        "local_expert_offset": 0,
+        "local_num_experts": tp.num_experts,
+        "tune_max_num_tokens": ROUTING_MAX_TOKENS,
+    }
+
+
+def bf16_tp_arguments(
+    args: dict[str, Any], tp: expert_tp.TpBf16Experts
+) -> dict[str, Any]:
+    """`args` (`bf16_arguments`) on the layer's BF16 TP experts: their weights,
+    every expert local, the intermediate slice, and `tune_max_num_tokens` at
+    ROUTING_MAX_TOKENS. The routing inside the op is the stock layer's."""
+    return {
+        **args,
+        "gemm1_weights": tp.w13,
+        "gemm2_weights": tp.w2,
         "intermediate_size": tp.intermediate,
         "local_expert_offset": 0,
         "local_num_experts": tp.num_experts,
@@ -640,8 +658,8 @@ class FlashInferOps:
 
         With `use_expert_tp` (collective over the TP group, which must equal the
         stock layers' EP group), every NVFP4 layer runs on TP experts resharded
-        from the stock ones (finalized by the package's TP tail); BF16 layers
-        stay EP (stock weights, the EP tail)."""
+        from the stock ones (finalized by the package's TP tail), and so does
+        every BF16 layer."""
         from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
             TrtLlmBf16ExpertsMonolithic,
         )
@@ -691,16 +709,20 @@ class FlashInferOps:
 
     # ------------------------------------------------------------- expert TP
     def shard_experts(self, tp, layers: tuple[nn.Module, ...]) -> None:
-        """Replaces every NVFP4 layer's arguments by its TP experts': reshard
-        (collective) and a probe against the stock EP op. Collective over
+        """Replaces every NVFP4 and BF16 layer's arguments by its TP experts':
+        reshard (collective) and a probe against the stock EP op. Collective over
         `tp`: the placement check is agreed across the ranks before any
         rank raises, so none is left waiting in the reshard."""
         if not self.nvfp4:
             raise RuntimeError("Expert TP needs NVFP4 layers.")
         group = tp.device_group
+        # A layer the stock experts quantize to NVFP4 (`quantize_bf16_experts`)
+        # is an NVFP4 layer here.
         nvfp4_layers = [layer for layer in layers if layer.layer_idx in self.nvfp4]
+        bf16_layers = [layer for layer in layers if layer.layer_idx in self.bf16]
         ep_ranks = {
-            stock_experts(layer.feed_forward)[0].ep_rank for layer in nvfp4_layers
+            stock_experts(layer.feed_forward)[0].ep_rank
+            for layer in nvfp4_layers + bf16_layers
         }
         wrong = sorted(ep_ranks - {tp.rank_in_group})
         reason = (
@@ -729,12 +751,30 @@ class FlashInferOps:
                 for t in shards
                 if isinstance(t, torch.Tensor)
             )
+        for layer in bf16_layers:
+            index = layer.layer_idx
+            experts, routed = stock_experts(layer.feed_forward)
+            ep_args = self.bf16[index]
+            bf16_shards = expert_tp.reshard_bf16(
+                ep_args["gemm1_weights"],
+                ep_args["gemm2_weights"],
+                group,
+                routed.global_num_experts,
+                ep_args["intermediate_size"],
+            )
+            tp_args = bf16_tp_arguments(ep_args, bf16_shards)
+            self.probe_rel_l2[index] = self.probe_bf16(index, tp_args, group)
+            self.bf16[index] = tp_args
+            self.tp_experts.add(index)
+            self.tp_bytes += sum(t.numel() * t.element_size() for t in bf16_shards[:2])
 
     def log_expert_tp(self, tp: int, seconds: float) -> None:
         """Logs the expert-TP build: what was resharded, its memory, the build
         probes and the tactic the decode batch takes (None: no body prepared
         for it, so the public op runs)."""
-        args = self.nvfp4[min(self.tp_experts)]
+        nvfp4_tp = sorted(self.tp_experts & self.nvfp4.keys())
+        bf16_tp = self.tp_experts & self.bf16.keys()
+        args = self.nvfp4[nvfp4_tp[0]]
         num_local = args["local_num_experts"]
         tactic = tactic_key(self.tp_tactic or -1, BATCHES[0], num_local)
         probes = self.probe_rel_l2.values()
@@ -745,12 +785,13 @@ class FlashInferOps:
             f" of {len(self.tp_preferred)}, on every rank"
         )
         logger.info(
-            "Muse Spark expert TP built: TP%d, %d NVFP4 layers (%d BF16 layers "
-            "EP), %d experts at intermediate %d per rank, +%.2f GiB per rank, "
-            "probe rel L2 %.3g..%.3g, tactic %s at %d tokens (%s), %.1f s",
+            "Muse Spark expert TP built: TP%d, %d NVFP4 layers, %d BF16 layers, "
+            "%d experts at intermediate %d per rank, "
+            "+%.2f GiB per rank, probe rel L2 %.3g..%.3g, tactic %s at %d tokens "
+            "(%s), %.1f s",
             tp,
-            len(self.tp_experts),
-            len(self.bf16),
+            len(nvfp4_tp),
+            len(bf16_tp),
             num_local,
             args["intermediate_size"],
             self.tp_bytes / 2**30,
@@ -802,6 +843,26 @@ class FlashInferOps:
         for args in (self.nvfp4[layer], tp_args):
             out = self.public_routed_experts(args, inputs, topk)
             outputs.append((out.gemm2_permuted, out.expanded_idx_to_permuted_idx))
+        return self.check_probe(layer, outputs, group)
+
+    def probe_bf16(self, layer: int, tp_args: dict[str, Any], group) -> float:
+        """`probe` for a BF16 layer: seeded unit-RMS rows and router logits at
+        the decode batch (the op routes), the same on every rank."""
+        b = BATCHES[0]
+        device = tp_args["gemm1_weights"].device
+        g = torch.Generator(device=device).manual_seed(20261023)
+        x = torch.randn((b, POOLED), generator=g, device=device).to(torch.bfloat16)
+        logits = torch.randn((b, NUM_EXPERTS), generator=g, device=device)
+        outputs = []
+        for args in (self.bf16[layer], tp_args):
+            out = self.bf16_op(args, x, logits)
+            outputs.append((out.gemm2_permuted, out.expanded_idx_to_permuted_idx))
+        return self.check_probe(layer, outputs, group)
+
+    @staticmethod
+    def check_probe(layer: int, outputs: list, group) -> float:
+        """The probe's rel L2 of `outputs` (EP, TP) (collective), raising
+        above EXPERT_TP_PROBE_MAX on every rank."""
         rel = expert_tp.probe_rel_l2(outputs[0], outputs[1], group)
         if not rel < EXPERT_TP_PROBE_MAX:
             ep_rows, ep_local = expert_tp.route_rows(*outputs[0])
@@ -1089,10 +1150,17 @@ class FlashInferOps:
         """The normed rows (bf16 [b, POOLED]) + the router logits (fp32
         [b, NUM_EXPERTS]) -> the unfinalized expert output, on a BF16 layer; the
         op routes, so its expert weights are bf16."""
+        return self.bf16_op(self.bf16[layer], x, router_logits)
+
+    @staticmethod
+    def bf16_op(
+        args: dict[str, Any], x: torch.Tensor, router_logits: torch.Tensor
+    ) -> UnfinalizedMoEOutput:
+        """The BF16 experts op on `args`."""
         import flashinfer
 
         output = flashinfer.fused_moe.trtllm_bf16_moe(
-            routing_logits=router_logits, hidden_states=x, **self.bf16[layer]
+            routing_logits=router_logits, hidden_states=x, **args
         )
         return convert_flashinfer_moe_output(
             output, do_finalize=False, num_tokens=x.shape[0], top_k=TOP_K

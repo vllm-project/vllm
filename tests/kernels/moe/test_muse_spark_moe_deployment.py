@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Deployment policy for the Muse Spark post-expert-norm MoE (CPU only)."""
+"""Deployment policy for the Muse Spark post-expert-norm MoE (CPU only), and
+the BF16 expert-TP reshard of the converted weights (CUDA)."""
 
 import pytest
 import torch
@@ -16,6 +17,7 @@ from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     needs_pre_norm_all_reduce,
     validate_deployment,
 )
+from vllm.platforms import current_platform
 
 
 def _moe_config(
@@ -126,3 +128,43 @@ def test_hopper_route_major_deployments(kwargs, match):
         return
     with pytest.raises(NotImplementedError, match=match):
         _validate_route_major_deployment(_moe_config(**kwargs))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="the stock conversion runs on CUDA"
+)
+@torch.inference_mode()
+def test_bf16_expert_tp_slice_is_the_converted_slice():
+    """Rank `r`'s rows `bf16_w13_rows(...)[r]` of the converted w13 and its
+    K-block range of the converted w2 (`reshard_bf16`) are, bit for bit, the
+    stock block-major-K conversion of its TP8 intermediate slice."""
+    pytest.importorskip("flashinfer")
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout as convert,
+    )
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime import expert_tp
+
+    tp, hidden, inter, experts, bk = 8, 256, 2048, 3, expert_tp.BLOCK_K
+    s = inter // tp
+    torch.manual_seed(0)
+    w13 = torch.randn(experts, 2 * inter, hidden, dtype=torch.bfloat16, device="cuda")
+    w2 = torch.randn(experts, hidden, inter, dtype=torch.bfloat16, device="cuda")
+    raw13, raw2 = w13.clone(), w2.clone()
+    convert({}, w13, w2, is_gated_act_gemm=True)
+    full13 = w13.view(experts, hidden // bk, 2 * inter, bk)
+    full2 = w2.view(experts, inter // bk, hidden, bk)
+    rows = expert_tp.bf16_w13_rows(inter, tp, "cuda").cuda()
+    for r in range(tp):
+        gate_up = raw13.view(experts, 2, inter, hidden)[:, :, r * s : (r + 1) * s]
+        slice13 = gate_up.reshape(experts, 2 * s, hidden).contiguous()
+        slice2 = raw2[:, :, r * s : (r + 1) * s].contiguous()
+        convert({}, slice13, slice2, is_gated_act_gemm=True)
+        assert torch.equal(
+            full13.index_select(2, rows[r]),
+            slice13.view(experts, hidden // bk, 2 * s, bk),
+        )
+        blocks = s // bk
+        assert torch.equal(
+            full2[:, r * blocks : (r + 1) * blocks],
+            slice2.view(experts, blocks, hidden, bk),
+        )

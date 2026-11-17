@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark specialized decode: a decode executor over the stock backbone, enabled
-by `additional_config={"decode_backend": "latency_specialized"}`."""
+by `--monokernel`, the same switch as
+`additional_config={"decode_backend": "latency_specialized"}`."""
 
-from dataclasses import dataclass
+import difflib
+import functools
+import json
+from dataclasses import dataclass, fields
+from typing import NamedTuple
 
 # The one text config the providers are built for.
 MUSE_SPARK_CONFIG = {
@@ -28,20 +33,118 @@ class DecodeConfig:
     capture_sizes: tuple[int, ...]
 
 
-def decode_backend(vllm_config) -> str:
-    """The requested `decode_backend` (`additional_config`), "auto" if unset."""
+DECODE_BACKENDS = ("auto", "latency_specialized")
+
+
+class DraftMlpNvfp4(NamedTuple):
+    """`draft_mlp_nvfp4`: `mode` "scales" or "calibrate" at the path `prefix`."""
+
+    mode: str
+    prefix: str
+
+
+@dataclass(frozen=True, slots=True)
+class MuseOptions:
+    """The Muse Spark entries of `additional_config`, parsed and validated once
+    (`muse_options`)."""
+
+    decode_backend: str = "auto"
+    markov_bias_table: bool = False
+    nvfp4_lm_head: bool = False
+    quantize_bf16_experts: bool = False
+    draft_mlp_nvfp4: DraftMlpNvfp4 | None = None
+
+    @property
+    def specialized(self) -> bool:
+        return self.decode_backend == "latency_specialized"
+
+
+OPTION_NAMES = tuple(f.name for f in fields(MuseOptions))
+
+
+def muse_options(vllm_config) -> MuseOptions:
+    """The `MuseOptions` of `vllm_config.additional_config`, where
+    `kernel_config.monokernel` means `decode_backend="latency_specialized"`
+    (`VllmConfig` makes them one switch).
+
+    Raises:
+        ValueError: on an invalid value, an option set without the specialized
+            decode, or a key that misspells an option (other components' keys
+            pass through).
+
+    """
     extra = vllm_config.additional_config
-    return extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
+    if not isinstance(extra, dict):
+        extra = {}
+    kernel_config = getattr(vllm_config, "kernel_config", None)
+    if getattr(kernel_config, "monokernel", False):
+        extra = {"decode_backend": "latency_specialized", **extra}
+    return _parse_options(json.dumps(extra, sort_keys=True, default=repr))
 
 
-def specialized_decode_config(vllm_config) -> DecodeConfig | None:
+@functools.cache
+def _parse_options(extra_json: str) -> MuseOptions:
+    extra = json.loads(extra_json)
+    misspelled = {
+        key: close[0]
+        for key in extra
+        if key not in OPTION_NAMES
+        and (close := difflib.get_close_matches(key, OPTION_NAMES, 1, 0.8))
+        and abs(len(close[0]) - len(key)) <= 3
+    }
+    if misspelled:
+        raise ValueError(
+            "Unknown Muse Spark additional_config keys: "
+            + ", ".join(f"{k!r} (did you mean {v!r}?)" for k, v in misspelled.items())
+        )
+    backend = extra.get("decode_backend", "auto")
+    if backend not in DECODE_BACKENDS:
+        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    for key in ("markov_bias_table", "nvfp4_lm_head"):
+        if not isinstance(extra.get(key, False), bool):
+            raise ValueError(f"{key} must be a boolean, got {extra[key]!r}")
+    quantize = extra.get("quantize_bf16_experts")
+    if quantize not in (None, "nvfp4"):
+        raise ValueError(
+            'Supported quantize_bf16_experts values are "nvfp4" (or unset)'
+        )
+    options = MuseOptions(
+        decode_backend=backend,
+        markov_bias_table=extra.get("markov_bias_table", False),
+        nvfp4_lm_head=extra.get("nvfp4_lm_head", False),
+        quantize_bf16_experts=quantize is not None,
+        draft_mlp_nvfp4=_draft_mlp_nvfp4(extra.get("draft_mlp_nvfp4")),
+    )
+    if not options.specialized:
+        for name in OPTION_NAMES:
+            if name != "decode_backend" and getattr(options, name):
+                raise ValueError(
+                    f'{name} needs --monokernel (decode_backend="latency_specialized")'
+                )
+    return options
+
+
+def _draft_mlp_nvfp4(value) -> DraftMlpNvfp4 | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, dict)
+        and set(value) in ({"scales"}, {"calibrate"})
+        and all(isinstance(v, str) and v.strip() for v in value.values())
+    ):
+        ((mode, prefix),) = value.items()
+        return DraftMlpNvfp4(mode, prefix)
+    raise ValueError(
+        'draft_mlp_nvfp4 must be {"scales": PREFIX} or {"calibrate": PREFIX} with a '
+        "nonempty path"
+    )
+
+
+def specialized_decode_config(vllm_config, options: MuseOptions) -> DecodeConfig | None:
     """The deployment's specialized decode settings, None for the stock decode.
     Raises when the specialized decode is requested for an unsupported deployment."""
-    backend = decode_backend(vllm_config)
-    if backend == "auto":
+    if not options.specialized:
         return None
-    if backend != "latency_specialized":
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
     reason = unsupported(vllm_config)
     if reason is not None:
         raise ValueError(f"Muse Spark specialized decode does not support {reason}")

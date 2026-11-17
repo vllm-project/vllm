@@ -27,19 +27,29 @@ past what these fields take (`metadata_size` leaves a guard element).
 
 Launch: one CTA of 256 threads, one warp per token row, with programmatic
 dependent launch: the bias (a weight) is read before `griddepcontrol.wait`,
-the logits after it; the dependents launch at the grid's end. Without metadata
-the warps past the last token row exit at once.
+the logits after it. With metadata, dependents can launch after that wait but
+must wait for routing writes before reading them. Without metadata they launch
+at the grid's end and unused warps exit at once. The rows' scores (FP32 [8, 256],
+8 KB) are staged in shared memory.
 
-Selection: lane l holds experts 8l .. 8l + 7 and sorts them once by a key that
-orders as score + bias (NaN is outside the domain; -0.0 keys as +0.0). Each of
-the 8 rounds takes the warp maximum of the lanes' head keys and the lowest lane
-holding it, matching the Triton argmax (the lowest expert among equal values);
-the winner pops its head.
+Selection: lane l holds experts 8l .. 8l + 7. Each expert's score + bias becomes
+a 32-bit word, the order-preserving key of the value with its low 3 bits
+replaced by 7 minus the expert's index in the lane; a lane sorts its 8 words
+once. Each of the 8 rounds takes the warp maximum of the lanes' head words, so
+the winning lane (and its expert) is known from the word, and the winner pops
+its head. Replacing 3 key bits by the index orders correctly unless two words
+the selection compares fall in the same bucket of 8 key values, which includes
+every exact tie. The rounds detect that (a round's winner in the bucket of the
+previous winner's, or of a head left at the last round) and the warp then
+selects again with the exact 64-bit words (key, 7 - index) and takes the
+lowest expert among equal values, as the Triton argmax does; NaN is outside
+the domain, -0.0 keys as +0.0. The scores of the picked experts are read back
+from shared memory by index.
 
 Arithmetic: every float operation is the PTX instruction Triton emits for the
 same expression of `_routing_kernel` (`primitives.sigmoid_f32`,
-`add_rn`, `mul_rn`, `div_full_f32`), as inline assembly, so the compiler
-can neither contract nor reorder them.
+`add_rn`, `mul_rn` as inline assembly, so the compiler can neither contract
+nor reorder them, and `div.full.f32`).
 """
 
 import functools
@@ -93,6 +103,11 @@ assert ROUTES <= THREADS  # a thread per route
 assert META_PERMUTED_TO_TOKEN % 4 == 0
 
 
+# With `splits` > 1 the logits are FP32 K-split partials [splits, 8, 256],
+# one split `SPLIT_BYTES` after the other (`router_mma`'s front).
+SPLIT_BYTES = MAX_TOKENS * EXPERTS * 4
+
+
 def metadata_size(tile_n: int) -> int:
     """int32 elements of the metadata for GEMM tile `tile_n`: the fields
     above and the permuted-to-token map (MAX_CTAS CTAs of tile_n rows), plus a
@@ -113,21 +128,44 @@ def _load_row(address: Int64) -> cute.Tensor:
     return row
 
 
+def _load_row_sum(address: Int64, splits: int) -> cute.Tensor:
+    """The sum, from 0.0 in split order, of `splits` K-split partial rows
+    `SPLIT_BYTES` apart from `address` (each as `_load_row`)."""
+    row = cute.make_rmem_tensor((EXPERTS_PER_LANE,), Float32)
+    for j in range(EXPERTS_PER_LANE):
+        row[j] = Float32(0.0)
+    for split in range(splits):
+        part = _load_row(address + split * SPLIT_BYTES)
+        for j in range(EXPERTS_PER_LANE):
+            row[j] = add_rn(row[j], part[j])
+    return row
+
+
 def _select(cond, if_value, else_value):
     return type(if_value)(cutlass.select_(cond, if_value, else_value))
 
 
-def _sort_word(value: Float32, j: int) -> Uint64:
-    """A word that orders as `value` (non-NaN), then the lower index `j`:
-    the order-preserving unsigned key of the value in bits 3..34, 7 - j in
-    bits 0..2. -0.0 takes the key of +0.0, as the two compare equal; the key of
-    any non-NaN value (-inf included) is above 0, the word of a popped slot.
-    Integer operations only, so subnormals keep their order."""
+def _order_key(value: Float32) -> Uint32:
+    """The order-preserving unsigned key of a non-NaN `value`. -0.0 takes the
+    key of +0.0, as the two compare equal; the key of any non-NaN value (-inf
+    included) is above 0. Integer operations only, so subnormals keep their
+    order."""
     bits = f32_bits(value)
     flipped = _select(bits < Int32(0), bits ^ Int32(0x7FFFFFFF), bits)
     key = _select((bits & Int32(0x7FFFFFFF)) == Int32(0), Int32(0), flipped)
-    unsigned = Uint32(key) ^ Uint32(0x80000000)
-    return (Uint64(unsigned) << Uint64(3)) | Uint64(7 - j)
+    return Uint32(key) ^ Uint32(0x80000000)
+
+
+def _sort_word(value: Float32, j: int) -> Uint64:
+    """A word that orders as `value` (non-NaN), then the lower index `j`:
+    `_order_key` of the value in bits 3..34, 7 - j in bits 0..2; above 0, the
+    word of a popped slot."""
+    return (Uint64(_order_key(value)) << Uint64(3)) | Uint64(7 - j)
+
+
+def _sort_word32(value: Float32, j: int) -> Uint32:
+    """The key of `_sort_word`, 32 bits, with 7 - `j` in the low 3 bits."""
+    return (_order_key(value) & Uint32(0xFFFFFFF8)) | Uint32(7 - j)
 
 
 def _compare_exchange(c: list, a: int, b: int) -> None:
@@ -144,12 +182,19 @@ _SORT8 = (
 
 
 class _RoutingKernel:
-    """The routing of up to 8 token rows; `metadata` and `renormalize`
-    are compile-time."""
+    """The routing of up to 8 token rows; `metadata`, `renormalize` and
+    `splits` (logits read as that many K-split partials) are compile-time."""
 
-    def __init__(self, metadata: bool, renormalize: bool) -> None:
+    def __init__(self, metadata: bool, renormalize: bool, splits: int = 1) -> None:
         self.metadata = metadata
         self.renormalize = renormalize
+        self.splits = splits
+
+    def load_logits(self, address: Int64) -> cute.Tensor:
+        """A lane's 8 logits at `address` (traced inline)."""
+        if self.splits == 1:
+            return _load_row(address)
+        return _load_row_sum(address, self.splits)
 
     @cute.jit
     def __call__(
@@ -190,8 +235,9 @@ class _RoutingKernel:
         # it before the PDL wait, the logits after it.
         bias_at = Int64((bias.iterator + lane * EXPERTS_PER_LANE).toint())
 
+        smem = cutlass.memory.SmemAllocator()
+        scores = smem.allocate_tensor(Float32, cute.make_layout(WARPS * EXPERTS), 16)
         if const_expr(self.metadata):
-            smem = cutlass.utils.SmemAllocator()
             # tokens[e]: bit t set when token t routes to local expert e;
             # cta_offset[e]: its first CTA; warp_ctas[w]: the CTAs of warp
             # w's experts; routes: the selected ids.
@@ -202,12 +248,14 @@ class _RoutingKernel:
             if tidx < num_local:
                 tokens[tidx] = Uint32(0)
             bias_row = _load_row(bias_at)
-            cute.arch.griddepcontrol_wait()
-            # tokens[] is zero before any warp sets a bit.
+            # tokens[] is zero before any warp sets a bit; the barrier is
+            # before the PDL wait, off the critical path.
             cute.arch.sync_threads()
+            cute.arch.griddepcontrol_wait()
+            cute.arch.griddepcontrol_launch_dependents()
             if warp < num_tokens:
                 picked_id = self.route_row(
-                    logits, bias_row, ids, weights, scale, warp, lane
+                    logits, bias_row, ids, weights, scale, warp, lane, scores
                 )
                 if lane < TOP_K:
                     routes[warp * TOP_K + lane] = picked_id
@@ -222,8 +270,9 @@ class _RoutingKernel:
             # The selections (tokens[], routes[]) are complete.
             cute.arch.sync_threads()
             self.write_expert_metadata(
-                meta, tokens, cta_offset, warp_ctas, num_local, tile, tidx, warp, lane
-            )
+                meta, tokens, cta_offset, warp_ctas, num_local, tile, tidx, warp,
+                lane,
+            )  # fmt: skip
             # cta_offset[] is complete.
             cute.arch.sync_threads()
             self.write_route_metadata(
@@ -236,10 +285,104 @@ class _RoutingKernel:
             if warp < num_tokens:
                 bias_row = _load_row(bias_at)
                 cute.arch.griddepcontrol_wait()
-                self.route_row(logits, bias_row, ids, weights, scale, warp, lane)
+                self.route_row(
+                    logits, bias_row, ids, weights, scale, warp, lane, scores
+                )
 
     @cute.jit
     def route_row(
+        self,
+        logits: cute.Tensor,
+        bias_row: cute.Tensor,
+        ids: cute.Tensor,
+        weights: cute.Tensor,
+        scale: Float32,
+        warp: Int32,
+        lane: Int32,
+        scores: cute.Tensor,
+    ) -> Int32:
+        """Warp `warp`: the top-8 of logits row `warp` into its ids and
+        weights rows; lanes 0..7 return the global id of pick `lane`. The rounds
+        of 32-bit words, then, if two compared words share a bucket, the exact
+        selection (`route_row_exact`) overwrites the rows."""
+        row = logits.iterator + (
+            Int64(warp) * logits.stride[0] + lane * EXPERTS_PER_LANE
+        )
+        g = self.load_logits(Int64(row.toint()))
+        s = [sigmoid_f32(g[j]) for j in range(EXPERTS_PER_LANE)]
+        base = warp * EXPERTS + lane * EXPERTS_PER_LANE
+        for j in cutlass.range_constexpr(EXPERTS_PER_LANE):
+            scores[base + j] = s[j]
+        cute.arch.sync_warp()
+        c = [
+            _sort_word32(add_rn(s[j], bias_row[j]), j) for j in range(EXPERTS_PER_LANE)
+        ]
+        for pair in cutlass.range_constexpr(len(_SORT8)):
+            _compare_exchange(c, *_SORT8[pair])
+
+        collide = Int32(0)
+        total = Float32(0.0)
+        mine = Float32(0.0)
+        mine_id = Int32(0)
+        previous = Uint32(0)
+        pops = Int32(0)
+        for r in cutlass.range_constexpr(TOP_K):
+            head = c[0]
+            top = cute.arch.warp_redux_sync(head, "umax")
+            bucket = top >> Uint32(3)
+            if const_expr(r > 0):
+                collide = collide | _select(bucket == previous, Int32(1), Int32(0))
+            previous = bucket
+            won = head == top
+            if const_expr(r == TOP_K - 1):
+                # Two heads, or a head and the winner's next word, in the
+                # bucket of the last pick.
+                same_head = Uint32(
+                    cute.arch.vote_ballot_sync((head >> Uint32(3)) == bucket)
+                )
+                same_next = Uint32(
+                    cute.arch.vote_ballot_sync((c[1] >> Uint32(3)) == bucket)
+                )
+                collide = (
+                    collide
+                    | _select(
+                        Int32(cute.arch.popc(same_head)) > Int32(1),
+                        Int32(1),
+                        Int32(0),
+                    )
+                    | _select(same_next != Uint32(0), Int32(1), Int32(0))
+                )
+            winner = Int32(
+                cute.arch.warp_redux_sync(Uint32(_select(won, lane, Int32(0))), "umax")
+            )
+            pops = pops + _select(won, Int32(1), Int32(0))
+            # The low 3 bits of the word are 7 - the winner's local index.
+            expert = winner * EXPERTS_PER_LANE + (Int32(7) - Int32(top & Uint32(7)))
+            pick = scores[warp * EXPERTS + expert]
+            total = add_rn(total, pick)
+            mine = _select(lane == Int32(r), pick, mine)
+            mine_id = _select(lane == Int32(r), expert, mine_id)
+            for j in cutlass.range_constexpr(EXPERTS_PER_LANE - 1):
+                c[j] = _select(won, c[j + 1], c[j])
+            c[EXPERTS_PER_LANE - 1] = _select(won, Uint32(0), c[EXPERTS_PER_LANE - 1])
+
+        # A round whose winning word is in two lanes pops both: more than 8.
+        pops_total = Int32(cute.arch.warp_redux_sync(Uint32(pops), "add"))
+        collide = collide | _select(pops_total != Int32(TOP_K), Int32(1), Int32(0))
+        inverse = scale
+        if const_expr(self.renormalize):
+            inverse = div_full_f32(scale, add_rn(total, Float32(_DIVISION_EPS_F32)))
+        if lane < TOP_K:
+            ids[warp, lane] = mine_id
+            weights[warp, lane] = mul_rn(mine, inverse)
+        if collide != Int32(0):
+            mine_id = self.route_row_exact(
+                logits, bias_row, ids, weights, scale, warp, lane
+            )
+        return mine_id
+
+    @cute.jit
+    def route_row_exact(
         self,
         logits: cute.Tensor,
         bias_row: cute.Tensor,
@@ -254,7 +397,7 @@ class _RoutingKernel:
         row = logits.iterator + (
             Int64(warp) * logits.stride[0] + lane * EXPERTS_PER_LANE
         )
-        g = _load_row(Int64(row.toint()))
+        g = self.load_logits(Int64(row.toint()))
         s = [sigmoid_f32(g[j]) for j in range(EXPERTS_PER_LANE)]
         c = [_sort_word(add_rn(s[j], bias_row[j]), j) for j in range(EXPERTS_PER_LANE)]
         # Each lane's 8 (key, local index) words sorted once, best first: a
@@ -360,7 +503,7 @@ class _RoutingKernel:
                 meta[META_PERMUTED_TO_TOKEN + padded] = Int32(-1)
             for padded in cutlass.range(body, tail, 4, unroll=4):
                 at = meta.iterator + (META_PERMUTED_TO_TOKEN + padded)
-                store_global_u32x4(Int64(at.toint()), [Uint32(0xFFFFFFFF)] * 4)
+                store_global_u32x4(Int64(at.toint()), cute.full(4, 0xFFFFFFFF, Uint32))
             for padded in cutlass.range(tail, end, 1, unroll=1):
                 meta[META_PERMUTED_TO_TOKEN + padded] = Int32(-1)
         if expert == 0:
@@ -393,7 +536,9 @@ class _RoutingKernel:
             meta[META_EXPANDED_TO_PERMUTED + route] = permuted
 
 
-def compile_routing(metadata: bool, renormalize: bool, options: str = ""):
+def compile_routing(
+    metadata: bool, renormalize: bool, options: str = "", splits: int = 1
+):
     """`cute.compile` the routing kernel of one variant, with these extra
     compile `options`. Call the result with the tensors of `route`
     (`meta` None without metadata), then scale, local offset, local count and
@@ -404,7 +549,7 @@ def compile_routing(metadata: bool, renormalize: bool, options: str = ""):
     if metadata:
         meta = make_fake_tensor(Int32, (cute.sym_int32(),), (1,), assumed_align=16)
     return cute.compile(
-        _RoutingKernel(metadata, renormalize),
+        _RoutingKernel(metadata, renormalize, splits),
         make_fake_tensor(
             Float32,
             (rows, EXPERTS),
@@ -425,17 +570,17 @@ def compile_routing(metadata: bool, renormalize: bool, options: str = ""):
 
 
 @functools.cache
-def compiled_routing(metadata: bool, renormalize: bool):
+def compiled_routing(metadata: bool, renormalize: bool, splits: int = 1):
     """`compile_routing` of one variant, once per process (before CUDA graph
     capture)."""
-    return compile_routing(metadata, renormalize)
+    return compile_routing(metadata, renormalize, splits=splits)
 
 
-def prepare(renormalize: bool = True) -> None:
+def prepare(renormalize: bool = True, splits: int = 1) -> None:
     """Compile the variants `route` takes with and without metadata (before
     CUDA graph capture)."""
     for metadata in (False, True):
-        compiled_routing(metadata, renormalize)
+        compiled_routing(metadata, renormalize, splits)
 
 
 def route(
@@ -449,6 +594,7 @@ def route(
     local_expert_offset: int = 0,
     num_local_experts: int = 0,
     tile_n: int = 0,
+    splits: int = 1,
 ) -> None:
     """`ids` [b, 8] (global expert ids) and `weights` [b, 8] of the top-8
     of sigmoid(logits) + bias for FP32 `logits` [b, 256] (1 <= b <= 8, unit
@@ -459,7 +605,9 @@ def route(
     elements, aliasing neither ids nor weights), also the routing metadata of
     the local experts `[local_expert_offset, local_expert_offset +
     num_local_experts)` for GEMM tile `tile_n` (1 to 256), at the
-    `META_*` offsets.
+    `META_*` offsets. With `splits` > 1, `logits` is `[0, :b]` of contiguous
+    FP32 K-split partials [splits, 8, 256], whose sum from 0.0 in split order
+    gives the logits.
 
     Raises ValueError on arguments outside that contract (some through the
     compiled call's own checks: dtypes, shapes, strides, alignment, devices).
@@ -473,6 +621,15 @@ def route(
         )
     if logits.stride(0) % 4:
         raise ValueError("logits rows must be 16-byte aligned")
+    if splits > 1 and (
+        logits.stride() != (EXPERTS, 1)
+        or logits.untyped_storage().nbytes() - logits.storage_offset() * 4
+        < splits * SPLIT_BYTES
+    ):
+        raise ValueError(
+            f"split partials must be contiguous fp32 [{splits}, {MAX_TOKENS}, "
+            f"{EXPERTS}]"
+        )
     if ids.dtype != torch.int32:
         raise ValueError(f"ids must be int32 [b, {TOP_K}] and contiguous")
     if metadata is not None:
@@ -497,7 +654,7 @@ def route(
                 f"metadata needs {metadata_size(tile_n)} elements for tile_n "
                 f"{tile_n}, got {metadata.shape[0]}"
             )
-    compiled_routing(metadata is not None, bool(renormalize))(
+    compiled_routing(metadata is not None, bool(renormalize), splits)(
         logits,
         bias,
         ids,

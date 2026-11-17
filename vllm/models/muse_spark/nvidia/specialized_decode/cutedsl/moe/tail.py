@@ -69,17 +69,18 @@ from ..common.primitives import (
     current_cu_stream,
     load_bf16x8_as_f32,
     load_global_u32x4,
-    load_volatile_u32,
     make_fake_dynamic_compact_tensor,
-    map_shared_to_peer,
+    map_shared_address_to_peer,
+    mbarrier_wait_cluster_address,
     mul_rn,
     pack_bf16x2_rn,
     packed_u32x4_to_bf16x8,
     sanitize_negative_zero_u32x4,
+    shared_ptr,
     stmc_bf16x8,
+    store_async_cluster_f32x2,
     store_global_u32,
     store_global_u32x4,
-    store_shared_cluster_f32,
     to_cute,
     to_cute_dynamic,
 )
@@ -184,7 +185,7 @@ class _NormFinalizePublishDeviceKernel:
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_wait()
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         # One slot set per route avoids a second barrier per route.
         warp_sums = smem.allocate_array(Float32, self.topk * self.warps)
         scaled = cute.make_rmem_tensor(frag_layout, Float32)
@@ -207,8 +208,7 @@ class _NormFinalizePublishDeviceKernel:
                 sum_sq = (scaled.load() * scaled.load()).reduce(
                     cute.ReductionOp.ADD, init_val=Float32(0.0), reduction_profile=0
                 )
-                for offset in (16, 8, 4, 2, 1):
-                    sum_sq = sum_sq + cute.arch.shuffle_sync_bfly(sum_sq, offset=offset)
+                sum_sq = cute.arch.warp_reduction_sum(sum_sq)
                 if lane == 0:
                     cute.arch.store(
                         (warp_sums + (k * self.warps + warp)).llvm_ptr, sum_sq
@@ -216,9 +216,7 @@ class _NormFinalizePublishDeviceKernel:
                 cute.arch.barrier()
                 total = Float32(0.0)
                 for w in cutlass.range_constexpr(self.warps):
-                    total = total + cute.arch.load(
-                        (warp_sums + (k * self.warps + w)).llvm_ptr, Float32
-                    )
+                    total = total + load_f32(warp_sums + (k * self.warps + w))
                 inv_rms = cute.math.rsqrt(
                     total * Float32(1.0 / self.hidden) + Float32(self.eps),
                     fastmath=True,
@@ -230,7 +228,9 @@ class _NormFinalizePublishDeviceKernel:
                         normalized = normalized * gamma[trip, None].load()
                     acc[trip, None].store(acc[trip, None].load() + normalized * weight)
 
-        stage = load_volatile_u32(stage_state.iterator + NEXT_STAGE)
+        stage = cute.arch.load(
+            stage_state.iterator + NEXT_STAGE, Uint32, sem="relaxed", scope="sys"
+        )
         for trip in cutlass.range_constexpr(self.trips):
             column = Int64(tidx + trip * self.threads) * VEC_BF16
             mailbox_element = (
@@ -247,6 +247,11 @@ class _NormFinalizePublishDeviceKernel:
         cute.arch.barrier()
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_launch_dependents()
+
+
+def load_f32(pointer: cute.Pointer) -> Float32:
+    """The FP32 at `pointer`."""
+    return cute.arch.load(pointer.llvm_ptr, Float32)
 
 
 class _TailReduceKernel:
@@ -318,7 +323,9 @@ class _TailReduceKernel:
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_wait()
 
-        active_stage = load_volatile_u32(stage_state.iterator + ACTIVE_STAGE)
+        active_stage = cute.arch.load(
+            stage_state.iterator + ACTIVE_STAGE, Uint32, sem="relaxed", scope="sys"
+        )
         stage_base = (Int64(active_stage) * self.tp) * self.capacity_m + Int64(token)
         for trip in cutlass.range_constexpr(self.trips):
             fragment = base_fragment + trip * self.fragment_stride
@@ -428,11 +435,15 @@ class _TpTailKernel:
     ) -> None:
         if not 2 <= tp <= 32 or len(route_peers) != tp:
             raise ValueError("the TP tail needs 2-32 ranks and every peer")
-        if split < 2 or TP_MAX_SPLIT % split:
-            raise ValueError(f"split must divide {TP_MAX_SPLIT} and exceed 1")
+        if split != TP_MAX_SPLIT:
+            # The served shape (8 tokens at TP8 on 128 or more SMs) splits
+            # into TP_MAX_SPLIT bands: one warp per route band.
+            raise ValueError(
+                f"the TP tail runs {TP_MAX_SPLIT} bands per token (tp_split at "
+                f"up to tp tokens on 128 or more SMs), not {split}"
+            )
         band_threads = POOLED // (VEC_BF16 * split)
-        if band_threads % WARP_SIZE:
-            raise ValueError("a band must split into whole warps")
+        assert band_threads == WARP_SIZE
         self.tp, self.rank, self.split, self.slots = tp, rank, split, slots
         self.route_peers = route_peers
         self.weight_fp32 = weight_dtype == torch.float32
@@ -443,15 +454,14 @@ class _TpTailKernel:
         self.timeout_ns = timeout_ns
         self.band_threads = band_threads
         self.threads = TOP_K * band_threads
-        self.group_warps = band_threads // WARP_SIZE
         self.band = band_threads * VEC_BF16
         # Route mailbox [3, tp, slots * TOP_K, P]; token mailbox [3, tp, slots, P].
         self.route_rows = slots * TOP_K
         self.route_rank_stride = self.route_rows * POOLED
         self.fine = TP_MAX_SPLIT // split
-        self.smem_bytes = 4 * (
-            TOP_K * self.group_warps + TOP_K + split * TOP_K + TOP_K * self.band
-        )
+        # One warp per route band: its sum of squares goes straight to the
+        # cluster's CTAs by st.async (8 B each), no CTA-level fold.
+        self.smem_bytes = 4 * (2 * split * TOP_K + TOP_K * self.band) + 8
 
     @cute.jit
     def __call__(
@@ -550,22 +560,33 @@ class _TpTailKernel:
         band, slot, d = cute.arch.block_idx()
         route_k = tidx // self.band_threads
         group_lane = tidx % self.band_threads
-        group_warp = group_lane // WARP_SIZE
         lane = cute.arch.lane_idx()
         column = Int64(band * self.band + group_lane * VEC_BF16)
         token = slot * self.tp + d
         own_token = slot * self.tp + self.rank
         owner = d == Int32(0) and own_token < m
 
-        smem = cutlass.utils.SmemAllocator()
-        sums = smem.allocate_array(Float32, TOP_K * self.group_warps)
-        inv_rms = smem.allocate_array(Float32, TOP_K)
-        exchange = smem.allocate_array(Float32, self.split * TOP_K)
+        smem = cutlass.memory.SmemAllocator()
+        # [band][route] sums of squares, one 8-byte message each, and the
+        # mbarrier counting them.
+        exchange = smem.allocate_array(
+            Float32, 2 * self.split * TOP_K, byte_alignment=8
+        )
         products = smem.allocate_array(Float32, TOP_K * self.band)
+        bar = smem.allocate_array(Int64, 1, byte_alignment=8)
+        exchange_address = Int32(exchange.toint())
+        bar_address = Int32(bar.toint())
+        if owner and tidx == 0:
+            cute.arch.mbarrier_init(shared_ptr(Int64, bar_address), 1)
+            cute.arch.mbarrier_arrive_and_expect_tx(
+                shared_ptr(Int64, bar_address), Int32(self.split * TOP_K * 8)
+            )
+            cute.arch.mbarrier_init_fence()
 
         if owner:
-            # Every peer must have started before the sums of squares store
-            # into its shared memory; the matching wait precedes them.
+            # Every peer must have started (and initialized its mbarrier)
+            # before the sums of squares store into its shared memory; the
+            # matching wait precedes them.
             cute.arch.cluster_arrive_relaxed()
 
         if cutlass.const_expr(self.enable_pdl):
@@ -603,7 +624,9 @@ class _TpTailKernel:
                     store_global_u32x4(
                         Int64(self.route_peers[dest]) + element * 2, words
                     )
-        if cutlass.const_expr(self.enable_pdl):
+        # The owners release after their poll: the dependents' pre-wait
+        # weight loads then miss the route exchange (they slow it in memory).
+        if cutlass.const_expr(self.enable_pdl) and (d != Int32(0) or own_token >= m):
             cute.arch.griddepcontrol_launch_dependents()
 
         # Sum: the owned token's route k, then the routes' sum.
@@ -645,6 +668,8 @@ class _TpTailKernel:
             peers = poll_at(base, offsets, self.timeout_ns)
             for i in cutlass.range_constexpr(len(offsets)):
                 rearm(base + Int64(offsets[i]))
+            if cutlass.const_expr(self.enable_pdl):
+                cute.arch.griddepcontrol_launch_dependents()
 
             summed = [Float32(0.0) for _ in range(VEC_BF16)]
             for src in cutlass.range_constexpr(self.tp):
@@ -661,41 +686,25 @@ class _TpTailKernel:
 
             gains = self.gains(gain_words)
             total = self.warp_sum_of_squares(packed, gains)
-            if lane == 0:
-                cute.arch.store(
-                    (sums + (route_k * self.group_warps + group_warp)).llvm_ptr, total
-                )
-            cute.arch.barrier()
-            # Fold each route's sums: the CTA's warps in order, then the
-            # cluster's bands in order, on every band.
+            # Each route's warp sends its band's sum to every band of the
+            # cluster, which folds the bands in order on every lane.
             cute.arch.cluster_wait()
-            if tidx < TOP_K:
-                partial_sum = Float32(0.0)
-                for w in cutlass.range_constexpr(self.group_warps):
-                    partial_sum = partial_sum + cute.arch.load(
-                        (sums + (tidx * self.group_warps + w)).llvm_ptr, Float32
-                    )
-                mine = exchange + (band * TOP_K + tidx)
-                for peer in cutlass.range_constexpr(self.split):
-                    store_shared_cluster_f32(
-                        map_shared_to_peer(mine, Int32(peer)), partial_sum
-                    )
-            cute.arch.barrier()
-            cute.arch.cluster_arrive()
-            cute.arch.cluster_wait()
-            if tidx < TOP_K:
-                total_sum = Float32(0.0)
-                for peer in cutlass.range_constexpr(self.split):
-                    total_sum = total_sum + cute.arch.load(
-                        (exchange + (peer * TOP_K + tidx)).llvm_ptr, Float32
-                    )
-                cute.arch.store(
-                    (inv_rms + tidx).llvm_ptr,
-                    cute.rsqrt(total_sum * (1.0 / POOLED) + self.eps),
+            if lane < Int32(self.split):
+                store_async_cluster_f32x2(
+                    map_shared_address_to_peer(
+                        exchange_address + (band * TOP_K + route_k) * 8, lane
+                    ),
+                    total,
+                    Float32(0.0),
+                    map_shared_address_to_peer(bar_address, lane),
                 )
-            cute.arch.barrier()
-
-            scale = cute.arch.load((inv_rms + route_k).llvm_ptr, Float32)
+            mbarrier_wait_cluster_address(bar_address, Int32(0))
+            total_sum = Float32(0.0)
+            for peer in cutlass.range_constexpr(self.split):
+                total_sum = total_sum + load_f32(
+                    exchange + 2 * (peer * TOP_K + route_k)
+                )
+            scale = cute.rsqrt(total_sum * (1.0 / POOLED) + self.eps)
             values = self.normalized(packed, scale, gains)
             slot_base = route_k * self.band + group_lane * VEC_BF16
             # Each product rounded alone (mul_rn): no FMA with the route sum.
@@ -709,9 +718,7 @@ class _TpTailKernel:
                 for k in cutlass.range_constexpr(TOP_K):
                     first_product = k * self.band + group_lane * VEC_BF16
                     for i in cutlass.range_constexpr(VEC_BF16):
-                        acc[i] = acc[i] + cute.arch.load(
-                            (products + (first_product + i)).llvm_ptr, Float32
-                        )
+                        acc[i] = acc[i] + load_f32(products + (first_product + i))
                 rounded = cute.make_rmem_tensor(cute.make_layout((4,)), Uint32)
                 for q in cutlass.range_constexpr(4):
                     rounded[q] = pack_bf16x2_rn(acc[2 * q], acc[2 * q + 1])

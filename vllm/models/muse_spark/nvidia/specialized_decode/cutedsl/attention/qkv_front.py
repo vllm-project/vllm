@@ -32,7 +32,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import BFloat16, Float32, Int32, Int64
+from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint16
 from cutlass.cute.runtime import make_fake_stream
 from cutlass.experimental.cuda import (
     TensorMap,
@@ -47,26 +47,22 @@ from ..common.primitives import (
     WARP_SIZE,
     add_rn,
     bf16x2_to_f32x2,
-    fence_mbarrier_init_cluster,
     fma_rn,
     fms_rn,
+    global_ptr,
     load_global_nc_f32_address,
     load_global_s64_address,
     load_shared_u32x4_address,
     map_shared_address_to_peer,
-    mbarrier_arrive_address,
-    mbarrier_arrive_expect_tx_address,
-    mbarrier_init_address,
     mbarrier_wait_address,
     mbarrier_wait_cluster_address,
     mma_m16n8k16_bf16,
     mul_rn,
     pack_bf16x2_rn,
-    prefetch_global_l2,
     quant_e4m3x2,
     rsqrt_approx_f32,
+    shared_ptr,
     store_async_cluster_f32x2,
-    store_global_u16_bits,
     store_global_u32_address,
     tma_load_2d,
     tma_prefetch_2d_l2,
@@ -90,7 +86,12 @@ WARPS = CONSUMER_WARPS + 2
 THREADS = WARPS * WARP_SIZE
 MIN_CTAS_PER_SM = 2
 STAGES = 5  # keeps two CTAs resident per SM
-DEEP_STAGES = 8  # the ring at S = 4 with one CTA per SM
+# The ring at S = 4 with one CTA per SM: 10 stages hold 10 of a CTA's 16 k-tiles
+# in shared memory before the PDL wait (measured 0.5 us faster than 8 after a
+# predecessor, 11 or more 3 us slower); the 16-token tile's stages are wider.
+DEEP_STAGES = 10
+WIDE_DEEP_STAGES = 8
+RING_STAGES = (STAGES, DEEP_STAGES, WIDE_DEEP_STAGES)
 SPLITS = (2, 4, 8)
 # SM count of the K-split rule. Fixed, so the reduction order (and the result)
 # does not depend on the device.
@@ -158,7 +159,7 @@ class QkvFrontKernel:
     ) -> None:
         if tiles not in (1, 2) or splits not in SPLITS or fixed_m not in (0, 8):
             raise ValueError(f"no variant {tiles=} {splits=} {fixed_m=}")
-        if stages not in (STAGES, DEEP_STAGES) or (fixed_m and tiles != 1):
+        if stages not in RING_STAGES or (fixed_m and tiles != 1):
             raise ValueError(f"no variant {stages=} {tiles=} {fixed_m=}")
         self.tiles, self.stages, self.splits, self.fixed_m = (
             tiles,
@@ -196,6 +197,7 @@ class QkvFrontKernel:
         hq: Int32,
         hkv: Int32,
         rope: Int32,
+        q_planar: Int32,
         eps: Float32,
         inv_k_scale: Float32,
         inv_v_scale: Float32,
@@ -236,6 +238,7 @@ class QkvFrontKernel:
             hq,
             hkv,
             rope,
+            q_planar,
             eps,
             inv_k_scale,
             inv_v_scale,
@@ -266,6 +269,7 @@ class QkvFrontKernel:
         hq: Int32,
         hkv: Int32,
         rope: Int32,
+        q_planar: Int32,
         eps: Float32,
         inv_k_scale: Float32,
         inv_v_scale: Float32,
@@ -281,7 +285,7 @@ class QkvFrontKernel:
         w_map = tm_w.get_ptr().toint()
         x_map = tm_x.get_ptr().toint()
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         # The ring is 1 KiB aligned by hand: 128B-swizzled boxes need it.
         ring = smem.allocate(stages * self.stage_bytes + 1024, byte_alignment=16)
         bars = smem.allocate_array(Int64, 2 * stages + 1, byte_alignment=8)
@@ -303,18 +307,22 @@ class QkvFrontKernel:
             # Stage 0's weights go first; the rest of the ring is initialized
             # while they are in flight. The full barrier counts bytes, so these
             # W boxes and the x boxes issued after the wait complete one phase.
-            mbarrier_init_address(fb, Int32(1))
-            mbarrier_init_address(eb, Int32(CONSUMER_WARPS))
-            fence_mbarrier_init_cluster()
-            mbarrier_arrive_expect_tx_address(fb, Int32(self.stage_bytes))
+            cute.arch.mbarrier_init(shared_ptr(Int64, fb), Int32(1))
+            cute.arch.mbarrier_init(shared_ptr(Int64, eb), Int32(CONSUMER_WARPS))
+            cute.arch.mbarrier_init_fence()
+            cute.arch.mbarrier_arrive_and_expect_tx(
+                shared_ptr(Int64, fb), Int32(self.stage_bytes)
+            )
             k0 = _k_tile(0, rank, splits)
             for j in cutlass.range_constexpr(NBOX):
                 tma_load_2d(sbase + j * W_BOX_BYTES, w_map, k0 + j * BOXK, row0, fb)
             for s in cutlass.range_constexpr(1, stages):
-                mbarrier_init_address(fb + 8 * s, Int32(1))
-                mbarrier_init_address(eb + 8 * s, Int32(CONSUMER_WARPS))
-            mbarrier_init_address(rb, Int32(1))
-            fence_mbarrier_init_cluster()
+                cute.arch.mbarrier_init(shared_ptr(Int64, fb + 8 * s), Int32(1))
+                cute.arch.mbarrier_init(
+                    shared_ptr(Int64, eb + 8 * s), Int32(CONSUMER_WARPS)
+                )
+            cute.arch.mbarrier_init(shared_ptr(Int64, rb), Int32(1))
+            cute.arch.mbarrier_init_fence()
 
         # Local token u of this CTA is global token rank + u * splits.
         active_m = m
@@ -326,7 +334,9 @@ class QkvFrontKernel:
             ntok = Int32(self.fixed_m // splits)
         if warp == PRODUCER_WARP and lane == 0:
             # All splits partials of this CTA's tokens, its own included.
-            mbarrier_arrive_expect_tx_address(rb, splits * ntok * HEAD_DIM * 4)
+            cute.arch.mbarrier_arrive_and_expect_tx(
+                shared_ptr(Int64, rb), splits * ntok * HEAD_DIM * 4
+            )
         cute.arch.barrier()
         # Peers wait for this arrive before their first st.async here.
         cute.arch.cluster_arrive_relaxed()
@@ -345,10 +355,12 @@ class QkvFrontKernel:
                 kv_cache,
                 kv_page_stride,
                 y,
+                active_m,
                 n,
                 hq,
                 hkv,
                 rope,
+                q_planar,
                 rank,
                 head,
                 ntok,
@@ -398,12 +410,30 @@ class QkvFrontKernel:
                 eps,
                 inv_k_scale,
                 inv_v_scale,
-                y + (Int64(token) * Int64(n) + Int64(row0)) * 2,
+                self.y_row(y, token, head, active_m, n, hq, q_planar),
                 kv_cache,
                 kv_page_stride,
                 lane,
             )
         cute.arch.cluster_wait()
+
+    @cute.jit
+    def y_row(self, y, token, head, m, n, hq, q_planar) -> Int64:
+        """Address of `token`'s y row of `head`: `[M, N]`, or with `q_planar`
+        the q heads as a dense `[M, HQ * 64]` block followed by the other heads
+        as a dense `[M, N - HQ * 64]` block."""
+        off = Int64(token) * Int64(n) + Int64(head * HEAD_DIM)
+        if q_planar != 0:
+            qn = Int64(hq * HEAD_DIM)
+            if head < hq:
+                off = Int64(token) * qn + Int64(head * HEAD_DIM)
+            else:
+                off = (
+                    Int64(m) * qn
+                    + Int64(token) * (Int64(n) - qn)
+                    + Int64((head - hq) * HEAD_DIM)
+                )
+        return y + off * 2
 
     @cute.jit
     def aux(
@@ -414,10 +444,12 @@ class QkvFrontKernel:
         kv_cache,
         kv_page_stride,
         y,
+        m,
         n,
         hq,
         hkv,
         rope,
+        q_planar,
         rank,
         head,
         ntok,
@@ -436,35 +468,46 @@ class QkvFrontKernel:
         if lane < ntok:
             slot = load_global_s64_address(slots + Int64(token) * 8, ordered=True)
             cute.arch.store((s_slot + lane).llvm_ptr, slot)
-            prefetch_global_l2(
-                y + (Int64(token) * Int64(n) + Int64(head * HEAD_DIM)) * 2
+            cute.arch.prefetch(
+                global_ptr(
+                    Uint8, self.y_row(y, token, head, m, n, hq, q_planar)
+                ).llvm_ptr,
+                cache_level="L2",
             )
             if slot >= 0 and head >= group_k and head < group_g:
                 eb = self.elem_bytes
                 if head < group_v:
-                    prefetch_global_l2(
-                        _cache_row(
-                            kv_cache,
-                            kv_page_stride,
-                            slot,
-                            hkv,
-                            head - group_k,
-                            eb,
-                            self.slots,
-                        )
+                    cute.arch.prefetch(
+                        global_ptr(
+                            Uint8,
+                            _cache_row(
+                                kv_cache,
+                                kv_page_stride,
+                                slot,
+                                hkv,
+                                head - group_k,
+                                eb,
+                                self.slots,
+                            ),
+                        ).llvm_ptr,
+                        cache_level="L2",
                     )
                 else:
-                    prefetch_global_l2(
-                        _cache_row(
-                            kv_cache,
-                            kv_page_stride,
-                            slot,
-                            hkv,
-                            head - group_v,
-                            eb,
-                            self.slots,
-                        )
-                        + HEAD_DIM * eb
+                    cute.arch.prefetch(
+                        global_ptr(
+                            Uint8,
+                            _cache_row(
+                                kv_cache,
+                                kv_page_stride,
+                                slot,
+                                hkv,
+                                head - group_v,
+                                eb,
+                                self.slots,
+                            )
+                            + HEAD_DIM * eb,
+                        ).llvm_ptr,
+                        cache_level="L2",
                     )
         if rope != 0 and head < group_v:
             position = Int64(0)
@@ -494,7 +537,9 @@ class QkvFrontKernel:
             for i in cutlass.range_constexpr(1, self.npre):
                 bar = fb + 8 * i
                 k0 = _k_tile(i, rank, splits)
-                mbarrier_arrive_expect_tx_address(bar, Int32(stage_bytes))
+                cute.arch.mbarrier_arrive_and_expect_tx(
+                    shared_ptr(Int64, bar), Int32(stage_bytes)
+                )
                 for j in cutlass.range_constexpr(NBOX):
                     tma_load_2d(
                         sbase + i * stage_bytes + j * W_BOX_BYTES,
@@ -527,7 +572,9 @@ class QkvFrontKernel:
                 sw = sbase + st * stage_bytes
                 bar = fb + 8 * st
                 k0 = _k_tile_dynamic(i, rank, splits)
-                mbarrier_arrive_expect_tx_address(bar, Int32(stage_bytes))
+                cute.arch.mbarrier_arrive_and_expect_tx(
+                    shared_ptr(Int64, bar), Int32(stage_bytes)
+                )
                 for j in cutlass.range_constexpr(NBOX):
                     tma_load_2d(sw + j * W_BOX_BYTES, w_map, k0 + j * BOXK, row0, bar)
                 for j in cutlass.range_constexpr(NBOX):
@@ -599,8 +646,11 @@ class QkvFrontKernel:
                         )
                         for e in cutlass.range_constexpr(4):
                             acc[b, nt, e] = d[e]
+            # Retire every lane's reads before the producer reuses this stage.
+            cute.arch.sync_warp()
+            cute.arch.fence_proxy("async.shared", space="cta")
             if lane == 0:
-                mbarrier_arrive_address(eb + 8 * st)
+                cute.arch.mbarrier_arrive(shared_ptr(Int64, eb + 8 * st))
 
     @cute.jit
     def send(self, acc, s_recv, rb, warp, lane, rank, ntok_max, active_m) -> None:
@@ -692,8 +742,7 @@ class QkvFrontKernel:
         if head < group_v:
             h0, h1 = bf16x2_to_f32x2(raw)
             ss = fma_rn(h0, h0, mul_rn(h1, h1))
-            for o in cutlass.range_constexpr(5):
-                ss = add_rn(ss, cute.arch.shuffle_sync_bfly(ss, 16 >> o))
+            ss = cute.arch.warp_reduction(ss, add_rn)
             rn = rsqrt_approx_f32(fma_rn(ss, Float32(1.0 / HEAD_DIM), eps))
             o0 = mul_rn(h0, rn)
             o1 = mul_rn(h1, rn)
@@ -709,8 +758,9 @@ class QkvFrontKernel:
                 )
                 if cutlass.const_expr(self.kind == "fp8"):
                     k0, k1 = bf16x2_to_f32x2(out)
-                    store_global_u16_bits(
-                        row + Int64(lane) * 2, quant_e4m3x2(k0, k1, inv_k_scale)
+                    cute.arch.store(
+                        global_ptr(Uint16, row + Int64(lane) * 2),
+                        quant_e4m3x2(k0, k1, inv_k_scale),
                     )
                 else:
                     store_global_u32_address(row + Int64(lane) * 4, out)
@@ -720,8 +770,9 @@ class QkvFrontKernel:
             )
             if cutlass.const_expr(self.kind == "fp8"):
                 v0, v1 = bf16x2_to_f32x2(raw)
-                store_global_u16_bits(
-                    row + Int64(HEAD_DIM + lane * 2), quant_e4m3x2(v0, v1, inv_v_scale)
+                cute.arch.store(
+                    global_ptr(Uint16, row + Int64(HEAD_DIM + lane * 2)),
+                    quant_e4m3x2(v0, v1, inv_v_scale),
                 )
             else:
                 store_global_u32_address(row + Int64(HEAD_DIM * 2 + lane * 4), raw)
@@ -753,7 +804,11 @@ def _cache_row(
 def variant(n: int, m: int) -> tuple[int, int, int, int]:
     """(tiles, stages, splits, fixed_m) of the kernel for N columns, M rows."""
     splits = k_split(n)
-    return token_tiles(m), ring_stages(n, splits), splits, fixed_rows(m)
+    tiles = token_tiles(m)
+    stages = ring_stages(n, splits)
+    if tiles == 2 and stages == DEEP_STAGES:
+        stages = WIDE_DEEP_STAGES
+    return tiles, stages, splits, fixed_rows(m)
 
 
 def supports_shape(n: int, num_kv_heads: int) -> bool:
@@ -776,9 +831,9 @@ def compile_qkv_front(
 ):
     """The compiled variant, shared by every layer and shape it serves, with
     these extra compile `options`; called (TVM FFI) as fn(w, x, positions,
-    cos_sin, slots, kv_cache, kv_page_stride, y, m, n, hq, hkv, rope, eps,
-    inv_k_scale, inv_v_scale, stream) with byte addresses and the stream handle as ints
-    (the inverse scales are read by the FP8 variant only)."""
+    cos_sin, slots, kv_cache, kv_page_stride, y, m, n, hq, hkv, rope, q_planar,
+    eps, inv_k_scale, inv_v_scale, stream) with byte addresses and the stream
+    handle as ints (the inverse scales are read by the FP8 variant only)."""
     assert_not_capturing("the QKV front")
     address = Int64(0)
     return cute.compile(
@@ -791,6 +846,7 @@ def compile_qkv_front(
         Int32(1),
         Int32(1),
         Int32(1),
+        Int32(0),
         Float32(1e-5),
         Float32(1.0),
         Float32(1.0),
@@ -910,6 +966,7 @@ def launch(
     out: torch.Tensor,
     eps: float,
     kv_quant: kvf.KvQuant | None = None,
+    q_planar: bool = False,
 ) -> None:
     """`qkv_front` without its checks: for a call `unsupported` took with
     this `out` and this `kv_quant`."""
@@ -938,6 +995,7 @@ def launch(
         n // (2 * HEAD_DIM) - hkv,
         hkv,
         int(cos_sin_cache is not None),
+        int(q_planar),
         eps,
         inv_k,
         inv_v,
@@ -956,9 +1014,8 @@ def inverse_scales(kv_quant: kvf.KvQuant | None) -> tuple[float, float]:
 def _compile_and_call(device: int, n: int, m: int, fmt: kvf.KvLayout, *args) -> None:
     """The (N, M) variant called on the current stream of `device`, which is
     current: a first compile targets the inputs' device too."""
-    compile_qkv_front(*variant(n, m), fmt)(
-        *args, torch._C._cuda_getCurrentRawStream(device)
-    )
+    stream = torch.cuda.current_stream(device).cuda_stream
+    compile_qkv_front(*variant(n, m), fmt)(*args, stream)
 
 
 def qkv_front(
@@ -971,13 +1028,16 @@ def qkv_front(
     out: torch.Tensor,
     eps: float,
     kv_quant: kvf.KvQuant | None = None,
+    q_planar: bool = False,
 ) -> None:
     """Out [M, N] = x [M, 8192] @ weight [N, 8192]^T with the q and k heads
     RMS-normalized (and rotated when `cos_sin_cache` is given), and the
     normalized k and raw v heads written to the kv_cache rows of
-    `slot_mapping` (-1: none): BF16, or FP8 with `kv_quant`'s
-    scales (`kv_format`). N = (2 HQ + 2 HKV) * 64, HKV the cache's KV
-    heads. Launched with PDL on the current stream of x's device;
+    `slot_mapping` (-1: none): BF16, or FP8 with `kv_quant`'s scales
+    (`kv_format`). N = (2 HQ + 2 HKV) * 64, HKV the cache's KV heads. With
+    `q_planar` out's storage holds the q heads as a dense [M, HQ * 64] block,
+    then the other heads as a dense [M, N - HQ * 64] block. Launched with PDL
+    on the current stream of x's device;
     raises ValueError for a call outside the kernel (`unsupported`).
     Graph-capturable once `prepare` has compiled the variant."""
     reason = unsupported(
@@ -986,5 +1046,14 @@ def qkv_front(
     if reason is not None:
         raise ValueError(reason)
     launch(
-        x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out, eps, kv_quant
+        x,
+        weight,
+        positions,
+        cos_sin_cache,
+        slot_mapping,
+        kv_cache,
+        out,
+        eps,
+        kv_quant,
+        q_planar,
     )

@@ -30,20 +30,16 @@ class MarkovChain:
         self.argmax = torch.empty(rows * blocks, device=device, dtype=torch.int64)
         self.maximum = torch.empty(rows * blocks, device=device, dtype=torch.float32)
         self.arrivals = torch.zeros(rows, device=device, dtype=torch.int32)
-        self.packets = torch.empty((rows, 4), device=device, dtype=torch.int32)
         self.kernels = MarkovKernels(
             self.params.w1,
             self.embeds,
             width=self.params.vocab_size,
             has_cap=self.params.soft_cap is not None,
-            tp=None,
             steps=tuple(
                 (block, pdl, vector)
                 for block, pdl in ((512, True), (1024, False), (1024, True))
                 for vector in (False, True)
             ),
-            pick_pdl=False,
-            fill_vector=False,
         )
 
     def run(
@@ -120,7 +116,6 @@ class MarkovChain:
                 self.arrivals[:rows],
                 out_tokens,
                 embeds[step + 1],
-                self.packets,
                 0,
                 params.output_multiplier,
                 params.inv_soft_cap,

@@ -36,9 +36,12 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from ..cutedsl.attention.qkv_warm import QkvWarm
+from ..cutedsl.attention.qkv_warm import unsupported as unsupported_warm
 from ..cutedsl.boundary.all_gather_dual_norm import FinalBoundary, GatherBoundary
 from ..cutedsl.boundary.layer_front import LayerFront
 from ..cutedsl.common import policy
+from ..cutedsl.common.symmetric import multicast_arena
 from ..cutedsl.moe.pooler_gather import Pooler, pooler_layer
 from ..cutedsl.moe.tail import MoETail, TpTail
 from ..cutedsl.oproj.batt import AttentionBoundary
@@ -167,7 +170,9 @@ class SpecializedDecode:
             all_reduce_order,
         )
         self.layout = layout = LAYOUTS[self.tp]
-        self.build(ctx, layout)
+        # The mailboxes of every layer share the arena's multicast objects.
+        with multicast_arena(ctx.group, self.device):
+            self.build(ctx, layout)
         # Capture-time outcomes already logged; plan() never logs outside capture.
         self.logged: set[str] = set()
         logger.info(
@@ -202,6 +207,16 @@ class SpecializedDecode:
         )
         for layer in self.layers:
             flashinfer_ops.check_attention(layer.self_attn.attn)
+        # One attn2 workspace for every layer's QkvAttention.
+        from . import cute_ops
+
+        workspace = cute_ops.attn2_workspace(
+            [layer.self_attn for layer in self.layers],
+            ctx.max_context,
+            PREPARED_MAX // cute_ops.QUERY_LEN,
+        )
+        if workspace is not None:
+            self.buffers["attn2_workspace"] = workspace
 
         # The first layer's front, the input boundary of every layer after it,
         # then the final boundary: the boundaries' mailboxes receive the
@@ -274,6 +289,21 @@ class SpecializedDecode:
                 )
             )
         self.decode_layers = tuple(layers)
+        # From each layer's experts' end, an L2 warm of the next layer's QKV
+        # front ring weights, on a side stream joined at the end of the step.
+        self.warm_stream = None
+        weights = [layer.self_attn.qkv_proj.weight for layer in self.layers[1:]]
+        reasons = {
+            reason
+            for weight in weights
+            if (reason := unsupported_warm(weight, BATCHES)) is not None
+        }
+        if reasons:
+            logger.info("Muse Spark QKV warm off: %s", "; ".join(sorted(reasons)))
+        else:
+            self.warm_stream = torch.cuda.Stream(device)
+            for layer, weight in zip(self.decode_layers, weights):
+                layer.moe.warm_next(QkvWarm(weight, BATCHES), self.warm_stream)
         end = self.backbone.end_layer
         self.final_aux = (
             buffer(f"aux{end}", torch.float32) if end in self.aux_layers else None
@@ -378,6 +408,8 @@ class SpecializedDecode:
         output = self.output[:b]
         final_aux = None if self.final_aux is None else self.final_aux[:b]
         self.final.run(self.final_slot, stream, output, final_aux)
+        if self.warm_stream is not None:
+            torch.cuda.current_stream().wait_stream(self.warm_stream)
         if final_aux is not None:
             aux_out.append(final_aux)
         return (output, aux_out) if aux_out else output

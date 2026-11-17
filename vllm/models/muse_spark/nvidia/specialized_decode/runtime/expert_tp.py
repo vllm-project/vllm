@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Expert tensor parallelism for the routed NVFP4 experts, built from the
-stock expert-parallel weights (pure torch and torch.distributed).
+"""Expert tensor parallelism for the routed experts (NVFP4, and the BF16 edge
+layers), built from the stock expert-parallel weights (pure torch and
+torch.distributed).
 
 The stock layer under TP x EP with EP equal to TP holds `E / tp` whole experts
 per rank, placed linearly (rank `r` owns experts `[r Er, (r + 1) Er)`), in
@@ -34,10 +35,17 @@ capture, and keeps the stock tensors: the stock layer still serves every step
 the executor does not take. `probe_rel_l2` compares one layer's TP route rows,
 summed across ranks, with its EP rows.
 
+The BF16 edge layers' experts (`reshard_bf16`) are cut the same way from the
+stock block-major-K layout ([E, K/64, rows, 64]): w2 slices on whole 64-wide
+K blocks, and w13 slices by gathering rows, because the stock conversion's
+gated row permutation depends on the intermediate width. `bf16_w13_rows` reads
+that permutation from the conversion itself.
+
 Every check runs on every rank and is agreed across the group before any rank
 raises, so a refusal never leaves the other ranks waiting in a collective.
 """
 
+import functools
 from typing import NamedTuple
 
 import torch
@@ -80,6 +88,16 @@ class TpExperts(NamedTuple):
     g1_alphas: torch.Tensor  # fp32 [E]
     g1_scale_c: torch.Tensor  # fp32 [E]
     g2_alphas: torch.Tensor  # fp32 [E]
+    intermediate: int  # I'
+    num_experts: int
+
+
+class TpBf16Experts(NamedTuple):
+    """One rank's BF16 TP experts of one layer in the stock block-major-K
+    layout, all `num_experts` experts at intermediate slice `rank` of `tp`."""
+
+    w13: torch.Tensor  # bf16 [E, H/64, 2I', 64]
+    w2: torch.Tensor  # bf16 [E, I'/64, H, 64]
     intermediate: int  # I'
     num_experts: int
 
@@ -241,6 +259,102 @@ def reshard_nvfp4(
         intermediate=shape.slice,
         num_experts=num_experts,
     )
+
+
+# The stock block-major-K layout: bf16 K blocks of 128 bytes.
+BLOCK_K = 64
+
+
+@functools.cache
+def bf16_w13_rows(intermediate: int, tp: int, device) -> torch.Tensor:
+    """For each rank `r`, the rows `j` in `[0, 2 I')` of the stock-converted
+    w13 (`[E, H/64, 2I, 64]`) that make rank `r`'s own converted slice: the
+    converted w13 of the slice (gate rows `[r I', (r + 1) I')` then up rows
+    `[I + r I', I + (r + 1) I')`) is the full converted w13 indexed by
+    `rows[r]` along its rows. int64 `[tp, 2I']`, on the CPU; cached, so not
+    to be modified.
+
+    The stock conversion only permutes rows (whole 64-wide K blocks), by a
+    permutation that depends on the row count, so each is read by converting
+    a tagged tensor: row `i` carries `i` in its first element."""
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout as convert,
+    )
+
+    def converted_source_rows(rows: int, device) -> torch.Tensor:
+        tagged = torch.zeros((1, rows, BLOCK_K), dtype=torch.bfloat16, device=device)
+        tagged.view(torch.int16)[0, :, 0] = torch.arange(
+            rows, dtype=torch.int16, device=device
+        )
+        w2 = torch.zeros((1, BLOCK_K, BLOCK_K), dtype=torch.bfloat16, device=device)
+        convert({}, tagged, w2, is_gated_act_gemm=True)
+        return tagged.view(torch.int16)[0, :, 0].to(torch.int64).cpu()
+
+    s = intermediate // tp
+    full_source = converted_source_rows(2 * intermediate, device)
+    full_dest = torch.empty_like(full_source)
+    full_dest[full_source] = torch.arange(2 * intermediate)
+    slice_source = converted_source_rows(2 * s, device)
+    r = torch.arange(tp).unsqueeze(1)
+    original = (slice_source // s) * intermediate + r * s + slice_source % s
+    return full_dest[original]
+
+
+def reshard_bf16(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    group: dist.ProcessGroup,
+    num_experts: int,
+    intermediate: int,
+) -> TpBf16Experts:
+    """This rank's BF16 TP experts of one layer, from every rank's stock
+    experts (`w13` `[Er, H/64, 2I, 64]`, `w2` `[Er, I/64, H, 64]`, the
+    block-major-K views of the converted weights, EP over `group` with linear
+    placement). Collective over `group` (NCCL); run it on every rank, before
+    capture. The experts are bf16 and the shapes checked on every rank before
+    any raises."""
+    world = dist.get_world_size(group)
+    device = w13.device
+    er, k_blocks = w13.shape[:2]
+    s = intermediate // world
+    reason = None
+    if w13.dtype != torch.bfloat16 or w2.dtype != torch.bfloat16:
+        reason = "the experts are not bf16"
+    elif intermediate % (world * 2 * BLOCK_K):
+        reason = f"intermediate {intermediate} does not split {world} ways in 128s"
+    elif er * world != num_experts:
+        reason = f"{world} ranks x {er} experts is not {num_experts} experts"
+    elif tuple(w13.shape) != (er, k_blocks, 2 * intermediate, BLOCK_K) or tuple(
+        w2.shape
+    ) != (er, intermediate // BLOCK_K, k_blocks * BLOCK_K, BLOCK_K):
+        reason = f"unexpected shapes {tuple(w13.shape)}, {tuple(w2.shape)}"
+    elif not (w13.is_contiguous() and w2.is_contiguous()):
+        reason = "the experts are not contiguous"
+    reason = agree(group, reason, device)
+    if reason is not None:
+        raise RuntimeError(f"Expert TP cannot reshard the BF16 experts: {reason}")
+
+    rows = bf16_w13_rows(intermediate, world, device).to(device)
+    packed = torch.empty(
+        (world, er, k_blocks, 2 * s, BLOCK_K), dtype=w13.dtype, device=device
+    )
+    for d in range(world):
+        torch.index_select(w13, 2, rows[d], out=packed[d])
+    w13_tp = torch.empty(
+        (num_experts, k_blocks, 2 * s, BLOCK_K), dtype=w13.dtype, device=device
+    )
+    dist.all_to_all_single(w13_tp, packed, group=group)
+    del packed
+    packed = (
+        w2.view(er, world, s // BLOCK_K, w2.shape[2], BLOCK_K)
+        .permute(1, 0, 2, 3, 4)
+        .contiguous()
+    )
+    w2_tp = torch.empty(
+        (num_experts, s // BLOCK_K, w2.shape[2], BLOCK_K), dtype=w2.dtype, device=device
+    )
+    dist.all_to_all_single(w2_tp, packed, group=group)
+    return TpBf16Experts(w13_tp, w2_tp, s, num_experts)
 
 
 def route_rows(

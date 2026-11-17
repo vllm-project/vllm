@@ -56,7 +56,12 @@ E, N, K, TOPK, M = 32, 1024, 2048, 8, 64
 FP4_SF_MAX = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX
 
 
-def build_moe(norm_cls, ckpt: dict[str, torch.Tensor], quant_config=None):
+def build_moe(
+    norm_cls,
+    ckpt: dict[str, torch.Tensor],
+    quant_config=None,
+    quantizes_at_load: bool = False,
+):
     # Non-zero so selecting on biased scores and normalizing unbiased ones is
     # distinguishable from using one set for both.
     expert_bias = (torch.rand(E, device="cuda", dtype=torch.float32) - 0.5) * 0.4
@@ -79,6 +84,7 @@ def build_moe(norm_cls, ckpt: dict[str, torch.Tensor], quant_config=None):
         hidden_size=K,
         intermediate_size=N,
         top_k=TOPK,
+        quantizes_at_load=quantizes_at_load,
     )
     assert router.routing_method_type == RoutingMethodType.MiniMax2
     routed = runner.routed_experts
@@ -427,6 +433,39 @@ def test_muse_spark_bf16_moe_kernel_router_matches_reference(dist_init, workspac
     assert (want - wrong).abs().max() > 1e-2
     assert (got - want).abs().max() < 5e-3
     assert (got - wrong).abs().max() > 5e-3
+
+
+@torch.inference_mode()
+def test_muse_spark_nvfp4_moe_quantizes_bf16_experts(dist_init, workspace_init):
+    """BF16 experts loaded into NVFP4 parameters (`quantize_bf16_experts`) run
+    bitwise as the round-to-nearest NVFP4 checkpoint of the same weights."""
+    bf16 = _bf16_checkpoint()
+    input_scales = {
+        "w13_input_scale": torch.full((E, 2), 0.7, device="cuda"),
+        "w2_input_scale": torch.full((E,), 0.9, device="cuda"),
+    }
+    shipped = dict(input_scales)
+    for base, shards in (("w13", 2), ("w2", 1)):
+        w = bf16[f"{base}_weight"]
+        q, sf, s2 = [], [], []
+        for rows in w.flatten(0, 1).chunk(E * shards):
+            s = rows.abs().max().float() / FP4_SF_MAX
+            rows_q, rows_sf = _quant_side(rows, 1.0 / s)
+            q.append(rows_q)
+            sf.append(rows_sf.view(torch.float8_e4m3fn))
+            s2.append(s)
+        shipped[f"{base}_weight"] = torch.cat(q).view(*w.shape[:2], -1)
+        shipped[f"{base}_weight_scale"] = torch.cat(sf).view(*w.shape[:2], -1)
+        shipped[f"{base}_weight_scale_2"] = torch.stack(s2).view(E, -1).squeeze(-1)
+    outputs = []
+    for ckpt, at_load in ((shipped, False), ({**bf16, **input_scales}, True)):
+        torch.manual_seed(0)
+        _, routed, _, vllm_config, runner = build_moe(
+            MuseSparkRMSNorm, ckpt, nvfp4_quant_config(), at_load
+        )
+        assert routed.w13_weight.dtype == torch.uint8
+        outputs.append(run_moe(runner, vllm_config, *_inputs(3)))
+    torch.testing.assert_close(outputs[1], outputs[0], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("nvfp4", [False, True])

@@ -6,6 +6,7 @@ import inspect
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING, Any, cast
 
@@ -114,6 +115,7 @@ from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
     supports_norm_residual_norm,
 )
 from vllm.models.muse_spark.common.ops.fused_routing import fused_muse_spark_routing
+from vllm.models.muse_spark.nvidia.flashinfer_norm_backend import get_norm_backend
 from vllm.models.muse_spark.nvidia.mega_moe import (
     MuseSparkMegaMoEExperts,
     get_trtllm_token_threshold,
@@ -142,7 +144,17 @@ from vllm.models.muse_spark.nvidia.ops.prepare_trtllm_nvfp4 import (
     norm_quant_trtllm_nvfp4,
 )
 from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+    muse_options,
     specialized_decode_config,
+)
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime.nvfp4_lm_head import (
+    padded_head_logits,
+    use_nvfp4_lm_head,
+)
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime.quantize_experts import (
+    adopt_input_scales,
+    check_quantize_bf16_experts,
+    without_exclusion,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -164,6 +176,19 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 logger = init_logger(__name__)
+
+if gated_residual_next_rmsnorm is not None:
+    gated_residual_next_rmsnorm = partial(
+        gated_residual_next_rmsnorm, backend=get_norm_backend()
+    )
+    supports_gated_residual_next_rmsnorm = partial(
+        supports_gated_residual_next_rmsnorm, backend=get_norm_backend()
+    )
+if o_norm_sigmoid_gate is not None:
+    o_norm_sigmoid_gate = partial(o_norm_sigmoid_gate, backend=get_norm_backend())
+    supports_o_norm_sigmoid_gate = partial(
+        supports_o_norm_sigmoid_gate, backend=get_norm_backend()
+    )
 
 _FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT = (
     "post_weight" in inspect.signature(supports_gated_residual_next_rmsnorm).parameters
@@ -424,6 +449,15 @@ class MuseSparkMoE(nn.Module):
         self.num_experts = config.num_local_experts
         parallel_config = vllm_config.parallel_config
         mega_backend = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        self.quantizes_experts_at_load = False
+        if (
+            # Parsed and checked once by MuseSparkForCausalLM.
+            muse_options(vllm_config).quantize_bf16_experts
+            and isinstance(quant_config, ModelOptNvFp4Config)
+            and quant_config.is_layer_excluded(f"{prefix}.experts")
+        ):
+            quant_config = without_exclusion(quant_config, f"{prefix}.experts")
+            self.quantizes_experts_at_load = True
         layer_is_nvfp4 = isinstance(
             quant_config, ModelOptNvFp4Config
         ) and not quant_config.is_layer_excluded(f"{prefix}.experts")
@@ -677,6 +711,8 @@ class MuseSparkMoE(nn.Module):
             },
             moe_config_cls=MuseSparkMoEConfig,
         )
+        if self.quantizes_experts_at_load:
+            self.experts.routed_experts.quantizes_at_load = True
 
     def finalize_mega_moe_weights(self) -> None:
         if self.use_mega_moe:
@@ -2011,6 +2047,9 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             )
         if layer_type is None:
             layer_type = self.decoder_layer_cls
+        options = muse_options(vllm_config)
+        if options.quantize_bf16_experts:
+            check_quantize_bf16_experts(vllm_config)
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
@@ -2036,12 +2075,19 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
 
         if get_pp_group().is_last_rank:
             self.logits_processor.scale = 1.0
+            if options.nvfp4_lm_head:
+                use_nvfp4_lm_head(self.lm_head)
 
         self.set_moe_parameters()
         # decode_backend=latency_specialized: a specialized decode executor over
         # self.model, built by the model state once the weights are loaded.
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode_config = specialized_decode_config(vllm_config, options)
         self.specialized_decode: SpecializedDecode | None = None
+        if self.specialized_decode_config is not None and get_pp_group().is_last_rank:
+            logger.info_once(
+                "Muse Spark target lm_head method: %s",
+                type(self.lm_head.quant_method).__name__,
+            )
 
     def build_specialized_decode(self) -> None:
         from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
@@ -2147,6 +2193,15 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
             return None
+        return self._apply_output_transform(logits)
+
+    def compute_head_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This TP rank's vocab shard of the head projection, before the output
+        transform: BF16 `[num_tokens, vocab_size // tp]` rows, unit stride in the
+        vocab, possibly with the padded row stride of the head GEMM."""
+        return padded_head_logits(self.lm_head, hidden_states)
+
+    def _apply_output_transform(self, logits: torch.Tensor) -> torch.Tensor:
         if self.mul_tanh_soft_cap is not None:
             return self.mul_tanh_soft_cap(logits)
         if logits.dtype != torch.float32:
@@ -2179,7 +2234,19 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(
+            interleaved_weights(), mapper=self.hf_to_vllm_mapper
+        )
+        adopt_input_scales(
+            {
+                layer.layer_idx: layer.feed_forward
+                for layer in islice(
+                    self.model.layers, self.model.start_layer, self.model.end_layer
+                )
+                if isinstance(layer.feed_forward, MuseSparkMoE)
+            }
+        )
+        return loaded
 
     def process_weights_after_loading(self) -> None:
         if self.specialized_decode is not None:

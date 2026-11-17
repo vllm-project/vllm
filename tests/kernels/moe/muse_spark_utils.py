@@ -49,10 +49,12 @@ def make_runner(
     hidden_size: int,
     intermediate_size: int,
     top_k: int,
+    quantizes_at_load: bool = False,
 ):
     """Build a MuseSpark runner, load `ckpt` and finalize its weights.
 
     With `ckpt=None` the runner is only built, on the current device.
+    `quantizes_at_load` loads BF16 expert weights into NVFP4 parameters.
     """
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
@@ -95,8 +97,10 @@ def make_runner(
     if all(not p.is_meta for p in runner.parameters()):
         runner.cuda()
     routed = runner.routed_experts
+    routed.quantizes_at_load = quantizes_at_load
     loaded = list(routed.load_weights(list(ckpt.items())))
-    assert len(loaded) == len(ckpt)
+    # BF16 weights for NVFP4 parameters also load their scales.
+    assert set(loaded) >= set(ckpt)
     routed.quant_method.process_weights_after_loading(routed)
     moe_kernel = routed.quant_method.moe_kernel
     assert moe_kernel is not None
