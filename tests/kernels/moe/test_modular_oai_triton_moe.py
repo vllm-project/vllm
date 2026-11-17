@@ -264,6 +264,7 @@ def test_oai_triton_moe(
     num_experts: int,
     topk: int,
     unfused: bool,
+    dist_init,
     workspace_init,
 ):
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
@@ -314,7 +315,9 @@ def test_oai_triton_moe(
     not UnfusedOAITritonExperts._supports_current_device(),
     reason="Unfused OAI Triton MoE is not supported on this device.",
 )
-def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_init):
+def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(
+    dist_init, workspace_init
+):
     """Exercise `UnfusedOAITritonExperts.apply` with explicit workspaces.
 
     Same MoE topology as `launch_dsv4.sh` / DeepSeek-V4-Flash `config.json`,
