@@ -146,8 +146,12 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
     from vllm.model_executor.layers.fused_moe.oracle import mxfp4
     from vllm.platforms import current_platform
 
+    # Patch the class, not the instance: before pytest 9.2, undoing an instance
+    # patch leaves the class attribute shadowed in the instance's __dict__.
     monkeypatch.setattr(
-        current_platform, "is_device_capability_family", lambda cap: cap == capability
+        type(current_platform),
+        "is_device_capability_family",
+        classmethod(lambda cls, cap: cap == capability),
     )
     monkeypatch.setattr(mxfp4, "_user_moe_activation_override", lambda: user_override)
     monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
@@ -184,10 +188,13 @@ def test_humming_nvfp4_linear_declares_executed_activation(
     from vllm.platforms.interface import DeviceCapability
 
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    # Patch the class, not the instance: before pytest 9.2, undoing an instance
+    # patch leaves a bound `@cache` classmethod in current_platform.__dict__,
+    # which cloudpickle cannot pickle when a later test calls LLM.apply_model.
     monkeypatch.setattr(
-        current_platform,
+        type(current_platform),
         "get_device_capability",
-        lambda device_id=0: DeviceCapability(*capability),
+        classmethod(lambda cls, device_id=0: DeviceCapability(*capability)),
     )
     monkeypatch.setattr(
         type(humming_schema.current_device),

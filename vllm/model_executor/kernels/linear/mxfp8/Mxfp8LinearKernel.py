@@ -9,7 +9,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+@dataclass(slots=True)
 class Mxfp8LinearLayerConfig:
     """Configuration for an MXFP8 linear layer.
 
@@ -68,6 +68,11 @@ class Mxfp8LinearKernel(ABC):
     @abstractmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the batch."""
+        return False
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

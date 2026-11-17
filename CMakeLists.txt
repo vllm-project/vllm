@@ -1622,6 +1622,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_SKINNY_SRC
     "csrc/rocm/skinny_gemms_llmm1.cu"
     "csrc/rocm/skinny_gemms_fp8_blockscale.cu"
+    "csrc/rocm/skinny_gemms_swmmac.cu"
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
     "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
     "csrc/rocm/skinny_gemms_wvsplitkq.cu")
