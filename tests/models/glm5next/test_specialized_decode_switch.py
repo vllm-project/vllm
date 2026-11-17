@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The vendor switch in `common/model.py`: the platform picks the specialized decode's
 config, executor and model state, and off is a no-op on every platform. Off ROCm the
-AMD runtime is never imported: `--monokernel` is refused, and
-`decode_backend=latency_specialized` goes to the NVIDIA executor. On ROCm the NVIDIA
-executor is never imported."""
+AMD runtime is never imported and the switch goes to the NVIDIA executor; on ROCm the
+NVIDIA executor is never imported."""
 
 import importlib
 import sys
@@ -42,27 +41,25 @@ def load(monkeypatch):
     importlib.reload(glm_model)
 
 
-@pytest.mark.parametrize("rocm", [True, False])
-@pytest.mark.parametrize("backend", [None, "auto"])
+# Off ROCm, `auto` turns NVIDIA's executor on where it is supported, so only
+# `stock` is off there.
+@pytest.mark.parametrize(
+    ("rocm", "backend"),
+    [(True, None), (True, "auto"), (True, "stock"), (False, "stock")],
+)
 def test_off_is_none_and_imports_no_other_vendor(load, rocm, backend):
     model = load(rocm)
     assert model.specialized_decode_config(_config(backend=backend)) is None
     assert (NVIDIA_RUNTIME if rocm else AMD_RUNTIME) not in sys.modules
 
 
-def test_monokernel_off_rocm_is_refused(load):
+def test_off_rocm_the_config_is_nvidias(load):
+    """`--monokernel` and `decode_backend=latency_specialized` are one switch
+    (`VllmConfig`), so off ROCm either one goes to the NVIDIA executor."""
     model = load(False)
-    with pytest.raises(ValueError, match="only on ROCm"):
-        model.specialized_decode_config(_config(monokernel=True))
-    assert AMD_RUNTIME not in sys.modules
+    from vllm.models.glm5next.nvidia.specialized_decode import runtime
 
-
-def test_decode_backend_off_rocm_goes_to_nvidia(load, monkeypatch):
-    model = load(False)
-    monkeypatch.setattr(model, "_nvidia_specialized_decode_config", lambda _: "nv")
-    assert model.specialized_decode_config(_config(backend="latency_specialized")) == (
-        "nv"
-    )
+    assert model.specialized_decode_config is runtime.specialized_decode_config
     assert AMD_RUNTIME not in sys.modules
 
 

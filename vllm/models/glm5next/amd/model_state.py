@@ -13,6 +13,8 @@ class Glm5NextModelState(MambaHybridModelState):
             model = model.get_language_model()
         self.language_model = model
         if model.specialized_decode_config is not None:
+            if model.specialized_decode is not None:
+                raise ValueError("--monokernel: reloading weights is not supported")
             model.build_specialized_decode()
 
     def initialize_kv_cache(self, kv_cache_config, block_tables):

@@ -137,19 +137,9 @@ if current_platform.is_rocm():
         return Glm5NextModelState
 
 else:
-    from ..nvidia.specialized_decode.runtime import (
-        specialized_decode_config as _nvidia_specialized_decode_config,
+    from ..nvidia.specialized_decode.runtime import (  # type: ignore[assignment]
+        specialized_decode_config,
     )
-
-    def specialized_decode_config(vllm_config: VllmConfig):  # type: ignore[misc]
-        """NVIDIA's executor config; `--monokernel` (the ROCm kernels) is refused
-        here, without importing AMD code."""
-        if vllm_config.kernel_config.monokernel:
-            raise ValueError(
-                "--monokernel runs GLM-5.3-Flash's specialized decode only on ROCm "
-                f"CDNA4 (gfx950); drop it on {current_platform.device_name}"
-            )
-        return _nvidia_specialized_decode_config(vllm_config)
 
     def _specialized_decode_cls() -> "type[SpecializedDecode]":
         from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
@@ -1296,16 +1286,13 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
-        # --monokernel or decode_backend=latency_specialized: the vendor's specialized
-        # decode over self.model, built by the model state once the weights are loaded.
+        # The vendor's specialized decode over self.model (None when off), built by
+        # the model state once the weights are loaded.
         self.specialized_decode_config = specialized_decode_config(vllm_config)
         self.specialized_decode: SpecializedDecode | None = None
 
     def build_specialized_decode(self) -> None:
         """Called by the vendor's `Glm5NextModelState` once the weights are loaded."""
-        assert self.specialized_decode_config is not None
-        if self.specialized_decode is not None:
-            raise ValueError("specialized decode: reloading weights is not supported")
         self.specialized_decode = _specialized_decode_cls()(
             self.model, self.specialized_decode_config
         )

@@ -12,16 +12,18 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-AUTO, SPECIALIZED = "auto", "latency_specialized"
+AUTO, STOCK, SPECIALIZED = "auto", "stock", "latency_specialized"
 
 
 def requested(vllm_config: VllmConfig) -> bool:
     """Whether the deployment asks for the specialized decode: `--monokernel`, or
-    `additional_config={"decode_backend": "latency_specialized"}` (RFC #60904)."""
+    `additional_config={"decode_backend": "latency_specialized"}` (RFC #60904).
+    `auto` and `stock` are off on ROCm."""
     extra = vllm_config.additional_config
     backend = extra.get("decode_backend", AUTO) if isinstance(extra, dict) else AUTO
-    if backend not in (AUTO, SPECIALIZED):
+    if backend not in (AUTO, STOCK, SPECIALIZED):
         raise ValueError(
-            f"decode_backend must be '{AUTO}' or '{SPECIALIZED}', got {backend!r}"
+            f"decode_backend must be '{AUTO}', '{STOCK}' or '{SPECIALIZED}', "
+            f"got {backend!r}"
         )
     return bool(vllm_config.kernel_config.monokernel) or backend == SPECIALIZED

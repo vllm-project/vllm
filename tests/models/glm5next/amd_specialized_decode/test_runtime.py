@@ -123,6 +123,7 @@ def test_switch_off_is_none_and_on_raises_with_every_reason():
     [
         (False, None, False),
         (False, "auto", False),
+        (False, "stock", False),
         (False, "latency_specialized", True),
         (True, "auto", True),
     ],
