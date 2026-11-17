@@ -132,7 +132,7 @@ class QSAPrefillChunk:
 
 
 @dataclass
-class QSAIndexerPrefillMetadata:
+class QSADeepGEMMPrefillPlan:
     # Exclusive cumsum of exact per-request compressed lengths, [requests + 1].
     cu_keys: torch.Tensor
     chunks: list[QSAPrefillChunk]
@@ -142,7 +142,7 @@ def prepare_deepgemm_prefill(
     metadata: "QSAIndexerMetadata",
     query_start_loc_cpu: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
-) -> QSAIndexerPrefillMetadata:
+) -> QSADeepGEMMPrefillPlan:
     """Plan the step's prefill chunks and their DeepGEMM schedules.
 
     `query_start_loc_cpu` and `seq_lens_cpu` cover the whole batch; host
@@ -191,7 +191,7 @@ def prepare_deepgemm_prefill(
                 schedule=get_mqa_logits_metadata(ks, ke, num_keys, _NUM_HEADS),
             )
         )
-    return QSAIndexerPrefillMetadata(cu_keys=cu_keys, chunks=chunks)
+    return QSADeepGEMMPrefillPlan(cu_keys=cu_keys, chunks=chunks)
 
 
 # Unit MX scales and FP32 head weights, allocated during memory profiling.
@@ -292,7 +292,7 @@ def _gather_prefill_keys_kernel(
 def gather_prefill_keys(
     k_cache: torch.Tensor,
     page_table: torch.Tensor,
-    metadata: QSAIndexerPrefillMetadata,
+    plan: QSADeepGEMMPrefillPlan,
     chunk: QSAPrefillChunk,
 ) -> torch.Tensor:
     """Pack the chunk's requests' compressed keys back to back."""
@@ -307,7 +307,7 @@ def gather_prefill_keys(
         k_cache,
         page_table[chunk.req_start : chunk.req_end],
         packed,
-        metadata.cu_keys[chunk.req_start : chunk.req_end + 1],
+        plan.cu_keys[chunk.req_start : chunk.req_end + 1],
         *k_cache.stride()[:2],
         page_table.stride(0),
         PAGE_SIZE=page_size,
@@ -361,6 +361,6 @@ def warmup_deepgemm_prefill(k_cache: torch.Tensor, num_heads: int) -> None:
     for table_offset, keys_offset in itertools.product(range(2), repeat=2):
         table = torch.zeros((2, 1), device=q.device, dtype=torch.int32)
         cu_keys = torch.tensor([0, 0, 1], device=q.device, dtype=torch.int32)
-        metadata = QSAIndexerPrefillMetadata(cu_keys[keys_offset:], [chunk])
-        packed = gather_prefill_keys(k_cache, table[table_offset:], metadata, chunk)
+        plan = QSADeepGEMMPrefillPlan(cu_keys[keys_offset:], [chunk])
+        packed = gather_prefill_keys(k_cache, table[table_offset:], plan, chunk)
     deepgemm_prefill_logits(q, packed, chunk)

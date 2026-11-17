@@ -34,7 +34,7 @@ from ..common.qsa_indexer import (
     build_qsa_metadata,
 )
 from .ops.qsa_prefill_deepgemm import (
-    QSAIndexerPrefillMetadata,
+    QSADeepGEMMPrefillPlan,
     deepgemm_prefill_supported,
     prepare_deepgemm_prefill,
 )
@@ -70,7 +70,7 @@ class QSAIndexerMetadata(AttentionMetadata):
     compress_ratio: int
     # DeepGEMM prefill plan, prepared once per batch and shared by the QSA
     # layers; None unless the compressed FP8 cache takes that path.
-    indexer_prefill_metadata: QSAIndexerPrefillMetadata | None = None
+    deepgemm_prefill: QSADeepGEMMPrefillPlan | None = None
 
 
 class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
@@ -211,7 +211,7 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
         )
         if self.use_deepgemm_prefill and num_prefill_tokens:
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-            metadata.indexer_prefill_metadata = prepare_deepgemm_prefill(
+            metadata.deepgemm_prefill = prepare_deepgemm_prefill(
                 metadata,
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.seq_lens_cpu_upper_bound,

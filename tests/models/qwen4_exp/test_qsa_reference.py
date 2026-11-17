@@ -934,7 +934,7 @@ def test_qsa_prefill_selection_correctness(
         reserve_deepgemm_prefill,
     )
 
-    indexer_prefill_metadata = None
+    deepgemm_prefill = None
     if can_use_deepgemm_prefill(q, cache):
         # The constants persist across cases; reserve the largest any case uses.
         reserve_deepgemm_prefill(q.device, 8192 * compress_ratio, compress_ratio, rows)
@@ -960,7 +960,7 @@ def test_qsa_prefill_selection_correctness(
         )
         # seq_len_slack makes the host lengths an over-estimate, as under
         # async spec decode.
-        indexer_prefill_metadata = prepare_deepgemm_prefill(
+        deepgemm_prefill = prepare_deepgemm_prefill(
             metadata, query_start_loc.cpu(), sequence_lengths.cpu() + seq_len_slack
         )
         if force_chunk:
@@ -969,7 +969,7 @@ def test_qsa_prefill_selection_correctness(
             # splits at one Q tile and reuses its gathered keys.
             assert [
                 (c.req_start, c.row_start, c.row_end, c.gather)
-                for c in indexer_prefill_metadata.chunks
+                for c in deepgemm_prefill.chunks
             ] == [(0, 0, 3, True), (1, 3, 35, True), (1, 35, 36, False)]
 
     actual = torch.empty(
@@ -986,7 +986,7 @@ def test_qsa_prefill_selection_correctness(
         max(query_lens),
         actual,
         max_seq_len=sequence_lengths.max().item() + seq_len_slack,
-        indexer_prefill_metadata=indexer_prefill_metadata,
+        deepgemm_prefill=deepgemm_prefill,
     )
     expected = _qsa_select_paged_reference(
         q,
