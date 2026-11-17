@@ -37,6 +37,8 @@ def _quantize_checkpoint(
         minimum_amax = QMAX * 2.0**-117
         denominator = tl.where(amax < minimum_amax, minimum_amax, amax)
     encode = tl.where(amax == 0, 1.0, QMAX / denominator)
+    if INT8:
+        encode = tl.minimum(encode, 2.0**126)
     quantized = tl.minimum(tl.maximum(value * encode, -QMAX), QMAX)
     if INT8:
         quantized = tl.inline_asm_elementwise(
