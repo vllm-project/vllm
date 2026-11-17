@@ -1873,12 +1873,31 @@ class VllmEvenMoeIntegration:
     """
 
     def __init__(self, algorithm: str = "") -> None:
-        from evenmoe import MoELoadBalancer
-
         self.algorithm = algorithm
         self._balancer_kwargs: dict | None = None
-        self._balancer = None if algorithm else MoELoadBalancer()
+        self._balancer = None if algorithm else self._placement_only_balancer()
         self.routing: EvenMoeRoutingRuntime | None = None
+
+    @staticmethod
+    def _l1_policy() -> str:
+        """The L1 planner vLLM selected, told to every balancer this engine builds.
+
+        vLLM picks L1 (``VLLM_EVENMOE_L1_ALGORITHM``) separately from the L2
+        expression, so the balancer is constructed with it: its defaults
+        (``plan_initial_placement``, ``placement_logical_count``) then answer
+        for the planner that will run, and EvenMoE's own L1/L2 compatibility
+        check sees the real pairing. ``l2_inapplicable_reason`` has already
+        refused a mismatch at configuration time, so the check here is a
+        backstop, not the first line.
+        """
+        from vllm.distributed.eplb.policy.evenmoe import l1_algorithm
+
+        return l1_algorithm()
+
+    def _placement_only_balancer(self):
+        from evenmoe import MoELoadBalancer
+
+        return MoELoadBalancer(placement_policy=self._l1_policy())
 
     def balancer(self):
         """The single MoELoadBalancer this engine uses."""
@@ -1889,10 +1908,12 @@ class VllmEvenMoeIntegration:
                 # Placement can be asked for before the routing geometry is
                 # known; a plain planner answers L1 and is replaced in place
                 # once routing supplies the topology.
-                self._balancer = MoELoadBalancer()
+                self._balancer = self._placement_only_balancer()
             else:
                 self._balancer = MoELoadBalancer.from_algorithm(
-                    self.algorithm, **self._balancer_kwargs
+                    self.algorithm,
+                    placement_policy=self._l1_policy(),
+                    **self._balancer_kwargs,
                 )
         return self._balancer
 
@@ -1907,7 +1928,7 @@ class VllmEvenMoeIntegration:
             "collectives": VllmRoutingCollectives(),
         }
         self._balancer = MoELoadBalancer.from_algorithm(
-            self.algorithm, **self._balancer_kwargs
+            self.algorithm, placement_policy=self._l1_policy(), **self._balancer_kwargs
         )
         self.routing = EvenMoeRoutingRuntime(
             self.algorithm, balancer=self._balancer, **kwargs
@@ -2020,15 +2041,16 @@ def l2_inapplicable_reason(
     )
 
 
-def requires_per_source_rank_statistics(algorithm: str) -> bool:
-    """Whether the named L1 planner solves from each source rank's own counts.
+def placement_logical_count(algorithm: str) -> str:
+    """The data view the named L1 planner solves from: "global" or "per_source_rank".
 
     Read from the planner's declaration through the engine's balancer, which
     is what ``EplbState.rearrange`` acts on when it chooses between a
-    sum-reducing all-reduce and an all-gather of the load windows.
+    sum-reducing all-reduce ("global") and an all-gather that keeps the
+    source-rank axis ("per_source_rank") of the load windows.
     """
     balancer = get_evenmoe_integration().balancer()
-    return balancer.requires_per_source_rank_statistics(algorithm)
+    return balancer.placement_logical_count(algorithm)
 
 
 def plan_initial_placement(

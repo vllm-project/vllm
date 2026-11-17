@@ -194,7 +194,7 @@ def test_per_rank_statistics_follow_the_planners_declaration(
     monkeypatch, algorithm, per_rank
 ):
     """Whether `rearrange` gathers or sum-reduces the load windows is the
-    planner's own declaration (``requires_per_source_rank_statistics``), read
+    planner's own declaration (``logical_count`` = "per_source_rank"), read
     through the balancer -- not a name this module compares against, which
     would have to be kept in step with every planner making the same choice."""
     monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", algorithm)
