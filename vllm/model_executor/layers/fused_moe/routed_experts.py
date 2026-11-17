@@ -672,13 +672,13 @@ class RoutedExperts(PluggableLayer):
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
     ):
-        param_data = param.data
-
-        # Used for both scalar input_scale and the size-2 `weight_shape`
-        # param (compressed-tensors). Copy directly so both shapes load;
-        # _to_scalar's reshape(()) would reject the size-2 weight_shape.
-        dst = param_data[expert_id]
-        dst.copy_(loaded_weight.reshape(dst.shape))
+        dst = param.data[expert_id]
+        # Keep scalar broadcasting as well as size-2 weight_shape loads.
+        if loaded_weight.numel() == dst.numel():
+            loaded_weight = loaded_weight.reshape(dst.shape)
+        else:
+            loaded_weight = loaded_weight.reshape(())
+        dst.copy_(loaded_weight)
 
     @overload
     def weight_loader(
