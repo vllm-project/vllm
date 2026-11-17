@@ -49,8 +49,9 @@ from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import set_forward_context
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -90,6 +91,8 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
+    ProcessorInputs,
+    TimingContext,
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -684,6 +687,44 @@ _PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
 
 
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        """Reject a silent video before the cache or the prompt updates run.
+
+        The renderer keeps `mm_data`/`mm_uuids` aligned for a video without an
+        audio track by inserting a `(None, uuid)` audio item. Neither the
+        processor cache (which reports a misleading "Cache miss") nor the
+        prompt updates (`assert audio is not None`) can consume that item, so
+        report the cause while it is still known.
+        """
+        if (
+            "audio" in inputs.mm_data_items
+            and "video" in inputs.mm_data_items
+            and get_use_audio_in_video(
+                self.info.ctx.get_merged_mm_kwargs(inputs.hf_processor_mm_kwargs)
+            )
+        ):
+            audio_items = inputs.mm_data_items["audio"]
+            video_items = inputs.mm_data_items["video"]
+            # Only a 1:1 audio/video pairing can be the renderer's
+            # `(None, uuid)` sentinel for a silent video. Extra audio parts
+            # (e.g. audio-only uuid reuse alongside a video) must keep working.
+            if (
+                isinstance(audio_items, AudioProcessorItems)
+                and len(audio_items) == len(video_items)
+                and any(audio is None for audio in audio_items.get_all())
+            ):
+                raise VLLMValidationError(
+                    "A video in this request has no audio track, but "
+                    "`use_audio_in_video` is enabled. Remove the flag or "
+                    "send a video with an audio track.",
+                    parameter="video_url",
+                )
+        return super().apply(inputs, timing_ctx)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
