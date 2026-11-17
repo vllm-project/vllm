@@ -223,6 +223,14 @@ class Base(
         self.recursive_replace()
         self._stage_input: torch.Tensor | None = None
         if not self.pp_group.is_first_rank and (layers := self._decoder_layers):
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            hidden_size = self.text_config.hidden_size
+            # Piecewise CUDA graphs require a stable address for the saved input.
+            self.register_buffer(
+                "pp_hidden_states",
+                torch.zeros(1, max_tokens, hidden_size),
+                persistent=False,
+            )
             layers[self.start_layer].register_forward_pre_hook(
                 self._restore_stage_input, with_kwargs=True
             )
@@ -909,7 +917,9 @@ class Base(
         if not self.pp_group.is_first_rank:
             # Unset after the forward, so modules which call the layers directly
             # (i.e. MTP) skip the hook
-            self._stage_input = inputs_embeds
+            # Preserve the received values if the decoder modifies its input in place.
+            self._stage_input = self.pp_hidden_states
+            self._stage_input[:, : inputs_embeds.shape[1]].copy_(inputs_embeds)
         self._aux_hidden_states.clear()
         outputs = self.model(
             input_ids=input_ids,
@@ -977,6 +987,8 @@ class Base(
         positions, ...) was already done on the first rank."""
         if (received := self._stage_input) is None:
             return None
+        hidden_states = args[0] if args else kwargs["hidden_states"]
+        received = received[:, : hidden_states.shape[1]]
         if args:
             return (received, *args[1:]), kwargs
         return args, kwargs | {"hidden_states": received}

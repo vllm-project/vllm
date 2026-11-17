@@ -15,8 +15,10 @@ process by timing, so two engines could otherwise run different kernels.
 
 import contextlib
 import hashlib
+import logging
 import math
 import os
+import re
 import sys
 import tempfile
 from functools import partial
@@ -317,9 +319,26 @@ def _granite():
     return GraniteForCausalLM(config)
 
 
+def _ctrl():
+    """Scales `inputs_embeds` in place before entering its decoder layers."""
+    from transformers import CTRLConfig, CTRLLMHeadModel
+
+    config = CTRLConfig(
+        vocab_size=256,
+        n_embd=128,
+        n_head=2,
+        n_layer=2,
+        dff=256,
+        n_positions=64,
+        embd_pdrop=0.0,
+        resid_pdrop=0.0,
+    )
+    return CTRLLMHeadModel(config)
+
+
 @pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("make_model", [_opt, _granite])
+@pytest.mark.parametrize("make_model", [_opt, _granite, _ctrl])
 def test_transformers_pp_decoder_preamble(vllm_runner, tmp_path, make_model):
     """Later stages must not reapply what the decoder does before its layers."""
     with torch.random.fork_rng(devices=[]):
@@ -349,6 +368,54 @@ def test_transformers_pp_decoder_preamble(vllm_runner, tmp_path, make_model):
             sample = out.outputs[0]
             results.append((sample.token_ids, out.prompt_logprobs, sample.logprobs))
     assert results[0] == results[1]
+
+
+@pytest.mark.timeout(CASE_TIMEOUT_S)
+@multi_gpu_test(num_gpus=2)
+def test_transformers_pp_piecewise_inputs(
+    vllm_runner, tmp_path, monkeypatch, caplog_vllm
+):
+    """Restored inputs keep their capture addresses across piecewise replays."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm.compilation.cuda_graph")
+    caplog_vllm.set_level(logging.INFO, logger="vllm.v1.metrics.loggers")
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(0)
+        _granite().save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        model_impl="transformers",
+        pipeline_parallel_size=2,
+        skip_tokenizer_init=True,
+        max_model_len=64,
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+        cudagraph_metrics=True,
+        compilation_config={
+            "mode": "VLLM_COMPILE",
+            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_capture_sizes": [1, 2, 4, 8, 16],
+        },
+    ) as runner:
+        caplog_vllm.clear()
+        params = SamplingParams(
+            temperature=0, max_tokens=4, ignore_eos=True, detokenize=False
+        )
+        for offset, length in ((0, 5), (10, 10), (20, 5), (30, 10)):
+            prompt = TokensPrompt(
+                prompt_token_ids=list(range(offset + 1, offset + length + 1))
+            )
+            (out,) = runner.llm.generate(prompt, params)
+            assert len(out.outputs[0].token_ids) == 4
+        runner.llm.llm_engine.do_log_stats()
+        # Check actual prefill dispatch, not just the requested graph mode.
+        for length in (5, 10):
+            assert re.search(
+                rf"\|\s+{length}\s+\|\s+\d+\s+\|\s+\d+\s+\|\s+PIECEWISE\s+\|",
+                caplog_vllm.text,
+            )
 
 
 @pytest.mark.timeout(CASE_TIMEOUT_S)
