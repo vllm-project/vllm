@@ -168,13 +168,13 @@ Example `--serve-params`:
         "_benchmark_name": "tp1",
         "model": "Qwen/Qwen3-0.6B",
         "tensor_parallel_size": 1,
-        "gpu_memory_utilization": 0.9
+        "max_num_seqs": 128
     },
     {
         "_benchmark_name": "tp2",
         "model": "Qwen/Qwen3-0.6B",
         "tensor_parallel_size": 2,
-        "gpu_memory_utilization": 0.9
+        "max_num_seqs": 128
     }
 ]
 ```
