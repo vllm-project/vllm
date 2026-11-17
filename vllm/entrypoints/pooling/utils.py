@@ -258,7 +258,7 @@ def merge_chat_template_kwargs(
     add_generation_prompt: bool | None,
     continue_final_message: bool | None,
 ) -> dict[str, Any]:
-    """Merge top-level chat template flags into ``chat_template_kwargs``."""
+    """Merge top-level chat template flags into `chat_template_kwargs`."""
     merged = dict(chat_template_kwargs or {})
 
     if add_generation_prompt:
