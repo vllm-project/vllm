@@ -254,7 +254,7 @@ def get_transformers_renames(hf_config: PreTrainedConfig) -> "WeightsMapper | No
     )
     renamings = {}  # keyed by repr: a config and its text config can share them
     for key in keys:
-        for renaming in get_checkpoint_conversion_mapping(key) or []:
+        for renaming in reversed(get_checkpoint_conversion_mapping(key) or []):
             if isinstance(renaming, WeightRenaming):
                 reverse = renaming.reverse_transform()
                 renamings.setdefault(repr(reverse), reverse)
