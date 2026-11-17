@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 _HEAD_DIM = 256
 # Below this query length, quantizing q/k/v costs more than the kernel saves.
-_MIN_CAUSAL_SEQLEN_Q = 4096
+_MIN_CAUSAL_SEQLEN_Q = 2048
 _KERNEL_KWARGS = frozenset(
     {
         "cu_seqlens_q",
