@@ -1192,14 +1192,32 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             )
             return (height // unit) * (width // unit)
 
-        return max(
-            sizes,
-            key=lambda canvas: (
-                num_tokens(canvas),
-                on_grid(canvas),
-                -canvas.width * canvas.height,
-            ),
+        def sort_key(canvas: ImageSize) -> tuple[int, bool, int]:
+            return (num_tokens(canvas), on_grid(canvas), -canvas.width * canvas.height)
+
+        best = max(sizes, key=sort_key)
+        min_patches = size["shortest_edge"] / (unit * unit)
+        max_upscaled_tokens = (
+            min_patches
+            + math.sqrt(200 * min_patches)
+            + math.sqrt(min_patches / 200)
+            + 1
         )
+        if do_resize and num_tokens(best) < max_upscaled_tokens:
+            upscaled = [best]
+            for w in range(MIN_DUMMY_SIDE, max_width + 1):
+                grid_w = round(w / unit)
+                max_h = min(max_height, 200 * w)
+                if grid_w:
+                    max_h = min(
+                        max_h, int((math.ceil(min_patches / grid_w) - 0.5) * unit)
+                    )
+                upscaled.extend(
+                    ImageSize(width=w, height=h)
+                    for h in range(MIN_DUMMY_SIDE, max_h + 1)
+                )
+            best = max(upscaled, key=sort_key)
+        return best
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
