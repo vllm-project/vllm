@@ -15,7 +15,6 @@ steps:
   - tests/plugins_tests/test_endpoint_plugins.py
   - vllm/entrypoints/launchers/launcher.py
   - vllm/entrypoints/launchers/utils/server_utils.py
-  - vllm/entrypoints/launchers/render/entry.py
   - tests/utils.py
   commands:
   # These plugins act only when a test names them (io_processor and endpoint)
@@ -46,7 +45,6 @@ steps:
       - tests/plugins_tests/test_endpoint_plugins.py
       - vllm/entrypoints/launchers/launcher.py
       - vllm/entrypoints/launchers/utils/server_utils.py
-      - vllm/entrypoints/launchers/render/entry.py
       - tests/utils.py
       - vllm/platforms/rocm.py
 

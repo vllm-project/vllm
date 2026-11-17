@@ -119,10 +119,7 @@ def load_endpoint_plugins(
     """
     from importlib.metadata import entry_points
 
-    from vllm.plugins.endpoint_plugins.interface import (
-        validate_endpoint_plugin_hooks,
-        validate_endpoint_plugin_stop_timeout,
-    )
+    from vllm.plugins.endpoint_plugins.interface import validate_endpoint_plugin_hooks
 
     if envs.VLLM_PLUGINS is None:
         discovered = entry_points(group=ENDPOINT_PLUGINS_GROUP)
@@ -136,8 +133,6 @@ def load_endpoint_plugins(
         return []
 
     factories = load_plugins_by_group(ENDPOINT_PLUGINS_GROUP)
-    if factories:
-        validate_endpoint_plugin_stop_timeout()
 
     endpoint_plugins: list[EndpointPlugin] = []
     for name, factory in factories.items():
