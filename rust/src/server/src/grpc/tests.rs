@@ -3946,6 +3946,10 @@ async fn derender_chat_stream_honors_skip_special_tokens() {
     token_ids.extend(render_token_ids("b"));
     let output = pb::SequenceOutput {
         token_ids,
+        finish_info: Some(pb::FinishInfo {
+            finish_reason: pb::finish_info::FinishReason::Length as i32,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let start = derender_start(plain_chat_request()).await;
@@ -3965,22 +3969,36 @@ async fn derender_chat_stream_honors_skip_special_tokens() {
     assert_eq!(kept.content, "a<|im_end|>b");
 }
 
+/// An `ABORTED` output ends the output early, flushing the text held back
+/// for a possible stop string.
 #[tokio::test]
-async fn derender_chat_stream_closed_early_finishes_with_length() {
+async fn derender_chat_stream_ends_early_on_aborted_output() {
     let response = derender(
-        derender_start(plain_chat_request()).await,
-        vec![plain_output("ok", None)],
+        pb::DerenderChatStart {
+            stop_strings: vec!["END".to_string()],
+            ..derender_start(plain_chat_request()).await
+        },
+        vec![
+            plain_output("Sunny E", None),
+            plain_output(
+                "",
+                Some(pb::FinishInfo {
+                    finish_reason: pb::finish_info::FinishReason::Aborted as i32,
+                    ..Default::default()
+                }),
+            ),
+        ],
     )
     .await
     .expect("derender");
 
-    assert_eq!(response.content, "ok");
+    assert_eq!(response.content, "Sunny E");
     let finish_info = response.finish_info.expect("finish_info");
     assert_eq!(
         finish_info.finish_reason(),
-        pb::finish_info::FinishReason::Length
+        pb::finish_info::FinishReason::Aborted
     );
-    assert_eq!(finish_info.num_output_tokens, 2);
+    assert_eq!(finish_info.num_output_tokens, 7);
 }
 
 /// Fields that decoding does not change, such as the KV transfer parameters of
@@ -4047,6 +4065,13 @@ async fn derender_chat_stream_rejects_invalid_messages() {
         (
             "output before start",
             vec![derender_stream_output(plain_output("ok", None))],
+        ),
+        (
+            "closed before a finished output",
+            vec![
+                derender_stream_start(start.clone()),
+                derender_stream_output(plain_output("ok", None)),
+            ],
         ),
         (
             "second start",

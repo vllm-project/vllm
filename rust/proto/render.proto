@@ -66,8 +66,9 @@ message DerenderChatStreamRequest {
     // First message.
     DerenderChatStart start = 1;
     // Each later message: `GenerateResponse.outputs` of the next
-    // GenerateStream chunk of the same sequence. Closing the request stream
-    // before a finished chunk ends the output as if it reached `length`.
+    // GenerateStream chunk of the same sequence, up to the finished one.
+    // Closing the request stream before it is an error; to end the output
+    // early, send an output with `finish_info.finish_reason = ABORTED`.
     SequenceOutput output = 2;
   }
 }

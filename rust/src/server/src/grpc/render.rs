@@ -293,10 +293,9 @@ impl DerenderInbound {
                     ));
                 }
                 None => {
-                    return Ok(DetokenizeChunk {
-                        finish_reason: Some(FinishReason::Length),
-                        ..Default::default()
-                    });
+                    return Err(Status::invalid_argument(
+                        "the DerenderChatStream request stream closed before a finished output",
+                    ));
                 }
             },
         };

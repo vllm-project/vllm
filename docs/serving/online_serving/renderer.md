@@ -49,6 +49,10 @@ The Rust frontend also serves a `vllm.Render` gRPC service, defined in
 false, so `DerenderChatStream` matches them, holding back text that may still
 begin one. When a stop string ends the output, the server closes the stream
 while generation may still be running: the client must cancel `GenerateStream`.
+To stop the output early instead, for example at a client deadline, send a
+final `SequenceOutput` whose `finish_info.finish_reason` is `ABORTED`; this
+flushes the held-back text. Closing the request stream before a finished output
+is an error.
 
 ## Get Responses prompt token IDs
 
