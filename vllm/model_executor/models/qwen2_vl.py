@@ -1205,7 +1205,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         )
         if do_resize and num_tokens(best) < max_upscaled_tokens:
             upscaled = [best]
-            for w in range(MIN_DUMMY_SIDE, max_width + 1):
+            for w in range(MIN_DUMMY_SIDE, min(max_width, 200 * max_height) + 1):
                 grid_w = round(w / unit)
                 max_h = min(max_height, 200 * w)
                 if grid_w:
