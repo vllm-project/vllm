@@ -14,6 +14,7 @@ use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_metrics::METRICS;
 
 mod aux_output;
@@ -212,6 +213,24 @@ impl EngineCoreLlm {
         Ok(streams.pop().expect("one output stream per sample"))
     }
 
+    /// Reject a request for prompt logprobs when an engine does not compute
+    /// them (under `--kv-sharing-fast-prefill`).
+    fn check_prompt_logprobs_supported(&self, params: &EngineCoreSamplingParams) -> Result<()> {
+        if self.client.supports_prompt_logprobs() {
+            return Ok(());
+        }
+        // Python tests `prompt_logprobs` for truthiness, which lets `0`
+        // through although those logprobs are just as incorrect.
+        let parameter = if params.prompt_logprobs.is_some() {
+            "prompt_logprobs"
+        } else if params.prompt_logprob_token_ids.is_some() {
+            "prompt_logprob_token_ids"
+        } else {
+            return Ok(());
+        };
+        Err(Error::PromptLogprobsUnsupported { parameter })
+    }
+
     /// Submit one request as `n` parallel samples, returning one output stream
     /// per sample in index order.
     ///
@@ -228,6 +247,8 @@ impl EngineCoreLlm {
         mut req: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
+        self.check_prompt_logprobs_supported(&req.sampling_params)?;
+
         // Clamp the request's stream interval to the frontend-level one, like
         // Python. Engine-core ignores it; the client batches deliveries by it.
         let stream_interval = (req.sampling_params.stream_interval)
