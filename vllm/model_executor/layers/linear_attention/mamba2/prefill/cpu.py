@@ -8,15 +8,18 @@ import torch
 from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms.interface import PlatformEnum
 
-from .base import MambaSSDKernel
+from .base import MambaSSDKernel, SSDLayerParams, SSDWarmupKey
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
     from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 
 class CPUSSDKernel(MambaSSDKernel):
     backend = MambaBackendEnum.CPU
+
+    @classmethod
+    def _register_warmups(cls, key: SSDWarmupKey) -> None:
+        """Nothing to compile: the CPU kernel launches no Triton."""
 
     @classmethod
     def supports_platform(cls, platform: PlatformEnum) -> bool:
@@ -54,7 +57,7 @@ class CPUSSDKernel(MambaSSDKernel):
     @classmethod
     def _scan(
         cls,
-        layer: "MambaMixer2",
+        layer: SSDLayerParams,
         x: torch.Tensor,
         dt: torch.Tensor,
         B: torch.Tensor,

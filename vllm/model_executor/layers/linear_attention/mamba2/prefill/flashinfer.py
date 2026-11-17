@@ -10,10 +10,9 @@ from vllm.model_executor.layers.linear_attention.kernel import LinearAttnSelecto
 from vllm.platforms.interface import DeviceCapability, PlatformEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from .base import MambaSSDKernel
+from .base import MambaSSDKernel, SSDLayerParams, SSDScanWarmup, SSDWarmupKey
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
     from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 # Shapes and activation dtype FlashInfer's SSD scan is built for.
@@ -24,6 +23,11 @@ FLASHINFER_SSD_DTYPE = torch.bfloat16
 
 class FlashInferSSDKernel(MambaSSDKernel):
     backend = MambaBackendEnum.FLASHINFER
+
+    @classmethod
+    def _register_warmups(cls, key: SSDWarmupKey) -> None:
+        super()._register_warmups(key)
+        _SCAN_WARMUP.register_warmup(key)
 
     @classmethod
     def supports_platform(cls, platform: PlatformEnum) -> bool:
@@ -105,7 +109,7 @@ class FlashInferSSDKernel(MambaSSDKernel):
     @classmethod
     def _scan(
         cls,
-        layer: "MambaMixer2",
+        layer: SSDLayerParams,
         x: torch.Tensor,
         dt: torch.Tensor,
         B: torch.Tensor,
@@ -136,3 +140,6 @@ class FlashInferSSDKernel(MambaSSDKernel):
             out=out.unsqueeze(0),
         )
         return final_states, metadata.checkpoint_states_p
+
+
+_SCAN_WARMUP = SSDScanWarmup(FlashInferSSDKernel)
