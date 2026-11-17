@@ -7,23 +7,7 @@ postprocess decision logic. The copy metadata comes from the production
 `MambaSpecDecodeGPUContext`, and every config checks the copy before timing
 it. `--model` takes any HF hybrid model with a conv +
 temporal state per layer; its layout (tp=1) comes from vLLM's own state
-shape/dtype logic. These presets work offline:
-
-- Qwen/Qwen3.5-9B (gated delta net, num_spec=2): 24 linear layers x 2 state
-  types = 48 states,
-  - conv state: state_len=5, conv_dim=8192 (bf16, 80 KiB/block)
-  - temporal: (num_v_heads=32, head_v_dim=128, head_k_dim=128) fp32
-    (2 MiB/block; mamba_ssm_dtype=float32 in HF config).
-- Qwen/Qwen3.5-0.8B (gated delta net, num_spec=2): 18 linear layers x 2 state
-  types = 36 states,
-  - conv state: state_len=5, conv_dim=6144 (bf16, 60 KiB/block)
-  - temporal: (num_v_heads=16, head_v_dim=128, head_k_dim=128) fp32
-    (1 MiB/block; mamba_ssm_dtype=float32 in HF config).
-- nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 (mamba2, num_spec=1): 40
-  mamba layers x 2 = 80 states,
-  - conv state: state_len=4, conv_dim=10240 (bf16, 80 KiB/block)
-  - temporal: (mamba_num_heads=128, mamba_head_dim=64, ssm_state_size=128)
-    fp32 (4 MiB/block; mamba_ssm_cache_dtype="float32").
+shape/dtype logic. The presets listed by `--list-models` work offline.
 
 Grid mirrors the fused-kernel launch shape
 (num_reqs, total_states, temporal_tiles).
@@ -120,7 +104,7 @@ _QWEN3_5_9B = ModelStateConfig(
     conv_state_len=4 - 1 + 2,  # conv_kernel - 1 + num_spec
     temporal_shape=(32, 128, 128),
     conv_dtype=torch.bfloat16,
-    temporal_dtype=torch.float32,
+    temporal_dtype=torch.float32,  # mamba_ssm_dtype in the HF config
     num_spec=2,
     layer_kind="gated_delta_net",
     notes="24 linear + 8 full_attention (interval 4) out of 32",
@@ -143,7 +127,7 @@ _NEMOTRON3_SUPER_120B = ModelStateConfig(
     conv_state_len=4 - 1 + 1,  # conv_kernel - 1 + num_spec
     temporal_shape=(128, 64, 128),
     conv_dtype=torch.bfloat16,
-    temporal_dtype=torch.float32,
+    temporal_dtype=torch.float32,  # mamba_ssm_cache_dtype in the HF config
     num_spec=1,
     layer_kind="mamba2",
     notes="40 mamba + 8 attention + 40 moe out of 88",
@@ -162,7 +146,7 @@ _QWEN3_5_0_8B = ModelStateConfig(
     conv_state_len=4 - 1 + 2,  # conv_kernel - 1 + num_spec
     temporal_shape=(16, 128, 128),
     conv_dtype=torch.bfloat16,
-    temporal_dtype=torch.float32,
+    temporal_dtype=torch.float32,  # mamba_ssm_dtype in the HF config
     num_spec=2,
     layer_kind="gated_delta_net",
     notes="18 linear + 6 full_attention (interval 4) out of 24",
