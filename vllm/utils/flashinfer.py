@@ -172,6 +172,37 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_batch_invariant_gemm() -> bool:
+    """Return whether FlashInfer's batch-invariant BF16 GEMM
+    (`mm_bf16(..., batch_invariant=True)`, FlashInfer >= 0.7.4) can run on
+    this device: CUDA on SM100, SM103 or SM107."""
+    if not current_platform.is_cuda() or not has_flashinfer():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.to_int() not in (100, 103, 107):
+        return False
+    version = _installed_version("flashinfer-python")
+    return version is not None and Version(version) >= Version("0.7.4")
+
+
+def use_flashinfer_batch_invariant_gemm() -> bool:
+    """Return whether VLLM_BATCH_INVARIANT=1 runs the unquantized bf16 linear
+    layers and LM head on FlashInfer's batch-invariant GEMM, per
+    VLLM_BATCH_INVARIANT_GEMM_BACKEND."""
+    backend = envs.VLLM_BATCH_INVARIANT_GEMM_BACKEND
+    if backend == "triton":
+        return False
+    if has_flashinfer_batch_invariant_gemm():
+        return True
+    if backend == "flashinfer":
+        raise RuntimeError(
+            "VLLM_BATCH_INVARIANT_GEMM_BACKEND=flashinfer needs FlashInfer >= 0.7.4 "
+            "on an SM100, SM103 or SM107 GPU."
+        )
+    return False
+
+
+@functools.cache
 def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
     """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
     if not has_flashinfer():

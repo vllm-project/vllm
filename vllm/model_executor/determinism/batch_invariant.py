@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_descriptor_matmul_config,
     _get_matmul_config,
@@ -16,10 +17,13 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import use_flashinfer_batch_invariant_gemm
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+
+logger = init_logger(__name__)
 
 
 def _matmul_launch_metadata(
@@ -1144,12 +1148,80 @@ def rms_norm_batch_invariant(
     return output.reshape(original_shape)
 
 
+def _flashinfer_mm_bf16(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    from flashinfer import mm_bf16
+
+    # The flag replaces the backends with one specified kernel class, which
+    # accepts only backend="auto" (mm_bf16 defaults to "cudnn").
+    return mm_bf16(
+        x,
+        weight.t(),
+        bias=bias,
+        out_dtype=torch.bfloat16,
+        backend="auto",
+        batch_invariant=True,
+    )
+
+
+def _flashinfer_mm_bf16_fake(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]))
+
+
+# Opaque to Dynamo: the class picks its configuration from the batch at run
+# time, inside the op, so a compiled forward does not freeze that choice.
+direct_register_custom_op(
+    op_name="flashinfer_mm_bf16_batch_invariant",
+    op_func=_flashinfer_mm_bf16,
+    fake_impl=_flashinfer_mm_bf16_fake,
+)
+
+# Whether linear_batch_invariant uses FlashInfer's GEMM: resolved once, in
+# enable_batch_invariant_mode or on the first call, so traced code reads a flag.
+_FLASHINFER_GEMM: bool | None = None
+
+
+def flashinfer_gemm_enabled() -> bool:
+    global _FLASHINFER_GEMM
+    if _FLASHINFER_GEMM is None:
+        _FLASHINFER_GEMM = use_flashinfer_batch_invariant_gemm()
+    return _FLASHINFER_GEMM
+
+
+def _fits_flashinfer_gemm(
+    input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> bool:
+    """FlashInfer's class takes bf16 operands, a row-major (N, K) weight and
+    N, K multiples of 8. The test reads the dtypes and the weight only, never
+    the number of rows, so a layer runs one kernel whatever the batch."""
+    n, k = weight.shape
+    return (
+        input.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and (bias is None or bias.dtype == torch.bfloat16)
+        and weight.is_contiguous()
+        and n % 8 == 0
+        and k % 8 == 0
+    )
+
+
 def linear_batch_invariant(input, weight, bias=None):
     if bias is not None:
         bias = bias.expand(weight.shape[0])
-    output = mm_batch_invariant(
-        input.reshape(-1, input.shape[-1]), weight.t(), bias=bias
-    )
+    x = input.reshape(-1, input.shape[-1])
+    if (
+        input.is_cuda
+        and flashinfer_gemm_enabled()
+        and _fits_flashinfer_gemm(input, weight, bias)
+    ):
+        output = torch.ops.vllm.flashinfer_mm_bf16_batch_invariant(
+            x.contiguous(), weight, None if bias is None else bias.contiguous()
+        )
+    else:
+        output = mm_batch_invariant(x, weight.t(), bias=bias)
     return output.view(*input.shape[:-1], output.shape[-1])
 
 
@@ -1422,6 +1494,13 @@ def enable_batch_invariant_mode():
             # CUDA device (see #35404).
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+            if flashinfer_gemm_enabled():
+                logger.info_once(
+                    "Batch invariance: unquantized bf16 linear layers and the LM "
+                    "head run FlashInfer's batch-invariant GEMM; set "
+                    "VLLM_BATCH_INVARIANT_GEMM_BACKEND=triton for the Triton "
+                    "persistent matmul."
+                )
 
         _resolve_block_sizes()
     elif current_platform.is_xpu():

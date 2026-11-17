@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.2"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BATCH_INVARIANT_GEMM_BACKEND: Literal["auto", "flashinfer", "triton"] = "auto"
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -684,6 +685,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # GEMM for the unquantized bf16 linear layers and LM head under
+    # VLLM_BATCH_INVARIANT=1. "auto": FlashInfer's batch-invariant GEMM
+    # (FlashInfer >= 0.7.4) on SM100 / SM103 / SM107, else the Triton
+    # persistent matmul; "flashinfer": require FlashInfer's; "triton": always
+    # the Triton kernel.
+    "VLLM_BATCH_INVARIANT_GEMM_BACKEND": env_with_choices(
+        "VLLM_BATCH_INVARIANT_GEMM_BACKEND", "auto", ["auto", "flashinfer", "triton"]
+    ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
