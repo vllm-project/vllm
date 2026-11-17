@@ -539,7 +539,7 @@ def warmup_gvr2_topk(
 _gvr2_prefill_zero_starts: torch.Tensor | None = None
 
 
-def init_gvr2_prefill_zero_starts(max_num_tokens: int) -> None:
+def init_gvr2(max_num_tokens: int) -> None:
     global _gvr2_prefill_zero_starts
     if (
         _gvr2_prefill_zero_starts is None
@@ -569,7 +569,7 @@ def _gvr2_topk(
         assert (
             _gvr2_prefill_zero_starts is not None
             and _gvr2_prefill_zero_starts.numel() >= num_tokens
-        ), "call init_gvr2_prefill_zero_starts(max_num_batched_tokens) first"
+        ), "call init_gvr2(max_num_batched_tokens) first"
         row_starts = _gvr2_prefill_zero_starts[:num_tokens]
     # -1-fills tokens shorter than block_topk itself.
     run_varlen(

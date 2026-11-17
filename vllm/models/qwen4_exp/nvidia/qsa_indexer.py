@@ -119,7 +119,7 @@ class QSAIndexer(nn.Module):
         self.compress_ratio = int(config.indexer_compress_ratio)
         from .ops.qsa_indexer import (
             QSA_TOPK_BACKENDS,
-            init_gvr2_prefill_zero_starts,
+            init_gvr2,
             use_gvr2_topk,
         )
 
@@ -131,9 +131,7 @@ class QSAIndexer(nn.Module):
             )
         # Width 64 is float4-aligned, so this only checks platform and k.
         if use_gvr2_topk(self.topk_backend, self.token_topk // self.compress_ratio, 64):
-            init_gvr2_prefill_zero_starts(
-                vllm_config.scheduler_config.max_num_batched_tokens
-            )
+            init_gvr2(vllm_config.scheduler_config.max_num_batched_tokens)
         self.rotary_emb = rotary_emb
         self.use_fused_pre_indexer = _supports_fused_pre_indexer(
             rotary_emb,
