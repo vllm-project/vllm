@@ -60,10 +60,15 @@ def test_flashinfer_bf16_cutedsl_correctness(
         (1, 1024, 1024),
         (64, 2048, 3072),
         (512, 1024, 1000),
-        # N not a multiple of 8 (MoE shared_expert_gate, in_proj_ba at TP8) must
-        # fall back to F.linear instead of aborting FlashInfer's autotuning.
+        # N not a multiple of 8 (MoE shared_expert_gate, in_proj_ba at TP8) goes
+        # through FlashInfer auto.
         (64, 1, 2048),
         (64, 12, 2048),
+        (4, 7, 2048),
+        # K not a multiple of 8: FlashInfer keeps TGV and TinyGEMM out of auto
+        # (flashinfer-ai/flashinfer#9610).
+        (64, 12, 2052),
+        (64, 128, 1001),
     ],
 )
 @pytest.mark.parametrize("tune", [False, True])
