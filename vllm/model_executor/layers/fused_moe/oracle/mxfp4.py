@@ -562,29 +562,33 @@ def _aiter_deferred_activation_key(
 
     Only MXFP8 on the interleaved (non-SiTU, non-a4w4) path can be: SiTU takes
     its activation dtype from VLLM_ROCM_USE_AITER_MOE_SITUV2, and the
-    DeepSeek-V4.1 a4w4 opt-in from VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4.
+    DeepSeek-V4.1 a4w4 opt-in from VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4. A user
+    request for an activation the experts do not compute with raises.
     """
     if activation_key is None:
         return None
 
     from vllm._aiter_ops import rocm_aiter_ops
 
-    if (
-        activation_key == kMxfp8Dynamic
-        and config.activation != MoEActivation.SITU
-        and not config.use_mxfp4_w4a4_dsv4
-        and rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
-    ):
-        return kMxfp8Dynamic
-    if config.use_mxfp4_w4a4_dsv4 and activation_key == kMxfp4Dynamic:
-        # What the a4w4 experts quantize their BF16 input to anyway.
-        return None
-    if _user_moe_activation_override_is_set():
-        logger.warning_once(
-            "%s experts cannot run MoE activation=%s in this configuration; "
-            "it is ignored and their inputs are not quantized before dispatch.",
-            Mxfp4MoeBackend.AITER_MXFP4_BF16.value,
-            activation_key,
+    if config.activation == MoEActivation.SITU:
+        computed_key = {"a8w4": kMxfp8Dynamic, "a4w4": kMxfp4Dynamic}.get(
+            rocm_aiter_ops.get_fused_moe_situv2_activation()
+        )
+    elif config.use_mxfp4_w4a4_dsv4:
+        computed_key = kMxfp4Dynamic
+    else:
+        computed_key = kMxfp8Dynamic
+        if (
+            activation_key == kMxfp8Dynamic
+            and rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
+        ):
+            return kMxfp8Dynamic
+    if activation_key != computed_key and _user_moe_activation_override_is_set():
+        computed = "null (BF16)" if computed_key is None else computed_key
+        raise ValueError(
+            f"quantization_config.moe.activation={activation_key} cannot run on "
+            f"{Mxfp4MoeBackend.AITER_MXFP4_BF16.value} experts in this "
+            f"configuration, which compute with activation={computed}."
         )
     return None
 

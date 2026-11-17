@@ -220,9 +220,9 @@ def _dsv41_flash_experts_quant_config(monkeypatch, moe_spec, a4w4=False):
         # The checkpoint names no activation scheme for its experts, so this is
         # the MXFP8 DeepseekV4FP8Config defaults to.
         pytest.param(None, current_platform.fp8_dtype(), id="checkpoint-default"),
-        # These experts cannot run MXFP4 activations, so the override turns the
-        # MXFP8 default off rather than being outvoted by it.
-        pytest.param({"activation": "mxfp4"}, torch.bfloat16, id="user-override"),
+        pytest.param(
+            {"activation": "mxfp8"}, current_platform.fp8_dtype(), id="user-mxfp8"
+        ),
         # An explicit null asks for unquantized activations, not the default.
         pytest.param({"activation": None}, torch.bfloat16, id="user-null"),
     ],
@@ -241,34 +241,42 @@ def test_dsv41_flash_dispatch_dtype(
 @requires_aiter_on_gfx950
 @requires_mori
 @pytest.mark.parametrize(
-    "moe_spec,warns",
+    "moe_spec",
     [
-        # The MXFP8 default yields to the a4w4 opt-in without a warning.
-        pytest.param(None, False, id="checkpoint-default"),
+        # The MXFP8 default yields to the a4w4 opt-in.
+        pytest.param(None, id="checkpoint-default"),
         # What the a4w4 experts run anyway.
-        pytest.param({"activation": "mxfp4"}, False, id="user-mxfp4"),
-        # A user request the a4w4 experts cannot honor.
-        pytest.param({"activation": "mxfp8"}, True, id="user-mxfp8"),
+        pytest.param({"activation": "mxfp4"}, id="user-mxfp4"),
     ],
 )
-def test_dsv41_flash_a4w4_dispatch_stays_bf16(
-    aiter_moe_env, monkeypatch, moe_spec, warns
-):
+def test_dsv41_flash_a4w4_dispatch_stays_bf16(aiter_moe_env, monkeypatch, moe_spec):
     """The a4w4 opt-in quantizes its BF16 input itself, so there is no MXFP8
-    dispatch, and only an unsatisfiable user override is warned about."""
-    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
-
-    warnings = []
-    monkeypatch.setattr(
-        mxfp4_oracle.logger, "warning_once", lambda *args, **kw: warnings.append(args)
-    )
+    dispatch."""
     quant_config = _dsv41_flash_experts_quant_config(monkeypatch, moe_spec, a4w4=True)
     prepare_finalize, args = _make_mori_dispatch(quant_config)
 
     assert quant_config.deferred_activation_key is None
     assert args["quant_dtype"] == torch.bfloat16
     assert not prepare_finalize.use_mxfp8_dispatch
-    assert bool(warnings) is warns
+
+
+@requires_aiter_on_gfx950
+@pytest.mark.parametrize(
+    "moe_spec,a4w4",
+    [
+        # The interleaved w4a16 experts compute with MXFP8, not MXFP4.
+        pytest.param({"activation": "mxfp4"}, False, id="interleaved-mxfp4"),
+        # The a4w4 opt-in computes with MXFP4, not MXFP8.
+        pytest.param({"activation": "mxfp8"}, True, id="a4w4-mxfp8"),
+    ],
+)
+def test_dsv41_flash_rejects_unrunnable_user_activation(
+    aiter_moe_env, monkeypatch, moe_spec, a4w4
+):
+    """A user activation the experts cannot run raises instead of being
+    ignored."""
+    with pytest.raises(ValueError, match="cannot run on AITER_MXFP4_BF16"):
+        _dsv41_flash_experts_quant_config(monkeypatch, moe_spec, a4w4=a4w4)
 
 
 @requires_aiter_on_gfx950
