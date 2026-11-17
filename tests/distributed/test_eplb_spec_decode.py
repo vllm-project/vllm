@@ -50,8 +50,6 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
-    if spec_method == "dspark":
-        model_args["trust_remote_code"] = True
     return model_args
 
 
