@@ -26,6 +26,9 @@ LOCKFILES = [
     "requirements/test/cuda.txt",
     "requirements/test/rocm.txt",
     "requirements/test/xpu.txt",
+    "requirements/test/kv_connectors_cuda.txt",
+    "requirements/test/quantization_deps_cuda.txt",
+    "requirements/test/quantization_deps_rocm.txt",
 ]
 
 
@@ -71,7 +74,16 @@ def test_refresh_excludes_recent_or_undated_archives(tmp_path, timestamps):
         try:
             hooks = []
             outputs = []
-            for suffix in ["", "-rocm", "-xpu", "-cpu", "-docs"]:
+            for suffix in [
+                "",
+                "-rocm",
+                "-xpu",
+                "-cpu",
+                "-docs",
+                "-kv-connectors",
+                "-quantization-deps",
+                "-quantization-deps-rocm",
+            ]:
                 output = f"requirements{suffix}.txt"
                 outputs.append(tmp_path / output)
                 hooks.append(
@@ -145,7 +157,16 @@ def review_repo(tmp_path):
         ROOT / "tools/review_compiled_requirements.py",
         tmp_path / "tools/review_compiled_requirements.py",
     )
-    before = ["shared", "changed", "removed-cuda", "same-hash", "xpu-only"]
+    before = [
+        "shared",
+        "changed",
+        "removed-cuda",
+        "same-hash",
+        "xpu-only",
+        "connector",
+        "quant-cuda",
+        "quant-rocm",
+    ]
     for path, name in zip(LOCKFILES, before):
         lock = tmp_path / path
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -174,12 +195,22 @@ def review_repo(tmp_path):
         "new-cuda==1.0",
         "same-hash==1.0",
         'xpu-only==1.0+vendor; sys_platform == "win32"',
+        "connector==1.0",
+        "quant-cuda==1.0",
+        "quant-rocm==1.0",
     ]
     for path, requirement in zip(LOCKFILES, after):
         digest = "b" if "same-hash" in requirement else "a"
         (tmp_path / path).write_text(
             f"{requirement} \\\n    --hash=sha256:{digest * 64}\n"
         )
+    # Current CUDA locks emit index directives; they are not package pins.
+    cuda_lock = tmp_path / "requirements/test/cuda.txt"
+    cuda_lock.write_text(
+        "--index-url https://pypi.org/simple\n"
+        "--extra-index-url https://download.pytorch.org/whl/cu132\n"
+        + cuda_lock.read_text()
+    )
     # Cross the API batch boundary; the XPU-only finding is in the second batch.
     with (tmp_path / LOCKFILES[0]).open("a") as file:
         for i in range(101):
@@ -265,12 +296,12 @@ def test_review_is_informational_by_default(review_repo, response_kind, enforce)
     assert change["after"]["hashes"] == ["b" * 64]
     if response_kind in {"clean", "vulnerable"}:
         pairs = {(q["package"]["name"], q["version"]) for q in queries}
-        assert len(pairs) == 107
+        assert len(pairs) == 110
         assert ("shared", "1.0") in pairs
         assert ("xpu-only", "1.0+vendor") in pairs
         assert ("xpu-only", "1.0") in pairs
         assert ("removed-cuda", "1.0") not in pairs
-        assert len(data["audit"]) == 107
+        assert len(data["audit"]) == 110
     if response_kind == "vulnerable":
         assert "GHSA-test-advisory" in report
         assert data["complete"] is True

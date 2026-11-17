@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Upgrade locks produced by the uv pip-compile pre-commit hooks.
 
-Reads each ``pip-compile`` hook in ``.pre-commit-config.yaml`` and reruns it
-with ``--upgrade``, then once more without ``--upgrade``. The second pass
+Reads each `pip-compile` hook in `.pre-commit-config.yaml` and reruns it
+with `--upgrade`, then once more without `--upgrade`. The second pass
 keeps the upgraded pins and hashes and rewrites the header to the pre-commit
 command, so CI's compile hooks do not touch the files again.
 Both passes share a seven-day upload cutoff, including archive hashes.
@@ -13,7 +13,7 @@ The hooks generate SHA-256 hashes for published package archives. uv verifies
 these on download; excluded ROCm packages and separate source/build installs
 are outside these locks.
 
-``--upgrade`` stays off the pre-commit hooks. Those run on every commit and
+`--upgrade` stays off the pre-commit hooks. Those run on every commit and
 must not float transitive pins.
 """
 
@@ -35,6 +35,9 @@ EXPECTED_HOOKS = {
     "pip-compile-xpu",
     "pip-compile-cpu",
     "pip-compile-docs",
+    "pip-compile-kv-connectors",
+    "pip-compile-quantization-deps",
+    "pip-compile-quantization-deps-rocm",
 }
 
 

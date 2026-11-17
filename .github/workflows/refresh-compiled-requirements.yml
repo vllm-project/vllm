@@ -26,7 +26,7 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           python-version: "3.12"
-          version: "0.11.1"
+          version: "0.13.6"
           enable-cache: false
       - name: Upgrade compiled requirement locks
         run: >-
@@ -78,7 +78,7 @@ jobs:
         run: |
           {
             echo 'Publishing is disabled. Review the patch and open a PR manually.'
-            echo 'This artifact refreshes five compiled locks within their source constraints.'
+            echo 'This artifact refreshes eight compiled locks within their source constraints.'
             echo 'Package versions and SHA-256 archive hashes are pinned together.'
             echo 'Python dependency archives have a seven-day cooldown in both compile passes.'
             echo 'Vulnerability checks are informational; findings and reporting failures do not block publication.'
@@ -94,7 +94,7 @@ jobs:
 
   publish:
     # Enable only after reviewing weekly artifacts and configuring the App.
-    if: ${{ false }}
+    if: ${{ github.repository == 'vllm-project/vllm' && false }}
     needs: compile
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -131,7 +131,7 @@ jobs:
               exit 1
             fi
             case "${file}" in
-              requirements/docs.txt|requirements/test/cpu.txt|requirements/test/cuda.txt|requirements/test/rocm.txt|requirements/test/xpu.txt) ;;
+              requirements/docs.txt|requirements/test/cpu.txt|requirements/test/cuda.txt|requirements/test/rocm.txt|requirements/test/xpu.txt|requirements/test/kv_connectors_cuda.txt|requirements/test/quantization_deps_cuda.txt|requirements/test/quantization_deps_rocm.txt) ;;
               *) echo "Unexpected path in lockfile patch: ${file}" >&2; exit 1 ;;
             esac
           done < "${RUNNER_TEMP}/lock-changes"
@@ -179,8 +179,8 @@ jobs:
           fi
           cat > "${RUNNER_TEMP}/requirements-pr.md" <<'EOF'
           ## Summary
-          - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade, pinning versions and SHA-256 archive hashes.
-          - Only regular-file modifications to these five locks passed publisher validation.
+          - Regenerates the eight compiled requirement locks with the pre-commit uv pip compile commands plus --upgrade, pinning versions and SHA-256 archive hashes.
+          - Only regular-file modifications to these eight locks passed publisher validation.
           - Both compile passes applied a seven-day archive-upload cooldown.
           - Vulnerability reporting is informational and does not block publication. Review version/hash changes and advisory results in the artifact when available.
 

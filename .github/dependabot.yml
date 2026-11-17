@@ -50,6 +50,9 @@ updates:
       - "requirements/test/cuda.txt"
       - "requirements/test/rocm.txt"
       - "requirements/test/xpu.txt"
+      - "requirements/test/kv_connectors_cuda.txt"
+      - "requirements/test/quantization_deps_cuda.txt"
+      - "requirements/test/quantization_deps_rocm.txt"
     groups:
       python-security:
         applies-to: security-updates

@@ -9,6 +9,7 @@ steps:
   source_file_dependencies:
     - .buildkite/test_areas/dependencies.yaml
     - .github/dependabot.yml
+    - .pre-commit-config.yaml
     - .github/workflows/refresh-compiled-requirements.yml
     - tools/refresh_compiled_requirements.py
     - tools/review_compiled_requirements.py

@@ -24,6 +24,9 @@ LOCKFILES = [
     "requirements/test/cuda.txt",
     "requirements/test/rocm.txt",
     "requirements/test/xpu.txt",
+    "requirements/test/kv_connectors_cuda.txt",
+    "requirements/test/quantization_deps_cuda.txt",
+    "requirements/test/quantization_deps_rocm.txt",
 ]
 OSV_URL = "https://api.osv.dev/v1/querybatch"
 HASH = re.compile(r"\s+--hash=sha256:([a-f0-9]{64})(?=\s|$)")
@@ -40,6 +43,9 @@ def parse_lock(text: str, require_hashes: bool) -> dict[tuple[str, str], Pin]:
     for line in re.sub(r"\\\r?\n", " ", text).splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
+            continue
+        # uv may emit registry directives before the requirement entries.
+        if re.match(r"^--(?:extra-)?index-url(?:\s|=)", line):
             continue
         hashes = sorted(set(HASH.findall(line)))
         requirement = Requirement(HASH.sub("", line))
@@ -121,8 +127,11 @@ def main() -> int:
     report = [
         "# Compiled dependency review\n",
         f"Base commit: `{html.escape(args.base)}`\n",
-        "Hashes identify archives; this report does not verify their sources or "
-        "publisher provenance. Sources are not recorded in these locks.\n",
+        (
+            "Hashes identify archives; this report does not verify their sources or "
+            "publisher provenance. Review index directives in the lockfile diff "
+            "separately; this report compares package pins and hashes.\n"
+        ),
         "Vulnerability enforcement: "
         + ("**enabled**.\n" if args.enforce else "**disabled (report only)**.\n"),
     ]
