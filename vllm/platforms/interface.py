@@ -9,7 +9,7 @@ import os
 import platform
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, get_args
 
 import torch
 
@@ -19,7 +19,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -713,7 +713,13 @@ class Platform:
         default_block_size: int,
         vllm_config: "VllmConfig",
     ) -> int:
-        """Smallest block size every backend accepts.
+        """Block size every backend accepts.
+
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends keep that preference only when they all ask
+        for the same size and all accept it. Differing preferences keep the
+        default. If any backend rejects the default, the LCM search is
+        unchanged.
 
         `supports_block_size` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -731,6 +737,18 @@ class Platform:
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Take a preference only when every backend asks for that same
+                # size. The max of disagreeing preferences would move
+                # DeepSeek-V4.1 from 64 to the SWA preference of 256.
+                preferences = [
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                ]
+                chosen = preferences[0]
+                if all(p == chosen for p in preferences) and all(
+                    b.supports_block_size(chosen) for b in backend_classes
+                ):
+                    return chosen
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [
@@ -1063,6 +1081,35 @@ class Platform:
                 attn_page_size_1_token = backend_cls.customize_spec(
                     attn_spec
                 ).page_size_bytes
+                # A drafter whose attention layers hold more KV per token than the
+                # target's (e.g. an EAGLE head with more KV heads) sets the common
+                # page; size the block for it too (lcm, as for the skip layers
+                # above), or every Mamba page is later padded up to the drafter's.
+                spec_config = vllm_config.speculative_config
+                if (
+                    spec_config is not None
+                    and (draft_config := spec_config.draft_model_config) is not None
+                    and not draft_config.use_mla
+                ):
+                    draft_parallel_config = (
+                        spec_config.draft_parallel_config or parallel_config
+                    )
+                    draft_spec = AttentionSpec(
+                        block_size=1,
+                        num_kv_heads=draft_config.get_num_kv_heads(
+                            draft_parallel_config
+                        ),
+                        head_size=draft_config.get_head_size(),
+                        dtype=kv_cache_dtype,
+                        kv_quant_mode=kv_quant_mode,
+                    )
+                    draft_page_size_1_token = backend_cls.customize_spec(
+                        draft_spec
+                    ).page_size_bytes
+                    if draft_page_size_1_token > attn_page_size_1_token:
+                        attn_page_size_1_token = lcm(
+                            attn_page_size_1_token, draft_page_size_1_token
+                        )
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -1270,6 +1317,58 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def supports_eplb(cls) -> bool:
+        """Whether this platform can run expert parallel load balancing."""
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
+
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
+        """Choose and validate the platform's EPLB policy and communicator.
+
+        Out-of-tree overrides validate their own policy and communicator names.
+        """
+        eplb_config = parallel_config.eplb_config
+        from vllm.config.parallel import EPLBCommunicatorBackend, EPLBPolicyOption
+
+        if eplb_config.policy is None:
+            eplb_config.policy = "default"
+        if eplb_config.policy not in get_args(EPLBPolicyOption):
+            raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
+        if eplb_config.communicator is None:
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP.
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            from vllm.distributed.nixl_utils import is_nixl_available
+
+            if cls._enum == PlatformEnum.XPU:
+                # On XPU, use the device-native XCCL P2P backend.
+                eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
+                eplb_config.communicator = "nixl"
+            elif parallel_config.enable_elastic_ep:
+                eplb_config.communicator = "pynccl"
+            else:
+                eplb_config.communicator = "torch_gloo"
+
+        if eplb_config.communicator not in get_args(EPLBCommunicatorBackend):
+            raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
+
+        if eplb_config.use_async and eplb_config.communicator in (
+            "torch_nccl",
+            "pynccl",
+        ):
+            raise ValueError(
+                f"{eplb_config.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
+
+    @classmethod
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
@@ -1289,6 +1388,17 @@ class Platform:
         """Whether the current platform should enable multi-stream overlap
         for the given aux streams and attention metadata."""
         return False
+
+    @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Set up per-stream library state before dual batch overlap runs its
+        microbatches on `streams` from `num_threads` new threads."""
+        return
 
     @classmethod
     def supports_mx(cls) -> bool:

@@ -98,9 +98,12 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
-def _mock_backend(supported: list, *, exact: bool = False):
+def _mock_backend(
+    supported: list, *, exact: bool = False, preferred: int | None = None
+):
     """Backend accepting multiples of `supported`, or only those exact sizes
-    when `exact` (as CPU_MLA does)."""
+    when `exact` (as CPU_MLA does). `preferred` overrides the size the
+    backend asks for."""
     from vllm.v1.attention.backend import AttentionBackend
 
     class _MockBackendCls(AttentionBackend):
@@ -120,6 +123,12 @@ def _mock_backend(supported: list, *, exact: bool = False):
             def supports_block_size(cls, block_size: int | None) -> bool:
                 return block_size is None or block_size in supported
 
+        if preferred is not None:
+
+            @classmethod
+            def get_preferred_block_size(cls, default_block_size: int) -> int:
+                return preferred
+
     return _MockBackendCls
 
 
@@ -136,11 +145,43 @@ def _mock_backend(supported: list, *, exact: bool = False):
         ([[32, 64]], 32),
         # Neither divides the other, so only the LCM satisfies both.
         ([[32], [48]], 96),
+        # Both accept the default 16 and prefer 64, so the shared preference
+        # wins over 16.
+        ([([MultipleOf(16)], 64), ([MultipleOf(16)], 64)], 64),
+        # A backend that rejects 16 stays on the LCM path. Preferring 256
+        # must not replace lcm(64, 32).
+        ([[64], ([MultipleOf(32)], 256)], 64),
     ],
 )
 def test_preferred_block_size_satisfies_every_backend(backends, expected):
-    classes = [_mock_backend(s) for s in backends]
+    classes = []
+    for spec in backends:
+        if isinstance(spec, tuple):
+            supported, preferred = spec
+            classes.append(_mock_backend(supported, preferred=preferred))
+        else:
+            classes.append(_mock_backend(spec))
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+
+
+@pytest.mark.parametrize(
+    "backends,expected",
+    [
+        # ROCm: both backends prefer 16 while the default is 64.
+        ([([MultipleOf(16)], 16), ([MultipleOf(16)], 16)], 16),
+        # HPU: full attention and its chunked-local subclass both prefer 128.
+        ([([16, 128], 128), ([16, 128], 128)], 128),
+        # DeepSeek-V4.1 on SM90: SWA prefers 256, the indexer stays at 64.
+        # 256 is legal for both, and must not replace the default.
+        ([([64], 64), ([MultipleOf(32)], 256)], 64),
+    ],
+)
+def test_preferred_block_size_requires_a_unanimous_preference(backends, expected):
+    classes = [
+        _mock_backend(supported, preferred=preferred)
+        for supported, preferred in backends
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 64, None) == expected
 
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
@@ -254,6 +295,39 @@ def test_mamba_blocks_divide_resized_attention_blocks(
 
     assert vllm_config.cache_config.mamba_block_size == mamba_block_size
     assert layer_configs["mamba.0"].spec.block_size == mamba_block_size
+
+
+@pytest.mark.parametrize("draft_kv_heads", [2, 16])
+def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
+    """An EAGLE drafter with more KV per token than the target sets the largest
+    attention page. Sized for the target alone, the block makes that page several
+    Mamba pages, and the planner pads every Mamba page up to it."""
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    draft = SimpleNamespace(
+        use_mla=False,
+        get_num_kv_heads=lambda parallel_config: draft_kv_heads,
+        get_head_size=lambda: 128,
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=draft, draft_parallel_config=None, num_speculative_tokens=3
+    )
+    cache_config = vllm_config.cache_config
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+
+    model_config = vllm_config.model_config
+    target_page = (
+        cache_config.block_size
+        * AttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=model_config.dtype,
+        ).page_size_bytes
+    )
+    draft_page = cache_config.block_size * 2 * draft_kv_heads * 128 * 2
+    assert cache_config.mamba_page_size_padded == max(target_page, draft_page)
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
