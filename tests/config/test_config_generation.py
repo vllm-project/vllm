@@ -122,20 +122,22 @@ def test_get_diff_sampling_param_includes_penalties():
     params. Regression test for the whitelist silently dropping them.
 
     Called unbound with a lightweight stand-in so no model is loaded:
-    generation_config="vllm" makes the method skip try_get_generation_config
-    and read only override_generation_config.
+    generation_config="vllm" contributes no model defaults, so the stand-in
+    mirrors what try_get_generation_config() would return.
     """
     from types import SimpleNamespace
 
     from vllm.config.model import ModelConfig
 
+    override_generation_config = {
+        "presence_penalty": 1.5,
+        "frequency_penalty": 0.5,
+        "temperature": 0.6,
+    }
     fake = SimpleNamespace(
         generation_config="vllm",
-        override_generation_config={
-            "presence_penalty": 1.5,
-            "frequency_penalty": 0.5,
-            "temperature": 0.6,
-        },
+        override_generation_config=override_generation_config,
+        try_get_generation_config=lambda: override_generation_config,
     )
 
     diff = ModelConfig.get_diff_sampling_param(fake)
