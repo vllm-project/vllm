@@ -261,6 +261,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
         """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
         requantization. Other FP8 weight strategies are not supported."""
+        if self.weight_quant.strategy != QuantizationStrategy.BLOCK:
+            raise NotImplementedError(
+                "MoE requantization from compressed-tensors FP8 is only supported "
+                "for block-scaled weights, got weight strategy "
+                f"{self.weight_quant.strategy}."
+            )
         return dequantize_block_fp8_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,

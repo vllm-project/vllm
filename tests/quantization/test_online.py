@@ -3205,6 +3205,16 @@ def _fp8_moe_source_method(source: str, block_size: list[int] | None):
     method.moe = SimpleNamespace(w13_num_shards=2)
     method.block_quant = block_size is not None
     method.weight_block_size = block_size
+    if source == "compressed_tensors":
+        from compressed_tensors.quantization import QuantizationStrategy
+
+        method.weight_quant = SimpleNamespace(
+            strategy=QuantizationStrategy.BLOCK
+            if block_size
+            else QuantizationStrategy.TENSOR
+        )
+    elif source == "quark":
+        method.weight_qscheme = "per_block" if block_size else "per_tensor"
     # Only `Fp8MoEMethod` names block scales `weight_scale_inv`.
     method.scale_name = (
         "weight_scale_inv" if source == "fp8" and block_size else "weight_scale"

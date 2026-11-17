@@ -870,6 +870,11 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
         """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
         requantization. Other FP8 weight schemes are not supported."""
+        if self.weight_qscheme != "per_block":
+            raise NotImplementedError(
+                "MoE requantization from Quark FP8 is only supported for "
+                f"block-scaled weights, got weight scheme {self.weight_qscheme}."
+            )
         return dequantize_block_fp8_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
