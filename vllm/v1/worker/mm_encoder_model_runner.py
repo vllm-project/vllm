@@ -8,7 +8,7 @@ embeddings. It runs no language model: no KV cache, sampler, or decoder graphs.
 """
 
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -52,7 +52,7 @@ class MMEncoderModelRunner(GPUModelRunner):
         self._input_event_idx = 0
 
     @contextmanager
-    def input_tensor_semaphore(self) -> Iterator[None]:
+    def input_tensor_semaphore(self) -> Generator[None]:
         """Guard the host writes into the pooled input buffers.
 
         `UvaBufferPool` recycles a slot every `max_concurrent_batches` steps and

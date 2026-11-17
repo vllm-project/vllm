@@ -3,6 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import Any, Literal
 
 import torch
@@ -23,6 +24,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -246,6 +248,23 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 
+def apply_flattened(
+    fn: Callable[[Any], torch.Tensor], x: torch.Tensor | QuantizedActivation
+) -> torch.Tensor:
+    """Call `fn` on `x` flattened to 2D, if that can be done without a copy.
+
+    Linear methods and kernels may assume 2D activations, but callers such as
+    the Transformers modeling backend pass `[batch, seq, hidden]` activations.
+    """
+    if isinstance(x, QuantizedActivation):
+        if len(x.orig_shape) <= 2:
+            return fn(x)
+        return fn(x.flatten()).view(*x.orig_shape[:-1], -1)
+    if x.ndim <= 2 or not x.is_contiguous():
+        return fn(x)
+    return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
+
+
 class LinearBase(PluggableLayer):
     """Base linear layer.
 
@@ -421,7 +440,7 @@ class ReplicatedLinear(LinearBase):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        output = self.quant_method.apply(self, x, bias)
+        output = apply_flattened(partial(self.quant_method.apply, self, bias=bias), x)
 
         if not self.return_bias:
             return output
@@ -624,7 +643,8 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        apply = partial(self.quant_method.apply, self, bias=bias)
+        output_parallel = apply_flattened(apply, input_)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1919,7 +1939,8 @@ class RowParallelLinear(LinearBase):
                 input_parallel, self.weight, bias_, self.partial_sum_scale
             )
         else:
-            output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+            apply = partial(self.quant_method.apply, self, bias=bias_)
+            output_parallel = apply_flattened(apply, input_parallel)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
