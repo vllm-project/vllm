@@ -266,11 +266,21 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         row (-1 for skipped pairs), so the LoRA kernels read and accumulate
         into those rows directly.
         """
+        impl = self.fused_moe_impl
+        assert impl is not None
         num_tokens, top_k = topk_ids.shape
-        # XpuFusedMoe stores bf16 weights as [E, K, N]; the LoRA config
-        # lookup expects the loaded [E, N, K] shapes.
-        w1 = w1.transpose(-1, -2)
-        w2 = w2.transpose(-1, -2)
+        # The LoRA config lookup only reads the logical [E, N, K] shapes. The
+        # stored weights cannot provide them for every recipe (XpuFusedMoe
+        # relayouts bf16 to [E, K, N]; int4 is packed), so pass shape-only
+        # meta tensors.
+        inter_size = impl.inter_size * impl.inter_size_scale
+        hidden_size = hidden_states.shape[-1]
+        w1 = torch.empty(
+            (ctx.local_num_experts, 2 * impl.inter_size, hidden_size), device="meta"
+        )
+        w2 = torch.empty(
+            (ctx.local_num_experts, hidden_size, inter_size), device="meta"
+        )
         # moe_gather applies the routing weights to base and LoRA outputs.
         if self._lora_ones.shape[0] < num_tokens:
             self._lora_ones = torch.ones_like(topk_weights)
@@ -321,10 +331,6 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
 
 class XPUExpertsFp8(XPUExperts):
-    @staticmethod
-    def supports_lora() -> bool:
-        return False
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -365,6 +371,10 @@ class XPUExpertsFp8(XPUExperts):
 
 
 class XPUExpertsMxFp8(XPUExpertsFp8):
+    @staticmethod
+    def supports_lora() -> bool:
+        return False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -393,10 +403,6 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
 
 
 class XPUExpertsBlockFp8(XPUExperts):
-    @staticmethod
-    def supports_lora() -> bool:
-        return False
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -434,10 +440,6 @@ class XPUExpertsWNA16(XPUExperts):
     Pairs with `INCXPULinearMethod` for the linear layers; together they
     cover full-attn + MoE on Intel XPU end-to-end without IPEX.
     """
-
-    @staticmethod
-    def supports_lora() -> bool:
-        return False
 
     def __init__(
         self,
