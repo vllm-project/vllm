@@ -120,13 +120,33 @@ class _Bucket:
     copies: list[list[torch.Tensor]] = field(default_factory=list)
     loads: list[str | None] = field(default_factory=list)
     # Built once by `prepare`, used every sync: where each piece sits in the
-    # bucket; contiguous destinations of the sent dtype as bytes, with the
-    # piece each copies; the other destinations; the fallbacks.
+    # bucket; contiguous destinations of the sent dtype as bytes, runs of
+    # pieces adjacent in both the bucket and memory merged into one, with
+    # the (offset, nbytes) of the bucket each copies; the other
+    # destinations; the fallbacks.
     layout: list[FlatPiece] = field(default_factory=list)
     byte_dsts: list[torch.Tensor] = field(default_factory=list)
-    byte_pieces: list[int] = field(default_factory=list)
+    byte_srcs: list[tuple[int, int]] = field(default_factory=list)
     typed: list[tuple[int, torch.Tensor]] = field(default_factory=list)
     fallbacks: list[tuple[int, str]] = field(default_factory=list)
+
+    def _add_byte_copy(self, src: tuple[int, int], dest: torch.Tensor) -> None:
+        """Copy bucket bytes `src` (offset, nbytes) into `dest`, extending
+        the last copy when both continue where it ends."""
+        offset, nbytes = src
+        if self.byte_dsts:
+            last, (last_offset, last_nbytes) = self.byte_dsts[-1], self.byte_srcs[-1]
+            if (
+                last_offset + last_nbytes == offset
+                and last.untyped_storage().data_ptr()
+                == dest.untyped_storage().data_ptr()
+                and last.data_ptr() + last_nbytes == dest.data_ptr()
+            ):
+                self.byte_dsts[-1] = last.as_strided((last_nbytes + nbytes,), (1,))
+                self.byte_srcs[-1] = (last_offset, last_nbytes + nbytes)
+                return
+        self.byte_dsts.append(dest.reshape(-1).view(torch.uint8))
+        self.byte_srcs.append(src)
 
     def wire(self) -> WireBucket:
         return [(name, wire_box(box)) for name, box in self.pieces]
@@ -138,8 +158,7 @@ class _Bucket:
         ):
             for dest in dests:
                 if dest.is_contiguous() and dest.dtype == dtype:
-                    self.byte_dsts.append(dest.reshape(-1).view(torch.uint8))
-                    self.byte_pieces.append(i)
+                    self._add_byte_copy(self.layout[i][:2], dest)
                 else:
                     self.typed.append((i, dest))
             if name is not None:
@@ -366,6 +385,10 @@ class ShardedRDTWeightTransferEngine(
         unit_rank = _component_unit_rank(self._metas, self._units, router)
         buckets: list[_Bucket] = []
         for (producer, unit), pieces in groups.items():
+            # By destination address, so pieces adjacent in memory (one
+            # fused tensor's slices, e.g. per-expert weights) are adjacent in
+            # the bucket too and land with one copy.
+            pieces.sort(key=_by_destination)
             for chunk in _cut(pieces, self._buffer_bytes):
                 buckets.append(
                     _Bucket(
@@ -517,10 +540,7 @@ class ShardedRDTWeightTransferEngine(
         if bucket.byte_dsts:
             torch._foreach_copy_(
                 bucket.byte_dsts,
-                [
-                    flat[layout[i][0] : layout[i][0] + layout[i][1]]
-                    for i in bucket.byte_pieces
-                ],
+                [flat[offset : offset + nbytes] for offset, nbytes in bucket.byte_srcs],
             )
         if bucket.typed:
             torch._foreach_copy_(
@@ -642,6 +662,17 @@ def _resolve_producers(init_info: ShardedRDTWeightTransferInitInfo) -> list[Any]
         actor._ray_enable_tensor_transport = True
         actors.append(actor)
     return actors
+
+
+def _by_destination(piece: tuple) -> tuple[int, int]:
+    """Sort key: a piece with one contiguous destination of its dtype by that
+    destination's address; every other piece after them, in plan order."""
+    _, _, dtype, copies, load = piece
+    if load is None and len(copies) == 1:
+        (dest,) = copies
+        if dest.is_contiguous() and dest.dtype == dtype:
+            return (0, dest.data_ptr())
+    return (1, 0)
 
 
 def _cut(pieces: list[tuple], budget: int) -> list[list[tuple]]:

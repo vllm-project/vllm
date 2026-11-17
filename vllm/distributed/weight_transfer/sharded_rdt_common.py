@@ -23,10 +23,12 @@ Gather units (every rank, every consumer, the same):
 
 Plan (a consumer's first `start_weight_update`):
     The consumer runs `plan_loads` and routes each name it needs to one owner
-    (`RdtRouter.producer_for`). Per producer, it cuts its pieces into buckets
-    of at most `buffer_bytes` without crossing a unit. A piece is one box of
-    one name: copied into its `get_dest` tensors, or loaded in full through
-    `load_weights` (a fallback). The consumer sends each producer, once,
+    (`RdtRouter.producer_for`). Per producer and unit, it orders its pieces
+    by destination address (so slices of one fused tensor, such as per-expert
+    weights, are adjacent and land with one copy) and cuts them into buckets
+    of at most `buffer_bytes`. A piece is one box of one name: copied into
+    its `get_dest` tensors, or loaded in full through `load_weights` (a
+    fallback). The consumer sends each producer, once,
     `register_consumer(consumer_id, buckets)`: per bucket, in pull order, a
     list of `(name, box)`.
 
@@ -41,9 +43,9 @@ Sync (`update_weights`, one per sync):
     Ray only describes it. The consumer receives the bucket into a slice of
     its own receive arena, registered with NIXL once per plan (per pull in
     flight, one slot of the largest bucket of at most `buffer_bytes`; a
-    larger bucket, one large piece, lands in a buffer Ray allocates), and
-    copies every piece into its
-    destinations with one fused copy, and loads the fallbacks. Ray holds a
+    larger bucket, one large piece, lands in a buffer Ray allocates), copies
+    every piece into its destinations with one fused copy, and loads the
+    fallbacks. Ray holds a
     target only weakly and silently receives into a buffer of its own when
     the target is gone, so the consumer keeps each slot view alive until its
     pull is applied and fails the sync if a pull did not land in its slot.

@@ -283,7 +283,13 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
     }
     b, i = pieces["proj.weight"]
     assert b.loads[i] is None and b.copies[i][0].stride() == (1, 4)  # strided
-    assert [j for j, _ in b.typed] == [i] and i not in b.byte_pieces
+    assert [j for j, _ in b.typed] == [i]
+    start, end = b.layout[i][0], b.layout[i][0] + b.layout[i][1]
+    assert all(o + n <= start or o >= end for o, n in b.byte_srcs)
+
+
+def _dests(fleet):
+    return [d for b in fleet.engine._buckets for ds in b.copies for d in ds]
 
 
 def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
@@ -346,6 +352,11 @@ def test_qkv_and_merged_column_under_tp(
     _check_equals_cold_start(fleet, make, _LINEAR_SHAPES)
     # every destination is contiguous: one fused byte copy per pull
     assert all(not b.typed and not b.fallbacks for b in fleet.engine._buckets)
+    if buffer_bytes > 32:
+        # q, k, v (and gate, up) fill adjacent rows of one fused weight, so
+        # a pull lands each fused weight's pieces from it with one copy
+        fused = {d.untyped_storage().data_ptr() for d in _dests(fleet)}
+        assert sum(len(b.byte_dsts) for b in fleet.engine._buckets) == len(fused)
 
 
 @pytest.mark.parametrize("ep_rank", [0, 1])
