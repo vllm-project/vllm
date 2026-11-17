@@ -36,7 +36,7 @@ class _RequestMetricsState:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _TierState:
     active_promotion_count: int = 0
     active_cascade_count: int = 0
@@ -250,6 +250,8 @@ class TieringMetricsTracker:
             else TieringOffloadingMetrics.WRITE_TIME
         )
         transfer_size = completed_key_count * self._primary_chunk_size
+        if completed_job.success and completed_job.transfer_bytes is not None:
+            transfer_size = completed_job.transfer_bytes
         self._stats.increase_counter(bytes_metric, transfer_size, labelvalues)
         if completed_job.transfer_time is not None:
             self._stats.increase_counter(
