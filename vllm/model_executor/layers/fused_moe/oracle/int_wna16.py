@@ -57,7 +57,7 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WNA16WeightFormat:
     """Symmetric group-quantized weights in the canonical N-first layout, for
     checkpoint formats without a quantization config of their own here: each
