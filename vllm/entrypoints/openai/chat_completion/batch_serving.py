@@ -9,7 +9,10 @@ from http import HTTPStatus
 
 from fastapi import Request
 
-from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.generate.base.protocol import (
+    RequestResponseMetadata,
+    parser_chat_template_kwargs,
+)
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     get_echo_content,
 )
@@ -302,8 +305,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     parser = parser_cls(
                         tokenizer,
                         None,
-                        chat_template_kwargs=self._effective_chat_template_kwargs(
-                            single_request
+                        chat_template_kwargs=parser_chat_template_kwargs(
+                            single_request.response_format,
+                            self._effective_chat_template_kwargs(single_request),
                         ),
                     )
                     parser.set_prompt_token_ids(final_res.prompt_token_ids)

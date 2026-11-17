@@ -185,6 +185,20 @@ AnyResponseFormat: TypeAlias = (
 )
 
 
+def parser_chat_template_kwargs(
+    response_format: AnyResponseFormat | None,
+    chat_template_kwargs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Parsers read the validated request format with the other per-request
+    kwargs; it replaces any client-supplied kwarg of the same name."""
+    return {
+        **(chat_template_kwargs or {}),
+        "response_format": None
+        if response_format is None
+        else response_format.model_dump(mode="json", by_alias=True, exclude_none=True),
+    }
+
+
 def structured_outputs_from_response_format(
     structured_outputs: StructuredOutputsParams | None,
     response_format: AnyResponseFormat | None,

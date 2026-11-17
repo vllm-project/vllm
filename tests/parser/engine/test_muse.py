@@ -17,6 +17,7 @@ from tests.parser.engine.replay_harness import (
     collect_output,
     replay_streaming,
 )
+from vllm.entrypoints.generate.base.protocol import parser_chat_template_kwargs
 from vllm.parser.engine.registered_adapters import (
     MuseParserToolAdapter,
 )
@@ -267,6 +268,19 @@ def test_commentary_is_reasoning_under_json_response_format(tokenizer, chunk_siz
         )
         reasoning, content = output.reasoning, output.content
     assert (reasoning, content) == ("Plan.Working. ", "391.")
+
+
+@pytest.mark.parametrize("client_value", ["json", {}, {"type": "json_object"}])
+def test_client_response_format_kwarg_does_not_reach_the_parser(
+    tokenizer, client_value
+):
+    # Clients control `chat_template_kwargs`; only the validated request field
+    # may select commentary routing.
+    kwargs = parser_chat_template_kwargs(None, {"response_format": client_value})
+    reasoning, content = MuseParser(
+        tokenizer, chat_template_kwargs=kwargs
+    ).extract_reasoning(CASES["commentary_answer"][0], _test_request())
+    assert (reasoning, content) == ("Plan.", "Working. 391.")
 
 
 def test_grammar_starts_at_the_answer_header(tokenizer):

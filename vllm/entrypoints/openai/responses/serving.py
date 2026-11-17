@@ -26,6 +26,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
+    parser_chat_template_kwargs,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -226,7 +227,9 @@ class OpenAIServingResponses(GenerateBaseServing):
         return self.parser(
             tokenizer,
             request.tools,
-            chat_template_kwargs=chat_template_kwargs,
+            chat_template_kwargs=parser_chat_template_kwargs(
+                request.chat_response_format(), chat_template_kwargs
+            ),
             model_config=self.model_config,
         )
 
@@ -490,7 +493,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 and context.response_parser.reasoning_parser is not None
             ):
                 reasoning_parser_kwargs = {
-                    "chat_template_kwargs": chat_template_kwargs,
+                    "chat_template_kwargs": parser_chat_template_kwargs(
+                        request.chat_response_format(), chat_template_kwargs
+                    ),
                 }
                 if (
                     isinstance(
