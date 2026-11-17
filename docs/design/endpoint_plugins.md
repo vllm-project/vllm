@@ -84,7 +84,7 @@ The server awaits `start(state)` during lifespan startup, after `init_state` and
 
 SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative: a `start` hook that ignores it can keep the process alive until a process manager kills it.
 
-`start` and `stop` are reserved hook names on endpoint plugins. An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. The plugin loader refuses any other value, such as a synchronous function or an object with an `async def __call__`, with an error naming the plugin and hook before attaching routes or initializing state.
+`start` and `stop` are reserved hook names on endpoint plugins. An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. For any other value, such as a synchronous function or an object with an `async def __call__`, the plugin loader raises a `TypeError` that names the plugin and the hook, and server startup fails before routes are attached or state is initialized.
 
 On shutdown, the server calls each eligible `stop(state)` once, in reverse order, while the time limit lasts, before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work.
 
@@ -221,6 +221,6 @@ There is currently no rejection of route conflicts (tracked as a follow-up to RF
 
 ### Upgrading existing plugins
 
-An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. A plugin with a synchronous `start` or `stop`, or any other non-`None` attribute with those names, no longer loads. Make the attribute `async def`, or rename it if it is not a lifecycle hook.
+An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. A plugin with a synchronous `start` or `stop`, or any other non-`None` attribute with those names, now makes server startup fail. Make the attribute `async def`, or rename it if it is not a lifecycle hook.
 
 The names `ready` and `drain` are reserved in the same way. An attribute named `drain` that is not `None` must be an `async def` coroutine function. An attribute named `ready` that is not `None` must be a synchronous callable: a plugin whose `ready` is an `async def` function or is not callable no longer loads. Define `ready` with `def`, make `drain` `async def`, or rename an attribute that is not a readiness or drain hook.
