@@ -10,7 +10,6 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import log_backend_summary
 from vllm.tracing import instrument
 
 _MODELEXPRESS_LOADER_MODULE = "modelexpress.engines.vllm.loader"
@@ -68,6 +67,4 @@ class ModelExpressModelLoader(BaseModelLoader):
             model_config=model_config,
             prefix=prefix,
         )
-        # Logged once per model: a no-op if the wrapped loader already did.
-        log_backend_summary(model, model_config)
         return model.eval()

@@ -11,10 +11,22 @@ import torch.nn as nn
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.model_loader import utils as loader_utils
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import log_backend_summary
-from vllm.model_inspection import _format_layer_names, format_backend_summary
+from vllm.model_executor.model_loader.utils import log_layer_backends
+from vllm.model_inspection import (
+    LayerBackend,
+    _format_layer_names,
+    collect_layer_backends,
+    format_layer_backends,
+)
 
 pytestmark = pytest.mark.cpu_test
+
+
+class Proj(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+        self.quant_method = UnquantizedLinearMethod()
 
 
 def test_layer_names_collapse_indices_and_leaves():
@@ -35,12 +47,6 @@ def test_backend_summary_groups_layers_by_backend():
     """Layers that selected the same backend share one line; a model without
     such layers has no summary."""
 
-    class Proj(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.zeros(1))
-            self.quant_method = UnquantizedLinearMethod()
-
     class Block(nn.Module):
         def __init__(self):
             super().__init__()
@@ -49,11 +55,20 @@ def test_backend_summary_groups_layers_by_backend():
 
     model = nn.ModuleDict({"layers": nn.ModuleList(Block() for _ in range(3))})
 
-    assert format_backend_summary(model) == (
-        "  layer  | count | backend               | modules\n"
-        "  linear |     3 | unquantized [float32] | layers.[0-2].proj"
+    backends = collect_layer_backends(model)
+    assert backends == [
+        LayerBackend(
+            kind="linear",
+            backend="unquantized",
+            details=(("w", "float32"),),
+            modules=("layers.0.proj", "layers.1.proj", "layers.2.proj"),
+        )
+    ]
+    assert format_layer_backends(backends) == (
+        "  layer  | count | backend                 | modules\n"
+        "  linear |     3 | unquantized [w=float32] | layers.[0-2].proj"
     )
-    assert format_backend_summary(nn.Linear(4, 4)) is None
+    assert collect_layer_backends(nn.Linear(4, 4)) == []
 
 
 def test_backend_summary_failure_does_not_fail_the_load():
@@ -66,19 +81,15 @@ def test_backend_summary_failure_does_not_fail_the_load():
             self.quant_method = 0  # not a quant method: has no `__dict__`
 
     with pytest.raises(TypeError):
-        format_backend_summary(Opaque())
-    log_backend_summary(Opaque(), SimpleNamespace(model="opaque"))
+        collect_layer_backends(Opaque())
+    log_layer_backends(Opaque(), SimpleNamespace(model="opaque"))
+    # Nor may an unexpected model config, as tests pass stand-ins for it.
+    log_layer_backends(nn.ModuleDict({"proj": Proj()}), SimpleNamespace())
 
 
 def test_backends_are_logged_when_loading_fails(monkeypatch):
     """Selections are made before the weights load, so a failed load still
     reports them, and the original error propagates unchanged."""
-
-    class Proj(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.zeros(1))
-            self.quant_method = UnquantizedLinearMethod()
 
     class FailingLoader(BaseModelLoader):
         def download_model(self, model_config): ...
@@ -107,4 +118,4 @@ def test_backends_are_logged_when_loading_fails(monkeypatch):
         if call.args[0].startswith("Backends selected")
     ]
     assert logged[1:4] == ("ModuleDict", "org/toy", " before loading failed")
-    assert "unquantized [float32] | proj" in logged[4]
+    assert "unquantized [w=float32] | proj" in logged[4]

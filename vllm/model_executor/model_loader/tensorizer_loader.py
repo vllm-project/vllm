@@ -21,7 +21,6 @@ from vllm.model_executor.model_loader.tensorizer import (
 )
 from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
-    log_backend_summary,
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -114,7 +113,6 @@ class TensorizerLoader(BaseModelLoader):
                         tensorizer_config=tensorizer_config, vllm_config=vllm_config
                     )
             self.load_weights(model, model_config)
-            log_backend_summary(model, model_config)
             return model
         return super().load_model(vllm_config, model_config, prefix)
 

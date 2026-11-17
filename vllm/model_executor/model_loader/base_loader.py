@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
-    log_backend_summary,
+    log_layer_backends,
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
@@ -124,10 +124,10 @@ class BaseModelLoader(ABC):
                 process_weights_after_loading(model, model_config, target_device)
                 log_online_quantization_time(vllm_config)
             except Exception:
-                # The selections were made before the failure: record them.
-                log_backend_summary(model, model_config, load_failed=True)
+                # The model runner logs the backends of a loaded model. A
+                # failed load never reaches it, but its selections were made.
+                log_layer_backends(model, model_config, load_failed=True)
                 raise
-            log_backend_summary(model, model_config)
 
             gc.collect()
             torch.accelerator.empty_cache()

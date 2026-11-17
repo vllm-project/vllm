@@ -35,10 +35,10 @@ You can check if this is happening by trying the old defaults with `--generation
 After loading a model, vLLM logs a table of the attention backend and the linear and MoE kernels its layers selected, with the layers that run each. It is on by default and logged once per model:
 
 ```text
-Backends selected for Qwen3MoeForCausalLM:
+Backends selected for Qwen3MoeForCausalLM (Qwen/Qwen3-30B-A3B-FP8):
   layer     | count | backend                                                       | modules
   attention |    48 | FLASHINFER                                                    | model.layers.[0-47].self_attn.attn
-  linear    |    50 | unquantized [bfloat16]                                        | model.embed_tokens, model.layers.[0-47].mlp.gate, lm_head
+  linear    |    50 | unquantized [w=bfloat16]                                      | model.embed_tokens, model.layers.[0-47].mlp.gate, lm_head
   linear    |    96 | DeepGemmFp8BlockScaledMMKernel                                | model.layers.[0-47].self_attn.{qkv_proj,o_proj}
   moe       |    48 | TrtLlmFp8ExpertsMonolithic [w=float8_e4m3fn, a=float8_e4m3fn] | model.layers.[0-47].mlp.experts.routed_experts
 ```
