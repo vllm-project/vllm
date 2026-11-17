@@ -25,11 +25,12 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import transform_fp8_block_sf_for_sm90_mega_moe
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.math_utils import round_up
 
 BLOCK = (128, 128)
-HIDDEN, INTER = 256, 128
+# Two 128-row blocks each of gate and up, so the SM90 block-row interleave shows.
+HIDDEN, INTER = 256, 256
 FP8 = torch.float8_e4m3fn
 NUM_EXPERTS = 4
 # Global ids of the experts _experts() places on this rank.
@@ -168,13 +169,38 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
 
 
 def _sm90_layout(w13, s13, w2, s2):
-    """Block-FP8 weights as loaded, block scales laid out by DeepGEMM."""
+    """Block-FP8 weights as loaded, and the checkpoint block scale of each
+    weight row."""
     return (
         _interleave(w13.view(torch.uint8)),
-        transform_fp8_block_sf_for_sm90_mega_moe(w13, s13, is_l1=True),
+        _interleave(s13.repeat_interleave(128, -2)),
         w2.view(torch.uint8),
-        transform_fp8_block_sf_for_sm90_mega_moe(w2, s2, is_l1=False),
+        s2.repeat_interleave(128, -2),
     )
+
+
+def _sm90_scale_reads(sf, is_l1):
+    """The block scale of each weight row, read from the kernel's SM90 scales
+    `[..., N / 128, K / 128]` the way the kernel reads them: tile `j` of 128
+    weight rows takes word `j & 2` for gate rows, `(j & 2) + 1` for up rows and
+    `j & 3` for L2 rows, of the four MN-major words at `j & ~3`."""
+    *_, mn, num_k = sf.shape
+    # MN-major, MN stride aligned to 16 bytes, experts contiguous.
+    assert sf.stride()[-2:] == (1, round_up(mn, 4))
+    assert sf.dim() == 2 or sf.stride(0) == num_k * round_up(mn, 4)
+    groups = sf if sf.dim() == 3 else sf.unsqueeze(0)
+    memory = torch.as_strided(
+        groups,
+        (groups.shape[0], num_k, sf.stride(-1)),
+        (groups.stride(0), sf.stride(-1), 1),
+    )
+    rows = torch.arange(mn * 128)
+    tiles = rows // 128
+    words = (
+        torch.where(rows % 16 < 8, tiles & 2, (tiles & 2) + 1) if is_l1 else tiles & 3
+    )
+    reads = memory[:, :, (tiles & ~3) + words].transpose(-1, -2)
+    return reads if sf.dim() == 3 else reads[0]
 
 
 def _expected(w13, s13, w2, s2, sm90):
@@ -191,10 +217,12 @@ def _expected_routed(ckpt, sm90=False):
 
 
 def _assert_layout(actual, expected, sm90=False):
-    for tensor, reference in zip(actual, expected):
+    """`actual` and `expected` are (w13, s13, w2, s2); on SM90 the scales are
+    compared as the kernel reads them."""
+    for i, (tensor, reference) in enumerate(zip(actual, expected)):
+        if sm90 and i % 2:
+            tensor = _sm90_scale_reads(tensor, is_l1=i == 1)
         assert torch.equal(tensor.view(reference.dtype), reference)
-        # The SM90 kernel reads the scales with DeepGEMM's strides.
-        assert not sm90 or tensor.stride() == reference.stride()
 
 
 def _routed(experts):
@@ -234,10 +262,10 @@ def _load_shared(experts, ckpt) -> None:
     for name, data in [
         ("down_proj.weight_scale_inv", s2[0]),
         ("gate_proj.weight", w13[0, :INTER]),
-        ("up_proj.weight_scale_inv", s13[0, 1:]),
+        ("up_proj.weight_scale_inv", s13[0, INTER // 128 :]),
         ("down_proj.weight", w2[0]),
         ("up_proj.weight", w13[0, INTER:]),
-        ("gate_proj.weight_scale_inv", s13[0, :1]),
+        ("gate_proj.weight_scale_inv", s13[0, : INTER // 128]),
     ]:
         loaded = experts.load_shared_expert_weight(f"mlp.shared_experts.{name}", data)
         assert loaded in params
@@ -318,7 +346,7 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
 
 def test_sm90_eplb_views_cover_padded_block_scales(monkeypatch):
     """EPLB moves experts as rows of these views. The SM90 block scales pad
-    their MN stride to 4 (N/128 = 2 here), and each row must still be one
+    their MN stride to 4 (N/128 = 2 for w2 here), and each row must still be one
     expert of the parameter."""
     monkeypatch.setattr(
         current_platform, "is_device_capability", lambda cap, **_: cap == 90
