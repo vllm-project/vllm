@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+from copy import deepcopy
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call
 
@@ -8,7 +9,11 @@ import pytest
 
 from vllm import LLM
 from vllm.exceptions import ProfilerAlreadyActiveError
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
@@ -342,3 +347,38 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_cumulative_outputs_preserve_previous_steps(vllm_runner, flat_logprobs):
+    """Later generation must not change a previously returned completion."""
+    with vllm_runner(
+        "HuggingFaceTB/SmolLM2-135M-Instruct",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.1,
+    ) as runner:
+        engine = runner.llm.llm_engine
+        engine.add_request(
+            "snapshot",
+            "The capital of France is",
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                logprobs=2,
+                flat_logprobs=flat_logprobs,
+                output_kind=RequestOutputKind.CUMULATIVE,
+            ),
+        )
+        retained = []
+        while engine.has_unfinished_requests():
+            for output in engine.step():
+                completion = output.outputs[0]
+                retained.append((completion, deepcopy(completion)))
+
+        assert len(retained) > 1
+        assert len(retained[-1][0].token_ids) == 8
+        for completion, snapshot in retained:
+            assert completion == snapshot
