@@ -416,6 +416,21 @@ class Scheduler(SchedulerInterface):
                     "KV cache group in v1 (the repair write-set and report "
                     "geometry are single-group-shaped)"
                 )
+            if self.repair_kv_load_failures and (
+                self.scheduler_config.async_scheduling
+            ):
+                # Repair-only steps return their verdicts from execute_model
+                # without setting execute_model_state, but the batch-queue
+                # step calls sample_tokens unconditionally; sample_tokens
+                # then returns None, the engine discards the repair verdicts
+                # riding the execution future, and raises at the batch-queue
+                # None check. Fail fast at init instead (the async-aware
+                # repair step shape is v2 work).
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' is not supported with "
+                    "async scheduling in v1 (the batch-queue step would "
+                    "discard the repair verdicts)"
+                )
 
             # With overlapping batches (async scheduling or PP), a step may
             # still be writing a freed request's KV blocks. A consumer KV
