@@ -316,11 +316,8 @@ def configure_logging_from_args(args: Any) -> "LoggingConfig":
     config = getattr(args, "logging_config", None) or LoggingConfig()
     if hasattr(args, "log_level"):
         config = replace(config, log_level=args.log_level)
-    if hasattr(args, "log_config_file"):
-        config = replace(config, pylogging_config_file=args.log_config_file)
 
     configure_logging_if_needed(config)
-    args.log_config_file = config.pylogging_config_file
     args.logging_config = config
     return config
 

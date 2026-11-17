@@ -74,7 +74,7 @@ def flat_kv_row_view(
 class ConvertReqIndexToGlobalIndexKernel(
     VllmTritonJitKernel["ConvertReqIndexToGlobalIndexKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
         block_stride_rows: int

@@ -87,7 +87,7 @@ _TIER_POLL_ERROR_LOG_INTERVAL_S = 30.0
 _TIER_POLL_JOIN_TIMEOUT_S = 5.0
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingPromotion:
     """Accumulator for chunks awaiting submit_load() for one (tier, request)."""
 
