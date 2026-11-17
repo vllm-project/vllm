@@ -80,10 +80,9 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        output = flashinfer_scaled_fp8_mm(
+        return flashinfer_scaled_fp8_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
-        return output.view(*output_shape[:-1], -1)
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

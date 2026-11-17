@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    apply_linear_method,
 )
 from vllm.platforms import current_platform
 
@@ -33,7 +34,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         == len(layer.output_slices)
     )
 
-    output = layer._get_quant_method().apply(layer.base_layer, x, bias)
+    output = apply_linear_method(layer._get_quant_method(), layer.base_layer, x, bias)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape

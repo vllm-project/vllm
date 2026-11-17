@@ -165,8 +165,8 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         # (@ksayers): confirm that this is done concurrently
         if self.output_transform is not None:
             for part_id, (start, length) in enumerate(self.partition_ranges):
-                x[..., start : start + length] = self.output_transform(
-                    x[..., start : start + length].clone(), part_id=part_id
+                x[:, start : start + length] = self.output_transform(
+                    x[:, start : start + length].clone(), part_id=part_id
                 )
 
         return x

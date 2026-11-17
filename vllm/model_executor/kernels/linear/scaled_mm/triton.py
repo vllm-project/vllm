@@ -122,8 +122,6 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
-        out_shape = (*x.shape[:-1], -1)
-        x = x.view(-1, x.shape[-1])
 
         symmetric = azp_adj is None
         x_q, x_s, x_zp = ops.scaled_int8_quant(
@@ -150,7 +148,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                 # Static per-tensor: azp already folded into azp_adj
                 out -= (x_s * w_s_row * azp_adj).to(x.dtype)
 
-        return out.view(out_shape)
+        return out
 
 
 class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
