@@ -13,17 +13,26 @@
 #   ci       Build and push this build's per-commit test image.
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
+#   promote  Copy the stack, runtime and test-deps images a PR's CI built into the trusted repo
+#            (/ci rocm cache), so main reuses them after the merge instead of rebuilding them.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
 #
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
-#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
-#   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags and caches: nightlies, branch builds)
+#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
+#                                          except promote: images a maintainer vouched for)
+#   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags: nightlies, branch builds; they
+#                                          push these but never read them back, reuse only
+#                                          rocm/vllm-ci images and cache, and write no cache)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
 #                                          csrc objects come from the shared S3 sccache, as in CUDA)
+# Every untrusted build has the same rocm/vllm-dev credentials, so the prefixes keep names apart but
+# isolate nothing: any PR can overwrite another PR's tags and caches. Isolating PRs from each other
+# would take per-namespace credentials (ci-infra). The per-commit test image ($REPO:build-<id>) is
+# still pulled by tag, so a nightly's is PR-writable too until ci-infra pulls it by digest.
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
@@ -35,6 +44,15 @@ MODE=$2
 REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set (by ci-infra or release-pipeline.yaml)}
 TRUSTED=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}
 
+# promote (/ci rocm cache) runs in every nightly, as an optional step: without a request, leave
+# before the builder, the build context and the tag fetch.
+if [[ $MODE == promote ]]; then
+  [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No /ci rocm cache request: nothing to promote" >&2; exit 0; }
+  [[ $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "ROCM_PROMOTE_PR or ROCM_PROMOTE_SHA is malformed" >&2; exit 2; }
+  [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
+fi
+
 export STACK PUSH=true
 export CACHE=${ROCM_CI_CACHE_REPO:-rocm/vllm-ci-cache}  # every CI build reads the trusted cache
 export CACHE_TO=$CACHE:                     # ref prefix trusted builds write (HCL appends <stack>-<name>)
@@ -43,17 +61,17 @@ export BUILDKIT_PROGRESS=${BUILDKIT_PROGRESS:-plain}  # TTY progress redraws blo
 # PR builds write to a per-PR cache and prefix their image tags. The release pipeline's agents
 # cannot write rocm/vllm-ci or its cache: release writes its images and its own cache to $REPO,
 # so the next release reuses this one's all-arch compile.
-PFX=""
+PFX="" OWN=true
 if [[ $MODE == release* ]]; then
   CACHE="" CACHE_TO=$REPO:cache-   # and reads only that cache: CI agents also run PR code
 elif [[ $REPO != "$TRUSTED" ]]; then
   if [[ ${BUILDKITE_PULL_REQUEST:-false} != false ]]; then
-    PFX="pr$BUILDKITE_PULL_REQUEST-"
+    PFX="pr$BUILDKITE_PULL_REQUEST-" CACHE_TO=$REPO:cache-$PFX
   else   # not a PR (AITER nightly, branch or manual builds): one namespace per branch
     br=${BUILDKITE_BRANCH:-local}   # the hash keeps e.g. feat/x and feat-x apart
     PFX="br-$(printf %s "$br" | tr -c 'A-Za-z0-9.-' - | cut -c1-40)-$(printf %s "$br" | sha256sum | cut -c1-8)-"
+    CACHE_TO="" OWN=false   # any PR can write rocm/vllm-dev: never read back from it
   fi
-  CACHE_TO=$REPO:cache-$PFX
   # Only the compile stages' cache: everything else is cheap or in the trusted cache.
   export CACHE_CI=false
 fi
@@ -93,6 +111,7 @@ docker buildx version
 # COPY on file modes, which drift on shared agents. umask 022 gives every agent git's modes.
 [[ $(git rev-parse HEAD) == $(git rev-parse "${BUILDKITE_COMMIT:-HEAD}^{commit}") ]] \
   || { echo "HEAD is not BUILDKITE_COMMIT ($BUILDKITE_COMMIT)" >&2; exit 1; }
+if [[ $MODE != promote ]]; then   # promote copies images: no context, no version
 umask 022
 rm -rf .rocm-src && mkdir .rocm-src
 git archive HEAD | tar -x --no-same-permissions -C .rocm-src -f -
@@ -111,6 +130,7 @@ git describe --tags --match 'v[0-9]*' >/dev/null 2>&1 \
 printf 'node: %s\nnode-date: %s\ndescribe-name: %s\n' "$(git rev-parse HEAD)" \
   "$(git log -1 --format=%cI)" "$(git describe --tags --long --abbrev=40 --match 'v[0-9]*')" \
   > .rocm-src/.git_archival.txt
+fi
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -165,22 +185,42 @@ pushed() {
 #   A Kr cache miss triggers a runtime rebuild (minutes).
 
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
-# The layer format (compression, and mtimes as built: see the bake file) is part of every image's
-# identity: an image left in an older format would hand later builds a second copy of the same layers.
-Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
-Kr=$(
-  {
-    echo "$Ks"
-    sed '/^# ==== per-commit stages/q' .rocm-src/docker/Dockerfile.rocm
-    git ls-tree HEAD -- \
-      requirements/common.txt \
-      requirements/rocm.txt \
-      requirements/test/rocm.txt \
-      rust-toolchain.toml \
-      tests/vllm_test_utils \
-      tools/install_torchcodec_rocm.sh
-  } | sha256sum | cut -c1-16
-)
+# keys_at <rev>  — print "Ks Kr" for the files at <rev>. In $(), set -e is off: failures are returned.
+keys_at() {
+  local rev=$1 Ks Kr
+  # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
+  # identity: an image left in an older format would hand later builds a second copy of the same layers.
+  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
+    || return 1
+  Kr=$(
+    {
+      echo "$Ks"
+      git show "$rev:docker/Dockerfile.rocm" | sed -n '1,/^# ==== per-commit stages/p' || exit 1
+      git ls-tree "$rev" -- \
+        requirements/common.txt \
+        requirements/rocm.txt \
+        requirements/test/rocm.txt \
+        rust-toolchain.toml \
+        tests/vllm_test_utils \
+        tools/install_torchcodec_rocm.sh
+    } | sha256sum | cut -c1-16
+  ) || return 1
+  echo "$Ks $Kr"
+}
+keys=$(keys_at HEAD) || { echo "cannot compute the image keys of HEAD" >&2; exit 1; }
+read -r Ks Kr <<<"$keys"
+
+# An untrusted base build whose keys are those of its merge base with main shares main's images.
+# Main's own CI build makes them (main's base builds run one at a time: see the concurrency group
+# in hardware_tests/amd.yaml), so such a build waits for them instead of building the same images
+# in parallel. MAIN_TAGS lists those tags; it stays empty when main cannot be read.
+MAIN_TAGS=""
+if [[ $MODE == base && $REPO != "$TRUSTED" ]] \
+    && git fetch -q --filter=tree:0 origin "${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}" \
+    && mb=$(git merge-base HEAD FETCH_HEAD) && [[ -n $mb ]] \
+    && keys=$(keys_at "$mb") && read -r mKs mKr <<<"$keys"; then
+  MAIN_TAGS="stack-$STACK-$mKs runtime-$STACK-$mKr test-deps-$STACK-$mKr"
+fi
 echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 
 # ---------------------------------------------------------------------------
@@ -191,14 +231,17 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 #   1. Trusted registry (rocm/vllm-ci:<tag>) — safe for any CI build to reuse. Not for release:
 #      CI agents also run PR code, so release never ships an image it did not build itself.
 #   2. This repo's own tag ($REPO:$PFX<tag>) — PR builds and the release pipeline write here.
-#   3. Neither found: build via bake and push.
+#      Not for other untrusted builds (OWN=false): a PR could have pushed it.
+#   3. Main's key (MAIN_TAGS, untrusted base builds): wait for main's build of it, within a deadline.
+#   4. Otherwise: build via bake and push.
 # A <sibling-suffix> means the image only counts as present when the sibling
 # tag also exists (used by stack: must have both the image and -wheels); then
 # both pinned refs are printed, space-separated.
 ensure() {
-  local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf
-  refs=("$REPO:$PFX$tag")
-  [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag" "${refs[@]}")
+  local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf hb=""
+  refs=()
+  [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag")
+  [[ $OWN == false ]] || refs+=("$REPO:$PFX$tag")
 
   for ref in "${refs[@]}"; do
     if d=$(digest "$ref") && { [[ -z $sibling ]] || ds=$(digest "$ref$sibling"); }; then
@@ -210,12 +253,34 @@ ensure() {
     fi
   done
 
-  # Neither copy found — build and push.
+  if [[ " $MAIN_TAGS " == *" $tag "* ]]; then
+    if ref=$(wait_for_trusted "$tag" "$sibling"); then
+      echo "$ref"
+      return 0
+    else
+      rc=$?; ((rc == 1)) || return $rc   # a registry error is not a miss
+    fi
+  fi
+
+  # Not found — build and push.
   ref=$REPO:$PFX$tag
   echo "--- :docker: Building $target as $ref" >&2
+  # A trusted base build marks the image it is building, so builds waiting for it know it is
+  # coming. The mark is refreshed until the bake ends; its output stays out of $(ensure ...).
+  if [[ $MODE == base && $REPO == "$TRUSTED" ]]; then
+    heartbeat "$tag"
+    local owner=$BASHPID
+    ( while sleep "${ROCM_HEARTBEAT_SECONDS:-300}" && kill -0 "$owner" 2>/dev/null; do
+        heartbeat "$tag"
+      done ) >/dev/null 2>&1 &
+    hb=$!
+  fi
   # Explicit checks: $(ensure ...) runs in a subshell, where set -e does not apply.
   mf=$(mktemp)
-  TAG=$ref bake --metadata-file "$mf" "$target" >&2 || { rm -f "$mf"; echo "building $ref failed" >&2; return 1; }
+  rc=0
+  TAG=$ref bake --metadata-file "$mf" "$target" >&2 || rc=$?
+  [[ -z $hb ]] || kill "$hb" 2>/dev/null || true
+  ((rc == 0)) || { rm -f "$mf"; echo "building $ref failed" >&2; return 1; }
   # The digests this bake pushed (base: stack-<stack>, stack-wheels), not the tags', which by now
   # may hold a concurrent build's push of the same key.
   if ! d=$(pushed "$mf" "${target/#base/stack-$STACK}") \
@@ -223,7 +288,72 @@ ensure() {
     rm -f "$mf"; echo "bake recorded no digest for $ref" >&2; return 1
   fi
   rm -f "$mf"
+  # /ci rocm cache copies only images this job pushed, and a runtime or test-deps only if this job
+  # also pushed the image it was built on: other PRs' CI can push to this PR's tags first, and
+  # metadata outlives a retried job. A new stack voids what an earlier attempt recorded on another.
+  local parent=none
+  case $MODE/$target in
+    base/base)
+      { meta set "rocm-$STACK-runtime-built" none && meta set "rocm-$STACK-test-deps-built" none; } \
+        || return 75
+      parent= ;;
+    base/runtime) parent=base ;;
+    base/test-deps) parent=runtime ;;
+  esac
+  if [[ -z $parent ]] || grep -qsx "$parent" "$BUILT_HERE"; then
+    meta set "rocm-$STACK-${target/#base/stack}-built" "$ref@$d${sibling:+ $ref$sibling@$ds}" || return 75
+    echo "$target" >>"$BUILT_HERE"
+  fi
   echo "$ref@$d${sibling:+ $ref$sibling@$ds}"
+}
+
+# heartbeat <tag>  — mark <tag> as being built: push $TRUSTED:building-<tag>, a label-only image
+#   holding the current time. Best effort: a missed beat only makes waiting builds build it too.
+HEARTBEAT_LABEL=ai.vllm.rocm.heartbeat
+heartbeat() {
+  printf 'FROM scratch\nLABEL %s=%s\n' "$HEARTBEAT_LABEL" "$(date +%s)" \
+    | docker buildx build -q --provenance=false --output "type=registry,name=$TRUSTED:building-$1" - \
+      >/dev/null 2>&1 || true
+}
+
+# wait_for_trusted <tag> [<sibling-suffix>]
+#   Poll the trusted registry for <tag>; print its pinned ref(s) as ensure() does, or return 1 to
+#   build it here. Waits only while main's build of <tag> is alive: its heartbeat is at most
+#   ROCM_HEARTBEAT_STALE_MINUTES (default 15) old. Without one, it gives main's build
+#   ROCM_TRUSTED_START_GRACE_MINUTES (default 10) to start, once per build: after a wait finds
+#   main not building, later images get no grace. ROCM_TRUSTED_WAIT_MINUTES (default 300) bounds
+#   all waits of a build together. It is reached only while main's mark stays fresh (a hung build,
+#   or a planted mark), and a stack built after it may not fit the step's 540-min timeout.
+WAIT_UNTIL=$(( $(date +%s) + ${ROCM_TRUSTED_WAIT_MINUTES:-300} * 60 ))
+NO_MAIN_BUILD=$(mktemp -u)   # a file, not a variable: each ensure() runs in its own subshell
+BUILT_HERE=$(mktemp -u)      # the targets this job built, likewise
+trap 'rm -f "$NO_MAIN_BUILD" "$BUILT_HERE"' EXIT
+wait_for_trusted() {
+  local tag=$1 sibling=${2:-} ref=$TRUSTED:$1 d ds rc beat now start
+  local stale=$(( ${ROCM_HEARTBEAT_STALE_MINUTES:-15} * 60 ))
+  local grace=$(( ${ROCM_TRUSTED_START_GRACE_MINUTES:-10} * 60 ))
+  [[ ! -e $NO_MAIN_BUILD ]] || grace=0
+  start=$(date +%s)
+  echo "--- :hourglass: $tag is main's; waiting for main's build to push $ref" >&2
+  while (( $(date +%s) < WAIT_UNTIL )); do
+    if d=$(digest "$ref") && { [[ -z $sibling ]] || ds=$(digest "$ref$sibling"); }; then
+      echo "Main's build pushed $ref@$d" >&2
+      echo "$ref@$d${sibling:+ $ref$sibling@$ds}"
+      return 0
+    else
+      rc=$?; ((rc == 1)) || return $rc
+    fi
+    now=$(date +%s)
+    beat=$(label "$TRUSTED:building-$tag" "$HEARTBEAT_LABEL" 2>/dev/null) || beat=""
+    if ! { [[ $beat =~ ^[0-9]+$ ]] && (( now - beat <= stale )); } && (( now - start >= grace )); then
+      echo "No build of $ref in progress (no heartbeat in the last $((stale / 60)) min); building it here" >&2
+      : >"$NO_MAIN_BUILD"
+      return 1
+    fi
+    sleep "${ROCM_TRUSTED_POLL_SECONDS:-120}"
+  done
+  echo "$ref did not appear in time; building it here" >&2
+  return 1
 }
 
 # load — read stack/runtime refs from Buildkite metadata (written by base mode).
@@ -289,6 +419,45 @@ case $MODE in
         echo "ROCm kernel symbol map export or upload failed; continuing without it" >&2
       fi
     fi
+    ;;
+
+  promote)
+    # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
+    # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit, if
+    # it was built with main's recipe; main reuses each once it gets that key. The runtime and
+    # test-deps are copied only over a parent of #ROCM_PROMOTE_PR's, never over one main built: an
+    # existing tag holding the recorded digest is an earlier attempt's copy, so a retry finishes the
+    # chain instead of stopping at it.
+    git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
+    git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
+      || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
+    keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
+    read -r pKs pKr <<<"$keys"
+    copied=0
+    for tag in "stack-$STACK-$pKs-wheels" "stack-$STACK-$pKs" \
+        "runtime-$STACK-$pKr" "test-deps-$STACK-$pKr"; do   # the stack tag completes the pair
+      stacked=0; [[ $tag == stack-* ]] && stacked=1
+      ref=$(tr ' ' '\n' <<<"${ROCM_PROMOTE_IMAGES:-}" \
+        | grep -xE "rocm/vllm-dev:pr$ROCM_PROMOTE_PR-$tag@sha256:[0-9a-f]{64}") || ref=""
+      if d=$(digest "$TRUSTED:$tag"); then
+        if [[ -n $ref && $d == "${ref#*@}" ]]; then
+          echo "$TRUSTED:$tag already holds #$ROCM_PROMOTE_PR's image" >&2; copied=1
+        else
+          echo "$TRUSTED:$tag already exists" >&2; copied=0
+        fi
+        continue
+      else
+        rc=$?; ((rc == 1)) || exit $rc   # a registry error is not a missing tag
+      fi
+      ((stacked || copied)) || { echo "Not copying $tag over an image main built" >&2; break; }
+      if [[ -z $ref ]]; then
+        ((stacked)) || { echo "#$ROCM_PROMOTE_PR's CI recorded no $tag; main builds it" >&2; break; }
+        echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1
+      fi
+      echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
+      docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
+      copied=1
+    done
     ;;
 
   release|release-base)
