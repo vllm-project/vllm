@@ -1613,13 +1613,6 @@ class TestHarmonyPreambleStreaming:
         type_names = [e.type for e in events]
         assert "response.output_text.done" not in type_names
 
-    @pytest.mark.xfail(
-        reason=(
-            "TODO: Ensure added/in-progress events are emitted for zero-delta items."
-            "So we can safely emit done events for zero-delta items."
-        ),
-        strict=True,
-    )
     def test_zero_delta_items_should_preserve_streaming_lifecycle(
         self,
     ) -> None:
@@ -2512,21 +2505,23 @@ async def test_harmony_stream_completed_response_reuses_streamed_ids():
 
 
 @pytest.mark.asyncio
-async def test_harmony_stream_unstreamed_item_keeps_own_id():
-    """An item with no done event (zero-delta) must not take the streamed id
-    of a later item of the same type."""
-    unstreamed = _harmony_msg("analysis", "skipped")
+async def test_harmony_stream_zero_delta_item_keeps_own_id():
+    """A zero-delta item gets its own lifecycle and retains its ID in the response."""
+    zero_delta = _harmony_msg("analysis", "skipped")
     reasoning = _harmony_msg("analysis", "think")
 
     events = await _harmony_stream_events(
-        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
+        [_harmony_segments(zero_delta, streamed=False), _harmony_segments(reasoning)]
     )
 
-    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    added = [e.item for e in events if e.type == "response.output_item.added"]
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
     first, second = events[-1].response.output
     assert first.content[0].text == "skipped"
-    assert first.id != streamed.id
-    assert second.id == streamed.id
+    assert second.content[0].text == "think"
+    assert first.id != second.id
+    assert [first.id, second.id] == [item.id for item in added]
+    assert [first.id, second.id] == [item.id for item in streamed]
 
 
 @pytest.mark.asyncio
