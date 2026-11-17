@@ -139,8 +139,7 @@ the first `/update_weights` returns 500. Reference:
   `t.contiguous().view(-1).view(torch.uint8)` bytes out as one stream, each
   tensor starting at a multiple of 16, and send a chunk each time the buffer is
   full (or only alignment padding would fit), then the rest; a tensor crossing
-  a cut continues at offset 0 of the next chunk.
-  A tensor larger than the buffer is an error. Synchronize before each
+  a cut continues at offset 0 of the next chunk. Synchronize before each
   `/update_weights`; do not overwrite the buffer until the call returns.
 - Keep every exported tensor alive until `/finish_weight_update` returns, then
   drop the references and call `torch.cuda.ipc_collect()`.
