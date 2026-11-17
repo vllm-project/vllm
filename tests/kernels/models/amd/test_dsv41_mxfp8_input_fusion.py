@@ -15,17 +15,18 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
-def _on_gfx950() -> bool:
+def _on_cdna4() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    return on_gfx950()
+    return get_cdna_version() == 4
 
 
-pytestmark = pytest.mark.skipif(not _on_gfx950(), reason="MXFP8 on gfx950")
+pytestmark = pytest.mark.skipif(not _on_cdna4(), reason="MXFP8 on CDNA4")
 
 
 def _assert_same_mxfp8(values, scales, ref_values, ref_scales):
@@ -41,7 +42,7 @@ def _assert_same_mxfp8(values, scales, ref_values, ref_scales):
 def test_silu_and_mul_mxfp8_matches_act_then_quant(num_tokens, d, swiglu_limit):
     from vllm.models.deepseek_v4.amd.silu_and_mul_mxfp8 import silu_and_mul_mxfp8
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     x = (torch.randn(num_tokens, 2 * d, device="cuda") * 4).to(torch.bfloat16)
     with set_current_vllm_config(VllmConfig()):
         act = (
@@ -68,7 +69,7 @@ def test_mhc_pre_delayed_mxfp8_matches_mega_mhc_seam(num_tokens, with_post):
     from vllm.models.deepseek_v4.amd.model import mxfp8_input
     from vllm.models.deepseek_v41.amd.mhc import mhc_pre_delayed_mxfp8
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     hidden, hc_mult = 5120, 4
     mix = (2 + hc_mult) * hc_mult
     residual = torch.randn(
