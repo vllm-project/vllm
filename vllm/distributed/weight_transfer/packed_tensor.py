@@ -5,7 +5,7 @@
 import math
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, NamedTuple
 
@@ -105,8 +105,9 @@ class ChunkLayout:
 
     chunks: list[list[Piece]]
     sizes: list[int]
-    # (shape, dtype) of every tensor, in order
-    specs: list[tuple[tuple[int, ...], torch.dtype]]
+    # (shape, dtype) of every tensor, in order; empty for a layout built
+    # from one chunk's pieces (IPC, a streamed chunk)
+    specs: list[tuple[tuple[int, ...], torch.dtype]] = field(default_factory=list)
 
     def views(self, k: int, buf: torch.Tensor) -> list[torch.Tensor]:
         """Chunk k's pieces in `buf`: typed, or raw bytes for a piece at an
@@ -293,7 +294,7 @@ def _chunks(
 
 
 def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
-    one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes], [])
+    one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes])
     device = stash[pieces[0].index].device
     buf = torch.empty(one.sizes[0], dtype=torch.uint8, device=device)
     views = one.views(0, buf)
