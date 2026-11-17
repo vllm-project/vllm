@@ -18,13 +18,13 @@ import hashlib
 import logging
 import math
 import os
-import re
 import sys
 import tempfile
 from functools import partial
 
 import numpy as np
 import pytest
+import regex as re
 import torch
 
 from vllm import ModelRegistry, SamplingParams

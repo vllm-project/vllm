@@ -915,6 +915,7 @@ class Base(
             input_ids = None
 
         if not self.pp_group.is_first_rank:
+            assert inputs_embeds is not None
             # Unset after the forward, so modules which call the layers directly
             # (i.e. MTP) skip the hook
             # Preserve the received values if the decoder modifies its input in place.
