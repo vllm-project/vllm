@@ -24,6 +24,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
+    _overlaid_layers_match,
     _pool_bytes_per_block,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
@@ -754,6 +755,46 @@ class TestDensePacking:
             ValueError, match="cannot express this model's mixed page sizes"
         ):
             get_kv_cache_config_from_groups(_mock_vllm_config("LBNHC"), groups, MEMORY)
+
+    @pytest.mark.parametrize(
+        ("n_swa", "expected"), [(1, True), (3, True), (4, False), (7, False)]
+    )
+    def test_overlaid_layers_match(self, n_swa, expected):
+        # Group 1: 3 mla (512), then 3 idx (128). Group 2: n_swa swa (512).
+        groups, _, _ = _mixed_page_groups(n_swa=n_swa)
+        assert _overlaid_layers_match(groups) is expected
+
+    def test_overlaid_layers_match_no_groups(self):
+        assert _overlaid_layers_match([])
+
+    def test_overlaid_layers_match_follows_the_placement_order(self):
+        # Layers with the same spec are placed together, so mla.0, idx.0, mla.1,
+        # idx.1 has the regions [512, 512, 128, 128]: two swa layers share the
+        # mla regions.
+        mixed = {"mla.0": _mla(512), "idx.0": _mla(128)}
+        mixed |= {"mla.1": _mla(512), "idx.1": _mla(128)}
+        swa = {f"swa.{i}": _mla(512) for i in range(2)}
+        groups = [_uniform_group(mixed), _uniform_group(swa)]
+        assert _overlaid_layers_match(groups)
+
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, MEMORY
+        )
+        views = _bind(config, "LBNHC")
+        for i in range(2):
+            assert views[f"swa.{i}"].data_ptr() == views[f"mla.{i}"].data_ptr()
+
+    def test_layer_compact_layout_overlays_groups_with_equal_pages(self):
+        # Layer i has the same page in both groups, so they share its region.
+        # The idx layers come after it, in regions of their own.
+        groups, g1, _ = _mixed_page_groups(n_swa=3)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, MEMORY
+        )
+        views = _bind(config, "LBNHC")
+        for i in range(3):
+            assert views[f"swa.{i}"].data_ptr() == views[f"mla.{i}"].data_ptr()
+        assert len({views[name].data_ptr() for name in g1}) == len(g1)
 
     def test_unresolved_layout_rejected(self):
         groups, _, _ = _mixed_page_groups()
