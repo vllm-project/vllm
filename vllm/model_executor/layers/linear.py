@@ -1870,10 +1870,11 @@ class RowParallelLinear(LinearBase):
 
     def _set_fp16_partials(self, mode: Literal["gemm", "kernel"] | None) -> None:
         """Partial sums for VLLM_TP_FP16_PARTIAL_SUMS: "gemm" (FP16 GEMM output
-        in `forward`), "kernel" (the quantized kernel reads partial_sum_dtype
-        and partial_sum_scale) or None (BF16)."""
+        in `forward`), "kernel" (the quantized kernel reads partial_sum_dtype,
+        set by `forward` for its own call only, and partial_sum_scale) or None
+        (BF16)."""
         self._fp16_partials = mode
-        self.partial_sum_dtype = torch.float16 if mode == "kernel" else None
+        self.partial_sum_dtype = None
         shift = envs.VLLM_TP_FP16_PARTIAL_SUMS_SHIFT if mode else 0
         self.partial_sum_scale = 2.0**-shift
         self._partial_sum_unscale = 2.0**shift
@@ -1939,7 +1940,14 @@ class RowParallelLinear(LinearBase):
             )
         else:
             apply = partial(self.quant_method.apply, self, bias=bias_)
-            output_parallel = apply_flattened(apply, input_parallel)
+            if self._fp16_partials == "kernel":
+                # FP16 output for this call only: code that calls
+                # quant_method.apply on this layer itself gets BF16.
+                self.partial_sum_dtype = torch.float16
+                output_parallel = apply_flattened(apply, input_parallel)
+                self.partial_sum_dtype = None
+            else:
+                output_parallel = apply_flattened(apply, input_parallel)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
@@ -2034,9 +2042,9 @@ class RowParallelLinear(LinearBase):
         return mode
 
     def disable_fp16_partial_sums(self, reason: str) -> None:
-        """Go back to BF16 partial sums. For wrappers that call
-        `quant_method.apply` on this layer and all-reduce the result
-        themselves, bypassing the unscale in `forward`."""
+        """Go back to BF16 partial sums and drop the prescaled copies. For
+        wrappers that run `quant_method.apply` on this layer instead of
+        `forward` (which gets BF16 from it anyway)."""
         if self._fp16_partials is None:
             return
         logger.warning_once(

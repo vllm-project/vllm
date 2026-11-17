@@ -832,6 +832,7 @@ def fp16_partial_sums_row_parallel_test_worker(
     - block FP8 ("kernel" mode, Fp8 and compressed-tensors): matches BF16
       partial sums up to rounding;
     - reduce_results turned off after __init__: unscaled BF16 partial sums;
+    - quant_method.apply called outside forward: BF16;
     - LoRA: falls back to BF16 partial sums.
     """
     from types import SimpleNamespace
@@ -940,7 +941,8 @@ def fp16_partial_sums_row_parallel_test_worker(
             assert outs[flag].dtype == torch.bfloat16
         diff = float(((outs["1"].double() - outs["0"].double()).abs() / rms).mean())
         assert diff < 1e-2, (scale_name, diff)
-        assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.float16
+        # Outside forward, quant_method.apply writes BF16.
+        assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.bfloat16
         # A weight reload refills the prescaled block scales in place.
         ptr = layer.partial_sum_block_scale.data_ptr()
         store_partial_sum_prescaled(
@@ -950,7 +952,9 @@ def fp16_partial_sums_row_parallel_test_worker(
         layer.reduce_results = False
         out, _ = layer(x[:, shard])
         bias = layer.bias if rank == 0 else None
+        layer.partial_sum_dtype = torch.float16  # as forward does
         part = layer.quant_method.apply(layer, x[:, shard], bias)
+        layer.partial_sum_dtype = None
         expected = part.bfloat16() * layer._partial_sum_unscale
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 

@@ -17,10 +17,7 @@ def store_partial_sum_prescaled(
     """With FP16 partial sums, store `tensor` times the 2^-k prescale as
     `layer.<name>`. A weight reload refills it in place (captured CUDA
     graphs keep its address)."""
-    if (
-        getattr(layer, "partial_sum_dtype", None) is not None
-        and layer.partial_sum_scale != 1.0
-    ):
+    if getattr(layer, "partial_sum_scale", 1.0) != 1.0:
         refill_derived(layer, name, tensor * layer.partial_sum_scale)
 
 
