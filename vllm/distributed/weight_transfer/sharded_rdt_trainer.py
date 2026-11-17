@@ -41,14 +41,19 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     DEFAULT_BUFFER_BYTES,
     DEFAULT_NUM_BUFFERS,
     Box,
+    FlatPiece,
     RdtRouter,
     WireBucket,
     box_slices,
     check_ray_rdt_version,
+    deregister_nixl_memory,
+    flat_layout,
+    flat_view,
     from_wire_box,
     gather_units,
     piece_nbytes,
     pool_bytes,
+    register_nixl_memory,
     register_nixl_memory_pool,
     validate_sharded_rdt_settings,
 )
@@ -90,6 +95,11 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Most bytes one pull moves, and the size of a gather unit."""
     num_buffers: int = DEFAULT_NUM_BUFFERS
     """Pulls each worker keeps in flight."""
+    flat_buckets: bool = False
+    """Pack each bucket, with one fused copy, into one byte tensor carved
+    from an arena registered with NIXL once, instead of returning one tensor
+    per piece for Ray to copy into its pool one by one. Needs Ray >= 2.56
+    instead of 2.60."""
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
     """Units the gather loop runs ahead of the consumers."""
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
@@ -109,6 +119,7 @@ class _ServedBucket:
     unit: int
     pieces: tuple[tuple[str, tuple[slice, ...]], ...]
     nbytes: int
+    layout: tuple[FlatPiece, ...]
 
 
 def _ray_stored(tensor: torch.Tensor) -> bool:
@@ -141,6 +152,7 @@ class _RDTProducerServer:
         pool_bytes: int,
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
         max_outstanding: int = 64,
+        flat_buckets: bool = False,
     ) -> None:
         self._device_index = torch.accelerator.current_device_index()
         self._served = {
@@ -149,6 +161,7 @@ class _RDTProducerServer:
         }
         self._unit_of = dict(units)
         self._pool_bytes = int(pool_bytes)
+        self._flat = flat_buckets
         self._stall_timeout = float(stall_timeout_s)
 
         self._cond = threading.Condition()
@@ -171,6 +184,9 @@ class _RDTProducerServer:
         self._freed_pending: list[int] = []  # released, not yet collected
         # served buckets whose pool blocks Ray has not freed yet
         self._pool_used = 0
+        # flat buckets: the registered arena, and its served blocks by offset
+        self._arena: torch.Tensor | None = None
+        self._blocks: dict[int, int] = {}
         self._serve_wait, self._served_count = 0.0, 0
         self._waiters = ThreadPoolExecutor(
             max_workers=max(1, max_outstanding), thread_name_prefix="rdt-free"
@@ -186,12 +202,17 @@ class _RDTProducerServer:
         return self._device_index
 
     def warmup_nixl(self) -> None:
-        """Create the NIXL agent and register the pool now, while the rank's
-        GPU is idle and before any rank enters a collective: creating the
-        agent lazily deadlocks on EFA-class fabrics."""
-        register_nixl_memory_pool(
-            self._pool_bytes, torch.device("cuda", self._device_index)
-        )
+        """Create the NIXL agent and register the pool (or the flat arena)
+        now, while the rank's GPU is idle and before any rank enters a
+        collective: creating the agent lazily deadlocks on EFA-class
+        fabrics."""
+        device = torch.device("cuda", self._device_index)
+        if not self._flat:
+            register_nixl_memory_pool(self._pool_bytes, device)
+            return
+        arena = torch.empty(self._pool_bytes, dtype=torch.uint8, device=device)
+        register_nixl_memory(arena)
+        self._arena = arena
 
     # ---------------- liveness ----------------
 
@@ -321,7 +342,7 @@ class _RDTProducerServer:
         """
         served: list[_ServedBucket] = []
         for i, wire in enumerate(buckets):
-            pieces, units, nbytes = [], set(), 0
+            pieces, units, nbytes, boxes, dtypes = [], set(), 0, [], []
             for name, wire_box in wire:
                 if name not in self._served:
                     raise ValueError(
@@ -335,13 +356,22 @@ class _RDTProducerServer:
                 ):
                     raise ValueError(f"{name!r}: box {box} is outside {shape}")
                 pieces.append((name, box_slices(box)))
+                boxes.append(box)
+                dtypes.append(dtype)
                 units.add(self._unit_of[name])
                 nbytes += piece_nbytes(box, dtype)
             if len(units) != 1:
                 raise ValueError(
                     f"consumer {consumer_id} bucket {i} spans units {sorted(units)}"
                 )
-            served.append(_ServedBucket(units.pop(), tuple(pieces), nbytes))
+            served.append(
+                _ServedBucket(
+                    units.pop(),
+                    tuple(pieces),
+                    nbytes,
+                    tuple(flat_layout(boxes, dtypes)),
+                )
+            )
         with self._cond:
             self._buckets[consumer_id] = served
             self._needs[consumer_id] = Counter(b.unit for b in served)
@@ -353,7 +383,7 @@ class _RDTProducerServer:
     def bucket(self, consumer_id: int, seq: int, sync_idx: int) -> list[torch.Tensor]:
         """Serve one registered bucket of sync `sync_idx`: its boxes, once
         the unit is gathered and the pool has room. Ray copies them into the
-        pool when this returns.
+        pool when this returns; a flat bucket is packed here, into the arena.
 
         Raises:
             ValueError: an unregistered bucket, or a sync this producer left.
@@ -374,23 +404,67 @@ class _RDTProducerServer:
                 lambda: (
                     self._sync_idx != sync_idx
                     or spec.unit not in self._unit_names
-                    # an empty pool admits any bucket
-                    or (
-                        self._pool_used > 0
-                        and self._pool_used + spec.nbytes > self._pool_bytes
-                    )
+                    or not self._has_room(spec.nbytes)
                 ),
                 f"unit {spec.unit} of sync {sync_idx} and pool room",
             )
+            offset = self._carve(spec.nbytes) if self._flat else -1
             self._pool_used += spec.nbytes
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            tensors = [
-                self._cache[name][slices].contiguous() for name, slices in spec.pieces
-            ]
+            views = [self._cache[name][slices] for name, slices in spec.pieces]
             self._progress()
-        self._track_free(tensors, consumer_id, spec.unit, spec.nbytes, sync_idx)
+        if self._flat:
+            tensors = [self._pack(views, spec, offset)]
+        else:
+            tensors = [v.contiguous() for v in views]
+        self._track_free(tensors, consumer_id, spec.unit, spec.nbytes, sync_idx, offset)
         return tensors
+
+    def _has_room(self, nbytes: int) -> bool:
+        """Whether a bucket of `nbytes` fits the pool now; an empty pool
+        admits any bucket. Caller holds `_cond`."""
+        if self._pool_used == 0:
+            return True
+        if not self._flat:
+            return self._pool_used + nbytes <= self._pool_bytes
+        return self._carve(nbytes, dry_run=True) >= 0
+
+    def _carve(self, nbytes: int, *, dry_run: bool = False) -> int:
+        """First fit for `nbytes` in the arena: its offset, or -1 (no room,
+        or a bucket larger than the arena). Caller holds `_cond`."""
+        start = 0
+        for offset, size in sorted(self._blocks.items()):
+            if offset - start >= nbytes:
+                break
+            start = offset + size
+        if start + nbytes > self._pool_bytes:
+            return -1
+        if not dry_run:
+            self._blocks[start] = nbytes
+        return start
+
+    def _pack(
+        self, views: list[torch.Tensor], spec: _ServedBucket, offset: int
+    ) -> torch.Tensor:
+        """Pack a flat bucket with one fused copy, into its arena block (or a
+        fresh tensor, for a bucket larger than the arena, which Ray then
+        registers itself)."""
+        device = views[0].device
+        if self._arena is None:  # warmup_nixl never ran (tests)
+            self._arena = torch.empty(
+                self._pool_bytes, dtype=torch.uint8, device=device
+            )
+        if offset < 0:
+            flat = torch.empty(spec.nbytes, dtype=torch.uint8, device=device)
+        else:
+            flat = self._arena[offset : offset + spec.nbytes]
+        torch._foreach_copy_([flat_view(flat, p) for p in spec.layout], views)
+        if flat.is_cuda:
+            # Ray synchronizes the device under its cache lock; do it here so
+            # its wait is empty.
+            torch.cuda.current_stream(device).synchronize()
+        return flat
 
     def _track_free(self, tensors: list[torch.Tensor], *key: int) -> None:
         """Account the bucket once Ray frees it (`_await_free`)."""
@@ -403,6 +477,7 @@ class _RDTProducerServer:
         unit: int,
         nbytes: int,
         sync_idx: int,
+        offset: int = -1,
     ) -> None:
         """Account a served bucket once Ray frees it: the consumer has read
         it, so its pool block and the unit's tensors are no longer read."""
@@ -425,15 +500,23 @@ class _RDTProducerServer:
             except TimeoutError:
                 continue
         del tensors, probe
-        self._freed_bucket(consumer_id, unit, nbytes, sync_idx, read=stored)
+        self._freed_bucket(consumer_id, unit, nbytes, sync_idx, offset, read=stored)
 
     def _freed_bucket(
-        self, consumer_id: int, unit: int, nbytes: int, sync_idx: int, *, read: bool
+        self,
+        consumer_id: int,
+        unit: int,
+        nbytes: int,
+        sync_idx: int,
+        offset: int = -1,
+        *,
+        read: bool,
     ) -> None:
-        """A served bucket's pool block is free; if it was `read`, it no
-        longer holds its unit."""
+        """A served bucket's pool block (arena block at `offset`, for a flat
+        one) is free; if it was `read`, it no longer holds its unit."""
         with self._cond:
             self._pool_used -= nbytes
+            self._blocks.pop(offset, None)
             if read and sync_idx == self._sync_idx and consumer_id in self._freed:
                 self._freed[consumer_id][unit] += 1
                 self._release_if_done(unit)
@@ -460,6 +543,10 @@ class _RDTProducerServer:
             self._cache.clear()
             self._unit_names.clear()
         self._waiters.shutdown(wait=False, cancel_futures=True)
+        if self._arena is not None and self._arena.is_cuda:
+            with contextlib.suppress(Exception):
+                deregister_nixl_memory(self._arena)
+            self._arena = None
 
 
 class ShardedRDTTrainerWeightTransferEngine(
@@ -582,6 +669,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 num_consumers=ii.num_consumers,
                 buffer_bytes=ii.buffer_bytes,
                 num_buffers=ii.num_buffers,
+                flat_buckets=ii.flat_buckets,
             )
         )
 
@@ -680,7 +768,7 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         ii = self._init_info
         # The trainer is often a separate install from the workers.
-        check_ray_rdt_version()
+        check_ray_rdt_version(ii.flat_buckets)
         self._server_name = f"vllm_rdt_producer_{uuid.uuid4().hex[:12]}_rk{ii.rank}"
         # The server is the rank's twin process: same library env, pinned to
         # the rank's physical GPU (num_gpus=0 so Ray does not hand it a
@@ -731,6 +819,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             pool_bytes=self._pool_bytes(),
             stall_timeout_s=ii.stall_timeout_s,
             max_outstanding=max_outstanding,
+            flat_buckets=ii.flat_buckets,
         )
         ray.get(self._server.ping.remote())
         ray.get(self._server.warmup_nixl.remote())

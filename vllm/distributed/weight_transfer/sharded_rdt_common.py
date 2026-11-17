@@ -25,13 +25,10 @@ Plan (a consumer's first `start_weight_update`):
     The consumer runs `plan_loads` and routes each name it needs to one owner
     (`RdtRouter.producer_for`). Per producer, it cuts its pieces into buckets
     of at most `buffer_bytes` without crossing a unit. A piece is one box of
-    one name. A DIRECT bucket holds pieces whose `get_dest` tensor is
-    contiguous with the box's shape and dtype, so NIXL writes into model
-    memory. A STAGED bucket holds the rest: destinations that need a strided
-    copy, and fallbacks (the full tensor, for `load_weights`). The consumer
-    registers the direct destinations' storage with NIXL and sends each
-    producer, once, `register_consumer(consumer_id, buckets)`: per bucket, in
-    pull order, a list of `(name, box)`.
+    one name: copied into its `get_dest` tensors, or loaded in full through
+    `load_weights` (a fallback). The consumer sends each producer, once,
+    `register_consumer(consumer_id, buckets)`: per bucket, in pull order, a
+    list of `(name, box)`.
 
 Sync (`update_weights`, one per sync):
     The consumer pulls its buckets with `num_buffers` in flight, in unit
@@ -39,10 +36,13 @@ Sync (`update_weights`, one per sync):
     components so independent pipeline stages pull in parallel.
     A pull is `bucket(consumer_id, seq, sync_idx)`: only the index travels.
     The producer waits until the bucket's unit is gathered in sync `sync_idx`,
-    then returns the boxes as contiguous tensors; Ray copies them into the
-    producer's registered NIXL memory pool. A direct pull's receive targets
-    are the destinations themselves (`set_target_for_ref`); a staged pull
-    lands in a buffer Ray allocates and is copied or loaded from there.
+    then returns the boxes. By default they are contiguous tensors, one per
+    piece, which Ray copies into the producer's NIXL memory pool. With
+    `flat_buckets`, the producer packs them itself, with one fused copy, into
+    one byte tensor (pieces at `flat_layout`) carved from an arena it
+    registered with NIXL once, so Ray only describes it. Either way the pull
+    lands in a buffer Ray allocates on the consumer, which copies every piece
+    into its destinations with one fused copy and loads the fallbacks.
 
 Release:
     A consumer drops each ref once its bucket is applied, which frees the
@@ -50,9 +50,10 @@ Release:
     consumer has registered and every bucket reading from the unit has been
     freed; that is the trainer's credit to gather the next unit.
 
-Pool: each producer registers `pool_bytes(...)` at startup and admits a
-bucket only while the bytes of served, unfreed buckets fit, so a full pool
-slows pulls down instead of failing them.
+Pool: each producer registers `pool_bytes(...)` at startup (Ray's pool, or
+with `flat_buckets` its own arena) and admits a bucket only while the bytes of
+served, unfreed buckets fit, so a full pool slows pulls down instead of
+failing them.
 """
 
 import itertools
@@ -62,9 +63,11 @@ from typing import Any
 
 import torch
 
-# Ray 2.60 is the first release with the NIXL sender memory pool
-# (`register_nixl_memory_pool`) this backend serves from.
+# Per-piece buckets lean on the NIXL sender memory pool as Ray 2.60 packs it
+# (one descriptor per bucket). Flat buckets need only `register_nixl_memory`,
+# `wait_tensor_freed` and concurrent `ray.get` on lists, all in Ray 2.56.
 RDT_MIN_RAY_VERSION = "2.60.0"
+RDT_MIN_RAY_VERSION_FLAT = "2.56.0"
 DEFAULT_BUFFER_BYTES = 1 << 30
 DEFAULT_NUM_BUFFERS = 2
 
@@ -96,11 +99,13 @@ def validate_sharded_rdt_settings(
     )
 
 
-def check_ray_rdt_version() -> None:
-    """Refuse an installed Ray older than `RDT_MIN_RAY_VERSION`.
+def check_ray_rdt_version(flat_buckets: bool | None = None) -> None:
+    """Refuse an installed Ray older than `RDT_MIN_RAY_VERSION` (or
+    `RDT_MIN_RAY_VERSION_FLAT` with `flat_buckets`). `None`, where the mode
+    is not known yet, checks the lower of the two.
 
     vLLM does not depend on Ray, so no pin carries this; without the check an
-    old Ray fails deep in the first pull.
+    old Ray fails deep in the first pull, or runs far slower.
 
     Raises:
         ValueError: the installed Ray is too old.
@@ -110,12 +115,13 @@ def check_ray_rdt_version() -> None:
 
     from packaging import version
 
+    minimum = RDT_MIN_RAY_VERSION if flat_buckets is False else RDT_MIN_RAY_VERSION_FLAT
     current = version.parse(importlib.metadata.version("ray"))
-    if current < version.parse(RDT_MIN_RAY_VERSION):
+    if current < version.parse(minimum):
         raise ValueError(
             f"The 'sharded_rdt' weight transfer backend requires Ray >= "
-            f"{RDT_MIN_RAY_VERSION} (the NIXL sender memory pool); found "
-            f"{current}. Run `pip install -U 'ray>={RDT_MIN_RAY_VERSION}'`."
+            f"{minimum} (flat_buckets={flat_buckets}); found {current}. "
+            f"Run `pip install -U 'ray>={minimum}'`."
         )
 
 
@@ -156,6 +162,28 @@ def piece_nbytes(box: Box, dtype: torch.dtype) -> int:
     """A piece's bytes in the pool, counting the block alignment Ray adds."""
     nbytes = math.prod(box_shape(box)) * dtype.itemsize
     return -(-nbytes // _POOL_ALIGNMENT) * _POOL_ALIGNMENT
+
+
+FlatPiece = tuple[int, int, torch.dtype, tuple[int, ...]]
+"""Where a piece sits in a flat bucket: byte offset, bytes, dtype, shape."""
+
+
+def flat_layout(boxes: Sequence[Box], dtypes: Sequence[torch.dtype]) -> list[FlatPiece]:
+    """The pieces of a flat bucket, in order, each starting on 16 B, so the
+    bucket is `sum(piece_nbytes)` long. Producer and consumer derive it from
+    the same `(name, box)` list."""
+    layout, offset = [], 0
+    for box, dtype in zip(boxes, dtypes, strict=True):
+        shape = box_shape(box)
+        layout.append((offset, math.prod(shape) * dtype.itemsize, dtype, shape))
+        offset += piece_nbytes(box, dtype)
+    return layout
+
+
+def flat_view(flat: torch.Tensor, piece: FlatPiece) -> torch.Tensor:
+    """One piece of a flat byte tensor, shaped like its box."""
+    offset, nbytes, dtype, shape = piece
+    return flat[offset : offset + nbytes].view(dtype).view(shape)
 
 
 def gather_units(nbytes: Sequence[int], budget: int) -> list[int]:

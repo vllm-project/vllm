@@ -22,7 +22,10 @@ import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
 from vllm.distributed.nixl_utils import alias_nixl_for_ray
-from vllm.distributed.weight_transfer.sharded_rdt_common import register_nixl_memory
+from vllm.distributed.weight_transfer.sharded_rdt_common import (
+    flat_view,
+    register_nixl_memory,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
@@ -284,6 +287,52 @@ class TestServe:
         s.begin_sync([0], 0)
         _publish(s, _weights(), 0)
         s.bucket(0, 0, 0)
+
+
+class TestFlat:
+    """`flat_buckets`: one byte tensor per bucket, carved from the arena."""
+
+    def test_a_flat_bucket_packs_its_boxes_into_the_arena(self, server):
+        s = server(flat_buckets=True)
+        boxes = [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]]
+        s.register_consumer(0, boxes)
+        s.begin_sync([0], 0)
+        w = _weights()
+        _publish(s, w, 0)
+        (flat,) = s.bucket(0, 0, 0)
+        assert flat.dtype == torch.uint8 and flat.numel() == 32
+        assert flat.untyped_storage().data_ptr() == s._arena.data_ptr()
+        a, b = (flat_view(flat, p) for p in s._buckets[0][0].layout)
+        assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
+
+    def test_the_arena_admits_a_bucket_only_when_a_block_fits(self, server):
+        """Freed blocks are reused, first fit."""
+        s = server(flat_buckets=True, pool_bytes=128)
+        whole = [(N, [[0, 8], [0, 4]])]  # 64 B
+        s.register_consumer(0, [whole, whole, whole])
+        s.begin_sync([0], 0)
+        _publish(s, _weights(), 0, 1)
+        s.bucket(0, 0, 0)
+        s.bucket(0, 1, 0)
+        assert sorted(s._blocks) == [0, 64]
+        future = _call(s.bucket, 0, 2, 0)
+        assert not future.done()
+        free(s, 1)
+        (flat,) = future.result(timeout=5)
+        assert flat.data_ptr() == s._arena.data_ptr()
+        free(s)
+        assert s._blocks == {} and s._pool_used == 0
+
+    def test_an_empty_arena_admits_an_oversized_bucket(self, server):
+        s = server(flat_buckets=True, pool_bytes=16)
+        s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
+        s.begin_sync([0], 0)
+        w = _weights()
+        _publish(s, w, 0)
+        (flat,) = s.bucket(0, 0, 0)
+        assert torch.equal(flat.view(torch.bfloat16).view(8, 4), w[N])
+        free(s)
+        assert s._blocks == {} and s._pool_used == 0
 
 
 class TestRegister:

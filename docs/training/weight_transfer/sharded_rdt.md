@@ -12,7 +12,7 @@ Requirements:
 
 - [`VLLM_RELOAD_MODE=direct`](../direct_reload.md) on the inference server; the engine refuses to start under layerwise reload
 - `distributed_executor_backend="ray"`: the workers must be Ray actors
-- Ray `>= 2.60.0` on both the trainer and the workers (the NIXL sender memory pool)
+- Ray `>= 2.60.0` on both the trainer and the workers (the NIXL sender memory pool), or `>= 2.56.0` with `flat_buckets=True`
 - `nixl` installed in the environment shared by trainer and workers
 
 ## How It Works
@@ -21,10 +21,7 @@ Requirements:
 
 At the first `start_weight_update`, each worker builds the load plan (`plan_loads`) for the trainer's metadata, on the tensors [direct reload](../direct_reload.md) has just viewed back to their checkpoint layout. For every checkpoint name, the plan gives the boxes of the tensor this worker needs (`get_boxes`) and the live tensors they are written to (`get_dest`). A name the loaders transform rather than copy is a *fallback*: the worker needs it in full, through `load_weights`. A name another worker owns (another expert, another pipeline stage) needs nothing.
 
-Each box is a *piece*. The worker routes every piece to one trainer rank that owns the name, and sorts the pieces into two kinds of pulls:
-
-- **Direct**: the destination is contiguous with the box's shape and dtype. NIXL writes the bytes straight into model memory, so the destination storages are registered with NIXL once, at plan time.
-- **Staged**: everything else. Destinations that need a strided copy (a transposed or interleaved layout, two boxes of one tensor under expert TP) and fallbacks. Ray receives these into a buffer it allocates, and the worker copies them into place or passes them to `load_weights`.
+Each box is a *piece*. The worker routes every piece to one trainer rank that owns the name. Every pull lands in a buffer Ray allocates on the worker; the worker then copies each piece into its `get_dest` tensors (the contiguous ones with one fused byte copy per pull) and passes fallbacks to `load_weights`. NIXL never writes into model memory, so the engine registers none of it. The copy lists are built once, at plan time.
 
 The plan is reused by every later sync. Re-initializing the engine (a new trainer, new metadata) drops it, and the next `start_weight_update` plans again.
 
@@ -43,10 +40,11 @@ begin_sync                              start_weight_update: start_reload
 for unit in its units:                  update_weights:
     wait while > lookahead unreleased       keep num_buffers pulls in flight:
     gather (iter_full), publish                 bucket(i) -> NIXL read
-                                                direct: lands in the model
-bucket(i): wait for the unit,                   staged: copy_ / load_weights
+                                                one fused copy into get_dest,
+bucket(i): wait for the unit,                   load_weights for fallbacks
     return the boxes; Ray copies                drop the ref -> pool block freed
-    them into the NIXL pool
+    them into the NIXL pool (or, flat:
+    one fused copy into the arena)
 release a unit once every live worker   finish_weight_update: finish_reload
     has freed every bucket reading it
 end_sync
@@ -55,6 +53,8 @@ end_sync
 A trainer rank runs at most `gather_lookahead` units ahead of the units its workers are still reading. Workers pull in unit order within each group of co-owning trainer ranks, and pull from independent groups (pipeline stages) side by side, so no rank waits on a unit its workers will pull later.
 
 Each trainer rank serves out of one NIXL memory pool registered at startup, sized for `num_buffers` buckets for every worker that may pull from it, plus one bucket of slack. A rank admits a pull only while the buckets it has served and Ray has not yet freed fit in the pool, so a full pool slows pulls down rather than failing them.
+
+By default a rank returns one tensor per piece, and Ray copies them into its pool one `copy_` at a time. With `flat_buckets=True`, the rank instead packs each bucket itself, with one fused copy, into one byte tensor carved from an arena of the same size that it registered with NIXL once; Ray only describes it, and the worker receives the bucket as one buffer. This needs only Ray 2.56.
 
 **Every inference deployment must call `start_weight_update` before any calls `update_weights`.** The first `start_weight_update` registers the worker's buckets with every trainer rank, and a rank releases a unit only once every live worker has registered.
 
@@ -72,8 +72,8 @@ VLLM_RELOAD_MODE=direct vllm serve my-model \
 
 Everything else (the producers, the metadata, the ownership table, `buffer_bytes` and `num_buffers`) arrives from the trainer at the init handshake.
 
-!!! warning "Leave headroom for staged pulls"
-    Staged pulls land in buffers Ray allocates on the worker's GPU: up to `num_buffers` buckets of at most `buffer_bytes` (or one tensor, if a fallback is larger) at a time. They do not count against `gpu_memory_utilization`, so leave room for them (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)). Direct pulls need no buffer.
+!!! warning "Leave headroom for the receive buffers"
+    Pulls land in buffers Ray allocates on the worker's GPU: up to `num_buffers` buckets of at most `buffer_bytes` (or one tensor, if larger) at a time. They do not count against `gpu_memory_utilization`, so leave room for them (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)).
 
 ## Trainer Side
 
@@ -114,16 +114,17 @@ To adapt a trainer that is not a plain `nn.Module` (a Megatron export, a raw sha
 | `trainer_actor_namespace` | `None` | Ray namespace for the producer actors; the workers resolve them by name there |
 | `buffer_bytes` | 1 GiB | Most bytes one pull moves, and the size of a gather unit |
 | `num_buffers` | 2 | Pulls each worker keeps in flight |
+| `flat_buckets` | `False` | Pack each bucket into one byte tensor in a NIXL-registered arena with one fused copy, instead of letting Ray copy each piece into its pool; works on Ray 2.56 |
 | `gather_lookahead` | 1 | Units the gather loop runs ahead of the workers; at most `gather_lookahead + 1` units are resident on a trainer rank |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a worker that dies mid-sync, not a latency target |
 
-Each trainer rank's GPU holds its NIXL pool, `(num_buffers × workers pulling from it + 1) × max(buffer_bytes, largest tensor)` bytes, and up to `gather_lookahead + 1` gathered units.
+Each trainer rank's GPU holds its NIXL pool (or flat arena), `(num_buffers × workers pulling from it + 1) × max(buffer_bytes, largest tensor)` bytes, and up to `gather_lookahead + 1` gathered units.
 
 ## Limitations
 
 - **Separate fleets only.** The trainer and the inference workers run on different GPUs; colocated setups need [IPC](ipc.md).
 - **Direct reload only**, with its [refused configurations](../direct_reload.md#refused-configurations); the load plan also refuses EPLB and online quantization.
-- **GPU staging only.** Staged pulls land in GPU memory.
+- **GPU staging only.** Pulls land in GPU memory.
 - Ray's RDT APIs used here are alpha. With many trainer ranks, keep Ray's NIXL remote-agent cache (`RAY_NIXL_REMOTE_AGENT_CACHE_MAXSIZE`, default 1000) at least the number of trainer ranks.
 
 ## Examples

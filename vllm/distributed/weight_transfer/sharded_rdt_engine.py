@@ -26,14 +26,14 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     DEFAULT_BUFFER_BYTES,
     DEFAULT_NUM_BUFFERS,
     Box,
+    FlatPiece,
     RdtRouter,
     WireBucket,
-    box_shape,
     check_ray_rdt_version,
-    deregister_nixl_memory,
+    flat_layout,
+    flat_view,
     gather_units,
     piece_nbytes,
-    register_nixl_memory,
     validate_int,
     validate_sharded_rdt_settings,
     wire_box,
@@ -83,6 +83,10 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     num_buffers: int = DEFAULT_NUM_BUFFERS
     """Pulls each worker keeps in flight."""
 
+    flat_buckets: bool = False
+    """Producers send each bucket as one flat byte tensor (pieces at
+    `flat_layout`) instead of one tensor per piece."""
+
     replica_rank: int = 0
     """This inference deployment's index in a fleet of `num_replicas`
     independent ones, whose worker indices each restart at 0."""
@@ -103,23 +107,43 @@ class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 @dataclass(slots=True)
 class _Bucket:
     """One pull: the pieces one producer serves to this worker, and where
-    they go.
-
-    A direct bucket's `targets` are model tensors, one per piece, written by
-    NIXL. A staged bucket lands in a buffer Ray allocates: per piece, the
-    tensors to copy it into, or the name to load it as (a fallback)."""
+    they go. It lands in a buffer Ray allocates; per piece, `copies` are the
+    model tensors it is copied into and `loads` the name to load it as (a
+    fallback, sent in full)."""
 
     producer: int
     seq: int
     unit: int
     pieces: list[tuple[str, Box]]
+    dtypes: list[torch.dtype]
     nbytes: int
-    targets: list[torch.Tensor] | None = None
     copies: list[list[torch.Tensor]] = field(default_factory=list)
     loads: list[str | None] = field(default_factory=list)
+    # Built once by `prepare`, used every sync: where each piece sits in a
+    # flat bucket; contiguous destinations of the sent dtype as bytes, with
+    # the piece each copies; the other destinations; the fallbacks.
+    layout: list[FlatPiece] = field(default_factory=list)
+    byte_dsts: list[torch.Tensor] = field(default_factory=list)
+    byte_pieces: list[int] = field(default_factory=list)
+    typed: list[tuple[int, torch.Tensor]] = field(default_factory=list)
+    fallbacks: list[tuple[int, str]] = field(default_factory=list)
 
     def wire(self) -> WireBucket:
         return [(name, wire_box(box)) for name, box in self.pieces]
+
+    def prepare(self) -> None:
+        self.layout = flat_layout([box for _, box in self.pieces], self.dtypes)
+        for i, (dests, name, dtype) in enumerate(
+            zip(self.copies, self.loads, self.dtypes, strict=True)
+        ):
+            for dest in dests:
+                if dest.is_contiguous() and dest.dtype == dtype:
+                    self.byte_dsts.append(dest.reshape(-1).view(torch.uint8))
+                    self.byte_pieces.append(i)
+                else:
+                    self.typed.append((i, dest))
+            if name is not None:
+                self.fallbacks.append((i, name))
 
 
 @dataclass(slots=True)
@@ -183,8 +207,7 @@ class ShardedRDTWeightTransferEngine(
         # Built at the first start_weight_update after an init.
         self._plan: LoadPlan | None = None
         self._buckets: list[_Bucket] = []
-        # One tensor per model storage registered with NIXL.
-        self._registered: list[torch.Tensor] = []
+        self._flat = False
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Check the configuration and bind the producers. Touches no model
@@ -205,7 +228,7 @@ class ShardedRDTWeightTransferEngine(
             allow_zero_consumers=True,
         )
         check_plannable(self.model)
-        check_ray_rdt_version()
+        check_ray_rdt_version(init_info.flat_buckets)
         metas = _metas(init_info)
         num_consumers = init_info.num_consumers or (
             self.parallel_config.world_size_across_dp
@@ -241,6 +264,7 @@ class ShardedRDTWeightTransferEngine(
         )
         self._buffer_bytes = init_info.buffer_bytes
         self._num_buffers = init_info.num_buffers
+        self._flat = init_info.flat_buckets
         self._producers = producers
         self._hooks = self._ray_hooks()
         logger.info(
@@ -258,9 +282,8 @@ class ShardedRDTWeightTransferEngine(
         return pc.data_parallel_index * pc.world_size + pc.rank
 
     def start_weight_update(self) -> None:
-        """Begin a direct reload; the first one after an init also plans,
-        registers the destinations with NIXL and sends each producer its
-        buckets.
+        """Begin a direct reload; the first one after an init also plans and
+        sends each producer its buckets.
 
         Raises:
             RuntimeError: not initialized.
@@ -281,30 +304,21 @@ class ShardedRDTWeightTransferEngine(
             t0 = time.perf_counter()
             plan = plan_loads(self.model, self._metas)
             buckets = self._build_buckets(plan)
-            registered = _register_storages(
-                t for b in buckets for t in (b.targets or ())
-            )
-            try:
-                self._send_buckets(buckets)
-            except BaseException:
-                _deregister(registered)
-                raise
+            self._send_buckets(buckets)
         except Exception as e:
             e.add_note(
                 "Sharded RDT: planning failed after start_reload, so the model "
                 "is mid-reload; the next start_weight_update plans again"
             )
             raise
-        self._plan, self._buckets, self._registered = plan, buckets, registered
-        direct = sum(b.targets is not None for b in buckets)
+        self._plan, self._buckets = plan, buckets
         logger.info(
-            "Sharded RDT plan: %d buckets (%d direct, %d staged), %.1f MiB, "
-            "%d storages registered, in %.2f s",
+            "Sharded RDT plan: %d buckets, %d pieces (%d loaded in full), "
+            "%.1f MiB, in %.2f s",
             len(buckets),
-            direct,
-            len(buckets) - direct,
+            sum(len(b.pieces) for b in buckets),
+            sum(name is not None for b in buckets for name in b.loads),
             sum(b.nbytes for b in buckets) / (1 << 20),
-            len(registered),
             time.perf_counter() - t0,
         )
 
@@ -315,20 +329,18 @@ class ShardedRDTWeightTransferEngine(
         assert isinstance(plan, LoadPlan) and self._metas is not None
         router = self._router
         assert router is not None
-        # (producer, unit, direct) -> pieces as (name, box, dtype, target|copies|load)
-        groups: dict[tuple[int, int, bool], list[tuple]] = defaultdict(list)
+        # (producer, unit) -> pieces as (name, box, dtype, copies, load name)
+        groups: dict[tuple[int, int], list[tuple]] = defaultdict(list)
         for meta in self._metas:
             boxes = plan.get_boxes(meta.name)
             if boxes is None:
                 continue
             unit = self._units[meta.name]
-            producer = router.producer_for(self._consumer_id, meta.name, unit)
+            key = (router.producer_for(self._consumer_id, meta.name, unit), unit)
             dest = plan.get_dest(meta.name)
             if dest is None:
                 (box,) = boxes
-                groups[(producer, unit, False)].append(
-                    (meta.name, box, meta.dtype, meta.name)
-                )
+                groups[key].append((meta.name, box, meta.dtype, [], meta.name))
                 continue
             by_box: dict[Box, list[torch.Tensor]] = defaultdict(list)
             for box, tensor in dest:
@@ -339,45 +351,33 @@ class ShardedRDTWeightTransferEngine(
                     )
                 by_box[box].append(tensor)
             for box in boxes:
-                staged = []
-                for tensor in by_box[box]:
-                    if _receivable(tensor, box, meta.dtype):
-                        groups[(producer, unit, True)].append(
-                            (meta.name, box, meta.dtype, tensor)
-                        )
-                    else:
-                        staged.append(tensor)
-                if staged:
-                    groups[(producer, unit, False)].append(
-                        (meta.name, box, meta.dtype, staged)
-                    )
+                groups[key].append((meta.name, box, meta.dtype, by_box[box], None))
 
         components = router.components()
         unit_rank = _component_unit_rank(self._metas, self._units, router)
         buckets: list[_Bucket] = []
-        for (producer, unit, direct), pieces in groups.items():
+        for (producer, unit), pieces in groups.items():
             for chunk in _cut(pieces, self._buffer_bytes):
-                bucket = _Bucket(
-                    producer=producer,
-                    seq=-1,
-                    unit=unit,
-                    pieces=[(name, box) for name, box, _, _ in chunk],
-                    nbytes=sum(piece_nbytes(box, dt) for _, box, dt, _ in chunk),
+                buckets.append(
+                    _Bucket(
+                        producer=producer,
+                        seq=-1,
+                        unit=unit,
+                        pieces=[(name, box) for name, box, *_ in chunk],
+                        dtypes=[dt for _, _, dt, *_ in chunk],
+                        nbytes=sum(piece_nbytes(box, dt) for _, box, dt, *_ in chunk),
+                        copies=[copies for *_, copies, _ in chunk],
+                        loads=[load for *_, load in chunk],
+                    )
                 )
-                if direct:
-                    bucket.targets = [target for *_, target in chunk]
-                else:
-                    for *_, sink in chunk:
-                        is_load = isinstance(sink, str)
-                        bucket.copies.append([] if is_load else sink)
-                        bucket.loads.append(sink if is_load else None)
-                buckets.append(bucket)
 
         def order(b: _Bucket) -> tuple:
             comp = components[b.producer]
-            return (unit_rank[comp][b.unit], comp, b.unit, b.producer, not b.targets)
+            return (unit_rank[comp][b.unit], comp, b.unit, b.producer)
 
         buckets.sort(key=order)
+        for b in buckets:
+            b.prepare()
         seqs: dict[int, int] = defaultdict(int)
         for b in buckets:
             b.seq = seqs[b.producer]
@@ -427,8 +427,9 @@ class ShardedRDTWeightTransferEngine(
             t0 = time.perf_counter()
             fetched = hooks.get(ready)
             t1 = time.perf_counter()
-            for handle, tensors in zip(ready, fetched):
-                self._apply(inflight.pop(handle), tensors)
+            for j, handle in enumerate(ready):
+                self._apply(inflight.pop(handle), fetched[j])
+                fetched[j] = []  # drop Ray's receive buffer at once
             spent[1] += t1 - t0
             spent[2] += time.perf_counter() - t1
 
@@ -451,20 +452,36 @@ class ShardedRDTWeightTransferEngine(
         )
 
     def _apply(self, bucket: _Bucket, tensors: list[torch.Tensor]) -> None:
-        """Land a staged bucket; a direct one is already in place."""
-        if bucket.targets is not None:
-            return
-        loads = []
-        for received, dests, name in zip(tensors, bucket.copies, bucket.loads):
-            if received.is_cuda:
+        """Copy a landed bucket into its destinations, the contiguous ones
+        with one fused byte copy, and load its fallbacks."""
+        for t in tensors:
+            if t.is_cuda:
                 # Ray allocated it, possibly on another stream
-                received.record_stream(torch.cuda.current_stream(received.device))
-            for dest in dests:
-                dest.copy_(received.reshape(dest.shape))
-            if name is not None:
-                loads.append((name, received))
-        if loads:
-            self.model.load_weights(loads)
+                t.record_stream(torch.cuda.current_stream(t.device))
+        layout = bucket.layout
+        flat = tensors[0] if self._flat else None
+        if flat is not None:
+            byte_srcs = [
+                flat[layout[i][0] : layout[i][0] + layout[i][1]]
+                for i in bucket.byte_pieces
+            ]
+        else:
+            byte_srcs = [
+                tensors[i].reshape(-1).view(torch.uint8) for i in bucket.byte_pieces
+            ]
+
+        def piece(i: int) -> torch.Tensor:
+            return tensors[i] if flat is None else flat_view(flat, layout[i])
+
+        if byte_srcs:
+            torch._foreach_copy_(bucket.byte_dsts, byte_srcs)
+        if bucket.typed:
+            torch._foreach_copy_(
+                [dest for _, dest in bucket.typed],
+                [piece(i).reshape(dest.shape) for i, dest in bucket.typed],
+            )
+        if bucket.fallbacks:
+            self.model.load_weights([(name, piece(i)) for i, name in bucket.fallbacks])
 
     def finish_weight_update(self) -> None:
         """Rerun post-load processing on the received weights."""
@@ -474,17 +491,13 @@ class ShardedRDTWeightTransferEngine(
 
     def _ray_hooks(self) -> _PullHooks:
         import ray
-        from ray.experimental import set_target_for_ref
 
         consumer_id, producers = self._consumer_id, self._producers
 
         def issue(bucket: _Bucket, sync_idx: int) -> Any:
-            ref = producers[bucket.producer].bucket.remote(
+            return producers[bucket.producer].bucket.remote(
                 consumer_id, bucket.seq, sync_idx
             )
-            if bucket.targets is not None:
-                set_target_for_ref(ref, bucket.targets)
-            return ref
 
         def wait(refs: list[Any]) -> list[Any]:
             ray.wait(refs, num_returns=1)
@@ -502,8 +515,6 @@ class ShardedRDTWeightTransferEngine(
         return _PullHooks(issue=issue, wait=wait, get=ray.get, register=register)
 
     def _drop_plan(self) -> None:
-        _deregister(self._registered)
-        self._registered = []
         self._plan = None
         self._buckets = []
 
@@ -565,16 +576,6 @@ def _resolve_producers(init_info: ShardedRDTWeightTransferInitInfo) -> list[Any]
     return actors
 
 
-def _receivable(tensor: torch.Tensor, box: Box, dtype: torch.dtype) -> bool:
-    """Whether NIXL can write the box straight into `tensor`: Ray receives
-    into a target only with the sent shape and dtype, contiguously."""
-    return (
-        tensor.is_contiguous()
-        and tuple(tensor.shape) == box_shape(box)
-        and tensor.dtype == dtype
-    )
-
-
 def _cut(pieces: list[tuple], budget: int) -> list[list[tuple]]:
     """Consecutive runs of at most `budget` bytes; a larger piece goes alone."""
     chunks: list[list[tuple]] = []
@@ -603,26 +604,3 @@ def _component_unit_rank(
         seen = rank[comp]
         seen.setdefault(units[meta.name], len(seen))
     return rank
-
-
-def _register_storages(tensors) -> list[torch.Tensor]:
-    """Register each distinct storage once; return one tensor per storage."""
-    registered: dict[int, torch.Tensor] = {}
-    try:
-        for tensor in tensors:
-            key = tensor.untyped_storage().data_ptr()
-            if key not in registered:
-                register_nixl_memory(tensor)
-                registered[key] = tensor
-    except BaseException:
-        _deregister(list(registered.values()))
-        raise
-    return list(registered.values())
-
-
-def _deregister(tensors: list[torch.Tensor]) -> None:
-    for tensor in tensors:
-        try:
-            deregister_nixl_memory(tensor)
-        except Exception:
-            logger.exception("Sharded RDT: NIXL deregistration failed")

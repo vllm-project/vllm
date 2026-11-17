@@ -3,11 +3,13 @@
 """The sharded-RDT consumer on the load plan, on CPU.
 
 The engine runs for real against real producer servers through a loopback
-transport that does what Ray does: a direct pull lands in the target tensors
-(checked for the shape, dtype and contiguity Ray requires), a staged pull in a
-fresh buffer, and dropping the pull frees it at the producer. After two syncs
-every tensor of the model must equal a cold start on the same weights, byte
-for byte, at the same address.
+transport that does what Ray's receive without targets does: a pull lands in
+one fresh buffer, and the received tensors are views of it at their packed
+offsets (the producer sends only contiguous tensors). Dropping the pull frees
+it at the producer. Producers send one tensor per piece, or one flat byte
+tensor per bucket (`flat_buckets`). After two syncs every tensor of the model
+must equal a cold start on the same weights, byte for byte, at the same
+address.
 """
 
 import gc
@@ -31,6 +33,8 @@ from tests.model_executor.model_loader.test_load_plan import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
+    flat_layout,
+    flat_view,
     gather_units,
     piece_nbytes,
     pool_bytes,
@@ -41,7 +45,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferUpdateInfo,
     _Bucket,
     _PullHooks,
-    _receivable,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import _RDTProducerServer
 from vllm.model_executor.model_loader.reload import lifecycle
@@ -53,7 +56,7 @@ BF16 = torch.bfloat16
 def _direct_mode(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setattr(lifecycle, "_weight_update_active", False)
-    monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda: None)
+    monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda flat=False: None)
     monkeypatch.setattr(
         torch.accelerator, "current_device_index", lambda *a, **kw: 0, raising=False
     )
@@ -71,13 +74,8 @@ class _Server(_RDTProducerServer):
 
 
 class _Handle:
-    def __init__(self, server, tensors, key, targets):
-        self.server, self.tensors, self.key, self.targets = (
-            server,
-            tensors,
-            key,
-            targets,
-        )
+    def __init__(self, server, tensors, key):
+        self.server, self.tensors, self.key = server, tensors, key
 
 
 class _Loopback:
@@ -104,21 +102,28 @@ class _Loopback:
         server = self.servers[bucket.producer]
         tensors = server.bucket(self.consumer_id, bucket.seq, sync_idx)
         assert all(t.is_contiguous() for t in tensors), "Ray sends contiguous only"
-        return _Handle(server, tensors, server.tracked, bucket.targets)
+        return _Handle(server, tensors, server.tracked)
 
     def get(self, handles):
         out = []
         for h in handles:
-            if h.targets is not None:
-                for target, sent in zip(h.targets, h.tensors, strict=True):
-                    assert target.is_contiguous()
-                    assert (target.shape, target.dtype) == (sent.shape, sent.dtype)
-                    target.copy_(sent)
-                out.append(h.targets)
-            else:
-                out.append([t.clone() for t in h.tensors])
+            out.append(_receive(h.tensors))
             h.server._freed_bucket(*h.key, read=True)
         return out
+
+
+def _receive(sent: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Ray's no-target receive: one fresh buffer, views at packed offsets."""
+    layout, offset = [], 0
+    for t in sent:
+        offset = -(-offset // t.element_size()) * t.element_size()
+        layout.append((offset, t.nbytes, t.dtype, tuple(t.shape)))
+        offset += t.nbytes
+    buf = torch.full((offset,), 0xA5, dtype=torch.uint8)
+    received = [flat_view(buf, piece) for piece in layout]
+    for got, t in zip(received, sent):
+        got.copy_(t)
+    return received
 
 
 # ------------------------------------------------------------ fleet
@@ -149,6 +154,7 @@ class _Fleet:
         num_buffers=2,
         consumer_id=0,
         num_consumers=1,
+        flat=False,
     ):
         owners = owners or {}
         owner_sets: list[list[int]] = []
@@ -169,8 +175,9 @@ class _Fleet:
                     if p in owner_sets[classes[i]]
                 },
                 units=units,
-                pool_bytes=1 << 30,
+                pool_bytes=1 << 22,
                 stall_timeout_s=5,
+                flat_buckets=flat,
             )
             for p in range(num_producers)
         ]
@@ -197,6 +204,7 @@ class _Fleet:
                 num_consumers=num_consumers,
                 buffer_bytes=buffer_bytes,
                 num_buffers=num_buffers,
+                flat_buckets=flat,
                 **_metas_info(shapes),
             )
         )
@@ -219,7 +227,7 @@ class _Fleet:
         for server in self.servers:
             server.end_sync()
             assert not server._cache, "a unit outlived the sync"
-            assert server._pool_used == 0
+            assert server._pool_used == 0 and not server._blocks
         self.engine.finish_weight_update()
 
 
@@ -244,10 +252,11 @@ def _check_equals_cold_start(fleet, make, shapes):
 # ------------------------------------------------------------ byte equality
 
 
+@pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("buffer_bytes", [64, 1 << 20])
-def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
-    """Transpose (a staged copy), a tied alias (nothing to pull), a cast and a
-    step slice (fallbacks), and a direct embedding; `router.bias` lives only on
+def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes, flat):
+    """Transpose (a strided copy), a tied alias (nothing to pull), a cast and
+    a step slice (fallbacks), and an embedding; `router.bias` lives only on
     producer 1."""
     model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
     fleet = _Fleet(
@@ -256,6 +265,7 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
         _TOY_SHAPES,
         owners={"router.bias": [1]},
         buffer_bytes=buffer_bytes,
+        flat=flat,
     )
     _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
     pulled = {name for b in fleet.loopback.pulls for name, _ in b.pieces}
@@ -263,18 +273,22 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
     (router,) = [
         b for b in fleet.engine._buckets if ("router.bias", ((0, 5),)) in b.pieces
     ]
-    assert router.producer == 1 and router.targets is None
-    assert router.loads == ["router.bias"]
-    (proj,) = [b for b in fleet.engine._buckets if b.pieces[0][0] == "proj.weight"]
-    assert proj.targets is None and proj.loads[0] is None  # staged copy
-    (embed,) = [b for b in fleet.engine._buckets if b.pieces[0][0] == "embed.weight"]
-    assert embed.targets is not None  # direct
+    assert router.producer == 1 and "router.bias" in router.loads
+    pieces = {
+        name: (b, i)
+        for b in fleet.engine._buckets
+        for i, (name, _) in enumerate(b.pieces)
+    }
+    b, i = pieces["proj.weight"]
+    assert b.loads[i] is None and b.copies[i][0].stride() == (1, 4)  # strided
+    assert [j for j, _ in b.typed] == [i] and i not in b.byte_pieces
 
 
+@pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("buffer_bytes", [32, 1 << 20])
 def test_qkv_and_merged_column_under_tp(
-    default_vllm_config, monkeypatch, tp_rank, buffer_bytes
+    default_vllm_config, monkeypatch, tp_rank, buffer_bytes, flat
 ):
     from vllm.model_executor import parameter
     from vllm.model_executor.layers import linear
@@ -284,10 +298,12 @@ def test_qkv_and_merged_column_under_tp(
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
     make = _linear_model()
     model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _LINEAR_SHAPES, buffer_bytes=buffer_bytes)
+    fleet = _Fleet(
+        monkeypatch, model, _LINEAR_SHAPES, buffer_bytes=buffer_bytes, flat=flat
+    )
     _check_equals_cold_start(fleet, make, _LINEAR_SHAPES)
-    # every destination here is contiguous and box-shaped
-    assert all(b.targets is not None for b in fleet.engine._buckets)
+    # every destination is contiguous: one fused byte copy per pull
+    assert all(not b.typed and not b.fallbacks for b in fleet.engine._buckets)
 
 
 @pytest.mark.parametrize("ep_rank", [0, 1])
@@ -310,14 +326,17 @@ def test_experts_under_ep_owned_by_one_producer(monkeypatch, ep_rank):
             assert box[0] == (2 * ep_rank, 2 * ep_rank + 2)
 
 
+@pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("buffer_bytes", [16, 1 << 20])
-def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes):
-    """Gate and up rows are two boxes of one name, landing strided: staged;
-    with 16 B budgets each piece is its own pull."""
+def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes, flat):
+    """Gate and up rows are two boxes of one name, landing strided; with
+    16 B budgets each piece is its own pull."""
     make = _experts_model(0, 1, tp_rank, 2)
     model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _EXPERT_SHAPES, buffer_bytes=buffer_bytes)
+    fleet = _Fleet(
+        monkeypatch, model, _EXPERT_SHAPES, buffer_bytes=buffer_bytes, flat=flat
+    )
     _check_equals_cold_start(fleet, make, _EXPERT_SHAPES)
     gate_up = [
         box
@@ -453,16 +472,48 @@ def test_init_refuses_mismatched_metadata(monkeypatch):
         fleet.engine.init_transfer_engine(info)
 
 
-def test_receivable_needs_the_sent_shape_dtype_and_contiguity():
-    box = ((0, 2), (0, 4))
-    t = torch.zeros(2, 4, dtype=BF16)
-    assert _receivable(t, box, BF16)
-    assert not _receivable(t, box, torch.float32)
-    assert not _receivable(torch.zeros(4, 2, dtype=BF16).t(), box, BF16)
-    assert not _receivable(torch.zeros(8, dtype=BF16), box, BF16)
+def test_flat_layout_puts_each_piece_on_16_bytes():
+    boxes = [((0, 3),), ((0, 2), (0, 5)), ((1, 2), (0, 1), (0, 4))]
+    dtypes = [BF16, torch.float32, torch.uint8]
+    layout = flat_layout(boxes, dtypes)
+    assert [(off, n) for off, n, _, _ in layout] == [(0, 6), (16, 40), (64, 4)]
+    pieces = [
+        torch.randn(3).to(BF16),
+        torch.randn(2, 5),
+        torch.arange(4, dtype=torch.uint8).view(1, 1, 4),
+    ]
+    nbytes = sum(piece_nbytes(b, d) for b, d in zip(boxes, dtypes))
+    flat = torch.zeros(nbytes, dtype=torch.uint8)
+    torch._foreach_copy_([flat_view(flat, p) for p in layout], pieces)
+    for p, want in zip(layout, pieces):
+        got = flat_view(flat, p)
+        assert got.dtype == want.dtype and torch.equal(got, want)
 
 
 # ------------------------------------------------------------ common
+
+
+@pytest.mark.parametrize(
+    "installed,flat,ok",
+    [
+        ("2.56.1", True, True),
+        ("2.56.1", None, True),
+        ("2.56.1", False, False),
+        ("2.60.0", False, True),
+        ("2.55.0", None, False),
+    ],
+)
+def test_ray_version_floor_depends_on_flat_buckets(monkeypatch, installed, flat, ok):
+    import importlib.metadata
+
+    from vllm.distributed.weight_transfer import sharded_rdt_common
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda pkg: installed)
+    if ok:
+        sharded_rdt_common.check_ray_rdt_version(flat)
+    else:
+        with pytest.raises(ValueError, match="requires Ray"):
+            sharded_rdt_common.check_ray_rdt_version(flat)
 
 
 def test_gather_units_cut_by_bytes():
