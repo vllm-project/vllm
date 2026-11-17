@@ -1178,11 +1178,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             return canvas.width % unit == 0 and canvas.height % unit == 0
 
         def num_tokens(canvas: ImageSize) -> int:
-            if max(canvas) > 200 * min(canvas):
-                return 0
             if not do_resize:
                 num_patches = (canvas.height // unit) * (canvas.width // unit)
                 return num_patches * (on_grid(canvas) and num_patches <= max_patches)
+            if max(canvas) > 200 * min(canvas):
+                return 0
             height, width = smart_resize(
                 height=canvas.height,
                 width=canvas.width,
@@ -1204,19 +1204,20 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             + 1
         )
         if do_resize and num_tokens(best) < max_upscaled_tokens:
-            upscaled = [best]
-            for w in range(MIN_DUMMY_SIDE, min(max_width, 200 * max_height) + 1):
-                grid_w = round(w / unit)
-                max_h = min(max_height, 200 * w)
-                if grid_w:
-                    max_h = min(
-                        max_h, int((math.ceil(min_patches / grid_w) - 0.5) * unit)
-                    )
-                upscaled.extend(
-                    ImageSize(width=w, height=h)
-                    for h in range(MIN_DUMMY_SIDE, max_h + 1)
-                )
-            best = max(upscaled, key=sort_key)
+
+            def upscaled_sizes() -> Iterator[ImageSize]:
+                for w in range(MIN_DUMMY_SIDE, min(max_width, 200 * max_height) + 1):
+                    grid_w = round(w / unit)
+                    max_h = min(max_height, 200 * w)
+                    if grid_w:
+                        max_h = min(
+                            max_h, int((math.ceil(min_patches / grid_w) - 0.5) * unit)
+                        )
+                    for h in range(MIN_DUMMY_SIDE, max_h + 1):
+                        yield ImageSize(width=w, height=h)
+
+            upscaled = max(upscaled_sizes(), key=sort_key, default=best)
+            best = max(best, upscaled, key=sort_key)
         return best
 
     def get_max_image_tokens(self) -> int:

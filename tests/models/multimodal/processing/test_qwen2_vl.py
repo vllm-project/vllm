@@ -482,6 +482,11 @@ def _count_video_tokens(processor_inputs) -> int:
             (1400, 2800),
         ),
         ({"videos_kwargs": {"do_resize": False}}, {"width": 2800}, (1792, 7168)),
+        (
+            {"videos_kwargs": {"do_resize": False}},
+            {"width": 28, "height": 5628},
+            (28, 5628),
+        ),
     ],
 )
 def test_dummy_video_follows_size_hint(
