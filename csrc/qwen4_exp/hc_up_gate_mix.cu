@@ -99,9 +99,7 @@ struct Config {
 };
 using SmallM = Config<32, 4, 4, 2, 1>;
 using LargeM = Config<64, 4, 2, 1, 2>;
-// Crossover between the two configurations, measured on GB300 with 152 and
-// (grid-capped) 148 SMs: anywhere in 1537..1664 is within ~1.5% of the faster
-// configuration on both, while 1536 or 2048 lose up to 5%.
+// Measured crossover between the two configurations on GB300 (148-152 SMs).
 constexpr int64_t kLargeM = 1600;
 
 // K-major operand with 128B swizzle: 8-row atoms of 128 bytes (BLOCK_K bf16),
@@ -227,10 +225,8 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
   tcgen05_after_thread_sync();
   const uint32_t tmem_base = sm.tmem_base;
 
-  // Tiles are N-fastest, so the tiles in flight at any time cover whole rows
-  // of xn rather than a 128-byte column slice of every row; all of w_up stays
-  // in L2. This measured 12% faster than M-fastest at M = 16384. lowrank and
-  // w_up are re-read by other tiles; xn is read once.
+  // Tiles are N-fastest so that concurrent tiles read whole rows of xn; w_up
+  // stays in L2 either way. xn is read once.
   if (warp == 0) {
     if (cute::elect_one_sync()) {
       uint32_t stage = 0, phase = 0;
