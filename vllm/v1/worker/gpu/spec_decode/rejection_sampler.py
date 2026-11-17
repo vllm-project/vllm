@@ -300,31 +300,33 @@ class RejectionSampler:
                 draft_sampled,
                 expanded_local_pos,
             )
-        sampled, num_sampled = rejection_sample(
-            processed_logits,
-            draft_logits,
-            draft_sampled,
-            cu_num_logits,
-            pos,
-            idx_mapping,
-            expanded_idx_mapping,
-            expanded_local_pos,
-            temperature,
-            self.sampler.sampling_states.seeds.gpu,
-            self.num_speculative_steps,
-            self.synthetic_conditional_rates,
-            use_fp64=self.sampler.use_fp64_gumbel,
-            use_block_verification=self.use_block_verification,
-            fly_window_size=self.fly_window_size,
-            fly_entropy_threshold=self.fly_entropy_threshold,
-            fly_entropy_top_k=self.fly_entropy_top_k,
-            skip_masked_vocab_blocks=bool(
-                np.any(self.sampler.may_mask_logits[idx_mapping_np])
-            ),
-            **watermarking_kwargs,
-        )
-        if restore_logits is not None:
-            restore_logits()
+        try:
+            sampled, num_sampled = rejection_sample(
+                processed_logits,
+                draft_logits,
+                draft_sampled,
+                cu_num_logits,
+                pos,
+                idx_mapping,
+                expanded_idx_mapping,
+                expanded_local_pos,
+                temperature,
+                self.sampler.sampling_states.seeds.gpu,
+                self.num_speculative_steps,
+                self.synthetic_conditional_rates,
+                use_fp64=self.sampler.use_fp64_gumbel,
+                use_block_verification=self.use_block_verification,
+                fly_window_size=self.fly_window_size,
+                fly_entropy_threshold=self.fly_entropy_threshold,
+                fly_entropy_top_k=self.fly_entropy_top_k,
+                skip_masked_vocab_blocks=bool(
+                    np.any(self.sampler.may_mask_logits[idx_mapping_np])
+                ),
+                **watermarking_kwargs,
+            )
+        finally:
+            if restore_logits is not None:
+                restore_logits()
         if self.sampler.trace_replay_state is not None:
             self.sampler.trace_replay_state.apply_trace_to_verified(
                 sampled, num_sampled, draft_sampled, cu_num_logits, idx_mapping

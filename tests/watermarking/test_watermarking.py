@@ -3,6 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -1381,6 +1382,41 @@ def test_set_watermarked_sample_as_argmax_keeps_dual_key_routing(monkeypatch):
     expected = torch.where(torch.arange(num_rows) % 2 == 0, key_a, key_b)
     assert torch.equal(logits.argmax(dim=-1), expected)
     assert not torch.equal(key_a, key_b)
+
+
+def test_verify_restores_pinned_logits_when_rejection_sampling_raises(monkeypatch):
+    sampler = _pin_sampler(watermarking=[True], temperatures=[1.0], contexts=[[3], [4]])
+    sampler.apply_sampling_params = lambda logits, *args: logits
+    sampler.may_mask_logits = np.zeros(1, dtype=bool)
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda logits, *args, **kwargs: logits.argmax(dim=-1),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.rejection_sampler.rejection_sample",
+        Mock(side_effect=RuntimeError("rejection sampling failed")),
+    )
+    rejection_sampler = RejectionSampler(
+        sampler, _speculative_config("greedy"), torch.device("cpu"), watermark_key=42
+    )
+    logits = torch.randn(2, 8)
+    original = logits.clone()
+
+    with pytest.raises(RuntimeError, match="rejection sampling failed"):
+        rejection_sampler._verify(
+            logits,
+            None,
+            torch.zeros(2, dtype=torch.int64),
+            torch.zeros(2, dtype=torch.int64),
+            torch.tensor([0, 2]),
+            torch.tensor([0]),
+            np.array([0]),
+            torch.tensor([0, 0]),
+            torch.tensor([0, 1]),
+            None,
+        )
+
+    assert torch.equal(logits, original)
 
 
 @pytest.mark.parametrize(
