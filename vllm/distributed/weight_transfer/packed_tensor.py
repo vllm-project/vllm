@@ -172,6 +172,7 @@ def packed_nccl_broadcast_producer(
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    layout: ChunkLayout | None = None,
     segments: bool = False,
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
@@ -189,8 +190,11 @@ def packed_nccl_broadcast_producer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
+        layout: `chunk_layout` of what `iterator` yields, for a caller that
+            sends the same parameters again: its buffers and views are built
+            once, so a chunk then costs no per-tensor Python.
         segments: split tensors over the buffer along dim 0. Both sides
-            must agree (`chunk_layout`).
+            must agree (`chunk_layout`); ignored when `layout` is given.
 
     """
     tensors = (post_iter_func(item) for item in iterator)
@@ -199,7 +203,7 @@ def packed_nccl_broadcast_producer(
     done: list[torch.Event | None] = [None] * num_buffers
     held: list[Any] = [None] * num_buffers  # alive until their broadcast ends
     for k, (buf, views, srcs) in enumerate(
-        _chunks(tensors, buffer_size_bytes, segments)
+        _chunks(tensors, buffer_size_bytes, num_buffers, layout, segments)
     ):
         slot = k % num_buffers
         prev = done[slot]
@@ -218,9 +222,29 @@ def packed_nccl_broadcast_producer(
 
 
 def _chunks(
-    tensors: Iterator[torch.Tensor], limit: int, segments: bool
+    tensors: Iterator[torch.Tensor],
+    limit: int,
+    num_buffers: int,
+    layout: ChunkLayout | None,
+    segments: bool,
 ) -> Iterator[tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]]:
     """(buffer, piece views, piece sources) per chunk."""
+    if layout is not None:
+        bufs = slot_buffers(num_buffers, max(layout.sizes, default=0))
+        bound = layout.__dict__.get("_bound")
+        if bound is None:
+            bound = layout.__dict__["_bound"] = [
+                layout.views(k, bufs[k % num_buffers]) for k in range(len(layout.sizes))
+            ]
+        index, tensor = -1, torch.empty(0)
+        for k, pieces in enumerate(layout.chunks):
+            srcs = []
+            for piece, view in zip(pieces, bound[k]):
+                if piece[0] != index:
+                    index, tensor = piece[0], next(tensors)
+                srcs.append(_source(piece, tensor, view))
+            yield bufs[k % num_buffers][: layout.sizes[k]], bound[k], srcs
+        return
     stash: dict[int, torch.Tensor] = {}
 
     def specs() -> Iterator[tuple[Sequence[int], torch.dtype]]:
@@ -247,6 +271,25 @@ def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
     for i in {p.index for p in pieces} - {pieces[-1].index}:
         stash.pop(i, None)  # the last tensor may continue in the next chunk
     return buf, views, srcs
+
+
+_SLOTS: dict[tuple[int, int], list[torch.Tensor]] = {}
+
+
+def slot_buffers(num_buffers: int, nbytes: int) -> list[torch.Tensor]:
+    """This device's reused packed buffers, at least `nbytes` each, shared by
+    every transfer on the device. They grow in place, so views of them stay
+    valid."""
+    key = (torch.accelerator.current_device_index(), num_buffers)
+    if key not in _SLOTS:
+        _SLOTS[key] = [
+            torch.empty(0, dtype=torch.uint8, device="cuda") for _ in range(num_buffers)
+        ]
+    bufs = _SLOTS[key]
+    for buf in bufs:
+        if buf.numel() < nbytes:
+            buf.resize_(nbytes)
+    return bufs
 
 
 def packed_nccl_broadcast_consumer(
