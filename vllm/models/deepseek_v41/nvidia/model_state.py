@@ -416,7 +416,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
                 if self.pcp_size > 1:
                     self._kept_gathered_slot_mappings = torch.empty(
-                        len(specs),
+                        len(groups),
                         self.max_num_tokens * self.pcp_size,
                         dtype=torch.int64,
                         device=self.device,
