@@ -278,15 +278,15 @@ class SpPrefill:
         these rows; codes and scales all-gathered (~0.52x a bf16 gather).
         `defer` (filled by stage 2): the uncombined GEMM2 intermediate, whose
         top-k combine then runs fused into the reduce-scatter."""
-        from aiter.ops.triton.comms.fused.moe_combine_reduce_scatter import (
-            fused_moe_combine_reduce_scatter,
-        )
-
         from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
             gemma_fused_add_rmsnorm_mxfp8,
         )
 
         if defer:
+            from aiter.ops.triton.comms.fused.moe_combine_reduce_scatter import (
+                fused_moe_combine_reduce_scatter,
+            )
+
             # [R, H]: this rank's rows of the combined, reduce-scattered MoE
             # output (x routed scale)
             rs = fused_moe_combine_reduce_scatter(
