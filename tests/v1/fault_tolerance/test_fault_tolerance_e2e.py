@@ -97,14 +97,14 @@ if _SPEC:
         m.run_rebalance_experts = _wrapped
 
     def _patch_eplb_state(m):
-        _orig = m._move_to_workspace
+        _orig = m.EplbModelState._move_to_workspace
 
         def _wrapped(model_state, ep_rank):
             _orig(model_state, ep_rank)
             # `rebalanced` is cleared once the last layer is applied.
             _REBALANCES[0] += not model_state.rebalanced
 
-        m._move_to_workspace = _wrapped
+        m.EplbModelState._move_to_workspace = _wrapped
 
     _real_import = builtins.__import__
 
@@ -131,7 +131,7 @@ if _SPEC:
         s = sys.modules.get(_EPLB_STATE_MODULE)
         if (
             s is not None
-            and hasattr(s, "_move_to_workspace")
+            and hasattr(s, "EplbModelState")
             and not getattr(s, "_ft_patched", False)
         ):
             s._ft_patched = True
