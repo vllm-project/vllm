@@ -298,29 +298,9 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
-### Freeing Host Memory During Sleep
-
-When training and inference share GPUs, for example in RL with a sleeping vLLM
-engine, host memory can run short while the engine sleeps: level 1 sleep keeps
-the model weights in CPU memory, and the trainer needs the rest. In `embedded`
-mode, each vLLM rank holds its `global_segment_size` share of the pool in its
-own process, so that memory stays allocated as long as the engine runs, even
-while it sleeps.
-
-In `standalone-store` mode, the pool lives in the external `mooncake_client`
-process instead, which can be stopped on its own to return that memory to the
-host:
-
-1. Put the engine to sleep.
-2. Stop `mooncake_client`. vLLM keeps running.
-3. Start `mooncake_client` again, at the same address, before serving resumes.
-
-The KV cache held in the pool's CPU memory is lost when `mooncake_client`
-stops, so later lookups miss and the prefixes are computed again. A load that
-starts just before the pool goes away can fail; set
-`"kv_load_failure_policy": "recompute"` in `--kv-transfer-config` to recompute
-those blocks instead of failing the request. Each vLLM rank still keeps its
-`local_buffer_size` buffer (4 GiB by default).
+To free the pool's host memory while the engine sleeps, stop the external
+`mooncake_client`; see
+[Sleep Mode](sleep_mode.md#free-a-kv-connectors-host-memory).
 
 ### Tenant Isolation
 
