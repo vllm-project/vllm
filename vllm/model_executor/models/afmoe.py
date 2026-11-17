@@ -83,11 +83,16 @@ class AfmoeMoE(nn.Module):
             )
 
         # Router gate
+        router_dtype = (
+            torch.bfloat16
+            if quant_config is None and torch.get_default_dtype() == torch.bfloat16
+            else torch.float32
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            out_dtype=torch.float32,
-            params_dtype=torch.float32,
+            out_dtype=router_dtype,
+            params_dtype=router_dtype,
             prefix=f"{prefix}.gate",
         )
         self.expert_bias = nn.Parameter(
@@ -143,6 +148,7 @@ class AfmoeMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         router_logits, _ = self.gate(hidden_states)
+        router_logits = router_logits.float()
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits

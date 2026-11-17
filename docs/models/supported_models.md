@@ -366,6 +366,11 @@ See [this page](generative_models.md) for more information on how to use generat
 
 #### Text Generation
 
+For unquantized AFMoE (Trinity) models loaded with `--dtype bfloat16`,
+normalization and router weights use BF16, while expert correction biases
+use FP32. Router projection outputs are converted from BF16 to FP32 before
+expert selection. FP16, FP32, and quantized loads use FP32 router weights.
+
 These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
 
 <style>
