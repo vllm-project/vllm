@@ -31,6 +31,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _identity_logits(hidden_states: torch.Tensor, row_start: int = 0) -> torch.Tensor:
+    del row_start
+    return hidden_states
+
+
 @pytest.mark.parametrize("logits_mode", [False, True])
 def test_cpu_output_logprobs(logits_mode: bool) -> None:
     logits = torch.tensor(
@@ -77,7 +82,7 @@ def test_cpu_prompt_logprobs_scores_prompt_targets() -> None:
     token_ids, logprobs, token_ranks = compute_prompt_logprobs_with_chunking(
         prompt_token_ids=prompt_token_ids,
         prompt_hidden_states=logits,
-        logits_fn=lambda hidden_states: hidden_states,
+        logits_fn=_identity_logits,
         num_prompt_logprobs=2,
     )
 
@@ -119,7 +124,7 @@ def test_cpu_prompt_logprobs_accumulate_chunked_prefill() -> None:
     prompt_lens = np.array([4], dtype=np.int32)
 
     first = worker.compute_prompt_logprobs(
-        lambda hidden_states: hidden_states,
+        _identity_logits,
         logits[:2],
         _input_batch("request", 0, 2, 4),
         all_token_ids,
@@ -129,7 +134,7 @@ def test_cpu_prompt_logprobs_accumulate_chunked_prefill() -> None:
     assert first == {}
 
     second = worker.compute_prompt_logprobs(
-        lambda hidden_states: hidden_states,
+        _identity_logits,
         logits[2:],
         _input_batch("request", 2, 2, 4),
         all_token_ids,
@@ -177,7 +182,7 @@ def test_cpu_prompt_logprobs_honor_start_position() -> None:
     all_token_ids = torch.tensor([[0, 1, 2, 3, 0]], dtype=torch.int32)
 
     result = worker.compute_prompt_logprobs(
-        lambda hidden_states: hidden_states,
+        _identity_logits,
         logits,
         _input_batch("request", 0, 4, 4),
         all_token_ids,
@@ -209,7 +214,7 @@ def test_cpu_requested_prompt_token_scores_honor_start_position() -> None:
     )
 
     result = worker.compute_prompt_token_id_logprobs(
-        lambda hidden_states: hidden_states,
+        _identity_logits,
         logits,
         _input_batch("request", 0, 4, 4),
         np.array([4], dtype=np.int32),

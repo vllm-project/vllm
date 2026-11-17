@@ -346,8 +346,13 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             # triton op
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
         # LogitsProcessorWithLoRA always using bgmv.
-        bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
-        bgmv_expand(buffer, lora_b_stacked, y, self.sampler_indices, add_inputs=True)
+        indices = (
+            self._logits_row_indices
+            if self._logits_row_indices is not None
+            else self.sampler_indices
+        )
+        bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
+        bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
         y = y.view_as(y_org)
 
     def apply_lora_full_linear(

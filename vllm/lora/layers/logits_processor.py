@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
@@ -213,3 +215,60 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False
+
+
+def compute_logits_for_prompt_rows(
+    model,
+    hidden_states: torch.Tensor,
+    row_start: int = 0,
+) -> torch.Tensor:
+    """Project one prompt-logprob slice through the lm_head.
+
+    `hidden_states` are rows `[row_start, row_start + N)` of the step's token
+    hidden states. An lm_head LoRA is applied with the token-row slot ids of
+    that slice. The sampler-row metadata is restored when the projection
+    returns.
+
+    Args:
+        model: Model exposing `compute_logits`. When LoRA wraps the lm_head,
+            `model.logits_processor.punica_wrapper` supplies the token mapping.
+        hidden_states: Hidden states for this slice.
+        row_start: Index of the first row in the step's token sequence.
+
+    Returns:
+        Logits for the slice.
+
+    """
+    processor = getattr(model, "logits_processor", None)
+    punica = getattr(processor, "punica_wrapper", None)
+    if punica is None or hidden_states.shape[0] == 0:
+        return model.compute_logits(hidden_states)
+    row_end = row_start + hidden_states.shape[0]
+    token_indices = punica.token_lora_indices
+    if row_end > token_indices.shape[0]:
+        raise RuntimeError(
+            "Prompt-logprob rows "
+            f"[{row_start}, {row_end}) exceed the LoRA token mapping "
+            f"of length {token_indices.shape[0]}."
+        )
+    with punica.logits_indices_for_rows(token_indices[row_start:row_end]):
+        return model.compute_logits(hidden_states)
+
+
+def prompt_row_logits_fn(
+    model,
+) -> Callable[[torch.Tensor, int], torch.Tensor]:
+    """Build the prompt-logprob logits callable for `model`.
+
+    Args:
+        model: Model passed to `compute_logits_for_prompt_rows`.
+
+    Returns:
+        Callable of `(hidden_states, row_start)` used by prompt-logprob workers.
+
+    """
+
+    def _logits(hidden_states: torch.Tensor, row_start: int = 0) -> torch.Tensor:
+        return compute_logits_for_prompt_rows(model, hidden_states, row_start)
+
+    return _logits

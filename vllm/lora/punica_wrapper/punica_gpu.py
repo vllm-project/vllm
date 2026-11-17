@@ -92,6 +92,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+    def _prepare_logits_indices(self, indices: torch.Tensor) -> None:
+        with gpu_sync_allowed():
+            self.prompt_mapping_meta.prepare_tensors(indices)
+
     def add_shrink(
         self,
         y: torch.Tensor,
