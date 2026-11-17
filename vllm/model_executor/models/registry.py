@@ -499,6 +499,10 @@ _MULTIMODAL_MODELS = {
         "lfm3_audio",
         "Lfm3AudioForConditionalGeneration",
     ),
+    "Lfm3OmniForConditionalGeneration": (
+        "lfm3_omni",
+        "Lfm3OmniForConditionalGeneration",
+    ),
     "Lfm3VlForConditionalGeneration": ("lfm3_vl", "Lfm3VlForConditionalGeneration"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
@@ -678,6 +682,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "ricursive_dflash2",
         "RicursiveDFlash2ForCausalLM",
     ),
+    "DSpineDraftModel": ("qwen3_dspine", "DSpineQwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
     # DFlash{arch} unless it already starts or ends with "DFlash" (see
