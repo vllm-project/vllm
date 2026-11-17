@@ -36,6 +36,7 @@ from vllm.parser.plamo3 import (
     END_TOOL_REQUESTS,
     EOT,
 )
+from vllm.tool_parsers import _TOOL_PARSERS_TO_REGISTER
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
@@ -2354,3 +2355,76 @@ def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
     assert grammar is not None
     assert _is_grammar_accept_string(grammar, call)
     assert not _is_grammar_accept_string(grammar, call * 2)
+
+
+_ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+
+def _auto_request_with_response_format(
+    tools: list[ChatCompletionToolsParam],
+) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="m",
+        messages=[],
+        tools=[t.model_dump() for t in tools],
+        tool_choice="auto",
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": _ANSWER_SCHEMA},
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_parser,prefix,call,suffix", _SINGLE_CALL_CASES, ids=_SINGLE_CALL_IDS
+)
+def test_auto_response_format_with_strict_tools_allows_call_or_answer(
+    sample_tools_strict, tool_parser, prefix, call, suffix
+):
+    request = _auto_request_with_response_format(sample_tools_strict)
+
+    grammar = _tool_calling_grammar(tool_parser, sample_tools_strict, request)
+
+    assert grammar is not None
+    assert _is_grammar_accept_string(grammar, prefix + call + suffix)
+    assert _is_grammar_accept_string(grammar, '{"answer": "Paris"}')
+    assert not _is_grammar_accept_string(grammar, "Paris")
+    assert not _is_grammar_accept_string(grammar, '{"city": "Paris"}')
+
+
+# These parsers need a checkpoint-specific setup (a response template, an
+# optional package, or checkpoint tokens) that a MagicMock tokenizer can't give.
+_PARSERS_NEEDING_CHECKPOINT = {
+    "beam",
+    "cohere_command3",
+    "cohere_command4",
+    "hf",
+    "hy_v4",
+}
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["non_strict", "strict"])
+@pytest.mark.parametrize(
+    "tool_parser",
+    sorted(set(_TOOL_PARSERS_TO_REGISTER) - _PARSERS_NEEDING_CHECKPOINT),
+)
+def test_auto_response_format_always_allows_the_answer(
+    sample_tools, sample_tools_strict, tool_parser, strict
+):
+    # Under tool_choice="auto" a schema-valid answer stays possible for every
+    # parser: either the response_format is kept as-is, or the structural tag
+    # is "tool calls OR answer".
+    tools = sample_tools_strict if strict else sample_tools
+    request = _auto_request_with_response_format(tools)
+
+    grammar = _tool_calling_grammar(tool_parser, tools, request)
+
+    if grammar is None:
+        assert request.response_format is not None
+    else:
+        assert _is_grammar_accept_string(grammar, '{"answer": "Paris"}')

@@ -158,6 +158,20 @@ When the option is unset, the tool parser's default level applies: `function` fo
 
 The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
+### Tools with Structured Outputs under `tool_choice="auto"`
+
+A request can set both `tools` and a structured output (`response_format`, or `structured_outputs`) with `tool_choice="auto"`. What the model can then generate depends on whether a structural tag applies to the tools:
+
+| Condition | What the model can generate |
+| --- | --- |
+| No tool sets `strict: true` and the strictness level is `auto` (the default for most parsers) | Only an answer that matches the structured output. Tool calls cannot be generated. |
+| A structural tag applies (a strict tool, or a `function`/`parameter` strictness level) and the parser supports structural tags | Either tool calls or an answer that matches the structured output. Free text outside the schema is not allowed. |
+| A structural tag would apply, but the parser has no structural-tag support or xgrammar does not support the structured output | Only an answer that matches the structured output. vLLM logs a warning once. |
+
+Setting `parallel_tool_calls=false` does not change the first row: it never makes tool calls possible where they are not.
+
+If your agent needs tool calls and a schema-shaped final answer from the same conversation, either mark its tools `strict: true` (or start the server with `--tool-strict-level function`) with a parser that supports structural tags, or send `response_format` only on the final request, after the model has stopped calling tools. When the model may choose between a tool call and the answer, bound the loop on the client side (for example with a step limit or `max_tokens`).
+
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
