@@ -1038,6 +1038,28 @@ class VllmRunner:
 
         from vllm.platforms import current_platform
 
+        # Only wait on the devices this engine will actually occupy. On a shared
+        # node the visible set can include GPUs owned by other processes that
+        # never free, which would otherwise time out the settle wait below.
+        # ``device_ids`` may pin the engine to specific, possibly non-contiguous
+        # GPUs; see ``resolve_engine_devices``.
+        from tests.utils import resolve_engine_devices
+
+        device_ids = kwargs.get("device_ids")
+        num_engine_devices = (
+            tensor_parallel_size
+            * int(kwargs.get("pipeline_parallel_size", 1))
+            * int(kwargs.get("prefill_context_parallel_size", 1))
+            * int(kwargs.get("data_parallel_size", 1))
+        )
+        engine_devices = resolve_engine_devices(device_ids, num_engine_devices)
+        pinned = bool(device_ids) and all(
+            isinstance(d, int) for d in (device_ids or [])
+        )
+        self._engine_device_ids: list[int] | None = (
+            list(engine_devices) if pinned else None
+        )
+
         if current_platform.is_rocm():
             # An unset utilization resolves to 1.0 with the extensible KV cache,
             # which no longer needs the memory free up front; wait for the
@@ -1051,7 +1073,10 @@ class VllmRunner:
             # VRAM from a previous process, so wait before constructing LLM.
             from tests.utils import wait_for_memory_to_settle
 
-            wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+            wait_for_memory_to_settle(
+                threshold_ratio=1.0 - gpu_memory_utilization,
+                devices=engine_devices,
+            )
         elif current_platform.is_xpu():
             # The XPU/oneAPI runtime keeps ~1 GiB of context resident in the
             # parent pytest process for its whole lifetime (grown by in-process
@@ -1066,7 +1091,10 @@ class VllmRunner:
             # previous engine shuts down, so wait before constructing LLM.
             from tests.utils import wait_for_memory_to_settle
 
-            wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+            wait_for_memory_to_settle(
+                threshold_ratio=1.0 - gpu_memory_utilization,
+                devices=engine_devices,
+            )
 
         with init_ctx:
             self.llm = LLM(
@@ -1392,23 +1420,40 @@ class VllmRunner:
     def __enter__(self):
         return self
 
-    def _wait_for_memory_release(self, gpu_memory_utilization: float) -> None:
+    def _wait_for_memory_release(
+        self, gpu_memory_utilization: float, devices: list[int] | None = None
+    ) -> None:
         from tests.utils import wait_for_memory_to_settle
 
         # V1 startup requires free_memory >= total * gpu_memory_utilization.
         # Wait for the complementary used-memory ratio so the next runner does
         # not fail the startup guard immediately after this runner exits. The
         # wait is bounded so cleanup failures fail this test instead of hanging.
-        wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0 - gpu_memory_utilization,
+            devices=devices,
+        )
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
         # This is needed because when executing consecutive tests, the GC
         # might not be fast enough in shutting down the llm engine. This can lead to OOMs
         # because when the next test starts some GPU memory is still in use.
+        vllm_config = self.llm.llm_engine.vllm_config
         gpu_memory_utilization = (
-            self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+            vllm_config.cache_config.gpu_memory_utilization
             or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+        )
+        # Only wait on the devices this engine occupied so the settle wait does
+        # not block on GPUs owned by other processes sharing the node. Reuse the
+        # visible-set indices resolved at construction (``device_ids`` when
+        # pinned, possibly non-contiguous), falling back to the contiguous range
+        # ``[0, world_size_across_dp)``.
+        from tests.utils import resolve_engine_devices
+
+        engine_devices = resolve_engine_devices(
+            self._engine_device_ids,
+            vllm_config.parallel_config.world_size_across_dp,
         )
         from vllm.platforms import current_platform
 
@@ -1428,7 +1473,7 @@ class VllmRunner:
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()
-        self._wait_for_memory_release(gpu_memory_utilization)
+        self._wait_for_memory_release(gpu_memory_utilization, devices=engine_devices)
 
 
 @pytest.fixture(scope="session")
