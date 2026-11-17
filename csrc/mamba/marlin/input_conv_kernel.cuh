@@ -86,10 +86,10 @@ __global__ void MarlinMambaInputConv(const int4* __restrict__ A0,
                                      vllm_mamba_input_conv::ConvParams conv) {
   constexpr int prob_n = 18560, lda = 4096;
   static_assert(conv_tokens >= 1 && conv_tokens <= 8);
-  constexpr auto a_type_id = vllm::kBFloat16.id();
-  constexpr auto b_type_id = vllm::kFE2M1f.id();
-  constexpr auto c_type_id = vllm::kBFloat16.id();
-  constexpr auto s_type_id = vllm::kFE4M3fn.id();
+  static constexpr auto a_type_id = vllm::kBFloat16.id();
+  static constexpr auto b_type_id = vllm::kFE2M1f.id();
+  static constexpr auto c_type_id = vllm::kBFloat16.id();
+  static constexpr auto s_type_id = vllm::kFE4M3fn.id();
   constexpr int threads = 128, thread_m_blocks = 1, thread_n_blocks = 8;
   constexpr int thread_k_blocks = 4, stages = 3, group_blocks = 1;
   // One CTA streams full K for one N128 tile; grid.x contains 145 tiles.

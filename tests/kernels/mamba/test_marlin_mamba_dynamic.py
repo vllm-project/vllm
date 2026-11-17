@@ -109,6 +109,13 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
         pytest.skip("requires SD convolution cache layout")
     if not hasattr(torch.ops._C, "mamba_marlin_input_conv"):
         pytest.skip("requires vLLM build with Marlin input-conv support")
+    if sr_rng == "shared_seed":
+        from inspect import signature
+
+        from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+        if "sr_rng" not in signature(checkpointing_ssu).parameters:
+            pytest.skip("installed FlashInfer checkpointing_ssu lacks sr_rng")
     NemotronHConfig(
         architectures=["NemotronHForCausalLM"],
         layers_block_type=["linear_attention"],
