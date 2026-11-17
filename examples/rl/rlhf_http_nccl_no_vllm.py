@@ -147,18 +147,29 @@ def main() -> None:
         for n in names:
             broadcast(weights[n].contiguous())
     else:
-        # Same chunking as the worker: a chunk closes right after the tensor
-        # that pushes it past the buffer size.
-        chunk: list[torch.Tensor] = []
-        size = 0
+        # The worker's chunk layout: the tensors back to back, each starting
+        # 16-byte aligned, cut every buffer size (rounded down to 16); a
+        # tensor crossing a cut is split. A chunk's trailing padding is not
+        # sent, nor is a chunk of no bytes.
+        cap = args.packed_buffer_size_bytes // 16 * 16
+        buf = torch.empty(cap, dtype=torch.uint8, device=device)
+        used = 0  # bytes of the current chunk taken
         for n in names:
-            chunk.append(weights[n].contiguous().view(-1).view(torch.uint8))
-            size += chunk[-1].numel()
-            if size > args.packed_buffer_size_bytes:
-                broadcast(torch.cat(chunk))
-                chunk, size = [], 0
-        if chunk:
-            broadcast(torch.cat(chunk))
+            used = (used + 15) // 16 * 16
+            flat = weights[n].contiguous().view(-1).view(torch.uint8)
+            start = 0
+            while True:
+                end = min(flat.numel(), start + cap - used)
+                buf[used : used + end - start].copy_(flat[start:end])
+                used += end - start
+                start = end
+                if (used + 15) // 16 * 16 == cap:  # full: send it
+                    broadcast(buf[:used])
+                    used = 0
+                if start == flat.numel():
+                    break
+        if used:
+            broadcast(buf[:used])
     torch.accelerator.synchronize()
     update.result()
     post("/finish_weight_update", {"weight_version": None})

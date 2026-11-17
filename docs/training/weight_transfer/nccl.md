@@ -52,15 +52,17 @@ engine = WeightTransferTrainerFactory.trainer_init(
     init_info=NCCLTrainerInitInfo(
         master_address=master_address,
         master_port=master_port,
-        world_size=world_size,   # broadcasting trainer ranks + all inference workers
-        rank=0,                  # this trainer rank; rank 0 is the sender
+        world_size=world_size,  # broadcasting trainer ranks + all inference workers
+        rank=0,  # this trainer rank; rank 0 is the sender
         packed=True,
     ),
-    client=HTTPVLLMWeightSyncClient("http://localhost:8000"),  # or RayVLLMWeightSyncClient(llm)
+    client=HTTPVLLMWeightSyncClient(
+        "http://localhost:8000"
+    ),  # or RayVLLMWeightSyncClient(llm)
     source=ModuleSource(model),
 )
 
-engine.send_weights()   # once per sync
+engine.send_weights()  # once per sync
 ```
 
 `trainer_init` drives the whole handshake: it kicks off the inference side's
@@ -225,10 +227,12 @@ that broadcasts that update, so one start/finish lifecycle can carry updates
 from several trainer ranks.
 
 - Unpacked: one broadcast per tensor.
-- Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
-  order; broadcast a chunk as soon as its size **exceeds**
-  `packed_buffer_size_bytes` (the crossing tensor stays in the chunk), then the
-  remainder.
+- Packed: lay the tensors' `t.contiguous().view(-1).view(torch.uint8)` bytes
+  out in `names` order as one stream, each tensor starting at a multiple of 16,
+  and cut it every `packed_buffer_size_bytes` (rounded down to 16); a tensor
+  crossing a cut is split there. Broadcast each chunk as soon as it is full (or
+  only alignment padding would fit), without that trailing padding, then the
+  rest; a chunk of no bytes is not sent.
 
 Trainer-side communicators without vLLM:
 
@@ -278,8 +282,8 @@ engine = WeightTransferTrainerFactory.trainer_init(
 patches = [
     SparseWeightPatch(
         name="model.layers.0.mlp.down_proj.weight",
-        indices=flat_indices,           # int32, 1-D
-        values=new_values,              # same length as indices
+        indices=flat_indices,  # int32, 1-D
+        values=new_values,  # same length as indices
         full_shape=tuple(param.shape),  # required when sending via the engine
     )
 ]
