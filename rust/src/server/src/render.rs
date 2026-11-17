@@ -76,6 +76,8 @@ pub struct RenderConfig {
     pub dtype: Option<ModelDtype>,
     /// Maximum multimodal items per prompt for each modality.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     pub tls: Option<TlsConfig>,
 }
 
@@ -160,6 +162,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
     .await
@@ -392,6 +395,7 @@ mod tests {
                 language_model_only: false,
                 dtype: None,
                 limit_mm_per_prompt: Default::default(),
+                mm_processor_kwargs: Default::default(),
                 tls: None,
             },
             shutdown,

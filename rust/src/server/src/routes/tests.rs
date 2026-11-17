@@ -628,11 +628,15 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
 }
 
 fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
-    qwen_multimodal_model_info_with_limits(std::collections::HashMap::new())
+    qwen_multimodal_model_info_with_options(
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
+    )
 }
 
-fn qwen_multimodal_model_info_with_limits(
+fn qwen_multimodal_model_info_with_options(
     limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+    mm_processor_kwargs: std::collections::HashMap<String, serde_json::Value>,
 ) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-server-qwen-config-{}.json",
@@ -652,6 +656,7 @@ fn qwen_multimodal_model_info_with_limits(
         },
         Arc::new(fake_chat_tokenizer()),
         limit_mm_per_prompt,
+        &mm_processor_kwargs,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -708,6 +713,7 @@ fn step5_vl_multimodal_model_info_with_limits(
         },
         Arc::new(step5_vl_chat_tokenizer()),
         limit_mm_per_prompt,
+        &std::collections::HashMap::new(),
     )
     .expect("load multimodal info")
     .expect("step5_vl multimodal info is registered");
@@ -5144,6 +5150,50 @@ fn multimodal_render_app() -> axum::Router {
     }))
 }
 
+/// Startup options must affect rendered tensors and cache keys, including UUID inputs.
+#[tokio::test]
+async fn render_startup_mm_processor_kwargs_control_engine_features() {
+    let mut results = Vec::new();
+    for pixels in [12544, 3136] {
+        let kwargs = serde_json::from_value(json!({
+            "min_pixels": 3136,
+            "max_pixels": 12544,
+            "images_kwargs": {"min_pixels": pixels, "max_pixels": pixels},
+        }))
+        .unwrap();
+        let backend = Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_options(std::collections::HashMap::new(), kwargs),
+        ));
+        let mut app = build_render_router(Arc::new(RenderState {
+            text: TextRequestProcessor::new(backend.clone(), u32::MAX),
+            chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
+            ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
+        }));
+        let (status, result) = post_json(&mut app, "/v1/chat/completions/render", json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": [{
+                "type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "same-image",
+            }]}],
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        results.push(result);
+    }
+    let features: Vec<_> = results.iter().map(|result| &result["features"]).collect();
+    let lengths: Vec<_> = features
+        .iter()
+        .map(|feature| feature["mm_placeholders"]["image"][0]["length"].as_u64().unwrap())
+        .collect();
+    expect_test::expect![[r#"
+        [
+            16,
+            4,
+        ]
+    "#]]
+    .assert_debug_eq(&lengths);
+    assert_ne!(features[0]["kwargs_data"], features[1]["kwargs_data"]);
+    assert_ne!(features[0]["mm_hashes"], features[1]["mm_hashes"]);
+}
+
 async fn render_image_chat(mm_payload: Option<&str>, uuid: Option<&str>) -> axum::body::Bytes {
     render_chat(
         json!([
@@ -5387,10 +5437,13 @@ async fn generate_limits_features_and_content_parts_together() {
         b"engine-generate-mm-limit-features-content-parts",
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::with_multimodal_model_info(
-            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
-                vllm_chat::multimodal::MmModality::Image,
-                vllm_chat::multimodal::MmLimitSpec::Count(1),
-            )])),
+            qwen_multimodal_model_info_with_options(
+                std::collections::HashMap::from([(
+                    vllm_chat::multimodal::MmModality::Image,
+                    vllm_chat::multimodal::MmLimitSpec::Count(1),
+                )]),
+                std::collections::HashMap::new(),
+            ),
         )),
     )
     .await;
@@ -5457,10 +5510,13 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
         b"engine-openai-mm-limit",
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::with_multimodal_model_info(
-            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
-                vllm_chat::multimodal::MmModality::Image,
-                vllm_chat::multimodal::MmLimitSpec::Count(1),
-            )])),
+            qwen_multimodal_model_info_with_options(
+                std::collections::HashMap::from([(
+                    vllm_chat::multimodal::MmModality::Image,
+                    vllm_chat::multimodal::MmLimitSpec::Count(1),
+                )]),
+                std::collections::HashMap::new(),
+            ),
         )),
     )
     .await;

@@ -17,7 +17,7 @@ use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_multimodal};
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
@@ -68,8 +68,12 @@ impl HfChatBackend {
                 },
                 tokenizer.clone(),
                 options.limit_mm_per_prompt.clone(),
+                &options.mm_processor_kwargs,
             )?
         };
+        if multimodal_model_info.is_none() && !options.mm_processor_kwargs.is_empty() {
+            bail_multimodal!("mm_processor_kwargs requires a supported multimodal processor");
+        }
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
         let response_template = load_response_template(&files)?;
 
@@ -325,6 +329,7 @@ mod tests {
                 trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
+                mm_processor_kwargs: HashMap::new(),
                 skip_tokenizer_init: false,
                 hf_token: None,
             },

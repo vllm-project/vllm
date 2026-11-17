@@ -42,6 +42,7 @@ mod expand;
 mod image;
 mod input;
 mod item;
+mod kwargs;
 mod models;
 mod preprocessed;
 mod tensor;
@@ -65,6 +66,7 @@ pub struct MultimodalModelInfo {
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
+    mm_processor_kwargs: HashMap<Modality, serde_json::Value>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -323,19 +325,14 @@ fn load_preprocessor_config(
     dedicated_name: &str,
     processor_config_path: Option<&Path>,
     processor_section: &str,
-) -> Result<Option<PreProcessorConfig>> {
+) -> Result<Option<serde_json::Value>> {
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
-            let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
-                multimodal!(
-                    "failed to parse {processor_section} from processor_config.json: {error}"
-                )
-            })?;
-            return Ok(Some(config));
+            return Ok(Some(processor.clone()));
         }
     }
     let Some(path) = dedicated_path else {
@@ -343,7 +340,7 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = PreProcessorConfig::from_json(&text)
+    let config = serde_json::from_str(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
     Ok(Some(config))
 }
@@ -389,6 +386,7 @@ impl MultimodalModelInfo {
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        mm_processor_kwargs: &HashMap<String, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -405,7 +403,7 @@ impl MultimodalModelInfo {
             files.processor_config,
             "image_processor",
         )?
-        .unwrap_or_default();
+        .unwrap_or_else(|| serde_json::json!({}));
         let video_preprocessor_config = load_preprocessor_config(
             files.video_preprocessor_config,
             "video_preprocessor_config.json",
@@ -429,12 +427,23 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
+        let mm_processor_kwargs = kwargs::resolve(mm_processor_kwargs)?;
         Self::from_loaded(
             context,
-            preprocessor_config,
-            video_preprocessor_config,
-            audio_preprocessor_config,
+            kwargs::apply(
+                preprocessor_config,
+                mm_processor_kwargs.get(&Modality::Image),
+            )?,
+            kwargs::apply(
+                video_preprocessor_config,
+                mm_processor_kwargs.get(&Modality::Video),
+            )?,
+            kwargs::apply(
+                audio_preprocessor_config,
+                mm_processor_kwargs.get(&Modality::Audio),
+            )?,
             limit_mm_per_prompt,
+            mm_processor_kwargs,
         )
     }
 
@@ -446,6 +455,7 @@ impl MultimodalModelInfo {
         video_preprocessor_config: PreProcessorConfig,
         audio_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        mm_processor_kwargs: HashMap<Modality, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let (image, video) =
             Self::resolve_vision_lanes(&context, preprocessor_config, video_preprocessor_config)?;
@@ -487,6 +497,7 @@ impl MultimodalModelInfo {
             audio,
             media_connector,
             limit_mm_per_prompt,
+            mm_processor_kwargs,
         }))
     }
 
@@ -989,6 +1000,7 @@ impl MultimodalModelInfo {
                     Some(uuid) => format!("uuid:{uuid}"),
                     None => format!("content:{}", item.hash),
                 };
+                let cache_key = self.processor_cache_key(media.modality, cache_key);
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -1234,6 +1246,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             limit_mm_per_prompt,
+            HashMap::new(),
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
@@ -1313,6 +1326,7 @@ mod tests {
             PreProcessorConfig::default(),
             video_config,
             PreProcessorConfig::default(),
+            HashMap::new(),
             HashMap::new(),
         )
         .unwrap()
@@ -1547,6 +1561,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            HashMap::new(),
             HashMap::new(),
         )
         .unwrap()
@@ -1792,7 +1807,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(24000));
+            assert_eq!(config["sampling_rate"], 24000);
         }
         fs::write(&combined, "{}").unwrap();
         let config = load_preprocessor_config(
@@ -1803,7 +1818,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
+        assert_eq!(config["sampling_rate"], 8000);
     }
 
     #[tokio::test]
@@ -1842,6 +1857,7 @@ mod tests {
             },
             Arc::new(muse_spark_tokenizer()),
             HashMap::new(),
+            &std::collections::HashMap::new(),
         )
         .unwrap()
         .unwrap();
@@ -1969,6 +1985,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            HashMap::new(),
             HashMap::new(),
         )
         .expect("resolution should not error");

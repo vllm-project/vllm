@@ -391,6 +391,8 @@ pub struct Config {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,

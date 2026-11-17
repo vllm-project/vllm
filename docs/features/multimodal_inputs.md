@@ -665,6 +665,25 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
+### Multimodal Processor Options in the Rust Frontend
+
+Set `--mm-processor-kwargs` to a JSON object to override the model's processor
+configuration when the Rust frontend starts. The default is `{}`. For example:
+
+```bash
+vllm-rs serve Qwen/Qwen2-VL-2B-Instruct \
+    --mm-processor-kwargs '{"min_pixels": 3136, "max_pixels": 200704}'
+```
+
+The same option works with `vllm-rs render`. Options can be flat or grouped under
+`images_kwargs`, `videos_kwargs`, and `audio_kwargs`. Scoped values override
+flat values; both override the checkpoint configuration. Nested objects merge
+recursively. Each model's Rust processor interprets the resulting configuration.
+
+Startup options participate in media cache identities, including inputs with a
+UUID. Request-level `mm_processor_kwargs`, `--trust-request-mm-kwargs`, and
+non-empty `text_kwargs` are not supported.
+
 ### Media Download Cache
 
 Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.
@@ -1061,9 +1080,10 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.
 
 !!! warning
-    Per-request `media_io_kwargs` (and `mm_processor_kwargs`) are rejected by
-    default because they let a client change media loading and preprocessing
-    resource usage. Start the server with `--trust-request-mm-kwargs` only when
+    In the Python frontend, per-request `media_io_kwargs` (and
+    `mm_processor_kwargs`) are rejected by default because they let a client
+    change media loading and preprocessing resource usage. Start the server
+    with `--trust-request-mm-kwargs` only when
     your API clients are trusted; see
     [Per-request multimodal arguments](../usage/security.md#per-request-multimodal-arguments).
 

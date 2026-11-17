@@ -291,6 +291,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -2354,6 +2355,7 @@ fn frontend_args_accept_json() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3382,6 +3384,7 @@ fn serve_args_accept_handshake_aliases() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3690,6 +3693,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -3826,6 +3830,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -4075,6 +4080,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -4360,4 +4366,53 @@ fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
     let config = args.into_config();
     assert!(config.api_server_options.enable_scale_out);
     assert!(config.skip_tokenizer_init);
+}
+
+#[test]
+fn mm_processor_kwargs_reach_frontend_and_managed_engine() {
+    let kwargs = r#"{"images_kwargs":{"min_pixels":3136,"max_pixels":12544}}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--mm-processor-kwargs",
+        kwargs,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = engine
+        .python_args
+        .windows(2)
+        .find(|pair| pair[0] == "--mm-processor-kwargs")
+        .unwrap();
+    let expected: serde_json::Value = serde_json::from_str(kwargs).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&forwarded[1]).unwrap(),
+        expected
+    );
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert_eq!(
+        serde_json::to_value(config.mm_processor_kwargs).unwrap(),
+        expected
+    );
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--mm-processor-kwargs",
+        kwargs,
+    ])
+    .unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args")
+    };
+    let config = args.into_config();
+    assert_eq!(
+        serde_json::to_value(config.mm_processor_kwargs).unwrap(),
+        expected
+    );
 }

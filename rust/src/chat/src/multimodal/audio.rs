@@ -126,6 +126,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
+            HashMap::new(),
         )
         .unwrap()
         .expect("Inkling multimodal support")
@@ -146,6 +147,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            HashMap::new(),
             HashMap::new(),
         )
         .unwrap()
