@@ -2148,10 +2148,7 @@ class VllmConfig:
                     self.speculative_config.uses_target_hidden_states
                     or self.speculative_config.uses_aux_hidden_states
                 )
-                and not (
-                    self.use_v2_model_runner
-                    and self.speculative_config.use_gemma4_mtp()
-                )
+                and not self.speculative_config.use_gemma4_mtp()
             ):
                 raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
