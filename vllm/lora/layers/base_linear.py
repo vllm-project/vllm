@@ -208,9 +208,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        quant_method = self._get_quant_method()
-        output = quant_method.apply(self.base_layer, x.flatten(0, -2), bias)
-        output = output.unflatten(0, x.shape[:-1])
+        flatten = x.ndim > 2 and x.is_contiguous()
+        flat_x = x.view(-1, x.shape[-1]) if flatten else x
+        output = self._get_quant_method().apply(self.base_layer, flat_x, bias)
+        if flatten:
+            output = output.view(*x.shape[:-1], -1)
         return self._apply_lora_to_output(x, output)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -256,9 +258,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            quant_method = self._get_quant_method()
-            output = quant_method.apply(self.base_layer, x.flatten(0, -2), bias)
-            return output.unflatten(0, x.shape[:-1])
+            flatten = x.ndim > 2 and x.is_contiguous()
+            flat_x = x.view(-1, x.shape[-1]) if flatten else x
+            output = self._get_quant_method().apply(self.base_layer, flat_x, bias)
+            return output.view(*x.shape[:-1], -1) if flatten else output
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without

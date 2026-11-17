@@ -420,10 +420,11 @@ class ReplicatedLinear(LinearBase):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        if is_tensor := isinstance(x, torch.Tensor):
-            orig_shape, x = x.shape, x.reshape(-1, x.shape[-1])
+        is_nd = isinstance(x, torch.Tensor) and x.ndim > 2
+        if flatten := is_nd and x.is_contiguous():
+            orig_shape, x = x.shape, x.view(-1, x.shape[-1])
         output = self.quant_method.apply(self, x, bias)
-        if is_tensor:
+        if flatten:
             output = output.view(*orig_shape[:-1], -1)
 
         if not self.return_bias:
@@ -627,10 +628,11 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        if is_tensor := isinstance(input_, torch.Tensor):
-            orig_shape, input_ = input_.shape, input_.reshape(-1, input_.shape[-1])
+        is_nd = isinstance(input_, torch.Tensor) and input_.ndim > 2
+        if flatten := is_nd and input_.is_contiguous():
+            orig_shape, input_ = input_.shape, input_.view(-1, input_.shape[-1])
         output_parallel = self.quant_method.apply(self, input_, bias)
-        if is_tensor:
+        if flatten:
             output_parallel = output_parallel.view(*orig_shape[:-1], -1)
 
         if self.gather_output and self.tp_size > 1:
@@ -1868,8 +1870,9 @@ class RowParallelLinear(LinearBase):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        if is_tensor := isinstance(input_, torch.Tensor):
-            orig_shape, input_ = input_.shape, input_.reshape(-1, input_.shape[-1])
+        is_nd = isinstance(input_, torch.Tensor) and input_.ndim > 2
+        if flatten := is_nd and input_.is_contiguous():
+            orig_shape, input_ = input_.shape, input_.view(-1, input_.shape[-1])
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1883,7 +1886,7 @@ class RowParallelLinear(LinearBase):
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
-        if is_tensor:
+        if flatten:
             output_parallel = output_parallel.view(*orig_shape[:-1], -1)
 
         if self.reduce_results and self.tp_size > 1:
