@@ -657,8 +657,8 @@ def sparse_attn_indexer(
                 "VLLM_DETERMINISTIC_SPARSE_TOPK does not cover the decode context "
                 "parallel top-k merge; its result keeps the merge's order."
             )
-    # The fused prefill kernel never materializes the scores to canonicalize.
-    fused_mqa_topk = not deterministic and use_fused_mqa_topk(
+    # Off under VLLM_DETERMINISTIC_SPARSE_TOPK (see use_fused_mqa_topk).
+    fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens,
         fp4_cache=use_fp4_cache,
