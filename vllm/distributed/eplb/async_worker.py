@@ -28,7 +28,7 @@ from vllm.logger import init_logger
 from .eplb_communicator import EplbCommunicator
 from .eplb_utils import device_stream
 from .migration_scheduler import MigrationFlow, schedule_migration_batches_for_layers
-from .policy import AbstractEplbPolicy
+from .policy import AbstractEplbPolicy, EplbStats
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     TransferMetadata,
@@ -36,7 +36,7 @@ from .rebalance_execute import (
 )
 
 if TYPE_CHECKING:
-    from .eplb_state import EplbModelState, EplbStats
+    from .eplb_state import EplbModelState
 
 logger = init_logger(__name__)
 
@@ -107,7 +107,7 @@ class AsyncEplbRunner:
         self,
         device_index: int,
         apply_layer: ApplyLayerFn,
-        policy: type[AbstractEplbPolicy],
+        policy: AbstractEplbPolicy,
         migration_batching: bool,
     ) -> None:
         self._executor = AsyncEplbExecutor(device_index, get_ep_group().rank_in_group)
@@ -289,21 +289,19 @@ class AsyncEplbRunner:
 
 
 def run_rebalance_experts(
-    policy: type[AbstractEplbPolicy],
-    eplb_stats: "EplbStats",
+    policy: AbstractEplbPolicy,
+    eplb_stats: EplbStats,
     physical_to_logical_map_cpu: torch.Tensor,
     stream: torch.Stream,
 ) -> torch.Tensor:
     # Move the global expert load window to CPU for computation.
     with device_stream(stream):
-        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+        eplb_stats.global_expert_load_window = (
+            eplb_stats.global_expert_load_window.cpu()
+        )
     # Compute new expert mappings for the model
     new_physical_to_logical_map = policy.rebalance_experts(
-        global_expert_load_window,
-        eplb_stats.num_replicas,
-        eplb_stats.num_groups,
-        eplb_stats.num_nodes,
-        eplb_stats.num_gpus,
+        eplb_stats,
         physical_to_logical_map_cpu,
     )
     assert new_physical_to_logical_map.device == torch.device("cpu")
@@ -315,8 +313,8 @@ def transfer_layer_to_buffer(
     stream: torch.Stream,
     *,
     plan: AsyncEplbPlan | None,
-    policy: type[AbstractEplbPolicy],
-    eplb_stats: "EplbStats",
+    policy: AbstractEplbPolicy,
+    eplb_stats: EplbStats,
     physical_to_logical_map: torch.Tensor,
     migration_batching: bool,
     layer_idx: int,

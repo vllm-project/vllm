@@ -20,10 +20,10 @@ from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb import async_worker
 from vllm.distributed.eplb.async_worker import AsyncEplbExecutor, AsyncEplbRunner
 from vllm.distributed.eplb.eplb_state import (
+    EplbModelState,
     EplbState,
-    _commit_eplb_maps,
-    _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.eplb.policy import AbstractEplbPolicy, EplbStats
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
@@ -83,16 +83,27 @@ def _make_model_state(
     log2phy: torch.Tensor,
     logcnt: torch.Tensor,
     phy2log_storage: torch.Tensor | None = None,
-) -> MagicMock:
-    """Build a minimal EplbModelState mock with its map tensors."""
-    state = MagicMock()
-    state.physical_to_logical_map = phy2log
-    state.physical_to_logical_map_buffer = (
-        phy2log if phy2log_storage is None else phy2log_storage
+) -> EplbModelState:
+    """Build a real EplbModelState for map-only tests."""
+    loads = torch.zeros_like(phy2log)
+    return EplbModelState(
+        physical_to_logical_map=phy2log,
+        physical_to_logical_map_buffer=phy2log
+        if phy2log_storage is None
+        else phy2log_storage,
+        logical_to_physical_map=log2phy,
+        logical_replica_count=logcnt,
+        expert_load_pass=loads,
+        expert_load_pass_buffer=loads,
+        expert_load_window=loads.unsqueeze(0),
+        last_expert_load=logcnt,
+        model_name="map-test",
+        model=torch.nn.Module(),
+        expert_buffer=[],
+        eplb_stats=None,
+        device_index=None,
+        communicator=MagicMock(),
     )
-    state.logical_to_physical_map = log2phy
-    state.logical_replica_count = logcnt
-    return state
 
 
 def test_commit_eplb_maps_shape_change():
@@ -120,7 +131,7 @@ def test_commit_eplb_maps_shape_change():
         .unsqueeze(0)
         .expand(num_layers, -1)
     )
-    _commit_eplb_maps(model_state, new_phy2log_larger)
+    model_state._commit_eplb_maps(new_phy2log_larger)
 
     # Check that the number of physical experts has been updated and that the values
     # match
@@ -151,7 +162,7 @@ def test_commit_eplb_maps_for_layer_logical_padding():
         .contiguous()
     )
     layer = 0
-    _commit_eplb_maps_for_layer(model_state, new_phy2log[layer], layer)
+    model_state._commit_eplb_maps_for_layer(new_phy2log[layer], layer)
 
     assert torch.all(model_state.logical_to_physical_map[layer, :, 2] == -1)
 
@@ -167,7 +178,7 @@ def test_commit_eplb_maps_for_layer_shape_assert():
     )
     bad_phy2log = torch.zeros(num_layers, num_physical + 1, dtype=torch.long)
     with pytest.raises(AssertionError):
-        _commit_eplb_maps_for_layer(model_state, bad_phy2log, layer=0)
+        model_state._commit_eplb_maps_for_layer(bad_phy2log, layer=0)
 
 
 def test_commit_eplb_maps():
@@ -188,7 +199,7 @@ def test_commit_eplb_maps():
     )
     new_logcnt = torch.tensor([[2, 1, 1], [1, 2, 1]], dtype=torch.long)
 
-    _commit_eplb_maps(model_state, new_phy2log)
+    model_state._commit_eplb_maps(new_phy2log)
 
     assert torch.equal(model_state.physical_to_logical_map, new_phy2log)
     assert torch.equal(model_state.logical_to_physical_map, new_log2phy)
@@ -214,7 +225,7 @@ def test_commit_eplb_maps_for_layer():
     )
     new_logcnt = torch.tensor([[2, 1, 1], [1, 2, 1]], dtype=torch.long)
 
-    _commit_eplb_maps_for_layer(model_state, new_phy2log[0], layer=0)
+    model_state._commit_eplb_maps_for_layer(new_phy2log[0], layer=0)
 
     # Layer 0 updated
     assert torch.equal(model_state.physical_to_logical_map[0], new_phy2log[0])
@@ -271,20 +282,15 @@ class _EplbTestModelConfig:
         return {"model": self.model}
 
 
-class _TopologyEncodingPolicy:
+class _TopologyEncodingPolicy(AbstractEplbPolicy):
     calls: list[tuple[int, int]] = []
 
-    @classmethod
     def rebalance_experts(
-        cls,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
+        self,
+        stats: EplbStats,
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        cls.calls.append((num_replicas, num_groups))
+        self.calls.append((stats.num_replicas, stats.num_groups))
         assert old_global_expert_indices is not None
         return old_global_expert_indices
 
@@ -304,7 +310,7 @@ class _EplbTestGroup:
 def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async):
     """Rearrangement keeps each model's physical expert and group counts."""
     monkeypatch.setattr(
-        parallel_config_module.current_platform, "is_cuda_alike", lambda: True
+        parallel_config_module.current_platform, "supports_eplb", lambda: True
     )
     parallel_config = ParallelConfig(
         tensor_parallel_size=2,
@@ -329,7 +335,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
     monkeypatch.setattr(
         eplb_state_module,
         "create_eplb_communicator",
-        lambda **kwargs: SimpleNamespace(owned_expert_buffer=None),
+        lambda *args, **kwargs: SimpleNamespace(owned_expert_buffer=None),
     )
     monkeypatch.setattr(
         eplb_state_module,
@@ -348,7 +354,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
     for model, model_config in zip(models, model_configs):
         state.add_model(model, model_config)
     _TopologyEncodingPolicy.calls.clear()
-    state.policy = _TopologyEncodingPolicy
+    state.policy = _TopologyEncodingPolicy()
 
     state.rearrange()
 
@@ -512,7 +518,7 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
     prev_mode = torch.cuda.get_sync_debug_mode()
     torch.cuda.set_sync_debug_mode("error")
     try:
-        _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
+        model_state._commit_eplb_maps_for_layer(new_phy2log, layer=0)
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)
 

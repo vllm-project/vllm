@@ -150,10 +150,14 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # recipe can start.
         # HYV4 also runs without torch.compile, preserving runtime-shape
         # kernel selection during graph capture.
-        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+        # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
+        return (
+            frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+            | _QWEN3_5_ARCHITECTURES
+        )
     if current_platform.is_cuda():
-        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
-        # platforms keep the torch.compile path.
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA and ROCm;
+        # other platforms keep the torch.compile path.
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
@@ -371,6 +375,53 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
     OptimizationLevel.O2: OPTIMIZATION_LEVEL_02,
     OptimizationLevel.O3: OPTIMIZATION_LEVEL_03,
 }
+
+
+# top_k values the pinned FlashInfer NVLinkOneSidedAlltoAll accepts.
+_ONE_SIDED_SUPPORTED_TOP_K = frozenset({1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 22})
+
+
+def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
+    """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
+    block_configs = getattr(model_config.hf_text_config, "block_configs", None)
+    if not block_configs:
+        return False
+
+    def field(block: Any, name: str) -> Any:
+        if isinstance(block, dict):
+            return block.get(name)
+        return getattr(block, name, None)
+
+    shapes = {
+        (field(block, "n_routed_experts"), field(block, "num_experts_per_tok"))
+        for block in block_configs
+        if field(block, "block_type") == "moe"
+    }
+    return len(shapes) > 1
+
+
+def _one_sided_model_unsupported_reason(model_config: "ModelConfig") -> str | None:
+    """Why a model's MoE layers cannot use flashinfer_nvlink_one_sided."""
+    # One shared communication object serves every MoE layer, so all of them
+    # must have the same num_experts and top_k (e.g. Nemotron Puzzle varies them
+    # per layer).
+    if _has_heterogeneous_moe_layers(model_config):
+        return "MoE layers with different num_experts or top_k"
+    top_k = model_config.get_num_experts_per_tok()
+    if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
+        return f"top_k={top_k}"
+    # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
+    quantization = model_config.quantization
+    if quantization is None:
+        if model_config.dtype in (torch.bfloat16, torch.float16):
+            return None
+        return f"dtype={model_config.dtype}"
+    if quantization == "modelopt_fp4":
+        return None
+    quant_cfg = model_config.model_arch_config.quantization_config or {}
+    if quantization == "fp8" and quant_cfg.get("weight_block_size") == [128, 128]:
+        return None
+    return f"quantization={quantization!r}"
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
@@ -1045,6 +1096,78 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _one_sided_all2all_unsupported_reason(self) -> str | None:
+        """Why the deployment cannot use flashinfer_nvlink_one_sided, if it can't."""
+        if self.lora_config is not None:
+            return "LoRA"
+        # Experts picked with --moe-backend decide on their own whether they
+        # take one-sided dispatch, and most (triton, deep_gemm, cutlass,
+        # emulation, ...) reject it, so any explicit choice keeps the old
+        # allgather_reducescatter default.
+        moe_backend = self.kernel_config.moe_backend
+        if moe_backend != "auto":
+            return f"moe_backend={moe_backend!r}"
+        # No kernel is both batch invariant and one-sided compatible.
+        if envs.VLLM_BATCH_INVARIANT:
+            return "VLLM_BATCH_INVARIANT=1"
+        model_config = self.model_config
+        if model_config is None:
+            return None
+        if reason := _one_sided_model_unsupported_reason(model_config):
+            return reason
+        # A separate MoE draft model builds its MoE layers on the same
+        # communication object, so it has to fit it and match the target.
+        spec = self.speculative_config
+        draft = spec.draft_model_config if spec is not None else None
+        if spec is not None and draft is not None and draft.is_moe:
+            if spec.moe_backend not in (None, "auto"):
+                return f"draft moe_backend={spec.moe_backend!r}"
+            if reason := _one_sided_model_unsupported_reason(draft):
+                return f"draft model {reason}"
+            if model_config.is_moe and (
+                draft.get_num_experts(),
+                draft.get_num_experts_per_tok(),
+            ) != (
+                model_config.get_num_experts(),
+                model_config.get_num_experts_per_tok(),
+            ):
+                return "a draft model with different num_experts or top_k"
+        return None
+
+    def _maybe_fall_back_from_auto_one_sided_all2all(self) -> None:
+        """Keep the "auto" all2all default to models one-sided supports."""
+        parallel_config = self.parallel_config
+        if (
+            not parallel_config._all2all_backend_auto_one_sided
+            or parallel_config.all2all_backend != "flashinfer_nvlink_one_sided"
+        ):
+            return
+        reason = self._one_sided_all2all_unsupported_reason()
+        if reason is None:
+            return
+        logger.info_once(
+            "all2all_backend='auto': using 'allgather_reducescatter' instead of "
+            "'flashinfer_nvlink_one_sided', which does not support %s.",
+            reason,
+        )
+        parallel_config.all2all_backend = "allgather_reducescatter"
+
+    def _sync_draft_all2all_backend(self) -> None:
+        """Make the draft follow the target's final all2all backend.
+
+        The draft's ParallelConfig is built before this config, so it holds the
+        target's backend from before any fallback, while both share one EP
+        communicator.
+        """
+        spec = self.speculative_config
+        draft = spec.draft_parallel_config if spec is not None else None
+        if (
+            draft is not None
+            and draft is not self.parallel_config
+            and draft.enable_expert_parallel
+        ):
+            draft.all2all_backend = self.parallel_config.all2all_backend
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1157,31 +1280,12 @@ class VllmConfig:
                 "context parallelism (DCP/PCP > 1)."
             )
 
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
-            for connector_name in (
-                "NixlConnector",
-                "NixlPullConnector",
-                "NixlPushConnector",
-                "MoRIIOConnector",
-                "MooncakeConnector",
-            ):
-                if kv_transfer_config.has_connector(connector_name):
-                    raise ValueError(
-                        "--enable-return-routed-experts is incompatible with "
-                        f"{connector_name}; PD auxiliary output is not supported."
-                    )
-
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
         # not `direct_reload_enabled()`: importing it would load the model
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":
             return
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
-
         offload = self.offload_config
         if (
             offload.offload_backend != "auto"
@@ -1196,12 +1300,6 @@ class VllmConfig:
             # its load_weights runs a layerwise reload, and its post-load
             # processing replaces the weight parameter
             raise ValueError("Direct reload does not support torchao quantization.")
-        if isinstance(self.quant_config, OnlineQuantizationConfig) or (
-            getattr(self.quant_config, "online_quantization_config", None) is not None
-        ):
-            # `finish` clears the guard that keeps online quantization from
-            # quantizing its already-quantized bytes again
-            raise ValueError("Direct reload does not support online quantization.")
         if self.lora_config is not None:
             # LoRA wraps layers after cold start; their wrappers forward
             # `quant_method`, so a rerun would process each base layer twice
@@ -1479,6 +1577,7 @@ class VllmConfig:
             self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
             return
 
+        self._resolve_specialized_decode_switch()
         self._resolve_mm_encoder_only()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
@@ -1796,10 +1895,15 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
+        # Must run before binding a MoE-EP backend, which rejects one-sided.
+        self._maybe_fall_back_from_auto_one_sided_all2all()
+
         # This populates IR op priorities,
         # must happen after compilation mode and backend are decided,
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
+        # After every fallback of the target's backend.
+        self._sync_draft_all2all_backend()
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
@@ -2106,7 +2210,10 @@ class VllmConfig:
                 f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
-        if self.parallel_config.use_ubatching:
+        if (
+            self.parallel_config.use_ubatching
+            and self.parallel_config.dbo_schedule != "all-reduce-overlap"
+        ):
             a2a_backend = self.parallel_config.all2all_backend
             if current_platform.is_rocm():
                 supported_backends = [
@@ -2995,6 +3102,25 @@ class VllmConfig:
             "omit the embedding tensor."
         )
 
+    def _resolve_specialized_decode_switch(self) -> None:
+        """`kernel_config.monokernel` and
+        `additional_config={"decode_backend": "latency_specialized"}` are one
+        switch: setting either sets both, whichever one a model reads."""
+        extra = self.additional_config
+        if not isinstance(extra, dict):
+            return
+        backend = extra.get("decode_backend")
+        if backend == "latency_specialized":
+            self.kernel_config.monokernel = True
+        elif self.kernel_config.monokernel:
+            if backend is not None:
+                raise ValueError(
+                    "--monokernel conflicts with additional_config "
+                    f"decode_backend={backend!r}; it means "
+                    "decode_backend=latency_specialized."
+                )
+            self.additional_config = {**extra, "decode_backend": "latency_specialized"}
+
     def _resolve_mm_encoder_only(self) -> None:
         """Enable encoder-only mode for a dedicated EC producer."""
         ec_config = self.ec_transfer_config
@@ -3256,7 +3382,7 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
+        elif current_platform.is_rocm() and KVCacheAccess.REGISTERS in kv_cache_access:
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
@@ -3415,6 +3541,7 @@ class VllmConfig:
         model_config = self.model_config
         parallel_config = self.parallel_config
 
+        schedule = parallel_config.dbo_schedule
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
         if parallel_config.pipeline_parallel_size > 1:
@@ -3422,7 +3549,8 @@ class VllmConfig:
         if parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("dual batch overlap with prefill context parallelism")
         if model_config is not None and (
-            model_config.is_multimodal_model or model_config.is_encoder_decoder
+            (model_config.is_multimodal_model and schedule != "all-reduce-overlap")
+            or model_config.is_encoder_decoder
         ):
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:

@@ -5,6 +5,7 @@ import atexit
 import os
 import random
 import time
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -111,7 +112,7 @@ class _RollPolicy:
     calls = 0
 
     @classmethod
-    def rebalance_experts(cls, load, replicas, groups, nodes, gpus, old_map):
+    def rebalance_experts(cls, stats, old_map):
         cls.calls += 1
         return torch.roll(old_map, 1, dims=1)
 
@@ -163,6 +164,9 @@ def make_async_eplb_state(
             expert_weights.append(weights)
         phy2log = torch.arange(num_experts, device=device).repeat(num_layers, 1)
         model_state = MagicMock()
+        model_state._commit_eplb_maps_for_layer = partial(
+            eplb_state_module.EplbModelState._commit_eplb_maps_for_layer, model_state
+        )
         model_state.model_name = f"model{m}"
         model_state.model.num_moe_layers = num_layers
         model_state.model.num_logical_experts = num_experts
