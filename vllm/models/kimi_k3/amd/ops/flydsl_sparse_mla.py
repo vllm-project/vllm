@@ -349,17 +349,23 @@ def flydsl_sparse_mla_fp8ds_warmup(
     heads: tuple[int, ...] = (1, 2, 4, 6, 8, 12, 16),
     has_invalid: tuple[bool, ...] = (False, True),
     return_lse: tuple[bool, ...] = (False, True),
-) -> None:
+) -> set[tuple[int, bool, bool]]:
     """Compile (and run once on a one-token problem) every listed configuration,
     so no JIT compile lands inside a CUDA-graph capture. A head count in
     MH_HEADS compiles both many-head configs (the row count picks one per call)
     and skips has_invalid, which that kernel does not serve; a head count with
-    no kernel compiles nothing."""
+    no kernel compiles nothing, and nothing compiles off gfx950.
+
+    Returns the (heads, has_invalid, return_lse) variants it compiled.
+    """
     dev = (
         torch.device("cuda", torch.accelerator.current_device_index())
         if device is None
         else torch.device(device)
     )
+    built: set[tuple[int, bool, bool]] = set()
+    if not _is_gfx950(dev.index):
+        return built  # every kernel here is gfx950-only: calls stay on Triton
     kv = torch.zeros(1, RECORD_BYTES, dtype=torch.uint8, device=dev)
     indptr = torch.tensor([0, 1], dtype=torch.int32, device=dev)
     indices = torch.zeros(1, dtype=torch.int32, device=dev)
@@ -397,10 +403,13 @@ def flydsl_sparse_mla_fp8ds_warmup(
                         4,
                         torch.cuda.current_stream(dev),
                     )
+                built.add((num_heads, False, rl))
             continue
         for hi in has_invalid:
             for rl in return_lse:
                 flydsl_sparse_mla_fp8ds_fwd(
                     q, kv, indptr, indices, 1.0, has_invalid=hi, return_lse=rl
                 )
+                built.add((num_heads, hi, rl))
     torch.accelerator.synchronize(dev)
+    return built

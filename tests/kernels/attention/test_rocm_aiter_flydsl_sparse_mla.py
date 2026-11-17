@@ -49,10 +49,14 @@ def flydsl_ops(monkeypatch):
     # Keep aiter's own FlyDSL route off so the Triton reference is Gluon.
     monkeypatch.delenv("AITER_FLYDSL_SPARSE_MLA", raising=False)
     rocm_aiter_ops.refresh_env_variables()
+    rocm_aiter_ops._FLYDSL_SPARSE_MLA_FAILED.clear()
+    # 96-head calls run only on what warmup built (as at model load).
+    rocm_aiter_ops.flydsl_sparse_mla_warmup(96)
     try:
         yield rocm_aiter_ops, launches
     finally:
         monkeypatch.undo()
+        rocm_aiter_ops._FLYDSL_SPARSE_MLA_FAILED.clear()
         rocm_aiter_ops.refresh_env_variables()
 
 
@@ -577,6 +581,7 @@ def test_flydsl_warmup_skips_unserved_heads(flydsl_ops, num_heads: int) -> None:
     must not fail the model load, and the calls stay on Triton."""
     ops, launches = flydsl_ops
     ops.flydsl_sparse_mla_warmup(num_heads)
+    assert not any(k[0] == num_heads for k in ops._FLYDSL_SPARSE_MLA_COMPILED)
     gen = torch.Generator().manual_seed(9)
     cache = _fp8_ds_mla_cache(TOPK, gen)
     indptr, indices, _ = _indices("ragged", 4, TOPK, gen)
@@ -585,30 +590,103 @@ def test_flydsl_warmup_skips_unserved_heads(flydsl_ops, num_heads: int) -> None:
     assert not launches
 
 
+@torch.inference_mode()
 def test_flydsl_warmup_failure_keeps_triton(flydsl_ops, monkeypatch) -> None:
-    """A warmup that raises (e.g. a fallback FlyDSL module without a kernel
-    for the head count) is logged; the configs stay uncompiled."""
-    ops, _ = flydsl_ops
+    """A warmup that raises (e.g. FlyDSL / aiter API skew) sends the head count
+    to Triton for good: eager calls and captures alike, and warmup is not
+    retried for every layer."""
+    import importlib
+
+    ops, launches = flydsl_ops
+    module = importlib.import_module(IN_TREE_MODULE)
+    calls = []
 
     def boom(**kwargs):
-        raise ValueError("no kernel")
+        calls.append(kwargs)
+        raise RuntimeError("no kernel")
 
-    keys = {(MH, hi, rl) for hi in (False, True) for rl in (False, True)}
-    for key in keys:
+    for key in {(MH, hi, rl) for hi in (False, True) for rl in (False, True)}:
         ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
+    monkeypatch.setattr(module, "flydsl_sparse_mla_fp8ds_warmup", boom)
+    ops.flydsl_sparse_mla_warmup(MH)
+    ops.flydsl_sparse_mla_warmup(MH)
+    assert len(calls) == 1
+    assert MH in ops._FLYDSL_SPARSE_MLA_FAILED
+
+    gen = torch.Generator().manual_seed(10)
+    cache = _fp8_ds_mla_cache(TOPK, gen)
+    indptr, indices, _ = _indices("ragged", 148, TOPK, gen)
+    q = _q(148, MH, gen)
+    _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
     with monkeypatch.context() as m:
-        m.setattr(ops, "_flydsl_sparse_mla_warmup_fn", staticmethod(lambda: boom))
-        ops.flydsl_sparse_mla_warmup(MH)
-    assert not keys & ops._FLYDSL_SPARSE_MLA_COMPILED
+        m.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+        _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
+    assert not launches
+
+
+@torch.inference_mode()
+def test_flydsl_first_call_failure_keeps_triton(flydsl_ops, monkeypatch) -> None:
+    """An eager first call that raises falls back to Triton, marks nothing
+    compiled, and is not retried."""
+    import importlib
+
+    ops, launches = flydsl_ops
+    module = importlib.import_module(IN_TREE_MODULE)
+    key = (6, False, True)
+    ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no kernel")
+
+    monkeypatch.setattr(module, "flydsl_sparse_mla_fp8ds_fwd", boom)
+    gen = torch.Generator().manual_seed(11)
+    cache = _fp8_ds_mla_cache(TOPK, gen)
+    indptr, indices, _ = _indices("ragged", 4, TOPK, gen)
+    q = _q(4, 6, gen)
+    out, lse = _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
+    assert launches == [key]
+    assert key not in ops._FLYDSL_SPARSE_MLA_COMPILED
+    assert 6 in ops._FLYDSL_SPARSE_MLA_FAILED
+    _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
+    assert launches == [key]
+    ops._FLYDSL_SPARSE_MLA = False
+    ref_out, ref_lse = _run(
+        ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04
+    )
+    assert torch.equal(out, ref_out) and torch.equal(lse, ref_lse)
+
+
+def test_flydsl_warmup_off_gfx950_builds_nothing(monkeypatch) -> None:
+    """Every kernel of the module is gfx950-only: its warmup builds none on
+    another GPU (an LLVM selection failure there could abort the process)."""
+    module = pytest.importorskip(IN_TREE_MODULE)
+    if not torch.cuda.is_available():
+        pytest.skip("needs a GPU")
+
+    def no_build(*args):
+        raise AssertionError("built a launcher off gfx950")
+
+    monkeypatch.setattr(module, "_is_gfx950", lambda device_index: False)
+    monkeypatch.setattr(module, "_get_launcher", no_build)
+    monkeypatch.setattr(module, "_get_mh_launcher", no_build)
+    assert module.flydsl_sparse_mla_fp8ds_warmup(heads=(12, 96)) == set()
 
 
 def test_flydsl_96h_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
     """flydsl_sparse_mla_warmup(96) compiles both many-head configs, so either
-    engages inside a graph capture."""
+    engages inside a graph capture; without it a 96-head call stays on Triton
+    even eagerly (a first call would build only its row count's config)."""
     ops, launches = flydsl_ops
-    keys = {(MH, hi, rl) for hi in (False, True) for rl in (False, True)}
-    for key in keys:
+    keys = {(MH, False, rl) for rl in (False, True)}
+    unbuilt = {(MH, True, rl) for rl in (False, True)}  # no has_invalid kernel
+    for key in keys | unbuilt:
         ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
+
+    gen = torch.Generator().manual_seed(6)
+    cache = _fp8_ds_mla_cache(TOPK, gen)
+    indptr, indices, _ = _indices("ragged", 148, TOPK, gen)
+    _run(ops, _q(148, MH, gen), cache.unsqueeze(1), indptr, indices, False, True, 0.04)
+    assert not launches and not keys & ops._FLYDSL_SPARSE_MLA_COMPILED
 
     ops._FLYDSL_SPARSE_MLA = False
     ops.flydsl_sparse_mla_warmup(MH)
@@ -617,10 +695,9 @@ def test_flydsl_96h_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
 
     ops.flydsl_sparse_mla_warmup(MH)
     assert keys <= ops._FLYDSL_SPARSE_MLA_COMPILED
+    assert not unbuilt & ops._FLYDSL_SPARSE_MLA_COMPILED
     assert not launches
 
-    gen = torch.Generator().manual_seed(6)
-    cache = _fp8_ds_mla_cache(TOPK, gen)
     for num_tokens in (148, 200):  # one per config
         indptr, indices, _ = _indices("ragged", num_tokens, TOPK, gen)
         q = _q(num_tokens, MH, gen)
