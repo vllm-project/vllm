@@ -4,6 +4,7 @@ from typing import Any
 
 from typing_extensions import override
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
@@ -24,6 +25,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
 )
+
+logger = init_logger(__name__)
 
 
 def _all_workers_barrier() -> None:
@@ -95,6 +98,20 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+
+        # Pre-fault and pin the region in the background; the engine serves
+        # without offloading until every worker is ready.
+        self.async_init = bool(self.extra_config.get("async_init", False))
+        if self.async_init and not current_platform.is_cuda():
+            # Pinning would race graph capture without a capture-mode guard.
+            logger.warning("async_init needs CUDA; setting the CPU tier up now")
+            self.async_init = False
+        # Pause between background pin calls, as a multiple of each call's time.
+        self.async_init_pin_pace = float(
+            self.extra_config.get("async_init_pin_pace", 2.0)
+        )
+        if not 0 <= self.async_init_pin_pace < float("inf"):
+            raise ValueError("async_init_pin_pace must be a finite number >= 0")
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
@@ -181,6 +198,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
+        prefault_shard: tuple[int, int] | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
@@ -188,6 +206,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             # replicated region's pre-faulting work across the worker group.
             world_size = self.config.parallel.world_size
             worker_index = self.config.parallel.rank
+            if self.replicated_layout:
+                prefault_shard = (worker_index, world_size)
 
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
@@ -197,9 +217,8 @@ class CPUOffloadingSpec(OffloadingSpec):
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
                 num_segments=REGION_SEGMENTS,
-                populate_shard=(
-                    (worker_index, world_size) if self.replicated_layout else None
-                ),
+                populate_shard=None if self.async_init else prefault_shard,
+                populate=not self.async_init,
             )
         try:
             return CPUOffloadingWorker(
@@ -207,6 +226,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                defer_host_setup=self.async_init,
+                prefault_shard=prefault_shard,
+                pin_pace=self.async_init_pin_pace,
             )
         except Exception:
             if mmap_region is not None:

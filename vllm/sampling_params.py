@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
-MAX_LOGPROB_TOKEN_IDS = 128
+MAX_LOGPROB_TOKEN_IDS = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
@@ -1505,6 +1505,12 @@ class BeamSearchParams(
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        if not math.isfinite(self.length_penalty):
+            raise VLLMValidationError(
+                f"length_penalty must be finite, got {self.length_penalty}.",
+                parameter="length_penalty",
+                value=self.length_penalty,
+            )
 
     def configure_logprobs(
         self, sampling_params: SamplingParams, config: "VllmConfig"
@@ -1515,7 +1521,7 @@ class BeamSearchParams(
         if not ids:
             raise ValueError("Beam search allowed_token_ids must not be empty")
         if self.structured_outputs is not None:
-            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            # Grammar candidates can exceed the MAX_LOGPROB_TOKEN_IDS exact-ID limit.
             raise ValueError(
                 "Beam allowlists with structured outputs are not supported"
             )
