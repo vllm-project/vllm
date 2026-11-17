@@ -27,6 +27,7 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
     QuarkOCP_MX,
 )
+from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -350,3 +351,31 @@ def test_mxfp8_weight_only_rejects_forced_w8a8_backend(backend, kernel_cls):
         pytest.raises(ValueError, match="quantization scheme"),
     ):
         init_mxfp8_linear_kernel(weight_shape=(128, 128), activation_quant_key=None)
+
+
+def test_marlin_fallback_warning_names_missing_flashinfer():
+    """Without FlashInfer, SM100 MXFP8 layers run on Marlin. Layers below the
+    mm_mxfp8 shape limits fall back the same way with FlashInfer installed, so
+    the warning must say why the FlashInfer kernels were skipped."""
+    flashinfer = "vllm.model_executor.kernels.linear.mxfp8.flashinfer"
+    with (
+        patch("vllm.model_executor.kernels.linear.current_platform") as platform,
+        patch(f"{flashinfer}.current_platform") as flashinfer_platform,
+        patch(f"{flashinfer}.has_flashinfer", return_value=False),
+        patch(f"{flashinfer}.has_flashinfer_cutedsl", return_value=False),
+        patch.object(
+            MarlinMxfp8LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch(f"{quant_utils.__name__}.logger.warning_once") as warning_once,
+    ):
+        platform._enum = PlatformEnum.CUDA
+        flashinfer_platform.is_cuda.return_value = True
+        flashinfer_platform.has_device_capability.return_value = True
+        flashinfer_platform.is_device_capability_family.return_value = True
+        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+
+    assert type(kernel) is MarlinMxfp8LinearKernel
+    fmt, *args = warning_once.call_args.args
+    warning = fmt % tuple(args)
+    assert "FlashInferCutedslMxfp8LinearKernel: requires FlashInfer" in warning
+    assert "FlashInferCutlassMxfp8LinearKernel: requires FlashInfer" in warning
