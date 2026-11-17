@@ -167,6 +167,25 @@ llm.wake_up()
 
 Block hashes do not cover the weights. If the weights may change before the wake-up, keep the default, or give requests a `cache_salt` per weight version so that blocks computed with older weights are never matched.
 
+#### Free a KV connector's host memory
+
+Resetting the connector's cache does not return its host memory. A connector
+that keeps a CPU pool inside the vLLM process, such as `MooncakeStoreConnector`
+in its default `embedded` mode, holds that pool for as long as the engine runs,
+also while it sleeps. When a colocated trainer needs that memory, run the pool
+in its own process with Mooncake's `standalone-store` mode, and stop that
+process while the engine sleeps:
+
+1. Put the engine to sleep.
+2. Stop `mooncake_client`. vLLM keeps running.
+3. Start `mooncake_client` again, at the same address, before serving resumes.
+
+The KV cache held in the pool is lost, so later lookups miss and the prefixes
+are computed again. Each vLLM rank still keeps its Mooncake `local_buffer_size`
+buffer. See
+[MooncakeStoreConnector](mooncake_store_connector_usage.md#disk-offloading)
+for the `standalone-store` setup.
+
 #### Offloading CUDA graph memory
 
 By default, CUDA graph memory stays on the GPU while asleep. With
