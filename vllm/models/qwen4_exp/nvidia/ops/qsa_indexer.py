@@ -607,13 +607,7 @@ def _topk(
         and not current_platform.is_device_capability_family(110)
         and not current_platform.is_device_capability_family(120)
     )
-    # Explicit cooperative/persistent pick the decode kernel; prefill keeps
-    # the chain, as in the DeepSeek indexer.
-    if topk_backend == "cooperative" and not prefill and not cooperative_supported:
-        raise RuntimeError(
-            "sparse_indexer_topk_backend='cooperative' supports at most 64 "
-            f"decode rows on SM90+ (not SM110/SM120); got {logits.shape[0]}"
-        )
+    # Explicit persistent forces it for decode; prefill keeps the chain.
     use_cooperative_topk = cooperative_supported and (
         prefill or topk_backend != "persistent"
     )
