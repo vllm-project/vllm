@@ -3,7 +3,8 @@
 """Two TP ranks whose local autotune timings disagree must pick the same Triton config
 under VLLM_TRITON_SYNC_AUTOTUNE_TP, and different configs without it, also when the key
 was already resolved on some ranks: in the on-disk autotune cache, or in memory by an
-autotune outside a forward pass.
+autotune outside a forward pass, including the config cache of Mamba's
+`launch_autotuned` helper.
 
 Run `pytest tests/distributed/test_tp_synced_autotune.py`.
 """
@@ -28,7 +29,12 @@ def _picked_block(rank: int, mode: str) -> list[tuple[int, int, int]]:
 
     from vllm.distributed import get_tp_group
     from vllm.forward_context import override_forward_context
+    from vllm.model_executor.layers.mamba.ops.triton_helpers import launch_autotuned
     from vllm.triton_utils import tl, tp_synced_autotune, triton
+
+    # helper_*: launch through launch_autotuned, which caches configs of its own.
+    helper = mode.startswith("helper_")
+    mode = mode.removeprefix("helper_")
 
     # A private cache dir per rank, so a rank sees only the autotune results it wrote.
     triton.knobs.cache.dir = tempfile.mkdtemp(prefix=f"triton_rank{rank}_")
@@ -68,7 +74,11 @@ def _picked_block(rank: int, mode: str) -> list[tuple[int, int, int]]:
     dst = torch.empty_like(src)
 
     def launch():
-        copy_kernel[lambda m: (triton.cdiv(n, m["BLOCK"]),)](src, dst, n)
+        grid = lambda m: (triton.cdiv(n, m["BLOCK"]),)  # noqa: E731
+        if helper:
+            launch_autotuned(copy_kernel, grid, src=src, dst=dst, n=n)
+        else:
+            copy_kernel[grid](src, dst, n)
 
     group = get_tp_group().cpu_group
     if mode == "warm_rank1" and rank == 1:
@@ -136,6 +146,34 @@ def warm_mem_both_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_p
     _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, "warm_mem_both")
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def helper_warm_mem_rank1_worker(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    _worker(
+        monkeypatch,
+        tp_size,
+        pp_size,
+        rank,
+        distributed_init_port,
+        "helper_warm_mem_rank1",
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def helper_warm_mem_both_worker(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    _worker(
+        monkeypatch,
+        tp_size,
+        pp_size,
+        rank,
+        distributed_init_port,
+        "helper_warm_mem_both",
+    )
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_target",
@@ -145,6 +183,8 @@ def warm_mem_both_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_p
         warm_rank1_worker,
         warm_mem_rank1_worker,
         warm_mem_both_worker,
+        helper_warm_mem_rank1_worker,
+        helper_warm_mem_both_worker,
     ],
 )
 def test_tp_synced_autotune(monkeypatch: pytest.MonkeyPatch, test_target):

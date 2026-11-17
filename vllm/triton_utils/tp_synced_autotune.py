@@ -72,6 +72,14 @@ def _sync_group() -> Any | None:
     return group if group.world_size > 1 else None
 
 
+def syncing() -> bool:
+    """Whether autotuned launches here resolve through the TP-synced cache.
+
+    Launch helpers with a config cache of their own (Mamba's `launch_autotuned`) key it
+    on this, so a config a rank tuned alone is never reused where ranks must agree."""
+    return _installed and _sync_group() is not None
+
+
 def _resolve_locally(autotuner, original, tuning_key, configs, bench_fn) -> bool:
     """Triton's own path: disk cache if this autotuner uses one, else benchmark."""
     if autotuner._vllm_disk_cache:
