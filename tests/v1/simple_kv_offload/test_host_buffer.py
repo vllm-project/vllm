@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from tests.utils import core_dumped_bytes
 from vllm.v1.simple_kv_offload.host_buffer import (
     alloc_host_buffer,
     parse_hugepage_size,
@@ -29,6 +30,14 @@ def test_parse_hugepage_size_rejects_unknown():
 def test_buffer_rounds_up_to_whole_pages():
     buf = alloc_host_buffer(mmap.PAGESIZE + 1)
     assert buf.nbytes == 2 * mmap.PAGESIZE
+
+
+@pytest.mark.parametrize("hugetlb", [False, True])
+def test_buffer_is_left_out_of_core_dumps(hugetlb, hugepage_with_free):
+    page = hugepage_with_free(1) if hugetlb else None
+    buf = alloc_host_buffer(3 * mmap.PAGESIZE, page)
+    start = buf.data_ptr()
+    assert core_dumped_bytes(start, start + buf.nbytes) == 0
 
 
 def test_hugepage_buffer_takes_pages_from_the_pool(free_hugepages, hugepage_with_free):

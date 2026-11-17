@@ -55,6 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
+from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -391,6 +392,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 local_mapping = mmap.mmap(
                     -1, secondary_g2_slots * self.block_size_bytes
                 )
+                exclude_from_core_dump(local_mapping)
                 local_dram = LocalDramOptions(
                     pools=[
                         (
