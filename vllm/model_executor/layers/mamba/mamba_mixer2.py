@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import itertools
-
 import torch
 from torch import nn
 
@@ -29,10 +27,7 @@ from vllm.model_executor.layers.linear_attention.mamba2.prefill.selector import 
     select_mamba2_ssd_kernel,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointExporter,
-    MambaPrefillCheckpointMetadata,
-)
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -44,7 +39,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
@@ -78,9 +72,6 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
-
-# Max length of the SSD autotune warmup, in chunks.
-_SSD_WARMUP_MAX_CHUNKS = 32
 
 
 def _view_mtp_decode_tensor(
@@ -519,8 +510,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
         )
 
-        self._ssd_kernels_warmed_up = False
-
         # - get hidden_states, B and C after depthwise convolution.
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
@@ -599,22 +588,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert isinstance(spec, MambaSpec)
             assert isinstance(params, MambaManager.Params)
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, spec)
-            # Prefill states are indexed by a block-table column.
-            self._state_indices_stride = 1 + params.num_speculative_blocks
-            self._exports_checkpoints = (
-                params.enable_prefix_caching
-                and params.num_prefill_checkpoint_blocks > 0
+            num_heads, head_dim, state_size = spec.shapes[1]
+            self.ssd_kernel.register_warmup(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                state_size=state_size,
+                num_groups=self.n_groups // self.tp_size,
+                chunk_size=model_config.get_mamba_chunk_size(),
+                dtype=model_config.dtype,
+                state_dtype=spec.dtypes[1],
+                state_indices_stride=1 + params.num_speculative_blocks,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+                exports_checkpoints=(
+                    params.enable_prefix_caching
+                    and params.num_prefill_checkpoint_blocks > 0
+                ),
             )
-            self._mamba_spec = spec
-            # The CPU kernel writes its final states without Triton.
-            if self.ssd_kernel.backend != MambaBackendEnum.CPU:
-                scatter_states.register_warmup(
-                    state_shape=spec.shapes[1],
-                    state_dtype=spec.dtypes[1],
-                    indices_dtype=torch.int32,
-                    max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
-                    indices_stride=self._state_indices_stride,
-                )
 
     def forward(
         self,
@@ -656,101 +648,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         output, _ = self.out_proj(hidden_states)
 
         return output
-
-    def _warmup_ssd_kernels(self, projected_states: torch.Tensor) -> None:
-        """Run a minimal SSD forward pass to trigger Triton autotuning
-        while GPU memory is still plentiful (before SSM cache allocation).
-        """
-        if self._ssd_kernels_warmed_up:
-            return
-        self._ssd_kernels_warmed_up = True
-        logger.info_once("Warming up Mamba2 SSD kernels...")
-
-        device = projected_states.device
-        dtype = projected_states.dtype
-
-        nheads = self.num_heads // self.tp_size
-        ngroups = self.n_groups // self.tp_size
-        headdim = self.head_dim
-        dstate = self.ssm_state_size
-
-        if self.model_config is None:
-            return
-        chunk_size = self.model_config.get_mamba_chunk_size()
-
-        # Triton's autotuner includes tensor dtypes in its cache key,
-        # so state_dtype must match what real inference uses.
-        ssm_state_dtype = self.get_state_dtype()[1]
-
-        # Prefill-sized warmup: the profile run has max_num_batched_tokens rows.
-        nchunks = max(
-            1, min(_SSD_WARMUP_MAX_CHUNKS, projected_states.shape[0] // chunk_size)
-        )
-        seqlen = nchunks * chunk_size
-        batch = 1
-
-        x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
-        dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
-        B = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
-        C = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
-        cu_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
-        out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
-        ssm_state = torch.zeros(
-            batch, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
-        )
-        # States are indexed by a block-table column, as in serving.
-        stride = self._state_indices_stride
-        state_indices = torch.zeros(stride, device=device, dtype=torch.int32)[::stride]
-        checkpoint = MambaPrefillCheckpointMetadata(
-            torch.tensor([seqlen // 2], device=device, dtype=torch.int32),
-            torch.zeros(batch, device=device, dtype=torch.int32),
-            offsets=[seqlen // 2],
-        )
-
-        # Initial states and checkpoint export each select separate compiled
-        # programs. Warm up all of them so none compiles during inference.
-        for use_initial_states, export_checkpoint in itertools.product(
-            (False, True), (False, True) if self._exports_checkpoints else (False,)
-        ):
-            metadata = self.ssd_kernel.prepare_metadata(
-                Mamba2AttentionMetadata(
-                    num_prefills=batch,
-                    num_prefill_tokens=seqlen,
-                    num_decodes=0,
-                    num_decode_tokens=0,
-                    num_reqs=batch,
-                    has_initial_states_p=torch.full(
-                        (batch,), use_initial_states, device=device
-                    ),
-                    query_start_loc_p=cu_seqlens,
-                    state_indices_tensor_p=state_indices,
-                    state_indices_tensor_d=None,
-                    query_start_loc_d=None,
-                    num_accepted_tokens=None,
-                    seq_lens=torch.tensor([seqlen], device=device, dtype=torch.int32),
-                    prep_initial_states=use_initial_states,
-                    chunk_size=chunk_size,
-                    checkpoint_meta=checkpoint if export_checkpoint else None,
-                ),
-                self._mamba_spec,
-                torch.tensor([seqlen if use_initial_states else 0]),
-                torch.tensor([0, seqlen], dtype=torch.int32),
-            )
-            try:
-                self.ssd_kernel.forward(self, x, dt, B, C, out, ssm_state, metadata)
-            except Exception:
-                logger.warning(
-                    "Mamba2 SSD kernel warmup failed for layer %s "
-                    "(initial_states=%s, checkpoint=%s). First inference may "
-                    "experience latency spike or OOM due to autotuner.",
-                    self.prefix,
-                    use_initial_states,
-                    export_checkpoint,
-                    exc_info=True,
-                )
-
-        logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
-        torch.accelerator.empty_cache()
 
     def conv_ssm_forward(
         self,
@@ -808,9 +705,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             checkpoint_meta = attn_metadata.checkpoint_meta
 
         if attn_metadata is None:
-            # V1 profile run -- warm up SSD kernels so that autotuning
-            # completes before SSM cache allocation.
-            self._warmup_ssd_kernels(projected_states)
             hidden_states_B_C = (
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()

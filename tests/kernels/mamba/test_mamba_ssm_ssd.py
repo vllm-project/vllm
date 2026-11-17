@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -9,9 +10,14 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from tests.kernels.mamba.utils import selective_state_update_ref
+from tests.utils import create_new_process_for_each_test
 from vllm.model_executor.layers.linear_attention.mamba2.prefill.flashinfer import (
     FlashInferSSDKernel,
 )
+from vllm.model_executor.layers.linear_attention.mamba2.prefill.triton import (
+    TritonSSDKernel,
+)
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
 from vllm.model_executor.layers.mamba.ops import (
     ssd_bmm,
     ssd_chunk_scan,
@@ -26,10 +32,15 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.triton_helpers import _autotuned_configs
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backends.mamba2_attn import compute_varlen_chunk_metadata
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionMetadata,
+    compute_varlen_chunk_metadata,
+)
+from vllm.v1.kv_cache_interface import MambaSpec
 
 # All kernels exercised here are pure Triton, so they run on any backend
 # that the vLLM platform layer treats as a CUDA-alike device or as XPU.
@@ -1095,3 +1106,136 @@ def test_flashinfer_ssd_exports_a_checkpoint_mid_prefill(has_initial_state):
         atol=0.05,
         rtol=0.05,
     )
+
+
+@contextmanager
+def _record_triton_compiles():
+    from triton import knobs
+
+    previous = knobs.runtime.jit_post_compile_hook
+    compiled: list[str] = []
+
+    def hook(**kwargs):
+        compiled.append(getattr(kwargs.get("fn"), "name", "<unknown>"))
+        if previous is not None:
+            return previous(**kwargs)
+        return None
+
+    knobs.runtime.jit_post_compile_hook = hook
+    try:
+        yield compiled
+    finally:
+        knobs.runtime.jit_post_compile_hook = previous
+
+
+@create_new_process_for_each_test("spawn")
+def test_registered_ssd_warmup_leaves_nothing_to_compile_at_first_prefill():
+    """After the registry's warmup, the first cold, cached-state and
+    checkpointed prefills compile and autotune no Triton kernel: the scan, the
+    state gather and the scatter. The inputs are laid out as the mixer passes
+    them (views into its projection and conv outputs after a decode token, a
+    padded state cache, block-table state indices with a speculative block),
+    since Triton specializes on strides and alignment. A fresh process keeps
+    other tests' compiles out of the JIT caches."""
+    set_random_seed(0)
+    heads, groups, dim, dstate, chunk_size = 8, 2, 64, 128, 256
+    dtype, state_dtype = torch.bfloat16, torch.float32
+    # One speculative block per request: state indices are every other
+    # block-table entry.
+    indices_stride = 2
+    registry = JitWarmupRegistry(None)
+    with registry.activate():
+        TritonSSDKernel.register_warmup(
+            num_heads=heads,
+            head_dim=dim,
+            state_size=dstate,
+            num_groups=groups,
+            chunk_size=chunk_size,
+            dtype=dtype,
+            state_dtype=state_dtype,
+            state_indices_stride=indices_stride,
+            max_num_seqs=4,
+            max_num_batched_tokens=4 * chunk_size,
+            exports_checkpoints=True,
+        )
+    registry.warmup()
+
+    layer = SimpleNamespace(
+        A=-torch.exp(torch.rand(heads, device=DEVICE)),
+        D=torch.randn(heads, device=DEVICE, dtype=dtype),
+        dt_bias=torch.randn(heads, device=DEVICE, dtype=dtype),
+    )
+    payload = heads * dim * dstate
+    pages = torch.randn(5, payload + 32, device=DEVICE, dtype=state_dtype)
+    cache = pages[:, :payload].view(5, heads, dim, dstate)
+    conv_dim = heads * dim + 2 * groups * dstate
+    proj_dim = heads * dim + conv_dim + heads
+    spec = MambaSpec(
+        block_size=chunk_size,
+        shapes=((3, conv_dim), (heads, dim, dstate)),
+        dtypes=(dtype, state_dtype),
+    )
+
+    def prefill(lengths, slots, has_states, computed, checkpoint=None):
+        tokens = sum(lengths)
+        starts = torch.tensor((0, *lengths), dtype=torch.int32).cumsum(0).int()
+        metadata = TritonSSDKernel.prepare_metadata(
+            Mamba2AttentionMetadata(
+                num_prefills=len(lengths),
+                num_prefill_tokens=tokens,
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_reqs=len(lengths),
+                has_initial_states_p=torch.tensor(has_states, device=DEVICE),
+                query_start_loc_p=starts.to(DEVICE),
+                state_indices_tensor_p=torch.tensor(
+                    [[slot, 0] for slot in slots], dtype=torch.int32, device=DEVICE
+                )[:, 0],
+                state_indices_tensor_d=None,
+                query_start_loc_d=None,
+                num_accepted_tokens=None,
+                seq_lens=torch.tensor(lengths, dtype=torch.int32, device=DEVICE),
+                prep_initial_states=any(computed),
+                chunk_size=chunk_size,
+                checkpoint_meta=checkpoint,
+            ),
+            spec,
+            torch.tensor(computed),
+            starts,
+        )
+        # A decode token precedes the prefills in the projection and output.
+        projected = torch.randn(1 + tokens, proj_dim, device=DEVICE, dtype=dtype)
+        dt = projected[1:, heads * dim + conv_dim :]
+        conv_out = torch.randn(tokens, conv_dim, device=DEVICE, dtype=dtype)
+        x, B, C = torch.split(
+            conv_out, [heads * dim, groups * dstate, groups * dstate], dim=-1
+        )
+        output = torch.empty(1 + tokens, heads * dim, device=DEVICE, dtype=dtype)
+        TritonSSDKernel.forward(
+            layer,
+            x.view(tokens, heads, dim),
+            dt,
+            B.view(tokens, groups, dstate),
+            C.view(tokens, groups, dstate),
+            output[1:].view(tokens, heads, dim),
+            cache,
+            metadata,
+        )
+
+    with _record_triton_compiles() as compiled:
+        prefill((90, 5), [3, 4], [False, False], [0, 0])
+        prefill((127, 126, 3), [0, 1, 2], [False, True, False], [0, 5, 0])
+        prefill(
+            (224, 129, 3),
+            [0, 1, 2],
+            [False, True, False],
+            [0, 5, 0],
+            MambaPrefillCheckpointMetadata(
+                torch.tensor([96, 0, 0], dtype=torch.int32, device=DEVICE),
+                torch.tensor([1, 0, 0], dtype=torch.int32, device=DEVICE),
+                offsets=[96, 0, 0],
+            ),
+        )
+        torch.accelerator.synchronize()
+
+    assert not compiled, f"Triton compiled after warmup: {compiled}"
