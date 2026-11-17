@@ -111,10 +111,18 @@ class _ServedBucket:
     nbytes: int
 
 
-def _rdt_store() -> Any:
+def _ray_stored(tensor: torch.Tensor) -> bool:
+    """Whether Ray holds `tensor` as part of an RDT object.
+
+    Ray stores a task's returned tensors, and copies them into the NIXL pool,
+    only after the method returns. Before that, the public
+    `ray.experimental.wait_tensor_freed` returns at once (Ray 2.60), as if
+    the object were already freed. Ray has no public check for this, so it
+    reads the RDT store, which is internal; keep that to this helper.
+    """
     from ray._private.worker import global_worker
 
-    return global_worker.rdt_manager.rdt_store
+    return global_worker.rdt_manager.rdt_store.has_tensor(tensor)
 
 
 class _RDTProducerServer:
@@ -389,15 +397,12 @@ class _RDTProducerServer:
         from ray.experimental import wait_tensor_freed
 
         probe = tensors[0]
-        store = _rdt_store()
-        # Ray stores the returned tensors after `bucket` returns; before
-        # that, the free wait would return at once. One never stored (Ray
-        # failed to serialize it) is not in the pool, but its unit stays
-        # unreleased and the stall watchdog fails the sync.
+        # A bucket Ray never stored (it failed to serialize it) is not in the
+        # pool, but its unit stays unreleased and the watchdog fails the sync.
         deadline = time.monotonic() + self._stall_timeout
         stored = False
         while not self._shutdown and time.monotonic() < deadline:
-            stored = store.has_tensor(probe)
+            stored = _ray_stored(probe)
             if stored:
                 break
             time.sleep(0.001)

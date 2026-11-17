@@ -426,7 +426,7 @@ def test_a_bucket_is_freed_only_after_ray_stored_and_freed_it(server, monkeypatc
             return self.calls > 2
 
     store = _Store()
-    monkeypatch.setattr(trainer_mod, "_rdt_store", lambda: store)
+    monkeypatch.setattr(trainer_mod, "_ray_stored", store.has_tensor)
     monkeypatch.setattr(
         ray.experimental, "wait_tensor_freed", lambda t, timeout: events.append(t)
     )
