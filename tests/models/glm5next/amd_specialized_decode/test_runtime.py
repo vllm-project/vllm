@@ -124,11 +124,13 @@ def test_switch_off_is_none_and_on_raises_with_every_reason():
         (False, None, False),
         (False, "auto", False),
         (False, "stock", False),
-        (False, "latency_specialized", True),
-        (True, "auto", True),
+        (True, None, True),
+        (True, "latency_specialized", True),
     ],
 )
-def test_either_switch_turns_it_on(monkeypatch, monokernel, backend, on):
+def test_monokernel_turns_it_on(monkeypatch, monokernel, backend, on):
+    """`VllmConfig` sets `kernel_config.monokernel` for
+    `decode_backend=latency_specialized` too, so only the flag is read."""
     monkeypatch.setattr(spec, "refusal_reasons", lambda cfg: [])
     cfg = kit.make_vllm_config()
     cfg.kernel_config.monokernel = monokernel

@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import POLL_STAGES
-from vllm.models.glm5next.common.specialized_decode import requested
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -220,8 +219,17 @@ def refusal_reasons(vllm_config: VllmConfig) -> list[str]:
 def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     """The deployment's specialized decode, None unless it is requested
     (`--monokernel` or `decode_backend=latency_specialized`). Raises when it is
-    requested for a deployment it cannot serve, listing every reason."""
-    if not requested(vllm_config):
+    requested for a deployment it cannot serve, listing every reason.
+    `VllmConfig` sets `kernel_config.monokernel` for either one; `auto` and `stock`
+    are off on ROCm."""
+    extra = vllm_config.additional_config
+    backend = extra.get("decode_backend") if isinstance(extra, dict) else None
+    if backend not in (None, "auto", "stock", "latency_specialized"):
+        raise ValueError(
+            "decode_backend must be 'auto', 'stock' or 'latency_specialized', "
+            f"got {backend!r}"
+        )
+    if not vllm_config.kernel_config.monokernel:
         return None
     reasons = refusal_reasons(vllm_config)
     if reasons:
