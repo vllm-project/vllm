@@ -85,9 +85,10 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
 # Appended to the prompt to bias decoding, per the model card's hotword recipe.
 MOSS_HOTWORDS_HINT = "热词提示："
 
-_MOSS_DIARIZED_HEADER_RE = re.compile(
-    r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
+_MOSS_DIARIZED_TOKEN_RE = re.compile(
+    r"\[(?:(?P<timestamp>[0-9.]{1,32})|(?P<speaker>S[0-9]{1,15}))\]"
 )
+_MOSS_DIARIZED_WHITESPACE_RE = re.compile(r"\s*")
 _MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
 
 
@@ -99,48 +100,94 @@ class MossStreamingDiarizedParser(StreamingDiarizedTranscriptParser):
         self, model_cls: type[SupportsTranscription], model_config: ModelConfig
     ) -> None:
         super().__init__(model_cls, model_config)
-        self._scan_pos = 0
-        # (header start, header end, start time, speaker) of unsent segments.
-        self._headers: list[tuple[int, int, float, str]] = []
+        self._tail = ""
+        self._header: tuple[float, str] | None = None
+        self._body: list[str] = []
+        self._timestamp: str | None = None
+        self._candidate: list[str] = []
         self._emitted_segment = False
+
+    def _flush_candidate(self) -> None:
+        self._body.extend(self._candidate)
+        self._candidate.clear()
+        self._timestamp = None
+
+    def _append_text(self, text: str) -> None:
+        if not text:
+            return
+        if self._timestamp is not None and _MOSS_DIARIZED_WHITESPACE_RE.fullmatch(text):
+            # Whitespace belongs to the body if the candidate header is rejected.
+            if self._header is not None:
+                self._candidate.append(text)
+        else:
+            self._flush_candidate()
+            if self._header is not None:
+                self._body.append(text)
+
+    def _finish_segment(self) -> DiarizedTranscriptionSegment | None:
+        if self._header is None:
+            return None
+        start, speaker = self._header
+        body = "".join(self._body)
+        self._body.clear()
+        end_match = _MOSS_DIARIZED_END_RE.search(body)
+        end = parse_diarized_timestamp(end_match["end"]) if end_match else None
+        if end_match is None or end is None or end < start:
+            raise ValueError("Model output did not contain a valid diarized transcript")
+        if segment_text := body[: end_match.start()].strip():
+            self._emitted_segment = True
+            return DiarizedTranscriptionSegment(
+                start=start, end=end, speaker=speaker, text=segment_text
+            )
+        return None
 
     def process_delta(
         self, text_delta: str, finished: bool
     ) -> Iterator[DiarizedTranscriptionSegment]:
-        self._text += text_delta
-        for match in _MOSS_DIARIZED_HEADER_RE.finditer(self._text, self._scan_pos):
-            self._scan_pos = match.end()
-            start = parse_diarized_timestamp(match["start"])
-            speaker = parse_diarized_speaker(match["speaker"])
-            if start is not None and speaker is not None:
-                self._headers.append((match.start(), match.end(), start, speaker))
+        text = self._tail + text_delta
+        self._tail = ""
+        pos = 0
+        for match in _MOSS_DIARIZED_TOKEN_RE.finditer(text, partial=True):
+            self._append_text(text[pos : match.start()])
+            pos = match.end()
+            if match.partial:
+                # Only an incomplete marker is rescanned, at most 33 characters.
+                self._tail = match[0]
+                break
+            if match["timestamp"] is not None:
+                self._flush_candidate()
+                self._timestamp = match["timestamp"]
+                if self._header is not None:
+                    self._candidate.append(match[0])
+            elif self._timestamp is not None:
+                start = parse_diarized_timestamp(self._timestamp)
+                speaker = parse_diarized_speaker(match["speaker"])
+                if start is not None and speaker is not None:
+                    self._candidate.clear()
+                    self._timestamp = None
+                    segment = self._finish_segment()
+                    self._header = (start, speaker)
+                    if segment is not None:
+                        yield segment
+                else:
+                    self._flush_candidate()
+                    self._append_text(match[0])
+            else:
+                self._append_text(match[0])
+        self._append_text(text[pos:])
 
-        # A segment's body runs up to the next header, so the last one stays
-        # open until the output ends.
-        num_final = len(self._headers) if finished else len(self._headers) - 1
-        for index in range(num_final):
-            _, body_start, start, speaker = self._headers[index]
-            body_end = (
-                self._headers[index + 1][0]
-                if index + 1 < len(self._headers)
-                else len(self._text)
-            )
-            body = self._text[body_start:body_end]
-            end_match = _MOSS_DIARIZED_END_RE.search(body)
-            end = parse_diarized_timestamp(end_match["end"]) if end_match else None
-            if end_match is None or end is None or end < start:
+        if finished:
+            self._flush_candidate()
+            self._append_text(self._tail)
+            self._tail = ""
+            segment = self._finish_segment()
+            self._header = None
+            if segment is not None:
+                yield segment
+            if not self._emitted_segment:
                 raise ValueError(
                     "Model output did not contain a valid diarized transcript"
                 )
-            if segment_text := body[: end_match.start()].strip():
-                self._emitted_segment = True
-                yield DiarizedTranscriptionSegment(
-                    start=start, end=end, speaker=speaker, text=segment_text
-                )
-
-        del self._headers[: max(num_final, 0)]
-        if finished and not self._emitted_segment:
-            raise ValueError("Model output did not contain a valid diarized transcript")
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):

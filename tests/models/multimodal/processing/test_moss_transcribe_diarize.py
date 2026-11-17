@@ -179,28 +179,109 @@ def test_streaming_parser_sends_a_segment_once_the_next_one_starts():
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "expected"),
     [
-        "[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]",
-        "[0][S01]First speaker[2][1][S02]Second speaker[3]",
-        "[0][S01]The [2024] report is ready.[4]",
-        "[0][S01]Hello[1]\n [2][S02]Hi[3]",
-        "noise [bad][0.1][S01]Hello[0.9]",
-        "[0][S01][1][2][S02]Complete[3]",
-        "[0][S01]a[1..2][S02]b[1]",
+        (
+            "[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]",
+            [(0.48, 1.66, "S01", "Welcome"), (12.26, 13.81, "S02", "Ready")],
+        ),
+        (
+            "[0][S01]First speaker[2][1][S02]Second speaker[3]",
+            [(0, 2, "S01", "First speaker"), (1, 3, "S02", "Second speaker")],
+        ),
+        (
+            "[0][S01]The [2024] report is ready.[4]",
+            [(0, 4, "S01", "The [2024] report is ready.")],
+        ),
+        (
+            "[0][S01]Hello[1]\n [2][S02]Hi[3]",
+            [(0, 1, "S01", "Hello"), (2, 3, "S02", "Hi")],
+        ),
+        ("noise [bad][0.1][S01]Hello[0.9]", [(0.1, 0.9, "S01", "Hello")]),
+        ("[0][S01][1][2][S02]Complete[3]", [(2, 3, "S02", "Complete")]),
+        ("[0][S01]a[1..2][S02]b[1]", [(0, 1, "S01", "a[1..2][S02]b")]),
+        (
+            "[0][S01]A[2]\x1c[S02]B[3]",
+            [(0, 3, "S01", "A[2]\x1c[S02]B")],
+        ),
+        (
+            f"[0][S01]Value [{'1' * 33}][1]",
+            [(0, 1, "S01", f"Value [{'1' * 33}]")],
+        ),
     ],
 )
-def test_streaming_parser_output_does_not_depend_on_delta_boundaries(text):
-    """Streaming one character at a time gives the non-streaming segments."""
+@pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+def test_streaming_parser_output_does_not_depend_on_delta_boundaries(
+    text, expected, chunk_size
+):
+    """Both parsing paths must match explicit semantics, not each other's output."""
     parser = _streaming_parser()
 
-    segments = [s for char in text for s in parser.process_delta(char, finished=False)]
+    segments = [
+        s
+        for offset in range(0, len(text), chunk_size)
+        for s in parser.process_delta(
+            text[offset : offset + chunk_size], finished=False
+        )
+    ]
     segments += parser.process_delta("", finished=True)
 
-    assert segments == (
+    assert [(s.start, s.end, s.speaker, s.text) for s in segments] == expected
+    non_streaming = (
         MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
             text, None
         )
+    )
+    assert [(s.start, s.end, s.speaker, s.text) for s in non_streaming] == expected
+
+
+@pytest.mark.parametrize("speaker_marker", ["[S02]", "[Sx]"])
+def test_streaming_parser_preserves_whitespace_until_header_is_resolved(speaker_marker):
+    whitespace = "\t\u2003\n " * 512
+    parser = _streaming_parser()
+    text = "[0][S01]A[1][2]" + whitespace + speaker_marker
+    sent = [s for char in text for s in parser.process_delta(char, finished=False)]
+    assert [(s.start, s.end, s.speaker, s.text) for s in sent] == (
+        [(0, 1, "S01", "A")] if speaker_marker == "[S02]" else []
+    )
+    sent.extend(parser.process_delta("B[3]", finished=True))
+    expected = (
+        [(0, 1, "S01", "A"), (2, 3, "S02", "B")]
+        if speaker_marker == "[S02]"
+        else [(0, 3, "S01", "A[1][2]" + whitespace + "[Sx]B")]
+    )
+    assert [(s.start, s.end, s.speaker, s.text) for s in sent] == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_prefix"),
+    [
+        ("noise only", []),
+        ("[0][S01][1]", []),
+        ("[2][S01]Reversed[1]", []),
+        ("[0][S01]A[1] trailing text", []),
+        ("[0][S01]A[1][S", []),
+        ("[0][S01]Complete[1][2][S02]Incomplete", [(0, 1, "S01", "Complete")]),
+    ],
+)
+@pytest.mark.parametrize("chunk_size", [1, 1000])
+def test_streaming_parser_rejects_invalid_transcripts_with_explicit_prefix(
+    text, expected_prefix, chunk_size
+):
+    parser = _streaming_parser()
+    segments = []
+    with pytest.raises(ValueError, match="valid diarized transcript"):
+        for offset in range(0, len(text), chunk_size):
+            segments.extend(
+                parser.process_delta(text[offset : offset + chunk_size], finished=False)
+            )
+        segments.extend(parser.process_delta("", finished=True))
+    assert [(s.start, s.end, s.speaker, s.text) for s in segments] == expected_prefix
+    assert (
+        MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
+            text, None
+        )
+        == []
     )
 
 
