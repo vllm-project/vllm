@@ -327,6 +327,14 @@ def test_pieces_over_buffer_bytes_go_in_row_segments(monkeypatch):
     assert split - loads and split & loads  # a direct and a fallback split
     assert all(b.nbytes <= 24 for b in fleet.engine._buckets)
     assert fleet.engine._joins == {}  # joined and loaded
+    # segments are no larger than the buckets the other pieces make, so the
+    # receive slot does not grow
+    regular = [
+        b.nbytes
+        for b in fleet.engine._buckets
+        if not any(n in split for n, _ in b.pieces)
+    ]
+    assert fleet.engine._slot_bytes == max(regular)
 
 
 def test_a_row_over_buffer_bytes_is_refused_at_plan_time(monkeypatch):

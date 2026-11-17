@@ -252,7 +252,8 @@ class ShardedRDTWeightTransferEngine(
         # (slot, bucket) -> the source views of its copy-out, built once
         self._views: dict[tuple[int, int], tuple] = {}
         # fallback name -> its whole tensor and segments landed, while some
-        # of its segments are still in flight
+        # of its segments are still in flight. Freed once loaded, so the
+        # caching allocator reuses it (e.g. for post-load processing).
         self._joins: dict[str, tuple[torch.Tensor, int]] = {}
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
@@ -402,16 +403,34 @@ class ShardedRDTWeightTransferEngine(
 
         components = router.components()
         unit_rank = _component_unit_rank(self._metas, self._units, router)
-        buckets: list[_Bucket] = []
-        for (producer, unit), pieces in groups.items():
+        for pieces in groups.values():
             # By destination address, so pieces adjacent in memory (one
             # fused tensor's slices, e.g. per-expert weights) are adjacent in
             # the bucket too and land with one copy.
             pieces.sort(key=_by_destination)
+        # Cut to the largest bucket the pieces within `buffer_bytes` make, and
+        # pieces over it into segments of that: the receive slot stays what
+        # those buckets need. (Cutting the other pieces to it gives the same
+        # buckets they get at `buffer_bytes`.)
+        budget = self._buffer_bytes
+        budget = max(
+            (
+                sum(piece_nbytes(box, dt) for _, box, dt, *_ in chunk)
+                for pieces in groups.values()
+                for chunk in _cut(
+                    [p for p in pieces if piece_nbytes(p[1], p[2]) <= budget], budget
+                )
+            ),
+            default=budget,
+        )
+        buckets: list[_Bucket] = []
+        for (producer, unit), pieces in groups.items():
             pieces = [
-                seg for piece in pieces for seg in _rows(piece, self._buffer_bytes)
+                seg
+                for piece in pieces
+                for seg in _rows(piece, budget, self._buffer_bytes)
             ]
-            for chunk in _cut(pieces, self._buffer_bytes):
+            for chunk in _cut(pieces, budget):
                 buckets.append(
                     _Bucket(
                         producer=producer,
@@ -721,29 +740,34 @@ def _by_destination(piece: tuple) -> tuple[int, int]:
     return (1, 0)
 
 
-def _rows(piece: tuple, budget: int) -> list[tuple]:
+def _rows(piece: tuple, budget: int, limit: int | None = None) -> list[tuple]:
     """A piece over `budget` cut along dim 0 of its box into segments of
-    whole rows, each at most `budget` (with its alignment): ordinary pieces,
-    whose destinations are the same rows of the piece's, so every segment
-    is a view on both sides. A fallback's segments are joined on landing.
+    whole rows, each at most `budget` (with its alignment), or `limit` if one
+    row does not fit `budget`: ordinary pieces, whose destinations are the
+    same rows of the piece's, so every segment is a view on both sides. A
+    fallback's segments are joined on landing.
 
     Raises:
-        RuntimeError: one row is over `budget`, or a destination's rows are
+        RuntimeError: one row is over `limit`, or a destination's rows are
             not rows of the box.
 
     """
+    limit = budget if limit is None else limit
     name, box, dtype, copies, load = piece
     if piece_nbytes(box, dtype) <= budget:
         return [piece]
     shape = box_shape(box)
     row = math.prod(shape[1:]) * dtype.itemsize
-    rows = budget // row
-    while rows and piece_nbytes(((0, rows), *box[1:]), dtype) > budget:
-        rows -= 1
-    if not rows:
+    for cap in (budget, limit):
+        rows = cap // row
+        while rows and piece_nbytes(((0, rows), *box[1:]), dtype) > cap:
+            rows -= 1
+        if rows:
+            break
+    else:
         raise RuntimeError(
             f"Sharded RDT: one row of {name!r} (box {box}) is {row} B, over "
-            f"buffer_bytes={budget}; raise buffer_bytes"
+            f"buffer_bytes={limit}; raise buffer_bytes"
         )
     dests = []
     for dest in copies:
