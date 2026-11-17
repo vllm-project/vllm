@@ -89,13 +89,19 @@ impl SingleWriterShmRingBuffer {
         }
         let path = format!("/dev/shm/{name}");
 
+        // Fail without unlinking when the name is taken: the existing segment
+        // belongs to another writer.
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) => bail_shm_storage_create!(name = name.to_string(), "{error}"),
+        };
         let create_result = (|| {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)?;
             file.set_len((data_buffer_size + DATA_OFFSET) as u64)?;
             // SAFETY: `file` is a fresh shm file of at least the mapped size.
             unsafe { MmapMut::map_mut(&file) }
@@ -354,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn create_fails_when_name_exists() {
+    fn create_fails_when_name_exists_and_keeps_the_existing_segment() {
         let name = unique_name();
         let _buffer = SingleWriterShmRingBuffer::create(1024, &name).unwrap();
         let result = SingleWriterShmRingBuffer::create(1024, &name);
@@ -363,6 +369,10 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("File exists"), "{error}");
+        assert!(
+            std::path::Path::new(&format!("/dev/shm/{name}")).exists(),
+            "a failed create must not unlink the existing segment"
+        );
     }
 
     #[test]
