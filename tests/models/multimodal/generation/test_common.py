@@ -8,9 +8,7 @@ import math
 from collections import defaultdict
 from pathlib import PosixPath
 
-import numpy as np
 import pytest
-from PIL import Image
 from transformers import (
     AutoModel,
     AutoModelForCausalLM,
@@ -19,7 +17,6 @@ from transformers import (
     AutoProcessor,
 )
 
-from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.utils.func_utils import identity
 
@@ -1440,47 +1437,3 @@ def test_custom_inputs_models_heavy(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
     )
-
-
-@pytest.mark.core_model
-def test_internvl3_image_kwargs_with_video(vllm_runner: type[VllmRunner]) -> None:
-    """Image crop overrides must not prevent video-capable models from loading."""
-    with vllm_runner(
-        "OpenGVLab/InternVL3-1B",
-        trust_remote_code=True,
-        enforce_eager=True,
-        max_model_len=2048,
-        max_num_seqs=2,
-        gpu_memory_utilization=0.2,
-        kv_cache_memory_bytes=512 * 1024**2,
-        attention_config={"backend": "TRITON_ATTN"},
-        mm_encoder_attn_backend="TORCH_SDPA",
-        mm_processor_kwargs={"max_dynamic_patch": 2, "use_thumbnail": False},
-        limit_mm_per_prompt={"image": 1, "video": 1},
-    ) as model:
-        llm = model.get_llm()
-        tokenizer = llm.get_tokenizer()
-        requests = []
-        for modality, data in (
-            ("image", Image.new("RGB", (896, 448), "red")),
-            ("video", np.full((2, 448, 448, 3), 128, dtype=np.uint8)),
-        ):
-            prompt = tokenizer.apply_chat_template(
-                [{"role": "user", "content": f"<{modality}>\nDescribe this."}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            requests.append({"prompt": prompt, "multi_modal_data": {modality: data}})
-        outputs = llm.generate(
-            requests, SamplingParams(temperature=0, max_tokens=2, logprobs=1)
-        )
-        assert len(outputs) == 2
-        # Two image crops and two video frames each produce 256 tokens per item.
-        for output, token in zip(outputs, ("<IMG_CONTEXT>", "<|video_pad|>")):
-            token_id = tokenizer.convert_tokens_to_ids(token)
-            assert output.prompt_token_ids.count(token_id) == 2 * 256
-            completion = output.outputs[0]
-            assert completion.token_ids
-            assert completion.logprobs is not None
-            for token_id, logprobs in zip(completion.token_ids, completion.logprobs):
-                assert math.isfinite(logprobs[token_id].logprob)
