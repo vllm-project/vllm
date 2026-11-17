@@ -317,8 +317,9 @@ class TestBuildChatParams:
 
         assert params.chat_template_content_format == "openai"
 
-    def test_auto_passes_through(self):
-        """`"auto"` must reach the renderer, which is where it is resolved."""
+    def test_auto_falls_back_to_default(self):
+        """`"auto"` is the "unspecified" sentinel: it must not swallow the
+        engine default. Resolution happens later, in the renderer."""
         ctx = OfflineInputsContext(
             pooling_task="embed",
             tokenization_kwargs=None,
@@ -326,28 +327,6 @@ class TestBuildChatParams:
             priorities=None,
             chat_template_content_format="auto",
         )
-
-        params = ctx.build_chat_params(
-            default_template="engine_jinja",
-            default_template_content_format="string",
-        )
-
-        assert params.chat_template_content_format == "auto"
-
-    def test_falls_back_to_default_when_self_unspecified(self):
-        # Simulate a caller who bypassed `_resolve_content_format` (e.g. an
-        # external user constructing `OfflineInputsContext` directly with the
-        # field explicitly set to an empty-ish value).
-        ctx = OfflineInputsContext(
-            pooling_task="embed",
-            tokenization_kwargs=None,
-            lora_request=None,
-            priorities=None,
-        )
-        # Overwrite the default `"auto"` with `None` to represent the
-        # "unspecified" branch directly (the type hint admits `None` only in
-        # a future-proofing sense; `__post_init__` does not check it).
-        ctx.chat_template_content_format = None  # type: ignore[assignment]
 
         params = ctx.build_chat_params(
             default_template="engine_jinja",
