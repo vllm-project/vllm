@@ -277,9 +277,10 @@ _SLOTS: dict[tuple[int, int], list[torch.Tensor]] = {}
 
 
 def slot_buffers(num_buffers: int, nbytes: int) -> list[torch.Tensor]:
-    """This device's reused packed buffers, at least `nbytes` each, shared by
-    every transfer on the device. They grow in place, so views of them stay
-    valid."""
+    """This device's reused packed buffers, at least `nbytes` each. Shared by
+    every transfer on the device, so memory is one set of buffers however many
+    senders there are. They grow in place and `release_slot_buffers` frees
+    their memory between updates: views of them stay valid either way."""
     key = (torch.accelerator.current_device_index(), num_buffers)
     if key not in _SLOTS:
         _SLOTS[key] = [
@@ -289,7 +290,15 @@ def slot_buffers(num_buffers: int, nbytes: int) -> list[torch.Tensor]:
     for buf in bufs:
         if buf.numel() < nbytes:
             buf.resize_(nbytes)
+        if buf.untyped_storage().nbytes() != buf.numel():
+            buf.untyped_storage().resize_(buf.numel())
     return bufs
+
+
+def release_slot_buffers() -> None:
+    for bufs in _SLOTS.values():
+        for buf in bufs:
+            buf.untyped_storage().resize_(0)
 
 
 def packed_nccl_broadcast_consumer(
