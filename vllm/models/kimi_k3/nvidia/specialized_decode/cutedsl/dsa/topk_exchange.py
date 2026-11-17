@@ -88,6 +88,19 @@ TIE_REGS = 8  # ties ranked by ballots: up to 32 per register
 # Tunable; set from a one-GPU sweep.
 TIE_OWN = 8
 TABLE_CAP = 1024  # block-table columns staged in shared memory
+# "digits" round 1, batch tables per DCP size (1: on): a lane's bit-plane pair and B'
+# pairs are re-polled together (every pass reloads all of them) instead of one pair
+# after another, so pairs landing late cost one reload round, not one each. The same
+# words (bit for bit). DCP16: set by a 16-rank decode-step A/B.
+MERGE_SETTLE_ALL = {16: "1-8:1"}
+
+
+def merge_settle_all(rows, world, digits) -> bool:
+    """Whether the "digits" merge of `rows` rows over `world` ranks re-polls its
+    pairs together (MERGE_SETTLE_ALL)."""
+    if not digits:
+        return False
+    return batch_table(MERGE_SETTLE_ALL.get(world, "")).get(rows, 0) == 1
 
 
 def merge_select(rows, topk, local_topk, world, emit_ids) -> str:
@@ -246,9 +259,12 @@ def reserve(group, device, world, rank, rows, local_topk):
 
 
 @functools.cache
-def build_merge(rows, topk, local_topk, world, block_size, emit_ids, digits=False):
+def build_merge(
+    rows, topk, local_topk, world, block_size, emit_ids, digits=False, settle_all=False
+):
     """`ExchangeMerge` of `rows` rows (see the module docstring); `digits`:
-    its "digits" first round (`merge_select`)."""
+    its "digits" first round (`merge_select`); `settle_all`: that round re-polls a
+    lane's pairs together (`merge_settle_all`)."""
     from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels as stock
 
     from .indexer import low_digit, shared_add, shared_or, warp_inclusive
@@ -264,6 +280,7 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids, digits=Fals
         and not emit_ids
     )
     n, tb = local_topk, TB
+    settle_all_pairs = bool(digits and settle_all)
     num_bins, num_warps = stock._NUM_BINS, TB // _WARP
     pairs = ll_pairs(n)
     num_r1 = world * n
@@ -305,6 +322,32 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids, digits=Fals
                     cute.printf("DCP top-k exchange timeout epoch=%d\n", epoch)
                     stock._trap()
         return w0, w1
+
+    @cute.jit
+    def settle_all(base: Int64, plane_address: Int64, lane, pv, epoch: Uint32):
+        """`settle` of a lane's B' pairs (rows 0 .. groups - 1 of `pv`, at base +
+        (lane + 32 m) * 16) and its bit-plane pair (row groups, at plane_address),
+        every pass reloading all of them."""
+        bad = Uint32(0)
+        for m in cutlass.range_constexpr(groups + 1):
+            bad = bad | (pv[m, 1] ^ epoch) | (pv[m, 3] ^ epoch)
+        if bad != Uint32(0):
+            start = stock._globaltimer()
+            while bad != Uint32(0):
+                bad = Uint32(0)
+                for m in cutlass.range_constexpr(groups + 1):
+                    address = plane_address
+                    if cutlass.const_expr(m < groups):
+                        address = base + Int64(lane + Int32(32 * m)) * 16
+                    w0, e0, w1, e1 = ll_load_pair(address)
+                    pv[m, 0] = w0
+                    pv[m, 1] = e0
+                    pv[m, 2] = w1
+                    pv[m, 3] = e1
+                    bad = bad | (e0 ^ epoch) | (e1 ^ epoch)
+                if stock._globaltimer() - start > Int64(stock._SPIN_TIMEOUT_NS):
+                    cute.printf("DCP top-k exchange timeout epoch=%d\n", epoch)
+                    stock._trap()
 
     @cute.jit
     def top_digit(
@@ -796,16 +839,29 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids, digits=Fals
             rows_out[row, i] = Int32(-1)
         cute.arch.sync_threads()
 
-        pw0, pw1 = settle(plane_address, praw[0], praw[1], praw[2], praw[3], tag)
+        if cutlass.const_expr(settle_all_pairs):
+            pv = cute.make_rmem_tensor((groups + 1, 4), Uint32)
+            for m in cutlass.range_constexpr(groups):
+                for k in cutlass.range_constexpr(4):
+                    pv[m, k] = raw[m][k]
+            for k in cutlass.range_constexpr(4):
+                pv[groups, k] = praw[k]
+            settle_all(base, plane_address, lane, pv, tag)
+            pw0, pw1 = pv[groups, 0], pv[groups, 2]
+        else:
+            pw0, pw1 = settle(plane_address, praw[0], praw[1], praw[2], praw[3], tag)
         lt = lanemask_lt()
         me = recast_val(lane, Uint32)
         keys = cute.make_rmem_tensor((kpl,), Uint64)
         source = recast_val(warp, Uint32)
         for m in cutlass.range_constexpr(groups):
-            w0, w1 = settle(
-                base + Int64(lane + Int32(32 * m)) * 16, raw[m][0], raw[m][1],
-                raw[m][2], raw[m][3], tag,
-            )  # fmt: skip
+            if cutlass.const_expr(settle_all_pairs):
+                w0, w1 = pv[m, 0], pv[m, 2]
+            else:
+                w0, w1 = settle(
+                    base + Int64(lane + Int32(32 * m)) * 16, raw[m][0], raw[m][1],
+                    raw[m][2], raw[m][3], tag,
+                )  # fmt: skip
             p0 = cute.arch.shuffle_sync(pw0, m)
             p1 = cute.arch.shuffle_sync(pw1, m)
             high = p0
@@ -1100,11 +1156,12 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids, digits=Fals
 
 @functools.cache
 def compile_merge(
-    rows, topk, local_topk, world, block_size, emit_ids, device, digits=False
-):
+    rows, topk, local_topk, world, block_size, emit_ids, device, digits=False,
+    settle_all=False,
+):  # fmt: skip
     """The compiled `ExchangeMerge` of `rows` rows (shared by every layer)."""
     args = rows, topk, local_topk, world, block_size, emit_ids
-    entry = build_merge(*args, digits)
+    entry = build_merge(*args, digits, settle_all)
     i32 = torch.int32
     vec, mat = dynamic_fake(1, i32), dynamic_fake(2, i32)
     with torch.accelerator.device_index(device):
@@ -1144,7 +1201,10 @@ class ExchangeMerge:
         args = rows, topk, exchange.local_topk, exchange.world, block_size, emit_ids
         self.select = merge_select(*args[:4], emit_ids)
         digits = self.select == "digits"
-        self.kernel = compile_merge(*args, exchange.recv.device.index, digits)
+        settle_all = merge_settle_all(rows, exchange.world, digits)
+        self.kernel = compile_merge(
+            *args, exchange.recv.device.index, digits, settle_all
+        )
         self.emit_ids = emit_ids
 
     def __call__(
