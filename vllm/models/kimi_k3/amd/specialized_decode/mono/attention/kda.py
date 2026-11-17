@@ -121,7 +121,7 @@ TAG_BATCH = 14  # tagged-row specs a poll batch (56 registers; ``poll_rows_to_ld
 _SOURCES = source_digest(".")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KdaPreBuild:
     tokens: int  # S
     qlen: int  # L, tokens a request

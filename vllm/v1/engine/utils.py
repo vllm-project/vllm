@@ -88,7 +88,7 @@ class CoreEngine:
         self.state = CoreEngineState.NEW
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqBindAddresses:
     """Frontend endpoints before their owning sockets bind."""
 
@@ -96,7 +96,7 @@ class EngineZmqBindAddresses:
     outputs: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqAddresses:
     """Resolved frontend endpoints advertised to engine processes."""
 
@@ -114,7 +114,7 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqListeners:
     inputs: list[ZmqListener]
     outputs: list[ZmqListener]
@@ -135,7 +135,7 @@ class EngineZmqListeners:
             self.cleanup()
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineHandshakeMetadata:
     """Metadata sent to each engine process during startup handshake,
     including addresses of the front-end ZMQ queues that they should
@@ -1189,7 +1189,7 @@ def bind_engine_zmq_listeners(
 FrontendProcess = BaseProcess | _SubprocessWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class CoreEngineLaunch:
     """Resources and startup barrier for launched engine processes."""
 

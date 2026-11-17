@@ -35,7 +35,7 @@ def _heads_per_program(heads_per_group: int) -> int:
 class FusedInvRopeFP8QuantKernel(
     VllmTritonJitKernel["FusedInvRopeFP8QuantKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         heads_per_group: int
         fp8_max: float
