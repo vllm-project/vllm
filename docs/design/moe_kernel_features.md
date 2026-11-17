@@ -80,6 +80,12 @@ gate is capped at the limit and the up projection is clipped to the positive
 and negative limit. No additional flag is needed. Models without a limit
 retain ordinary SiLU behavior.
 
+Expert implementations that cannot apply this SiLU clamp declare
+`_supports_silu_clamp() = False`. Kernel selection excludes them when the model
+requires a limit; direct construction also rejects limits from the quantization
+configuration. This check is specific to SiLU and does not change the separate
+`SWIGLUOAI` activation contract.
+
 As with the backends, some experts support applying topk weights on the input activations. The entries in the column in this table only apply to the non-modular experts.
 
 Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEExpertsModular`.

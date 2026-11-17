@@ -81,7 +81,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.local_expert_offset = self.ep_rank * self.local_num_experts
         self.gemm1_alpha = quant_config.gemm1_alpha
         self.gemm1_beta = quant_config.gemm1_beta
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_clamp_limit = self.activation_config.clamp_limit
         # FlashInfer selects SiTU via its beta parameters.
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta

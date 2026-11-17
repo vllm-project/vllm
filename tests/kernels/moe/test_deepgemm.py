@@ -23,12 +23,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
+    mxfp4_w4a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
     ep_gather,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+    DeepGemmExperts,
+    DeepGemmFP4Experts,
     _fp8_workspace_shape,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
@@ -50,6 +53,41 @@ from vllm.v1.worker.workspace import (
 )
 
 BLOCK_SIZE = [128, 128]
+
+
+@pytest.mark.parametrize("fp4", [False, True])
+@pytest.mark.parametrize("quant_limit", [None, 5.0])
+def test_deepgemm_activation_resolves_model_clamp(fp4, quant_limit):
+    """Fused activation honors model limits and explicit quant overrides."""
+    moe_config = make_dummy_moe_config()
+    moe_config.swiglu_limit = 10.0
+    scale = torch.ones(1, device="cuda")
+    factory = mxfp4_w4a8_moe_quant_config if fp4 else fp8_w8a8_moe_quant_config
+    quant_config = factory(
+        w1_scale=scale,
+        w2_scale=scale,
+        block_shape=BLOCK_SIZE,
+        gemm1_clamp_limit=quant_limit,
+    )
+    cls = DeepGemmFP4Experts if fp4 else DeepGemmExperts
+    experts = cls(moe_config, quant_config)
+    gate = torch.full((128, 512), 20.0, device="cuda", dtype=torch.bfloat16)
+    up = gate.clone()
+    up[:, ::2] = -20.0
+    values = torch.cat((gate, up), dim=-1)
+    output = torch.empty_like(gate, dtype=torch.float8_e4m3fn)
+    q, s = experts._act_mul_quant(values, output, MoEActivation.SILU)
+    limit = 10.0 if quant_limit is None else quant_limit
+    clamped = torch.cat((gate.clamp(max=limit), up.clamp(-limit, limit)), dim=-1)
+    reference = cls(
+        make_dummy_moe_config(),
+        factory(w1_scale=scale, w2_scale=scale, block_shape=BLOCK_SIZE),
+    )
+    ref_q, ref_s = reference._act_mul_quant(
+        clamped, torch.empty_like(output), MoEActivation.SILU
+    )
+    torch.testing.assert_close(q.float(), ref_q.float(), atol=0, rtol=0)
+    torch.testing.assert_close(s, ref_s, atol=0, rtol=0)
 
 
 def test_ep_gather_uses_64_bit_row_offsets():

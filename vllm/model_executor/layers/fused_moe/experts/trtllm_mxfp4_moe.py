@@ -4,7 +4,10 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -80,9 +83,12 @@ class TrtLlmMxfp4ExpertsBase:
         else:
             self.gemm1_beta = None
 
-        if quant_config.gemm1_clamp_limit is not None:
+        clamp_limit = ApplyMoEActivationConfig.from_configs(
+            moe_config, quant_config
+        ).clamp_limit
+        if clamp_limit is not None:
             self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                [clamp_limit] * self.local_num_experts,
                 dtype=torch.float32,
                 device=device,
             )

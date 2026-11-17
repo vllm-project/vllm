@@ -51,6 +51,7 @@ CASES = [
     (8, 1024, 7168, fp8_dtype),
     (17, 31, 768, fp8_dtype),
     (32, 64, 256, fp8_dtype),
+    (33, 4, 384, fp8_dtype),
     (256, 8, 7168, fp8_dtype),
     (256, 32, 7168, fp8_dtype),
     (256, 64, 7168, fp8_dtype),
@@ -215,19 +216,28 @@ def token_random(E, T, H2, tokens_per_expert):
 
 
 @pytest.mark.parametrize("ceil_ue8m0", [False, True])
+@pytest.mark.parametrize("clamp_limit", [0.5, 10.0, 10.1])
 @torch.inference_mode()
-def test_masked_triton_silu_quant_clamps_valid_tokens(ceil_ue8m0: bool):
+def test_masked_triton_silu_quant_clamps_valid_tokens(
+    ceil_ue8m0: bool, clamp_limit: float
+):
     """The fallback applies the same limits as explicitly clamped inputs."""
     E, T, H = 3, 4, 2048
     set_random_seed(42)
     counts = torch.tensor([0, 1, T], dtype=torch.int32, device=DEVICE)
     y = torch.randn(E, T, 2 * H, dtype=torch.bfloat16, device=DEVICE) * 20
-    clamped = torch.cat((y[..., :H].clamp(max=10), y[..., H:].clamp(-10, 10)), -1)
+    clamped = torch.cat(
+        (
+            y[..., :H].clamp(max=clamp_limit),
+            y[..., H:].clamp(-clamp_limit, clamp_limit),
+        ),
+        -1,
+    )
     shape, strides, dtype = scales_shape_stride_dtype(
         E, T, H // 128, DeepGemmQuantScaleFMT.FLOAT32
     )
     results = []
-    for values, limit in ((y, 10.0), (clamped, None)):
+    for values, limit in ((y, clamp_limit), (clamped, None)):
         q = torch.empty(E, T, H, dtype=fp8_dtype, device=DEVICE)
         s = torch.empty_strided(shape, strides, dtype=dtype, device=DEVICE)
         fp8_min, fp8_max = get_fp8_min_max()
@@ -257,6 +267,46 @@ def test_masked_triton_silu_quant_clamps_valid_tokens(ceil_ue8m0: bool):
         torch.testing.assert_close(
             actual.float()[valid], expected.float()[valid], atol=0, rtol=0
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    reason="Requires the native SM80+ masked activation kernel",
+)
+@pytest.mark.parametrize("H", [128, 4096])
+@pytest.mark.parametrize("scale_fmt", list(DeepGemmQuantScaleFMT))
+@pytest.mark.parametrize("limit", [0.0, 0.5, 10.1])
+@pytest.mark.parametrize("empty", [False, True])
+def test_native_masked_clamp_matches_preclamped_input(H, scale_fmt, limit, empty):
+    """Each native launch variant preserves BF16 clipping before quantization."""
+    E, T = 3, 4
+    set_random_seed(42)
+    counts = torch.tensor([0, 1, T], dtype=torch.int32, device=DEVICE)
+    if empty:
+        counts.zero_()
+    values = torch.randn(E, T, 2 * H, dtype=torch.bfloat16, device=DEVICE) * 20
+    clamped = torch.cat(
+        (values[..., :H].clamp(max=limit), values[..., H:].clamp(-limit, limit)),
+        dim=-1,
+    )
+    shape, strides, scale_dtype = scales_shape_stride_dtype(E, T, H // 128, scale_fmt)
+    results = []
+    for x, clamp in ((values, limit), (clamped, None)):
+        q = torch.ones(E, T, H, dtype=fp8_dtype, device=DEVICE)
+        s = torch.empty_strided(shape, strides, dtype=scale_dtype, device=DEVICE)
+        s.fill_(1)
+        torch.ops._C.persistent_masked_m_silu_mul_quant(
+            x, counts, q, s, scale_fmt != DeepGemmQuantScaleFMT.FLOAT32, clamp
+        )
+        if empty:
+            assert torch.all(q.float() == 1)
+            assert torch.all(s == 1)
+        results.append((q, s))
+    valid = torch.arange(T, device=DEVICE)[None, :] < counts[:, None]
+    for actual, expected in zip(results[0], results[1]):
+        if actual.is_floating_point():
+            actual, expected = actual.float(), expected.float()
+        torch.testing.assert_close(actual[valid], expected[valid], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("E,T,H,fp8_type", CASES)

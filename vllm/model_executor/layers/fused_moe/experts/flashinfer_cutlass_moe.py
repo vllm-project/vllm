@@ -113,7 +113,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 device=self.device,
             )
 
-        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
+        self.gemm1_clamp_limit = _per_expert(self.activation_config.clamp_limit)
         self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
         self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
 

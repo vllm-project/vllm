@@ -60,6 +60,10 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
+    def _supports_silu_clamp() -> bool:
+        return False
+
+    @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
         return p.is_cuda() and p.is_device_capability(90) and has_hpc()
