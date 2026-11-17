@@ -205,7 +205,7 @@ def test_mamba_cache_cg_padding(
     """
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
-    vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
+    vllm_config = EngineArgs(model=model).create_engine_config()
     compilation_config = vllm_config.compilation_config
     if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")

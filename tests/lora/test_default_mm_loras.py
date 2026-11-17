@@ -26,6 +26,7 @@ AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assist
 RESPONSE_SUFFIX_WITH_LORA = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 VLLM_RUNNER_BASE_KWARGS = {
     "model_name": MODEL_PATH,
+    "trust_remote_code": True,
     "dtype": "half",
     "enable_lora": "True",
     "max_num_seqs": 2,
