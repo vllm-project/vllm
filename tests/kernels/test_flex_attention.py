@@ -528,5 +528,77 @@ def test_block_sparsity_hint_prunes_blocks():
     assert metadata_with_hint.block_mask.kv_num_blocks.max().item() <= 1
 
 
+def test_flex_attention_chunked_local_virtual_batches(vllm_runner, tmp_path):
+    """Local windows can outnumber requests without changing generated logprobs."""
+    from transformers import Llama4TextConfig
+
+    from vllm import SamplingParams
+
+    config = Llama4TextConfig(
+        architectures=["Llama4ForCausalLM"],
+        vocab_size=256,
+        hidden_size=256,
+        intermediate_size=512,
+        intermediate_size_mlp=512,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        attention_chunk_size=64,
+        no_rope_layers=[0, 1],
+        interleave_moe_layer_step=2,
+        max_position_embeddings=512,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    config.save_pretrained(tmp_path)
+    prompt = {"prompt_token_ids": [3 + i % 200 for i in range(321)]}
+    sampling = SamplingParams(
+        temperature=0, max_tokens=4, ignore_eos=True, logprobs=256
+    )
+    results = []
+    for max_num_seqs in (16, 1):
+        with vllm_runner(
+            str(tmp_path),
+            load_format="dummy",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            seed=42,
+            enforce_eager=True,
+            gpu_memory_utilization=0.2,
+            kv_cache_memory_bytes=16 * 1024**2,
+            max_model_len=512,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=256,
+            max_logprobs=256,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            attention_config={"backend": "FLEX_ATTENTION"},
+        ) as runner:
+            for repeat in range(2):
+                output = runner.llm.generate([prompt], sampling, use_tqdm=False)[0]
+                if repeat:
+                    assert output.num_cached_tokens > 0
+                completion = output.outputs[0]
+                assert len(completion.token_ids) == 4
+                assert completion.logprobs is not None
+                logprobs = torch.tensor(
+                    [
+                        [step[token].logprob for token in range(256)]
+                        for step in completion.logprobs
+                    ]
+                )
+                assert torch.isfinite(logprobs).all()
+                results.append((completion.token_ids, logprobs))
+    for (reference_tokens, reference_logprobs), (tokens, logprobs) in zip(
+        results[:2], results[2:]
+    ):
+        assert tokens == reference_tokens
+        torch.testing.assert_close(logprobs, reference_logprobs, atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
