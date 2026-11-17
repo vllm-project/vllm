@@ -79,7 +79,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -258,28 +258,21 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
             int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
         )
 
-    def get_max_video_frames(self) -> int | None:
+    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
         video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
-        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
-        loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
-        if loader_frames < 0:
-            return None
-        return round_up(
-            max(int(video_processor.num_frames), loader_frames),
-            int(video_kwargs["temporal_patch_size"]),
-        )
-
-    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
-        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        temporal_patch_size = int(video_kwargs["temporal_patch_size"])
         num_videos = max(num_videos, 1)
         groups = max(
             1,
             seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
-        num_frames = groups * int(video_kwargs["temporal_patch_size"])
-        if (max_frames := self.get_max_video_frames()) is not None:
-            num_frames = min(num_frames, max_frames)
+        num_frames = groups * temporal_patch_size
+        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
+        loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
+        if loader_frames >= 0:
+            max_frames = max(int(video_processor.num_frames), loader_frames)
+            num_frames = min(num_frames, round_up(max_frames, temporal_patch_size))
         return num_frames
 
 
@@ -332,24 +325,6 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
 class MuseGlimmerMultiModalProcessor(
     BaseMultiModalProcessor[MuseGlimmerProcessingInfo]
 ):
-    def _apply_hf_processor_main(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        videos = mm_items.get("video")
-        max_frames = self.info.get_max_video_frames()
-        if isinstance(videos, VideoProcessorItems) and max_frames is not None:
-            for item_idx in range(videos.get_count()):
-                if (num_frames := videos.get_num_frames(item_idx)) > max_frames:
-                    raise ValueError(
-                        f"Video has {num_frames} frames, more than the "
-                        f"{max_frames} that Muse-Glimmer profiles at startup. "
-                        "Raise the video `num_frames` in `--media-io-kwargs` "
-                        "to accept longer videos."
-                    )
-        return super()._apply_hf_processor_main(mm_items, hf_kwargs)
-
     def _call_hf_processor(
         self,
         hf_data: Mapping[str, object],
@@ -357,7 +332,36 @@ class MuseGlimmerMultiModalProcessor(
     ) -> BatchFeature:
         # vLLM samples video frames before processing
         hf_kwargs = {**hf_kwargs, "do_sample_frames": False}
-        return super()._call_hf_processor(hf_data, hf_kwargs)
+        processed = super()._call_hf_processor(hf_data, hf_kwargs)
+        mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
+        max_group_tokens = {
+            "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
+            "video": int(mm_kwargs["videos_kwargs"]["max_video_frame_tokens"]),
+        }
+        max_tokens = self.info.get_mm_max_tokens_per_item(
+            seq_len=self.info.ctx.model_config.max_model_len,
+            mm_counts={"image": 1, "video": 1},
+        )
+        merge_length = self.info.get_hf_config().vision_config.merge_size ** 2
+        for modality in ("image", "video"):
+            grid_thw = processed.get(f"{modality}_grid_thw")
+            if grid_thw is None:
+                continue
+            for num_groups, grid_height, grid_width in grid_thw.tolist():
+                group_tokens = grid_height * grid_width // merge_length
+                if (
+                    group_tokens > max_group_tokens[modality]
+                    or num_groups * group_tokens > max_tokens[modality]
+                ):
+                    raise ValueError(
+                        f"The {modality} has {num_groups * group_tokens} tokens "
+                        f"({group_tokens} per temporal group), but Muse-Glimmer "
+                        f"profiles at most {max_tokens[modality]} "
+                        f"({max_group_tokens[modality]} per group) at startup. "
+                        "Reduce its size or frame count, or for videos raise "
+                        "`num_frames` in `--media-io-kwargs`."
+                    )
+        return processed
 
     def _get_mm_fields_config(
         self,
