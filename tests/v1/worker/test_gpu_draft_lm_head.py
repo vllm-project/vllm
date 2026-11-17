@@ -135,10 +135,11 @@ def test_unknown_format_lists_supported_formats(
     monkeypatch.setattr(
         current_platform,
         "get_draft_lm_head_quantization_methods",
-        lambda: {"platform-fp8": "irrelevant.qualname"},
+        lambda: {"fp8": "irrelevant.qualname", "platform-fp8": "irrelevant.qualname"},
     )
     head = _target_head(monkeypatch)
-    with pytest.raises(ValueError, match="bogus.*fp8.*nvfp4.*platform-fp8"):
+    # A platform format shadowing a core format's name is listed once.
+    with pytest.raises(ValueError, match=r"bogus.*\['fp8', 'nvfp4', 'platform-fp8'\]"):
         quantized_lm_head_copy(head, "bogus")
 
 
