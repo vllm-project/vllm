@@ -75,9 +75,9 @@ def apply_qsa_rmsnorm(
 class QSAIndexer(nn.Module):
     """Replicated Q/K projection plus paged, weight-free QSA selection.
 
-    ``prefix`` must be the checkpoint's indexer prefix, normally
-    ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
-    ``index_qk_proj``, ``q_layernorm`` and ``k_layernorm`` under that prefix.
+    `prefix` must be the checkpoint's indexer prefix, normally
+    `model.layers.N.self_attn.indexer`.  Consequently the trainable names are
+    `index_qk_proj`, `q_layernorm` and `k_layernorm` under that prefix.
     """
 
     def __init__(
@@ -289,13 +289,13 @@ class QSAIndexer(nn.Module):
         slot_mapping: torch.Tensor,
         gate_out: torch.Tensor | None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """Prepare the indexer and ``attn``'s main attention in one launch.
+        """Prepare the indexer and `attn`'s main attention in one launch.
 
         Normalizes and rotates the index Q, compresses K and writes both side
-        caches, which replaces ``project_qk``'s norm/RoPE half and the whole of
-        ``_update_and_compress``. The same launch applies ``attn``'s QK-norm and
-        RoPE, copies its gate and writes its K/V into ``attn.kv_cache``,
-        replacing ``_project_qkv_gate`` and ``do_kv_cache_update``. Both halves
+        caches, which replaces `project_qk`'s norm/RoPE half and the whole of
+        `_update_and_compress`. The same launch applies `attn`'s QK-norm and
+        RoPE, copies its gate and writes its K/V into `attn.kv_cache`,
+        replacing `_project_qkv_gate` and `do_kv_cache_update`. Both halves
         must stay numerically interchangeable with what they replace.
         """
         num_tokens = raw_metadata.num_actual_tokens
@@ -380,13 +380,13 @@ class QSAIndexer(nn.Module):
         slot_mapping: torch.Tensor | None = None,
         gate_out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-        """Return fixed-width request-relative token indices padded with ``-1``.
+        """Return fixed-width request-relative token indices padded with `-1`.
 
-        With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
-        its Q and gate from ``qkv``, returned as the second element (None
-        otherwise). The gate is written into ``gate_out`` when given. ``qkv``,
-        ``slot_mapping`` and ``gate_out`` are only read in that mode.
+        With `attn.use_fused_qsa_prepare`, the same launch also writes
+        `attn`'s K/V into `attn.kv_cache` at `slot_mapping` and prepares
+        its Q and gate from `qkv`, returned as the second element (None
+        otherwise). The gate is written into `gate_out` when given. `qkv`,
+        `slot_mapping` and `gate_out` are only read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:

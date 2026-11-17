@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the fused Muse-Spark QK-norm + RoPE + KV-insert kernel vs unfused.
 
-``tuned_us`` forces the cp.async schedule ``fused_qk_norm_rope`` only auto-selects
-on SM 9.0; ``unfused_us`` is what production runs.
+`tuned_us` forces the cp.async schedule `fused_qk_norm_rope` only auto-selects
+on SM 9.0; `unfused_us` is what production runs.
 """
 
 import argparse
@@ -197,7 +197,7 @@ def time_eager(fn, warmup=20, iters=100) -> float:
 
 
 def time_graph(fn, warmup=10, iters=50, inner=32) -> float:
-    """GPU time per call; ``inner`` calls per graph amortize the ~2 us replay."""
+    """GPU time per call; `inner` calls per graph amortize the ~2 us replay."""
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):

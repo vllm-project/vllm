@@ -19,6 +19,5 @@ server_args: >-
   --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"ROCM_AITER_FA"}'
   --kv-cache-dtype auto
 env:
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_ROCM_USE_AITER: "1"
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"

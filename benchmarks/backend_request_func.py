@@ -21,7 +21,7 @@ from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncInput:
     prompt: str
     api_url: str
@@ -37,7 +37,7 @@ class RequestFuncInput:
     request_id: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncOutput:
     generated_text: str = ""
     success: bool = False
@@ -376,7 +376,8 @@ def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
         return False
     if (
         delta.get("content")
-        or delta.get("reasoning")
+        or delta.get("reasoning")  # vLLM spec
+        or delta.get("reasoning_content")  # SGLang spec
         or delta.get("tool_calls")
         or delta.get("function_call")
     ):

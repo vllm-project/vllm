@@ -134,7 +134,7 @@ def test_sanitized_opentelemetry_name():
 
 def _install_mock_metric(wrapper: RayPrometheusMetric) -> MagicMock:
     """Swap the wrapper's underlying Ray metric for a MagicMock while
-    preserving the real metric's ``_tag_keys`` (labels() reads them to
+    preserving the real metric's `_tag_keys` (labels() reads them to
     validate arity)."""
     real_metric = wrapper.metric
     mock = MagicMock()
@@ -228,7 +228,7 @@ def test_ray_histogram_labels_returns_independent_children_and_forwards_tags():
 
 
 def test_ray_counter_labels_accepts_non_string_label_values():
-    """RayPrometheusStatLogger passes ``str(idx)`` for engine indexes; this
+    """RayPrometheusStatLogger passes `str(idx)` for engine indexes; this
     covers the coercion path for any caller that passes a non-string label
     value positionally."""
     wrapper = RayCounterWrapper(
