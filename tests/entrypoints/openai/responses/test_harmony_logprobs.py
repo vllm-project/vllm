@@ -93,7 +93,7 @@ def run_context(
         response_parser=HarmonyParser(tokenizer),
     )
     logprobs = fake_logprobs(token_ids) if with_logprobs else None
-    streamed = []
+    streamed: list[tuple[int, dict[int, Logprob]]] = []
     for start in range(0, len(token_ids), chunk_size):
         end = min(start + chunk_size, len(token_ids))
         context.append_output(

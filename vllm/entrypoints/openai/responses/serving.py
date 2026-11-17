@@ -1012,7 +1012,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         return out
 
     def _token_bytes(self, token_id: int, text: str) -> list[int]:
-        """Bytes of a token for the logprobs ``bytes`` field.
+        """Bytes of a token for the logprobs `bytes` field.
 
         For gpt-oss, these are the token's raw bytes, so tokens that split a
         multi-byte character can be joined back into it.

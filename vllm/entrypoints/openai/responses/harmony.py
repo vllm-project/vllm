@@ -368,7 +368,7 @@ def _parse_final_message(
 ) -> ResponseOutputItem:
     """Parse final channel messages into output message items.
 
-    ``logprobs`` covers every text token of the message, so it is attached
+    `logprobs` covers every text token of the message, so it is attached
     to the first content part.
     """
     contents = []

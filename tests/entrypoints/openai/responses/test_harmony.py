@@ -220,7 +220,7 @@ async def test_streaming_logprobs_match_final_output(client: OpenAI, model_name:
         stream=True,
     )
     delta_logprobs = []
-    done_logprobs = []
+    done_logprobs: list[Any] = []
     completed = None
     async for event in stream:
         if event.type == "response.output_text.delta":
