@@ -61,8 +61,7 @@ class DummyRequest(Request):
             request_id=request_id,
             prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [],
             sampling_params=SamplingParams(
-                stop_token_ids=[STOP_TOKEN],
-                max_tokens=max_tokens,
+                stop_token_ids=[STOP_TOKEN], max_tokens=max_tokens
             ),
             pooling_params=None,
             mm_features=mm_features,
@@ -848,24 +847,6 @@ def test_keep_last_output_token_rehashes_block_of_kept_token():
         block_hasher=block_hasher,
     )
     assert session.block_hashes == expected.block_hashes
-
-
-def test_keep_last_output_token_lifecycle():
-    """Each one-token chunk decodes from the previous chunk's sample."""
-    scheduler = create_scheduler()
-    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=1)
-    scheduler.add_request(session)
-    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
-    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-
-    for sampled in (11, 12):
-        scheduler.add_request(DummyRequest("session", max_tokens=1))
-        output = scheduler.schedule()
-        assert output.num_scheduled_tokens["session"] == 1
-        scheduler.update_from_output(output, _model_output("session", [sampled]))
-        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-
-    assert list(session.all_token_ids) == [1, 2, 3, 10, 11, 12]
 
 
 def _chunk(**kwargs) -> DummyRequest:

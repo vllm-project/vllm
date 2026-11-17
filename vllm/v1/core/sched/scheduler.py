@@ -1897,9 +1897,9 @@ class Scheduler(SchedulerInterface):
         self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
-        self, session: Request, update: StreamingUpdate, *, was_running: bool = False
+        self, session: Request, update: StreamingUpdate
     ) -> None:
-        """Updates the stopped session with the next streaming update.
+        """Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk,
         unless the update has no prompt tokens. The session then continues from
@@ -1919,7 +1919,7 @@ class Scheduler(SchedulerInterface):
         del session.block_hashes[start // self.hash_block_size :]
 
         parked = session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        if (was_running or parked) and self._can_resume_in_place(session, update):
+        if self._can_resume_in_place(session, update):
             session.update_block_hashes()
             if parked:
                 self.num_waiting_for_streaming_input -= 1
@@ -1965,7 +1965,8 @@ class Scheduler(SchedulerInterface):
         return (
             not update.prompt_token_ids
             and session.sampling_params == update.sampling_params
-            # Preemption releases the KV cache and the worker state.
+            # Preemption releases the KV cache and the worker state, and moves
+            # the session to the waiting queue.
             and session.num_computed_tokens > 0
             # The worker's last sample must be the session's last token. A stop
             # before max_tokens can leave a step in flight that samples past it.
@@ -2535,9 +2536,7 @@ class Scheduler(SchedulerInterface):
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
-                finished = self._handle_stopped_request(
-                    request, was_running=status_before_stop == RequestStatus.RUNNING
-                )
+                finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (
@@ -2854,7 +2853,7 @@ class Scheduler(SchedulerInterface):
             < limit
         )
 
-    def _handle_stopped_request(self, request: Request, *, was_running: bool) -> bool:
+    def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
             return True
@@ -2874,7 +2873,7 @@ class Scheduler(SchedulerInterface):
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update, was_running=was_running)
+            self._update_request_as_session(request, update)
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
