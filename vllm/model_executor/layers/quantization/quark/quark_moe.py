@@ -1926,6 +1926,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 swiglu_limit=getattr(layer, "swiglu_limit", None),
                 layer=layer,
+                moe_config=self.moe,
+                activation_key=self.activation_quant_key,
             )
 
         # Emulation and other schemes

@@ -326,6 +326,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
+            moe_config=self.moe,
+            activation_key=self.activation_quant_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

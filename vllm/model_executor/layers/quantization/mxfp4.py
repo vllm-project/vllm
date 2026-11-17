@@ -23,7 +23,6 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
-    _user_moe_activation_override_is_set,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -43,8 +42,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     is_layer_skipped,
-    kMxfp4Dynamic,
-    kMxfp8Dynamic,
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
@@ -434,6 +431,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             gemm1_beta=1.0,
             swiglu_limit=7.0,
             layer=layer,
+            moe_config=self.moe,
         )
 
     def apply(
@@ -686,7 +684,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
             )
-        self.deferred_activation_key = self._aiter_deferred_activation_key()
 
         self.max_capture_size = moe.max_capture_size
 
@@ -696,43 +693,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # Used for triton kernel precision configs
         self.w13_precision_config = None
         self.w2_precision_config = None
-
-    def _aiter_deferred_activation_key(self) -> QuantKey | None:
-        """The activation quantization AITER's w4a16 experts are told to run
-        on their BF16 input, from `activation_key`.
-
-        Only MXFP8 on the interleaved (non-SiTU, non-a4w4) path can be: SiTU
-        takes its activation dtype from VLLM_ROCM_USE_AITER_MOE_SITUV2, and the
-        DeepSeek-V4.1 a4w4 opt-in from VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4.
-        """
-        if (
-            self.mxfp4_backend != Mxfp4MoeBackend.AITER_MXFP4_BF16
-            or self.activation_key is None
-        ):
-            return None
-
-        from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-
-        if (
-            self.activation_key == kMxfp8Dynamic
-            and self.moe.activation != MoEActivation.SITU
-            and not self.moe.use_mxfp4_w4a4_dsv4
-            and rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
-        ):
-            return kMxfp8Dynamic
-        if self.moe.use_mxfp4_w4a4_dsv4 and self.activation_key == kMxfp4Dynamic:
-            # What the a4w4 experts quantize their BF16 input to anyway.
-            return None
-        if _user_moe_activation_override_is_set():
-            logger.warning_once(
-                "%s experts cannot run MoE activation=%s in this configuration; "
-                "it is ignored and their inputs are not quantized before "
-                "dispatch.",
-                self.mxfp4_backend.value,
-                self.activation_key,
-            )
-        return None
 
     @property
     def supports_eplb(self) -> bool:
@@ -1132,7 +1092,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 gemm1_clamp_limit=swiglu_limit,
             )
 
-        quant_config = make_mxfp4_moe_quant_config(
+        return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -1140,10 +1100,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             swiglu_limit=swiglu_limit,
             layer=layer,
+            moe_config=self.moe,
+            activation_key=self.activation_key,
         )
-        if quant_config is not None:
-            quant_config.deferred_activation_key = self.deferred_activation_key
-        return quant_config
 
     def apply(
         self,

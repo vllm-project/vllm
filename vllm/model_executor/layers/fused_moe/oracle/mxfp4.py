@@ -554,6 +554,41 @@ def resolve_default_moe_activation_key(
     return _user_moe_activation_override()
 
 
+def _aiter_deferred_activation_key(
+    config: FusedMoEConfig, activation_key: QuantKey | None
+) -> QuantKey | None:
+    """The activation quantization AITER_MXFP4_BF16 experts are told to run on
+    their BF16 input, from `activation_key`.
+
+    Only MXFP8 on the interleaved (non-SiTU, non-a4w4) path can be: SiTU takes
+    its activation dtype from VLLM_ROCM_USE_AITER_MOE_SITUV2, and the
+    DeepSeek-V4.1 a4w4 opt-in from VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4.
+    """
+    if activation_key is None:
+        return None
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if (
+        activation_key == kMxfp8Dynamic
+        and config.activation != MoEActivation.SITU
+        and not config.use_mxfp4_w4a4_dsv4
+        and rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
+    ):
+        return kMxfp8Dynamic
+    if config.use_mxfp4_w4a4_dsv4 and activation_key == kMxfp4Dynamic:
+        # What the a4w4 experts quantize their BF16 input to anyway.
+        return None
+    if _user_moe_activation_override_is_set():
+        logger.warning_once(
+            "%s experts cannot run MoE activation=%s in this configuration; "
+            "it is ignored and their inputs are not quantized before dispatch.",
+            Mxfp4MoeBackend.AITER_MXFP4_BF16.value,
+            activation_key,
+        )
+    return None
+
+
 def _humming_input_schema(model_activation_key: QuantKey | None):
     """Humming input schema for the checkpoint activation combined with the
     user override, or None to keep Humming's default (BF16 or the
@@ -2144,8 +2179,14 @@ def make_mxfp4_moe_quant_config(
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
     layer: "RoutedExperts | None" = None,
+    moe_config: FusedMoEConfig | None = None,
+    activation_key: QuantKey | None = None,
 ) -> FusedMoEQuantConfig | None:
-    """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
+    """Create a FusedMoEQuantConfig for the given MXFP4 backend.
+
+    Pass `moe_config` and the `activation_key` given to backend selection to set
+    the `deferred_activation_key` of AITER_MXFP4_BF16 experts; the user override
+    applies to `activation_key` here as it does there."""
     if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
         # The megakernel quantizes activations itself and owns its scales.
         return FusedMoEQuantConfig.make("nvfp4", weight_dtype="mxfp4")
@@ -2241,7 +2282,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.CPU,
     ):
-        return mxfp4_w4a16_moe_quant_config(
+        quant_config = mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             w1_scale=w1_scale,
@@ -2250,6 +2291,11 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and moe_config is not None:
+            quant_config.deferred_activation_key = _aiter_deferred_activation_key(
+                moe_config, _resolve_activation_key(activation_key)
+            )
+        return quant_config
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,

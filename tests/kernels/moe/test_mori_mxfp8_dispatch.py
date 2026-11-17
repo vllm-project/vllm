@@ -256,11 +256,11 @@ def test_dsv41_flash_a4w4_dispatch_stays_bf16(
 ):
     """The a4w4 opt-in quantizes its BF16 input itself, so there is no MXFP8
     dispatch, and only an unsatisfiable user override is warned about."""
-    from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_quant
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 
     warnings = []
     monkeypatch.setattr(
-        mxfp4_quant.logger, "warning_once", lambda *args, **kw: warnings.append(args)
+        mxfp4_oracle.logger, "warning_once", lambda *args, **kw: warnings.append(args)
     )
     quant_config = _dsv41_flash_experts_quant_config(monkeypatch, moe_spec, a4w4=True)
     prepare_finalize, args = _make_mori_dispatch(quant_config)
