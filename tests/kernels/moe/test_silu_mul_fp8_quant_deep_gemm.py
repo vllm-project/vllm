@@ -8,7 +8,9 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    _silu_mul_fp8_quant_deep_gemm,
     persistent_masked_m_silu_mul_quant,
+    scales_shape_stride_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -212,9 +214,57 @@ def token_random(E, T, H2, tokens_per_expert):
     return y
 
 
-@pytest.mark.parametrize("E,T,H,fp8_type", CASES)
+@pytest.mark.parametrize("ceil_ue8m0", [False, True])
 @torch.inference_mode()
-def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dtype):
+def test_masked_triton_silu_quant_clamps_valid_tokens(ceil_ue8m0: bool):
+    """The fallback applies the same limits as explicitly clamped inputs."""
+    E, T, H = 3, 4, 2048
+    set_random_seed(42)
+    counts = torch.tensor([0, 1, T], dtype=torch.int32, device=DEVICE)
+    y = torch.randn(E, T, 2 * H, dtype=torch.bfloat16, device=DEVICE) * 20
+    clamped = torch.cat((y[..., :H].clamp(max=10), y[..., H:].clamp(-10, 10)), -1)
+    shape, strides, dtype = scales_shape_stride_dtype(
+        E, T, H // 128, DeepGemmQuantScaleFMT.FLOAT32
+    )
+    results = []
+    for values, limit in ((y, 10.0), (clamped, None)):
+        q = torch.empty(E, T, H, dtype=fp8_dtype, device=DEVICE)
+        s = torch.empty_strided(shape, strides, dtype=dtype, device=DEVICE)
+        fp8_min, fp8_max = get_fp8_min_max()
+        _silu_mul_fp8_quant_deep_gemm[(E * (H // 128),)](
+            values,
+            q,
+            s,
+            counts,
+            H,
+            128,
+            *values.stride(),
+            *q.stride(),
+            *s.stride(),
+            counts.stride(0),
+            1e-10,
+            fp8_min,
+            fp8_max,
+            ceil_ue8m0,
+            limit,
+            BLOCK=128,
+            NUM_STAGES=4,
+            num_warps=1,
+        )
+        results.append((q, s))
+    valid = torch.arange(T, device=DEVICE)[None, :] < counts[:, None]
+    for actual, expected in zip(results[0], results[1]):
+        torch.testing.assert_close(
+            actual.float()[valid], expected.float()[valid], atol=0, rtol=0
+        )
+
+
+@pytest.mark.parametrize("E,T,H,fp8_type", CASES)
+@pytest.mark.parametrize("clamp_limit", [None, 10.0])
+@torch.inference_mode()
+def test_silu_mul_fp8_quant_deep_gemm(
+    E: int, T: int, H: int, fp8_type: torch.dtype, clamp_limit: float | None
+):
     group_size = 128
     set_random_seed(42)
 
@@ -231,6 +281,9 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
 
     gate = y[..., :H].to(torch.bfloat16)
     up = y[..., H:].to(torch.bfloat16)
+    if clamp_limit is not None:
+        gate = gate.clamp(max=clamp_limit)
+        up = up.clamp(-clamp_limit, clamp_limit)
 
     scale_fmts = [
         DeepGemmQuantScaleFMT.FLOAT32,
@@ -245,6 +298,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
             tokens_per_expert,
             group_size=group_size,
             quant_scale_fmt=scale_fmt,
+            clamp_limit=clamp_limit,
         )
 
         ref_y_q, ref_y_s = ref_with_scale_fmt(

@@ -19,6 +19,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
@@ -29,10 +30,15 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingGroupedExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+from vllm.model_executor.layers.fused_moe.experts.moonep_experts import MoonEPExperts
 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
+    TrtLlmMxint4ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
@@ -98,6 +104,28 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+
+
+def test_moonep_rejects_model_clamp():
+    config = make_dummy_moe_config()
+    config.swiglu_limit = 10.0
+    with pytest.raises(NotImplementedError, match="clamp"):
+        MoonEPExperts(config, FusedMoEQuantConfig.make(None))
+
+
+@pytest.mark.parametrize("expert_cls", [HPCExperts, TrtLlmMxint4ExpertsMonolithic])
+@pytest.mark.parametrize("clamp_source", ["model", "quant"])
+def test_plain_silu_experts_reject_clamp(expert_cls, clamp_source):
+    """Backends without a clamp argument must not silently drop the limit."""
+    config = make_dummy_moe_config()
+    config.swiglu_limit = 10.0 if clamp_source == "model" else None
+    quant = FusedMoEQuantConfig.make(
+        torch.float8_e4m3fn,
+        gemm1_clamp_limit=10.0 if clamp_source == "quant" else None,
+    )
+    with pytest.raises(ValueError, match="SwiGLU clamp"):
+        expert_cls(config, quant)
+
 
 # oracle -> (select call, backend mapper, explicit runner backend, name used in
 # the "moe_backend=... is not supported for <name> MoE" error).

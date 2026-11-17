@@ -152,7 +152,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
 
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_clamp_limit = self.activation_config.clamp_limit
         # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
         # FP8 (silu) configs leave these None, reproducing plain silu.
         self.gemm1_alpha = (
@@ -460,7 +460,7 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
 
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_clamp_limit = self.activation_config.clamp_limit
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

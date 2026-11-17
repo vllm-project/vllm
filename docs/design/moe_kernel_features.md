@@ -73,6 +73,22 @@ Similar to the backend kernels, each experts kernel only supports certain quanti
 
 Each experts kernel supports one or more activation functions, e.g. silu or gelu, which are applied to the intermediate results.
 
+### SwiGLU limits
+
+Models such as DeepSeek-V4-Flash-Base specify a `swiglu_limit`. DeepGEMM
+experts, including the batched FP8 path used with
+`--all2all-backend deepep_low_latency`, apply this limit before SiLU and
+activation quantization. No additional flag is needed: the gate is capped at
+the limit, and the up projection is clipped to the positive and negative limit.
+Models without a limit retain ordinary SiLU behavior.
+
+HPC, TRT-LLM MxInt4, and MoonEP expert implementations do not support this
+clamped activation and reject configurations that require it. Select a backend
+that supports the model's activation and quantization instead; removing the
+model's limit changes its computation.
+
+### Other expert properties
+
 As with the backends, some experts support applying topk weights on the input activations. The entries in the column in this table only apply to the non-modular experts.
 
 Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEExpertsModular`.
