@@ -176,7 +176,9 @@ def _run_test(
             for input_texts, input_images in input_cases
         ]
 
-    with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, auto_cls=AutoModel, trust_remote_code=True
+    ) as hf_model:
         hf_outputs_per_case = []
         for input_texts, input_images in input_cases:
             hf_outputs = []

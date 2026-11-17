@@ -962,10 +962,10 @@ steps:
     amd:
       # Run on PRs even when the H100 step is optional (nightly only).
       optional: false
-      label: ":amd: (MI300) Batch Invariance"
+      label: ":amd: (MI300 DPX) Batch Invariance"
       dind: false
       automatic_shard: true
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
