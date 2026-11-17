@@ -73,6 +73,7 @@ from vllm.distributed.nixl_utils import (
     check_nixl_version,
     nixl_agent_config,
     nixl_thread_sync_t,
+    nixlRemoteDisconnectError,
 )
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -862,6 +863,9 @@ class NixlBaseConnectorWorker:
         )
         # Failed reads need a local metadata probe; invalid peers wait for drain.
         self._failed_remote_engines: set[EngineId] = set()
+        # Failed reads that NIXL reported as a lost connection. Their metadata
+        # can still be loaded, so they are invalidated without the probe.
+        self._disconnected_remote_engines: set[EngineId] = set()
         self._invalid_remote_engines: set[EngineId] = set()
         # Invalid engine -> (backoff, earliest release time). Kept across release
         # so that repeat invalidations back off.
@@ -3646,7 +3650,9 @@ class NixlBaseConnectorWorker:
                         req_id=req_id,
                         error=e,
                     )
-                    if not self._handle_failed_transfer(req_id, handle, failed_req_ids):
+                    if not self._handle_failed_transfer(
+                        req_id, handle, failed_req_ids, error=e
+                    ):
                         in_progress.append(handle)
 
             if not in_progress:
@@ -3677,6 +3683,7 @@ class NixlBaseConnectorWorker:
         handle: int | None,
         failed_req_ids: set[str] | None = None,
         record_failed_transfer: bool = True,
+        error: BaseException | None = None,
     ) -> bool:
         """Record a failure and release its handle, returning False to retain it.
 
@@ -3689,6 +3696,8 @@ class NixlBaseConnectorWorker:
                 transport-failure metric. Callers that already recorded a more
                 specific metric (eg KV expiry, reported separately from
                 transport failures) pass False.
+            error: The exception that failed the transfer, if any. A lost
+                connection invalidates the remote engine.
 
         """
         if record_failed_transfer:
@@ -3699,6 +3708,10 @@ class NixlBaseConnectorWorker:
                 and meta.remote is not None
             ):
                 self._failed_remote_engines.add(meta.remote.engine_id)
+                if nixlRemoteDisconnectError is not None and isinstance(
+                    error, nixlRemoteDisconnectError
+                ):
+                    self._disconnected_remote_engines.add(meta.remote.engine_id)
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -4215,6 +4228,13 @@ class NixlBaseConnectorWorker:
             replaced = self._remote_agents.keys() - self._engine_by_address.values()
         now = time.perf_counter()
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
+            if engine_id in self._disconnected_remote_engines:
+                # The metadata may still be loaded; the connection is not.
+                logger.warning(
+                    "NIXL lost the connection to remote engine %s.", engine_id
+                )
+                self._mark_remote_engine_invalid(engine_id, now)
+                continue
             agents = self._remote_agents.get(engine_id, {}).values()
             try:
                 # No descriptors: query local existence, not peer health.
@@ -4227,6 +4247,7 @@ class NixlBaseConnectorWorker:
                     exc_info=True,
                 )
         self._failed_remote_engines.clear()
+        self._disconnected_remote_engines.clear()
         # Invalid peers keep rejecting new reads until their backoff has elapsed.
         invalid = {
             engine_id
@@ -4303,6 +4324,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self._failed_remote_engines.discard(engine_id)
+        self._disconnected_remote_engines.discard(engine_id)
         self._invalid_remote_engines.discard(engine_id)
 
         self.kv_caches_base_addr.pop(engine_id, None)
