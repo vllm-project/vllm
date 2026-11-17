@@ -31,7 +31,7 @@
 
 # Config utils
 /vllm/config/utils.py @hmellor
-/vllm/utils/argparse_utils.py
+/vllm/utils/argparse_utils.py @hmellor
 
 # Entrypoints
 /vllm/entrypoints/anthropic @chaunceyjiang @mgoin @DarkLight1337
