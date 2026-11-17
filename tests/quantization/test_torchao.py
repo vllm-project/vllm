@@ -409,5 +409,40 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         assert output
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
+    reason="Only fp8_fnuz supported on CDNA3 architecture",
+)
+def test_safetensors_tensors_missing_from_metadata(dist_init, workspace_init, tmp_path):
+    """Tensors that match no name in the torchao metadata fail the load instead
+    of leaving the weights they belong to uninitialized."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    from torchao.quantization import Float8WeightOnlyConfig
+    from transformers import AutoModelForCausalLM, TorchAoConfig
+
+    model_dir = tmp_path / "opt-125m-float8"
+    AutoModelForCausalLM.from_pretrained(
+        "facebook/opt-125m",
+        dtype=torch.bfloat16,
+        device_map=DEVICE_TYPE,
+        quantization_config=TorchAoConfig(Float8WeightOnlyConfig()),
+    ).save_pretrained(model_dir, max_shard_size="60MB")
+    assert len(list(model_dir.glob("*.safetensors"))) > 1
+    load_model_without_vllm_runner(str(model_dir), quantization="torchao")
+
+    for path in model_dir.glob("*.safetensors"):
+        with safe_open(path, framework="pt") as f:
+            metadata = f.metadata()
+            tensors = {
+                name.replace("model.decoder.", "decoder.", 1): f.get_tensor(name)
+                for name in f.keys()  # noqa: SIM118
+            }
+        save_file(tensors, path, metadata=metadata)
+    with pytest.raises(ValueError, match="do not match the tensor names"):
+        load_model_without_vllm_runner(str(model_dir), quantization="torchao")
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
