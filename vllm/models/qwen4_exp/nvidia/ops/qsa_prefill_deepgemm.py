@@ -62,13 +62,6 @@ def can_use_deepgemm_prefill(q: torch.Tensor, k_cache: torch.Tensor) -> bool:
     )
 
 
-def max_group_keys(max_model_len: int, compress_ratio: int) -> int:
-    """Most keys one group gathers: the budget's worth, or one max-length
-    request."""
-    max_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    return max(cdiv(max_model_len, compress_ratio), max_bytes // _HEAD_DIM)
-
-
 def _logits_width(num_keys: int) -> int:
     # 64-column multiple keeps the logits stride cooperative_topk-compatible.
     return max(64, round_up(num_keys, 64))
@@ -91,30 +84,30 @@ def plan_prefill_chunks(
 ) -> list[tuple[int, int, int, int]]:
     """Split prefill requests into (req_start, req_end, row_start, row_end).
 
-    Requests are grouped while the group's keys and all its logits fit
-    `max_bytes`. A request that cannot share a group is alone, and its rows
-    are split so its keys and each chunk's logits fit, down to one Q tile.
-    Rows are relative to the group's first row, so a chunk with row_start > 0
-    reuses the keys gathered for the group's first chunk.
+    Requests are grouped while their keys take at most half of `max_bytes`,
+    so a lone request is the only group past it. A group's rows, across its
+    requests, are split into even chunks whose logits fit beside its keys,
+    down to one Q tile. Rows are relative to the group's first row, so a
+    chunk with row_start > 0 reuses the keys gathered for the group's first
+    chunk.
     """
     chunks = []
     num_requests = len(query_lens)
     start = 0
     while start < num_requests:
-        end, rows, keys, longest = start, 0, 0, 0
-        while end < num_requests:
-            next_rows = rows + query_lens[end]
-            next_keys = keys + key_lens[end]
-            next_longest = max(longest, key_lens[end])
-            if _scratch_bytes(next_rows, next_keys, next_longest) > max_bytes:
-                break
-            rows, keys, longest, end = next_rows, next_keys, next_longest, end + 1
-        if end == start:
-            rows, keys, longest = query_lens[start], key_lens[start], key_lens[start]
-            end = start + 1
-        row_bytes = _logits_bytes(_Q_TILE, _logits_width(longest)) // _Q_TILE
+        end, keys = start + 1, key_lens[start]
+        while (
+            end < num_requests and (keys + key_lens[end]) * _HEAD_DIM <= max_bytes // 2
+        ):
+            keys += key_lens[end]
+            end += 1
+        rows = sum(query_lens[start:end])
+        width = _logits_width(max(key_lens[start:end]))
+        row_bytes = _logits_bytes(_Q_TILE, width) // _Q_TILE
         logits_bytes = max_bytes - keys * _HEAD_DIM
         step = max(_Q_TILE, logits_bytes // row_bytes // _Q_TILE * _Q_TILE)
+        # Even chunks: a short tail chunk underfills the GPU.
+        step = round_up(cdiv(rows, max(1, cdiv(rows, step))), _Q_TILE)
         for row in range(0, rows, step):
             chunks.append((start, end, row, min(row + step, rows)))
         start = end
@@ -207,7 +200,8 @@ _constants: tuple[torch.Tensor, torch.Tensor] | None = None
 
 def reserve_deepgemm_prefill(
     device: torch.device,
-    max_keys: int,
+    max_model_len: int,
+    compress_ratio: int,
     max_tokens: int,
 ) -> None:
     """Allocate the unit scales and weights during memory profiling.
@@ -216,6 +210,11 @@ def reserve_deepgemm_prefill(
     request whose keys and one Q tile of its logits exceed the budget.
     """
     global _constants
+    max_request_keys = cdiv(max_model_len, compress_ratio)
+    # plan_prefill_chunks grows a group only while its keys fit half the
+    # budget, so a group is at most that or one max-length request.
+    max_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    max_keys = max(max_request_keys, max_bytes // 2 // _HEAD_DIM)
     if _constants is None:
         scales = torch.full(
             (max(_NUM_HEADS * max_tokens, max_keys),),
@@ -228,7 +227,9 @@ def reserve_deepgemm_prefill(
         )
         _constants = scales, weights
     _ = torch.empty(
-        _scratch_bytes(_Q_TILE, max_keys, max_keys), dtype=torch.uint8, device=device
+        _scratch_bytes(_Q_TILE, max_request_keys, max_request_keys),
+        dtype=torch.uint8,
+        device=device,
     )
 
 

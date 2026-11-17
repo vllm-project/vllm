@@ -60,7 +60,6 @@ from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .ops.qsa_prefill_deepgemm import (
     deepgemm_prefill_supported,
-    max_group_keys,
     reserve_deepgemm_prefill,
 )
 from .qsa_indexer import QSAIndexer
@@ -548,9 +547,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 ):
                     reserve_deepgemm_prefill(
                         output.device,
-                        max_group_keys(
-                            cfg.model_config.max_model_len, self.indexer.compress_ratio
-                        ),
+                        cfg.model_config.max_model_len,
+                        self.indexer.compress_ratio,
                         cfg.scheduler_config.max_num_batched_tokens,
                     )
             _ = torch.empty(

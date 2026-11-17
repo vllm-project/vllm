@@ -840,18 +840,21 @@ def test_qsa_deepgemm_prefill_plan() -> None:
         plan_prefill_chunks,
     )
 
-    # A 1000-key logits row has a 1280-float pitch; past its 1000 * 128 bytes
-    # of keys, the budget holds 64 rows of its logits.
-    max_bytes = 1000 * 128 + 64 * 1280 * 4
-    # Short requests group while their keys and logits fit. The long request
-    # is alone and its rows split to fit beside its keys, keeping the keys
-    # gathered for its first chunk.
-    assert plan_prefill_chunks([10, 10, 10, 100], [800, 800, 800, 1000], max_bytes) == [
+    # Keys may take half the budget, 800 keys here: the third request starts
+    # a new group.
+    assert plan_prefill_chunks([10, 10, 10], [400, 400, 400], 1600 * 128) == [
         (0, 2, 0, 20),
         (2, 3, 0, 10),
-        (3, 4, 0, 64),
-        (3, 4, 64, 100),
     ]
+    # A 1000-key logits row has a 1280-float pitch, so beside 1000 keys this
+    # budget holds 128 rows; 130 rows split into two even chunks, the second
+    # reusing the gathered keys.
+    assert plan_prefill_chunks([130], [1000], 1000 * 128 + 128 * 1280 * 4) == [
+        (0, 1, 0, 96),
+        (0, 1, 96, 130),
+    ]
+    # Below one Q tile of logits, chunks still take one tile.
+    assert plan_prefill_chunks([40], [1000], 0) == [(0, 1, 0, 32), (0, 1, 32, 40)]
 
 
 @requires_qsa_kernels
@@ -910,7 +913,7 @@ def test_qsa_prefill_selection_correctness(
     indexer_prefill_metadata = None
     if can_use_deepgemm_prefill(q, cache):
         # The constants persist across cases; reserve the largest any case uses.
-        reserve_deepgemm_prefill(q.device, 8192, rows)
+        reserve_deepgemm_prefill(q.device, 8192 * compress_ratio, compress_ratio, rows)
         metadata = QSAIndexerMetadata(
             block_table=page_table,
             slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
