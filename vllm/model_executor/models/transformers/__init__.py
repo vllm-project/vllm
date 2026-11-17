@@ -38,6 +38,7 @@ from vllm.model_executor.models.transformers.linear_attention import (
     LinearAttentionMixin,
 )
 from vllm.model_executor.models.transformers.moe import MoEMixin
+from vllm.model_executor.models.transformers.mtp import MTPMixin
 from vllm.model_executor.models.transformers.multimodal import (
     MultiModalDummyInputsBuilder,
     MultiModalMixin,
@@ -47,6 +48,9 @@ from vllm.model_executor.models.transformers.multimodal import (
 from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
+)
+from vllm.model_executor.models.transformers.transcription import (
+    TranscriptionMixin,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -187,6 +191,13 @@ class TransformersMoEHybridForCausalLM(
 ): ...
 
 
+# Multi-token prediction draft models
+class TransformersForMTP(MTPMixin): ...
+
+
+class TransformersMoEForMTP(MoEMixin, MTPMixin): ...
+
+
 # Multimodal models
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
@@ -194,6 +205,16 @@ class TransformersMoEHybridForCausalLM(
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
 class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalForTranscription(
+    TranscriptionMixin, MultiModalMixin, CausalMixin
+): ...
 
 
 @MULTIMODAL_REGISTRY.register_processor(

@@ -35,8 +35,6 @@ from transformers import PreTrainedConfig
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -48,25 +46,26 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    get_pp_missing_layer_names,
+    compute_skip_topk_layers,
+    copy_pp_buffers,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_topk_buffers,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .attention import (
     HYV4MLAAttention,
-    compute_skip_topk_layers,
     is_skip_topk_indexer_weight,
+    sparse_layer_ids,
 )
 from .hc import HYV4HCHeadLayer, HYV4HCLayer
 from .moe import HYV4FeedForward, HYV4MoEFused
@@ -87,7 +86,7 @@ def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
 class HYV4DecoderLayer(nn.Module):
     """One HY V4 decoder layer: MLA attention plus a dense or MoE MLP.
 
-    When``config.enable_ihc`` is set the layer runs on ``hc_mult`` residual
+    When`config.enable_ihc` is set the layer runs on `hc_mult` residual
     channels and each sub-block is wrapped by an `HYV4HCLayer` boundary;
     otherwise it uses the standard single-stream residual.
     """
@@ -262,6 +261,9 @@ class HYV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, sparse_layer_ids(config)
+        )
         if self.enable_ihc:
             # iHC head layer: merge the residual channels into one stream.
             if get_pp_group().is_last_rank:
@@ -276,13 +278,15 @@ class HYV4Model(nn.Module):
                 self.hc_head = PPMissingLayer()
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states"], config.hc_mult * config.hidden_size
+                    ["hidden_states"],
+                    config.hc_mult * config.hidden_size,
+                    self.pp_buffers,
                 )
             )
         else:
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states", "residual"], config.hidden_size
+                    ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
                 )
             )
 
@@ -373,17 +377,21 @@ class HYV4Model(nn.Module):
             # previous PP stage is reshaped back to 3D by the first layer's
             # prepare_input, and residual is unused.
             residual = None if self.enable_ihc else intermediate_tensors["residual"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
+            buffers = {k: v[: positions.shape[0]] for k, v in self.pp_buffers.items()}
             if self.enable_ihc:
                 # hidden_states is [num_tokens, hc, h]; flatten the channel dim
                 # for PP transfer (matches the 2D receive buffer).
-                return IntermediateTensors({"hidden_states": hidden_states.flatten(1)})
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states.flatten(1), **buffers}
+                )
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": hidden_states, "residual": residual, **buffers}
             )
         if self.enable_ihc:
             hidden_states = self.hc_head(hidden_states)
@@ -419,9 +427,6 @@ class HYV4Model(nn.Module):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         skip_topk_layers = compute_skip_topk_layers(self.config)
 
         # Must not be cached on `self`: `process_weights_after_loading` swaps in
@@ -433,12 +438,6 @@ class HYV4Model(nn.Module):
         split_expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
 
-        # Sink weights are sharded like the q/k/v linears.
-        sink_tp_size = get_tensor_model_parallel_world_size()
-        sink_tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // sink_tp_size
-        head_rank_start = n_local_head * sink_tp_rank
-        head_rank_end = n_local_head * (sink_tp_rank + 1)
         base_layer = (
             "base_layer." if any(".base_layer." in name for name in params_dict) else ""
         )
@@ -472,24 +471,12 @@ class HYV4Model(nn.Module):
         for name, loaded_weight in weights:
             if is_skip_topk_indexer_weight(name, skip_topk_layers):
                 continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             # Names and stacked shard ids are normalized upstream by
             # AutoWeightsLoader, through quant_config.get_cache_scale_mapper()
             # and hf_to_vllm_mapper.
             stacked_shard_id = getattr(loaded_weight, "shard_id", None)
-            if ".indexer.wk." in name:
-                name = name.replace(".indexer.wk.", ".indexer.wk_weights_proj.")
-                stacked_shard_id = 0
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
@@ -570,48 +557,36 @@ class HYV4Model(nn.Module):
                 if loaded_expert_param_names:
                     loaded_params.update(loaded_expert_param_names)
                     continue
-                if "learnable_sink_param" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
-                else:
-                    if is_expert_weight:
-                        # An expert weight that is not mapped to this rank.
-                        continue
-                    if "gate.e_score_correction_bias" in name:
-                        name = name.replace(
-                            "gate.e_score_correction_bias", "expert_bias"
-                        )
-                    if "router.gate." in name:
-                        name = name.replace("router.", "")
-                    if "hc_fn" in name:
-                        name = name.replace("hc_fn", "hc_fn.weight")
-                    if "hc_head_fn" in name:
-                        name = name.replace("hc_head_fn", "hc_head_fn.weight")
+                if is_expert_weight:
+                    # An expert weight that is not mapped to this rank.
+                    continue
+                if "gate.e_score_correction_bias" in name:
+                    name = name.replace("gate.e_score_correction_bias", "expert_bias")
+                if "router.gate." in name:
+                    name = name.replace("router.", "")
+                if "hc_fn" in name:
+                    name = name.replace("hc_fn", "hc_fn.weight")
+                if "hc_head_fn" in name:
+                    name = name.replace("hc_head_fn", "hc_head_fn.weight")
 
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    if name not in params_dict:
-                        if _should_skip_missing_param(name):
-                            continue
-                        logger.warning_once(
-                            "Skipping unknown checkpoint weight: %s",
-                            name,
-                        )
+                if name not in params_dict:
+                    if _should_skip_missing_param(name):
                         continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
+                    logger.warning_once(
+                        "Skipping unknown checkpoint weight: %s",
+                        name,
                     )
-                    if stacked_shard_id is None:
-                        weight_loader(param, loaded_weight)
-                    else:
-                        weight_loader(param, loaded_weight, stacked_shard_id)
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                if stacked_shard_id is None:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, stacked_shard_id)
             loaded_params.add(name)
 
         return loaded_params
@@ -626,15 +601,12 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-            ".indexer.weights_proj.": (".indexer.wk_weights_proj.", 1),
         }
     )
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         # MLA runs both latent down-projections as one GEMM.
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-        # The indexer fuses wk and weights_proj into one GEMM.
-        "wk_weights_proj": ["wk", "weights_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

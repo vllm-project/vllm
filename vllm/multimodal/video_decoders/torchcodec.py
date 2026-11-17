@@ -14,6 +14,7 @@ from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_availabl
 from .base import (
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -44,16 +45,16 @@ def decode_torchcodec(
         seek_mode=seek_mode,
         device=device,
     )
-    check_frame_pixel_limit(
-        decoder.metadata.width or 0,
-        decoder.metadata.height or 0,
-    )
+    width = decoder.metadata.width or 0
+    height = decoder.metadata.height or 0
+    check_frame_pixel_limit(width, height)
     source = loader_cls._prepare_source(
         TorchCodecVideoBackendMixin.get_torchcodec_metadata(decoder)
     )
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
+    charge_sampled_frames(len(frame_idx), width, height)
     frames, valid = TorchCodecVideoBackendMixin.decode_torchcodec_frames(
         decoder, frame_idx, device=device
     )
@@ -63,9 +64,9 @@ def decode_torchcodec(
 class TorchCodecVideoBackendMixin:
     """TorchCodec (FFmpeg-backed, PyTorch-native) codec utilities.
 
-    Builds a :class:`~torchcodec.decoders.VideoDecoder` over the in-memory
+    Builds a `VideoDecoder` over the in-memory
     bytes and extracts the sampled indices with a single batched
-    ``get_frames_at`` call, while releasing the GIL during decode.
+    `get_frames_at` call, while releasing the GIL during decode.
     """
 
     @staticmethod

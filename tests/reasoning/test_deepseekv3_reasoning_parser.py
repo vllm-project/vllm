@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,7 +17,7 @@ REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
 
 @pytest.fixture(scope="module")
-def tokenizer():
+def tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 

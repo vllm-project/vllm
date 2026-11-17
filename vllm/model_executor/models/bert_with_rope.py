@@ -572,7 +572,6 @@ class GteNewModel(BertWithRope):
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
         # GteNewModel only gate_up_proj does not have bias.
-        # Hack method learned from vllm/model_executor/models/glm.py
         for layer in self.encoder.layers:
             layer.mlp.gate_up_proj.bias = None
             layer.mlp.gate_up_proj.skip_bias_add = True

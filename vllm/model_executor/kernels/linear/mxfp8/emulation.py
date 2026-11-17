@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.utils import replace_parameter
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
@@ -19,6 +20,12 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     supports_pre_processed_weights = True
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
@@ -27,6 +34,10 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
@@ -46,8 +57,8 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
 
         if envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", weight.contiguous())
+        replace_parameter(layer, "weight_scale", weight_scale)
 
     def apply_weights(
         self,

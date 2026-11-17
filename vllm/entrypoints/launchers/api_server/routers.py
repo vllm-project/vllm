@@ -25,6 +25,18 @@ def register_api_routers(
 
     register_models_api_router(app)
 
+    from vllm.entrypoints.generate.structured_decisions.api_router import (
+        register_structured_decisions_api_router,
+    )
+
+    register_structured_decisions_api_router(app)
+
+    from vllm.entrypoints.openai.decisions.api_router import (
+        register_decisions_api_router,
+    )
+
+    register_decisions_api_router(app)
+
     from vllm.entrypoints.serve.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
@@ -35,6 +47,10 @@ def register_api_routers(
         from vllm.entrypoints.serve import register_vllm_dev_api_routers
 
         register_vllm_dev_api_routers(app)
+
+        from vllm.entrypoints.rl.factories import register_rl_api_routers
+
+        register_rl_api_routers(app)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import (
@@ -48,6 +64,13 @@ def register_api_routers(
         )
 
         elastic_ep_attach_router(app)
+
+        if model_config is not None and model_config.enable_sleep_mode:
+            from vllm.entrypoints.serve.checkpoint.api_router import (
+                attach_router as checkpoint_attach_router,
+            )
+
+            checkpoint_attach_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers

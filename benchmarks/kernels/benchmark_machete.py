@@ -56,7 +56,7 @@ def terse_type_name(dt):
     }[dt]
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkTensors:
     w_ref: torch.Tensor
     a: torch.Tensor
@@ -70,7 +70,7 @@ class BenchmarkTensors:
     w_tok_s: torch.Tensor | None
 
 
-@dataclass
+@dataclass(slots=True)
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
@@ -235,7 +235,6 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
             b_q_weight=w_q,
             b_bias=None,
             b_scales=w_s,
-            a_scales=None,
             global_scale=None,
             b_zeros=w_zp,
             workspace=workspace.scratch,

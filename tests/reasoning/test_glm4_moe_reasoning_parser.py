@@ -4,9 +4,11 @@
 import copy
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "glm45"
@@ -17,7 +19,7 @@ REASONING_MODEL_NAME = "zai-org/GLM-4.7"
 
 
 @pytest.fixture(scope="module")
-def glm45_tokenizer():
+def glm45_tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -261,13 +263,20 @@ def glm53_style_tokenizer(glm45_tokenizer):
     return tokenizer
 
 
+def _glm_engine(parser: ReasoningParser) -> Glm47MoeParser:
+    assert isinstance(parser, ParserEngineReasoningAdapter)
+    engine = parser._parser_engine
+    assert isinstance(engine, Glm47MoeParser)
+    return engine
+
+
 @pytest.mark.parametrize(
     "disable_kwargs", [{"enable_thinking": False}, {"thinking": False}]
 )
 def test_glm53_template_forces_reasoning(disable_kwargs: dict, glm53_style_tokenizer):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(glm53_style_tokenizer, chat_template_kwargs=disable_kwargs)
-    assert parser._parser_engine.thinking_enabled
+    assert _glm_engine(parser).thinking_enabled
 
     output = glm53_style_tokenizer.tokenize(GLM53_LEAK["output"])
     output_tokens: list[str] = [
@@ -298,7 +307,7 @@ def test_glm47_template_honors_thinking_disable(glm45_tokenizer):
     parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         glm45_tokenizer, chat_template_kwargs={"enable_thinking": False}
     )
-    assert not parser._parser_engine.thinking_enabled
+    assert not _glm_engine(parser).thinking_enabled
 
     output = glm45_tokenizer.tokenize(GLM53_LEAK["output"])
     output_tokens: list[str] = [

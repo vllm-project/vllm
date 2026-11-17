@@ -17,6 +17,7 @@ from tests.models.utils import (
 EMBEDDING_MODELS = [
     EmbedModelInfo(
         "nvidia/llama-nemotron-embed-1b-v2",
+        trust_remote_code=True,
         architecture="LlamaBidirectionalModel",
         mteb_score=0.689164662128673,
         mteb_tol=2e-3,
@@ -30,6 +31,7 @@ EMBEDDING_MODELS = [
 RERANK_MODELS = [
     RerankModelInfo(
         "nvidia/llama-nemotron-rerank-1b-v2",
+        trust_remote_code=True,
         architecture="LlamaBidirectionalForSequenceClassification",
         chat_template_name="nemotron-rerank.jinja",
         mteb_score=0.33994,
@@ -38,6 +40,15 @@ RERANK_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
+    ),
+    # Declares its score template in its Sentence Transformers config, so no
+    # chat template is passed.
+    RerankModelInfo(
+        "nvidia/llama-nemotron-rerank-vl-1b-v2",
+        trust_remote_code=True,
+        architecture="LlamaNemotronVLForSequenceClassification",
+        mteb_score=0.33919,
+        mteb_tol=1e-2,
     ),
 ]
 

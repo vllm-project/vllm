@@ -23,5 +23,5 @@ def _mock_cpu_backend_block_sizes(monkeypatch):
     monkeypatch.setattr(
         CPUAttentionBackend,
         "get_supported_kernel_block_sizes",
-        staticmethod(lambda: [MultipleOf(16)]),
+        staticmethod(lambda kv_cache_spec=None: [MultipleOf(16)]),
     )

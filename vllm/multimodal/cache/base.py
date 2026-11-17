@@ -35,12 +35,12 @@ class MultiModalCacheMissError(RuntimeError):
     are not cached.
 
     P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends
-    ``data=None`` on a shadow hit. The two caches are updated in different orders
+    `data=None` on a shadow hit. The two caches are updated in different orders
     across processes, so they can drift -- leaving P0 referencing items P1 has
     evicted. Raising (instead of asserting) lets the engine return a retryable
     response and have P0 drop the stale entries
-    (``BaseMultiModalProcessorCache.invalidate``) so the client resends the data.
-    Carries every drifted ``mm_hash`` in the request so P0 can drop them all in one
+    (`BaseMultiModalProcessorCache.invalidate`) so the client resends the data.
+    Carries every drifted `mm_hash` in the request so P0 can drop them all in one
     pass -- one retry then recovers the whole request, not one item per retry.
     """
 
@@ -345,8 +345,16 @@ class BaseMultiModalProcessorCache(
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
+    def get_cached_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+        """Return a locally stored payload without updating eviction order.
+
+        Metadata-only and shared-memory sender caches do not retain a local
+        payload, so they return `None`.
+        """
+        return None
+
     def invalidate(self, mm_hash: str) -> None:
-        """Drop ``mm_hash`` from this P0 shadow cache to recover from P0/P1 drift.
+        """Drop `mm_hash` from this P0 shadow cache to recover from P0/P1 drift.
 
         No-op by default; shadow caches that can drift from P1 override this.
         """
@@ -355,6 +363,14 @@ class BaseMultiModalProcessorCache(
     def close(self) -> None:
         """Close the underlying cache, if needed."""
         pass
+
+    def validate_input_item(
+        self,
+        mm_item: MultiModalKwargsItem,
+        mm_hash: str,
+    ) -> None:
+        """Validate externally supplied cache metadata before engine handoff."""
+        return None
 
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
@@ -368,6 +384,10 @@ class BaseMultiModalProcessorCache(
 
         """
         raise NotImplementedError
+
+    def release_sender_touches(self) -> None:
+        """Release the items that were touched but not updated afterwards."""
+        return None
 
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
@@ -403,6 +423,12 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     @override
     def is_cached_item(self, mm_hash: str) -> bool:
         return mm_hash in self._cache
+
+    @override
+    def get_cached_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
+            return cached_item.item, cached_item.prompt_updates
+        return None
 
     @override
     def get_and_update_item(

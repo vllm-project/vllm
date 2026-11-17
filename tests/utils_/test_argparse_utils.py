@@ -4,6 +4,7 @@
 
 import json
 import os
+import sys
 from argparse import BooleanOptionalAction
 
 import pytest
@@ -80,6 +81,51 @@ def test_with_bool_flag(parser):
     assert args.enable_feature is True
     args = parser.parse_args(["--enable-feature"])
     assert args.enable_feature is True
+
+
+@pytest.fixture
+def bool_parser():
+    parser = FlexibleArgumentParser()
+    serve = parser.add_subparsers().add_parser("serve")
+    group = serve.add_argument_group("group")
+    group.add_argument(
+        "--enable-feature", "-ef", action=BooleanOptionalAction, default=None
+    )
+    group.add_argument("--disable-logs", action=BooleanOptionalAction, default=False)
+    group.add_argument("--plain", action=BooleanOptionalAction, default=None)
+    return parser, serve
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], (None, False, None)),
+        (["--enable-feature", "--disable-logs"], (True, True, None)),
+        (["-ef", "--enable-logs"], (True, False, None)),
+        (["--disable-feature"], (False, False, None)),
+        (["--disable_feature"], (False, False, None)),
+        # Hidden backwards-compatible spellings
+        (["--no-enable-feature", "--no-disable-logs"], (False, False, None)),
+        (["--plain"], (None, False, True)),
+        (["--no-plain"], (None, False, False)),
+    ],
+)
+def test_enable_disable_flags(bool_parser, args, expected):
+    """`--enable-x`/`--disable-x` are inverses, and `--no-*` still works."""
+    parser, _ = bool_parser
+    ns = parser.parse_args(["serve", *args])
+    assert (ns.enable_feature, ns.disable_logs, ns.plain) == expected
+
+
+def test_enable_disable_flags_help(bool_parser):
+    """Help advertises `--enable-x`/`--disable-x` but not `--no-enable-x`."""
+    _, serve = bool_parser
+    usage = serve.format_usage()
+    assert "[--enable-feature | -ef | --disable-feature]" in usage
+    assert "[--disable-logs | --enable-logs]" in usage
+    assert "[--plain | --no-plain]" in usage
+    assert "--no-enable-feature" not in usage
+    assert "--no-disable-logs" not in usage
 
 
 def test_invalid_choice(parser):
@@ -250,6 +296,28 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
     assert "--optimization-level" in caplog_vllm.text
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13), reason="argparse handles deprecated natively"
+)
+def test_deprecated_arg_scoped_to_subcommand(caplog_vllm, disable_log_dedup):
+    """A deprecated arg of one subcommand must not warn for a sibling
+    subcommand that defines a non-deprecated arg with the same dest."""
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="subcommand")
+    run_batch = subparsers.add_parser("run-batch")
+    run_batch.add_argument_group("Frontend").add_argument(
+        "--url", default="0.0.0.0", deprecated=True
+    )
+    chat = subparsers.add_parser("chat")
+    chat.add_argument("--url", default="http://localhost:8000/v1")
+
+    parser.parse_args(["chat", "--url", "http://localhost:9000/v1"])
+    assert "is deprecated" not in caplog_vllm.text
+
+    parser.parse_args(["run-batch", "--url", "1.2.3.4"])
+    assert caplog_vllm.text.count("argument 'url' is deprecated") == 1
 
 
 def test_model_specification(

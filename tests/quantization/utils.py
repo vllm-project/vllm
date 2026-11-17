@@ -6,16 +6,33 @@ from typing import Any
 
 import regex as re
 import torch
+from pydantic import TypeAdapter
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     ModelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    QuantSpec,
+    resolve_quantization_config,
+)
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
+
+
+def quant_spec(**kwargs: Any) -> QuantSpec:
+    """Build a `QuantSpec` from user-facing names such as `"mxfp8"`."""
+    return TypeAdapter(QuantSpec).validate_python(kwargs)
+
+
+def quant_config_args(**kwargs: Any) -> QuantizationConfigArgs:
+    """Build `QuantizationConfigArgs` from user-facing shorthand values."""
+    return TypeAdapter(QuantizationConfigArgs).validate_python(kwargs)
 
 
 def _limit_num_hidden_layers(
@@ -27,10 +44,17 @@ def _limit_num_hidden_layers(
     original_load_weights = model.load_weights
 
     def should_load_weight(name: str) -> bool:
-        for prefix in ("model.layers.", "layers."):
-            if name.startswith(prefix):
-                layer_idx = int(name.removeprefix(prefix).split(".", 1)[0])
-                return layer_idx < num_hidden_layers
+        layers_prefix = "layers."
+        if name.startswith(layers_prefix):
+            layer_name = name.removeprefix(layers_prefix)
+        elif ".layers." in name:
+            layer_name = name.split(".layers.", maxsplit=1)[1]
+        else:
+            return True
+
+        layer_idx_str = layer_name.split(".", maxsplit=1)[0]
+        if layer_idx_str.isdigit():
+            return int(layer_idx_str) < num_hidden_layers
         return True
 
     def load_weights(weights):
@@ -58,11 +82,19 @@ def load_model_without_vllm_runner(
         quantization=quantization,
         **(model_config_kwargs or {}),
     )
+    model_config.quantization_config = resolve_quantization_config(
+        model_config.quantization, model_config.quantization_config
+    )
     vllm_config_args = dict(vllm_config_kwargs or {})
-    vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
+    vllm_config_args.setdefault(
+        "compilation_config", CompilationConfig(mode=CompilationMode.NONE)
+    )
     vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
     hf_overrides = (model_config_kwargs or {}).get("hf_overrides") or {}
-    num_hidden_layers = hf_overrides.get("num_hidden_layers")
+    text_config_overrides = hf_overrides.get("text_config") or {}
+    num_hidden_layers = text_config_overrides.get(
+        "num_hidden_layers", hf_overrides.get("num_hidden_layers")
+    )
 
     with set_current_vllm_config(vllm_config):
         model_loader = model_loader_cls(vllm_config.load_config)
@@ -99,20 +131,12 @@ def is_quant_method_supported(quant_method: str) -> bool:
 
 def _test_online_quant_peak_mem_impl(
     quantization_arg_value,
+    model_name,
+    expected_model_memory_gib,
     vllm_runner,
     caplog_mp_spawn,
     monkeypatch,
 ) -> None:
-    # Note: `allenai/OLMoE-1B-7B-0125-Instruct` was selected because:
-    # 1. it covers both Linear and MoE paths
-    # 2. it is already used by other tests in CI, so adding it here
-    #    does not increase disk space for CI runners
-    # I really wanted to use `ibm-granite/granite-3.0-1b-a400m-base`
-    # which I think is the smallest MoE model in vLLM (2.5 GiB bf16,
-    # 1.3 GiB fp8), but could not as adding one more model makes CI
-    # run out of disk space.
-    model_name = "allenai/OLMoE-1B-7B-0125-Instruct"
-
     # Force spawn to ensure caplog_mp_spawn works consistently
     # (it relies on VLLM_LOGGING_CONFIG_PATH which spawn reads but fork ignores)
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -150,13 +174,8 @@ def _test_online_quant_peak_mem_impl(
     print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
     print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
 
-    expected_model_memory_gib = 6.7
-
-    # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06
-    # GiB on CUDA, which is 1.36x above model_memory_gib. A slightly higher
-    # number is expected as when we load and quantize weights in a streaming
-    # fashion we need to have individual weights in bf16 + fp8 alive at the
-    # same time.
+    # Streaming quantization keeps each weight alive in both bf16 and fp8, so
+    # peak memory is slightly above the final model memory
     expected_peak_memory_gib = expected_model_memory_gib * 1.4
 
     assert model_memory_gib < expected_model_memory_gib, (

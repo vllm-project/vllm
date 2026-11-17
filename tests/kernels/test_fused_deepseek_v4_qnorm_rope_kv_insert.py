@@ -443,7 +443,7 @@ V41_HEAD_BYTES = HEAD_DIM + HEAD_DIM // 32  # 512 fp8 + 16 UE8M0 scales = 528
 @pytest.mark.parametrize("num_tokens", [1, 17, 64])
 @pytest.mark.parametrize("block_size", [32, 64])
 def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int):
-    """``kv_mxfp8=True`` writes DeepSeek's V4.1 record: all 512 dims as fp8 e4m3
+    """`kv_mxfp8=True` writes DeepSeek's V4.1 record: all 512 dims as fp8 e4m3
     with one UE8M0 scale per 32 dims, no bf16 RoPE tail.
 
     Both sides quantize the same bf16-rounded rotated row, so the bytes must
@@ -525,9 +525,8 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
     step = 32.0 * tile_scale.repeat_interleave(32, dim=-1)
     assert ((rec_fused - rec_ref).abs() <= step).all()
     # The NoPE dims see no rotation at all, so they must be byte-identical.
-    nope_bytes = slice(0, block_size * HEAD_DIM)
-    ref_rows = k_cache_ref[:, nope_bytes].view(num_blocks, block_size, HEAD_DIM)
-    fused_rows = k_cache_fused[:, nope_bytes].view(num_blocks, block_size, HEAD_DIM)
+    ref_rows = k_cache_ref.view(num_blocks, block_size, V41_HEAD_BYTES)
+    fused_rows = k_cache_fused.view(num_blocks, block_size, V41_HEAD_BYTES)
     torch.testing.assert_close(
         fused_rows[..., :NOPE_DIM], ref_rows[..., :NOPE_DIM], rtol=0, atol=0
     )
@@ -544,12 +543,12 @@ NUM_Q_CHUNKS = HEAD_DIM // Q_CHUNK  # 32
 def test_q_interleaved_pads_without_rope(
     num_tokens: int, n_heads: int, q_head_padded: int
 ):
-    """``is_q_interleaved`` with no norm or RoPE only zero-pads Q.
+    """`is_q_interleaved` with no norm or RoPE only zero-pads Q.
 
     The mega-attention kernel norms and rotates Q itself, so every live
     element must survive bit-exact while the padding heads -- which interleave
     with the live ones inside each of the 32 head-dim chunks -- come back
-    zero. ``q_head_padded=0`` drops the Q pass entirely and returns nothing,
+    zero. `q_head_padded=0` drops the Q pass entirely and returns nothing,
     for a shard already at the kernel's head count.
     """
     torch.manual_seed(5)
@@ -600,10 +599,10 @@ def test_q_interleaved_pads_without_rope(
 def test_q_interleaved_survives_graph_replay(n_heads: int):
     """A captured fused insert refills its padded Q buffer on every replay.
 
-    The op allocates ``q_out`` itself, so the tensor a capture hands back has
+    The op allocates `q_out` itself, so the tensor a capture hands back has
     to keep receiving the new padding when the graph is replayed over changed
     input -- that is what lets the layer prepare Q inside the captured region
-    rather than in ``forward_mqa``.
+    rather than in `forward_mqa`.
     """
     torch.manual_seed(6)
     device = "cuda"
@@ -714,6 +713,62 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
     )
     # The Q layout must not leak into the KV half.
     torch.testing.assert_close(cache_inter, cache_major, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_tokens", [17, 1024, 2049])
+@pytest.mark.parametrize("dp_pad", [0, 5])
+def test_q_interleaved_pad_copy_matches_fused_insert(num_tokens: int, dp_pad: int):
+    """A KV-only launch plus `_pad_interleaved_q` equals the fused launch.
+
+    Same cache bytes and same padded Q bits; the copy writes into a NaN-filled
+    buffer, and the last `dp_pad` rows have no slot, as under DP padding.
+    """
+    from vllm.models.deepseek_v41.attention import _pad_interleaved_q
+
+    torch.manual_seed(8)
+    device = "cuda"
+    dtype = torch.bfloat16
+    block_size, n_heads, q_head_padded = 64, 32, 64
+    total = num_tokens + dp_pad
+
+    q = torch.randn(total, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(total, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(total, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    def insert(pad_to: int):
+        cache = torch.zeros(
+            num_blocks, block_size * V41_HEAD_BYTES, dtype=torch.uint8, device=device
+        )
+        out = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q,
+            kv,
+            cache,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+            pad_to,
+            1e-6,
+            block_size,
+            False,  # apply_q_norm
+            True,  # kv_mxfp8
+            False,  # apply_q_rope
+            True,  # is_q_interleaved
+        )
+        return out, cache
+
+    want, want_cache = insert(q_head_padded)
+    _, cache = insert(0)
+    assert want_cache.any()
+    torch.testing.assert_close(cache, want_cache, rtol=0, atol=0)
+
+    got = torch.full_like(want, float("nan"))
+    _pad_interleaved_q(q, got)
+    torch.testing.assert_close(
+        got.view(torch.int16), want.view(torch.int16), rtol=0, atol=0
+    )
 
 
 # ── Test 2b: DP padding (slot_mapping shorter than q/kv) ─────────────────────

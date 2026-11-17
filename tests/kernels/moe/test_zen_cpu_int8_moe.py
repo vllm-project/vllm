@@ -191,6 +191,7 @@ def test_zen_int8_dispatch_contract(
         w1_bias=w13_bias,
         w2_bias=w2_bias,
         per_act_token_quant=True,
+        per_out_ch_quant=True,
     )
 
     input = torch.randn((BATCH_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16) / (
@@ -224,8 +225,9 @@ def test_zen_int8_dispatch_contract(
     call = mock_zentorch_fused_moe["fused_moe"]
     assert call["w13_scales"].shape == (EXPERT_NUM, 2 * INTERMEDIATE_SIZE)
     assert call["w2_scales"].shape == (EXPERT_NUM, HIDDEN_SIZE)
-    assert call["w13_scales"].dtype == torch.bfloat16
-    assert call["w2_scales"].dtype == torch.bfloat16
+    # f32 scales keep the layer on zentorch's fast routed MoE executor.
+    assert call["w13_scales"].dtype == torch.float32
+    assert call["w2_scales"].dtype == torch.float32
     assert call["act"] == act.value.lower()
     assert call["skip_weighted"] is False
     assert call["topk_weights"].dtype == torch.float32

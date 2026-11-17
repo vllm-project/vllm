@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
@@ -868,7 +869,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     ],
 )
 def test_budget_caps_prevent_dummy_input_validation_failure(
-    model_id, user_limit, supported_limit
+    model_id, user_limit, supported_limit, monkeypatch
 ):
     limit_mm_per_prompt = {"image": user_limit}
 
@@ -878,7 +879,9 @@ def test_budget_caps_prevent_dummy_input_validation_failure(
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    processor.info.get_supported_mm_limits = lambda: {"image": supported_limit}
+    monkeypatch.setattr(
+        processor.info, "get_supported_mm_limits", lambda: {"image": supported_limit}
+    )
 
     # This is what budget.py uses to derive mm_counts
     allowed = processor.info.allowed_mm_limits
@@ -936,7 +939,7 @@ def test_hf_processor_init_kwargs(
     )
 
     processor = ctx.get_hf_processor(
-        DummyProcessor,  # type: ignore[arg-type]
+        DummyProcessor,
         **inference_kwargs,
     )
     assert processor.a == expected_kwargs["a"]
@@ -967,7 +970,7 @@ def test_hf_processor_call_kwargs(
         tokenizer=None,
     )
 
-    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
+    processor = ctx.get_hf_processor(DummyProcessor)
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
@@ -1439,7 +1442,7 @@ def test_get_merged_mm_kwargs_treats_empty_scopes_as_absent_before_routing(
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
 
     merged = ctx.get_merged_mm_kwargs(
         inference_kwargs,
@@ -1479,7 +1482,7 @@ def test_get_merged_mm_kwargs_merges_before_routing():
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
 
     merged = ctx.get_merged_mm_kwargs(
         {
@@ -1524,12 +1527,53 @@ def test_processor_inputs_hashes_partial_uuids():
 
     assert inputs.get_mm_hashes("test-model", "blake3") == {
         "image": [
-            "image-uuid",
-            MultiModalHasher.hash_kwargs(
+            "uuid:image-uuid",
+            "content:"
+            + MultiModalHasher.hash_kwargs(
                 "blake3", model_id="test-model", image=images[1]
             ),
         ]
     }
+
+
+def test_processor_inputs_hashes_separate_content_and_uuid_domains():
+    """A caller-chosen uuid must never alias a content-addressed digest.
+
+    Regression test for #66422: `get_mm_hashes()` used to emit content
+    digests and verbatim caller uuids into the same untagged string keyspace,
+    so a caller could poison the multimodal cache for later callers by
+    setting `uuid` to the content digest of a target media item.
+    """
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    content_key = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    assert content_key.startswith("content:")
+
+    raw_digest = MultiModalHasher.hash_kwargs(
+        "blake3", model_id="test-model", image=image
+    )
+    assert content_key == f"content:{raw_digest}"
+
+    # A caller sets `uuid` to the predictable content digest of the target.
+    uuid_key = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+        mm_uuid_items={"image": [raw_digest]},
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    assert uuid_key == f"uuid:{raw_digest}"
+    assert uuid_key != content_key
+
+    # A caller sets `uuid` to the full content-addressed key.
+    aliased_key = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+        mm_uuid_items={"image": [content_key]},
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    assert aliased_key != content_key
 
 
 def test_processor_inputs_hashes_scope_kwargs_by_modality():
@@ -1541,7 +1585,10 @@ def test_processor_inputs_hashes_scope_kwargs_by_modality():
             "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
         }
     )
-    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+    mm_uuid_items: dict[str, Sequence[str | None]] = {
+        "image": ["image-uuid"],
+        "video": ["video-uuid"],
+    }
 
     def get_hashes(video_frames: int, image_size: int, video_size: int):
         return ProcessorInputs(
@@ -1576,7 +1623,9 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
         hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
     )
 
-    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": ["uuid:image-uuid"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -1598,7 +1647,7 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
 def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     """Distinct processor kwargs must not share a multi-modal hash.
 
-    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    `hf_processor_mm_kwargs` is per-request input, so both the keys and the
     values here are caller-controlled. The hash is the identity of the
     processor cache entry and is mixed into the prefix-cache block key, so two
     requests sharing one is a cross-request cache hit.
@@ -1621,7 +1670,7 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
 )
 def test_dummy_inputs_scheduler_budget(
-    chunked_prefill, max_model_len, expected_seq_len
+    chunked_prefill, max_model_len, expected_seq_len, monkeypatch
 ):
     ctx = build_model_context(
         "llava-hf/llava-v1.6-mistral-7b-hf",
@@ -1634,11 +1683,9 @@ def test_dummy_inputs_scheduler_budget(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
     )
-    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
-
-    kwargs = {}
+    scheduler_config = None
     if chunked_prefill is not None:
-        kwargs["scheduler_config"] = SchedulerConfig(
+        scheduler_config = SchedulerConfig(
             max_model_len=max_model_len,
             is_encoder_decoder=False,
             max_num_batched_tokens=8192,
@@ -1646,5 +1693,10 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
 
-    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    monkeypatch.setattr(
+        processor, "apply", lambda *args, **kwargs: {"prompt_token_ids": [7]}
+    )
+    result = processor.get_dummy_mm_inputs(
+        {"image": 1}, scheduler_config=scheduler_config
+    )
     assert len(result["prompt_token_ids"]) == expected_seq_len
