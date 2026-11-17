@@ -21,6 +21,70 @@ from ....utils import multi_gpu_only
 MODEL = "inclusionAI/Ling-3.0-flash-VL"
 
 
+def _check_mtp_quantization(worker):
+    runner = worker.model_runner
+    speculator = runner.speculator
+    mtp_layer = next(iter(speculator.model.model.layers.values()))
+    assert mtp_layer.eh_proj.weight.dtype == runner.model_config.dtype
+
+    def check_finite(module, args, output):
+        assert torch.isfinite(output).all()
+
+    speculator.model.model.register_forward_hook(check_finite)
+
+
+@multi_gpu_only(num_gpus=4)
+@pytest.mark.usefixtures("enable_pickle")
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3])
+def test_bailing_mtp_fp8_projection(vllm_runner, num_speculative_tokens):
+    """FP8 VL target mapping must not quantize the BF16 MTP projection."""
+    image = Image.new("RGB", (320, 160), "red")
+    ImageDraw.Draw(image).rectangle((160, 0, 320, 160), fill="blue")
+    with vllm_runner(
+        f"{MODEL}-fp8",
+        dtype="bfloat16",
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        max_num_seqs=2,
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    ) as runner:
+        runner.collective_rpc(_check_mtp_quantization)
+        result = (
+            runner.get_llm()
+            .chat(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": encode_image_url(image)},
+                            },
+                            {
+                                "type": "text",
+                                "text": "Name the left and right colors. "
+                                "Answer only the two color names in order.",
+                            },
+                        ],
+                    }
+                ],
+                SamplingParams(temperature=0, seed=0, max_tokens=32),
+                chat_template_kwargs={"enable_thinking": False},
+                use_tqdm=False,
+            )[0]
+            .outputs[0]
+        )
+        assert re.findall(r"\b(red|blue)\b", result.text.lower()) == ["red", "blue"]
+
+
 def _image_then_text_positions(model):
     merge = model.config.vision_config.spatial_merge_size
     data = MultiModalKwargsItems.from_hf_inputs(
