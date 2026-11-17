@@ -657,13 +657,22 @@ inline bool skinny_wmma_enabled() {
   static const bool v = env_int("VLLM_MXFP4_RDNA4_SKWMMA", 1) != 0;
   return v;
 }
-// Measured on gfx1201 (K=N=4096): KW=4 wins for <=2 row tiles (M=16/32:
-// 0.040/0.051 -> 0.023/0.024 ms), KW=2 for 3-4 row tiles (M=64: 0.054 ->
-// 0.038 ms; KW=4 there is 0.040-0.044 from ring x row-tile register pressure).
-inline int skinny_kw(int mt) {
+// Waves per 16-column tile. Base by row tiles (gfx1201, K=N=4096: KW=4 for
+// <=2 row tiles, M=16/32 0.040/0.051 -> 0.023/0.024 ms; KW=2 for 3-4 row
+// tiles, M=64 0.054 -> 0.038 ms, KW=4 there spills from ring x row tiles).
+// Then N-aware: with blocks = ceil(N/16) the grid under-fills the GPU at
+// small N, so double KW while blocks*KW < 512 (16 waves per CU on 32 CUs),
+// capped at 8. Swept over N in {1024..34816}, K in {3072..17408}: this is
+// the per-shape best or within ~9% (N=1024/K=5120: M=16 20.2 -> 17.2us,
+// M=64 26.5 -> 22.9us; N=2048/K=4096: M=16 17.1 -> 15.9us); from N>=4096 the
+// base rule already wins, and at N=4096 KW=8 would cost 25% (27.1 vs 21.9).
+inline int skinny_kw(int mt, int N) {
   static const int ov = env_int("VLLM_MXFP4_RDNA4_SKW", 0);
-  if (ov == 1 || ov == 2 || ov == 4) return ov;
-  return mt <= 2 ? 4 : 2;
+  if (ov == 1 || ov == 2 || ov == 4 || ov == 8) return ov;
+  const int blocks = (N + 15) / 16;
+  int kw = mt <= 2 ? 4 : 2;
+  while (kw < 8 && blocks * kw < 512) kw *= 2;
+  return kw;
 }
 inline int skinny_pf() {
   static const int v = [] {
@@ -697,7 +706,7 @@ void launch_wmma(const uint8_t* aqp, const float* asp, const uint32_t* bq,
   // 5 128x64/8w (32x32 per wave, LDS only), 6 32x16/2w (LDS only).
   if (M <= 64 && skinny_wmma_enabled()) {
     const int mt = (M + 15) / 16;
-    const int kw = skinny_kw(mt), pf = skinny_pf();
+    const int kw = skinny_kw(mt, N), pf = skinny_pf();
     const dim3 grd((N + 15) / 16);
 #define SKW_LAUNCH(MT_, KW_, PF_)               \
   gemm_mxfp4_wmma_fp8_skinny<TT, MT_, KW_, PF_> \
@@ -717,6 +726,8 @@ void launch_wmma(const uint8_t* aqp, const float* asp, const uint32_t* bq,
       SKW_PF(MT_, 1); \
     else if (kw == 2) \
       SKW_PF(MT_, 2); \
+    else if (kw == 8) \
+      SKW_PF(MT_, 8); \
     else              \
       SKW_PF(MT_, 4); \
   } while (0)

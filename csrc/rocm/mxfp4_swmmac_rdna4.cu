@@ -175,12 +175,17 @@ __global__ void gemm_mxfp4_swmmac_skinny(const uint8_t*, const float*,
 
 // Host launcher used by mxfp4_gemm_rdna4.cu's dispatch. `c` is fp16 or bf16
 // per `out_bf16`; `stream` is the current HIP stream.
-// VLLM_MXFP4_RDNA4_SKINNY_KW = waves per 16-column tile (1, 2 or 4; default 4).
+// VLLM_MXFP4_RDNA4_SKINNY_KW = waves per 16-column tile (1/2/4/8/16; default
+// 8). Swept on gfx1201 over N in {1024..34816}, K in {3072..17408}, M in
+// {1..8}: KW=8 is best or within ~5% everywhere (e.g. N=1024/K=4096 M=1:
+// KW4 16.5us
+// -> KW8 12.0us; N=4096: 19.6 -> 18.1; N=34816/K=5120: 171 -> 167). KW=16
+// only helps at N=1024 (-13%) and costs 20-35% at N=4096-5120, so no N term.
 static int skinny_kw() {
   static const int v = [] {
     const char* e = std::getenv("VLLM_MXFP4_RDNA4_SKINNY_KW");
-    const int k = e ? atoi(e) : 4;
-    return (k == 1 || k == 2) ? k : 4;
+    const int k = e ? atoi(e) : 8;
+    return (k == 1 || k == 2 || k == 8 || k == 16) ? k : 4;
   }();
   return v;
 }
@@ -199,6 +204,14 @@ static void launch_t(const uint8_t* aq, const float* ascale,
     case 2:
       gemm_mxfp4_swmmac_skinny<T, 2, 4>
           <<<grd, 64, 0, st>>>(aq, ascale, b_q, b_scales, c, M, N, K);
+      break;
+    case 8:
+      gemm_mxfp4_swmmac_skinny<T, 8, 4>
+          <<<grd, 256, 0, st>>>(aq, ascale, b_q, b_scales, c, M, N, K);
+      break;
+    case 16:
+      gemm_mxfp4_swmmac_skinny<T, 16, 4>
+          <<<grd, 512, 0, st>>>(aq, ascale, b_q, b_scales, c, M, N, K);
       break;
     default:
       gemm_mxfp4_swmmac_skinny<T, 4, 4>
