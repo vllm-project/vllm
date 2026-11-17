@@ -1100,12 +1100,25 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         waits in the pool queue behind other work (tokenization and decoding
         share the pool). A render still queued when the pool is replaced is
         submitted again to the new pool. On timeout, replaces the executor so
-        subsequent renders are not permanently blocked by the stuck thread.
+        subsequent renders are not permanently blocked by the stuck thread. A
+        queued render also replaces a pool that made no progress for a whole
+        timeout, whatever job holds its workers. A render that runs keeps its
+        timeout when its caller is cancelled; one still queued is dropped.
         """
         timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
         if timeout <= 0:
             return await self._apply_chat_template_async(*args, **kwargs)
         loop = asyncio.get_running_loop()
+
+        def keep_timeout(job, pool_replaced, remaining):
+            # The caller is gone. Replace the pool at the render's deadline if
+            # the render still runs and nothing replaced its pool before.
+            def expire():
+                if not job.done() and not pool_replaced.is_set():
+                    self._replace_executor()
+
+            loop.call_later(remaining, expire)
+
         while True:
             started = loop.create_future()
             abandoned = threading.Event()
@@ -1118,24 +1131,42 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                     return None
                 return safe_apply_chat_template(*args, **kwargs)
 
-            result = loop.run_in_executor(self._executor, render)
-            replaced = asyncio.ensure_future(self._pool_replaced.wait())
+            job = self._executor.submit(render)
+            result = asyncio.wrap_future(job, loop=loop)
+            pool_replaced = self._pool_replaced
+            replaced = asyncio.ensure_future(pool_replaced.wait())
             try:
-                await asyncio.wait(
-                    {started, replaced}, return_when=asyncio.FIRST_COMPLETED
-                )
+                while True:
+                    progress = self._executor.progress()
+                    done, _ = await asyncio.wait(
+                        {started, replaced},
+                        timeout=timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if done:
+                        break
+                    # Still queued after a whole timeout. A pool that started
+                    # or finished no job in that time has every worker stuck.
+                    if self._executor.progress() == progress:
+                        self._replace_executor()
             except asyncio.CancelledError:
                 # No caller is left to time the render: it must not run later.
+                # If a worker took it at this moment, it keeps its timeout.
                 abandoned.set()
                 result.cancel()
+                keep_timeout(job, pool_replaced, timeout)
                 raise
             finally:
                 replaced.cancel()
             if started.done():
                 break
             abandoned.set()  # still queued in the replaced pool: submit again
+        deadline = loop.time() + timeout
         try:
             return await asyncio.wait_for(result, timeout=timeout)
+        except asyncio.CancelledError:
+            keep_timeout(job, pool_replaced, deadline - loop.time())
+            raise
         except TimeoutError:
             self._replace_executor()
             raise TimeoutError(

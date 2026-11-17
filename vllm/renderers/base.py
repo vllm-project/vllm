@@ -92,9 +92,22 @@ class _SwappableExecutor(Executor):
         super().__init__()
         self._max_workers = max_workers
         self._inner = ThreadPoolExecutor(max_workers=max_workers)
+        self._progress = AtomicCounter()
 
     def submit(self, fn, /, *args, **kwargs):
-        return self._inner.submit(fn, *args, **kwargs)
+        def run():
+            self._progress.inc()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._progress.inc()
+
+        return self._inner.submit(run)
+
+    def progress(self) -> int:
+        """Job starts, job ends and pool replacements so far. The count stays
+        the same for as long as every worker is stuck in one job."""
+        return self._progress.value
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         self._inner.shutdown(wait=wait, cancel_futures=cancel_futures)
@@ -103,6 +116,7 @@ class _SwappableExecutor(Executor):
         old = self._inner
         old.shutdown(wait=False)
         self._inner = ThreadPoolExecutor(max_workers=self._max_workers)
+        self._progress.inc()
 
 
 class BaseRenderer(ABC, Generic[_T]):

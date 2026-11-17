@@ -177,10 +177,12 @@ def test_slow_render_still_times_out_and_replaces_pool(monkeypatch):
 
 
 def test_render_queued_behind_stuck_render_moves_to_new_pool(monkeypatch):
+    stuck_started = threading.Event()
     release = threading.Event()
 
     def render(model_config, tokenizer, conversation, **kwargs):
         if conversation == ["stuck"]:
+            stuck_started.set()
             release.wait(10)
             return "stuck"
         return "fast"
@@ -192,7 +194,7 @@ def test_render_queued_behind_stuck_render_moves_to_new_pool(monkeypatch):
         stuck = asyncio.ensure_future(
             renderer._render_with_timeout(None, None, ["stuck"])
         )
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(stuck_started.wait, 5)
         queued = asyncio.ensure_future(
             renderer._render_with_timeout(None, None, ["fast"])
         )
@@ -243,4 +245,157 @@ def test_cancelled_caller_does_not_render_later(monkeypatch):
         asyncio.run(_run())
     finally:
         release.set()
+        renderer.shutdown()
+
+
+def _hold(started: threading.Event, release: threading.Event) -> None:
+    """A pool job that reports its start and then holds its worker."""
+    started.set()
+    release.wait(10)
+
+
+def test_cancelled_running_render_keeps_its_timeout(monkeypatch):
+    """A render that hangs after its caller is cancelled still replaces the
+    pool at its deadline, with no other render in the queue."""
+    stuck_started = threading.Event()
+    release = threading.Event()
+
+    def render(model_config, tokenizer, conversation, **kwargs):
+        if conversation == ["stuck"]:
+            _hold(stuck_started, release)
+        return conversation[0]
+
+    _patch_render(monkeypatch, 0.3, render)
+    renderer = _build_renderer()
+
+    async def _run():
+        pool_replaced = renderer._pool_replaced
+        stuck = asyncio.ensure_future(
+            renderer._render_with_timeout(None, None, ["stuck"])
+        )
+        assert await asyncio.to_thread(stuck_started.wait, 5)
+        stuck.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stuck
+        await asyncio.wait_for(pool_replaced.wait(), timeout=5)
+        new_inner = renderer._executor._inner
+        later = renderer._render_with_timeout(None, None, ["later"])
+        assert await asyncio.wait_for(later, timeout=5) == "later"
+        # The later render ran on the new pool: nothing replaced it again.
+        assert renderer._executor._inner is new_inner
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+        renderer.shutdown()
+
+
+def test_render_queued_behind_stuck_render_of_cancelled_caller(monkeypatch):
+    """A render that is queued behind a render that hangs after its caller was
+    cancelled must run and not wait without limit."""
+    stuck_started = threading.Event()
+    release = threading.Event()
+
+    def render(model_config, tokenizer, conversation, **kwargs):
+        if conversation == ["stuck"]:
+            _hold(stuck_started, release)
+        return conversation[0]
+
+    _patch_render(monkeypatch, 0.3, render)
+    renderer = _build_renderer()
+    old_inner = renderer._executor._inner
+
+    async def _run():
+        stuck = asyncio.ensure_future(
+            renderer._render_with_timeout(None, None, ["stuck"])
+        )
+        assert await asyncio.to_thread(stuck_started.wait, 5)
+        stuck.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stuck
+        later = renderer._render_with_timeout(None, None, ["later"])
+        assert await asyncio.wait_for(later, timeout=5) == "later"
+        assert renderer._executor._inner is not old_inner
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+        renderer.shutdown()
+
+
+def test_render_replaces_pool_stuck_in_another_job(monkeypatch):
+    """Tokenization and decoding share the pool and have no timeout. A render
+    queued behind a job that hangs must replace the pool and then run."""
+    _patch_render(monkeypatch, 0.3, lambda *args, **kwargs: "rendered")
+    renderer = _build_renderer()
+    old_inner = renderer._executor._inner
+    hung_started = threading.Event()
+    release = threading.Event()
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        hung = loop.run_in_executor(renderer._executor, _hold, hung_started, release)
+        assert await asyncio.to_thread(hung_started.wait, 5)
+        queued = renderer._render_with_timeout(None, None, [])
+        assert await asyncio.wait_for(queued, timeout=5) == "rendered"
+        assert renderer._executor._inner is not old_inner
+        release.set()
+        await hung
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+        renderer.shutdown()
+
+
+def test_render_keeps_pool_whose_queue_moves(monkeypatch):
+    """A render that waits longer than the timeout behind jobs that start and
+    finish must keep waiting: it neither fails nor replaces the pool."""
+    _patch_render(monkeypatch, 0.5, lambda *args, **kwargs: "rendered")
+    renderer = _build_renderer()
+    executor = renderer._executor
+    old_inner = executor._inner
+    first_started, release_first = threading.Event(), threading.Event()
+    second_started, release_second = threading.Event(), threading.Event()
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        waited_one_timeout = asyncio.Event()
+        progress = executor.progress
+        num_progress_reads = 0
+
+        def counted_progress() -> int:
+            # The render reads the count before each wait and after a timeout.
+            nonlocal num_progress_reads
+            num_progress_reads += 1
+            if num_progress_reads == 2:
+                waited_one_timeout.set()
+            return progress()
+
+        monkeypatch.setattr(executor, "progress", counted_progress)
+        first = loop.run_in_executor(executor, _hold, first_started, release_first)
+        second = loop.run_in_executor(executor, _hold, second_started, release_second)
+        assert await asyncio.to_thread(first_started.wait, 5)
+        queued = asyncio.ensure_future(renderer._render_with_timeout(None, None, []))
+        # One loop step: the task queues its render behind the two jobs.
+        await asyncio.sleep(0)
+        # The pool moves after the render was queued: one job ends, one starts.
+        release_first.set()
+        assert await asyncio.to_thread(second_started.wait, 5)
+        await asyncio.wait_for(waited_one_timeout.wait(), timeout=5)
+        assert executor._inner is old_inner
+        release_second.set()
+        assert await asyncio.wait_for(queued, timeout=5) == "rendered"
+        assert executor._inner is old_inner
+        await first
+        await second
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release_first.set()
+        release_second.set()
         renderer.shutdown()
