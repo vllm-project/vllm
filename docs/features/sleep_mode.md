@@ -184,7 +184,7 @@ The KV cache held in the pool is lost, so later lookups miss and the prefixes
 are computed again. A load that starts just before the pool goes away can fail;
 set `"kv_load_failure_policy": "recompute"` in `--kv-transfer-config` to
 recompute those blocks instead of failing the request. Each vLLM rank still
-keeps its Mooncake `local_buffer_size` buffer (4 GiB by default). See
+keeps its Mooncake `local_buffer_size` buffer. See
 [MooncakeStoreConnector](mooncake_store_connector_usage.md#disk-offloading)
 for the `standalone-store` setup.
 
