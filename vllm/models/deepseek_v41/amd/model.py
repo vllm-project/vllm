@@ -80,7 +80,6 @@ from vllm.models.deepseek_v41.amd.mhc import (
     mhc_pre_delayed_seam,
     supports_mhc_overlap,
     supports_mhc_seam,
-    warmup_mhc_seam,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import (
     MonoDecodeLayer,
@@ -370,8 +369,6 @@ class DeepseekV4DecoderLayer(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
             self.mono.build_runner(self.attn_norm.weight.device)
-        if self.mhc_seam is not None and self.hc_attn_fn.is_cuda:
-            warmup_mhc_seam(self.hidden_size, self.hc_mult, self.hc_attn_fn.device)
         if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
             return
         # Reloads and in-place updates end here too; refilled in place, so

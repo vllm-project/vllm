@@ -139,14 +139,13 @@ def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
 
 @requires_cdna3
 def test_seam_graph_replay(default_vllm_config):
-    """After the warmup, the seam captures in a CUDA graph and its replay on
-    new inputs matches the eager call."""
+    """After one eager call, as vLLM makes before capture, the seam captures
+    in a CUDA graph and its replay on new inputs matches the eager call."""
     set_random_seed(0)
     num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
     static = _seam_args(num_tokens)
     residual, fn, scale, base, x, post, comb, pre_mix = static
     pre_delayed = MHCPreDelayedOp()
-    amd_mhc.warmup_mhc_seam(HIDDEN, HC, residual.device)
 
     def seam():
         return amd_mhc.mhc_pre_delayed_seam(
