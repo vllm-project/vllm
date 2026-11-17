@@ -7,7 +7,7 @@ load. It returns None unless `--monokernel` or
 `decode_backend=latency_specialized` is set, and raises with every reason
 when the deployment cannot run it. Checks that need the loaded weights run when the
 executor is built (`guards.model_refusals`), those that need the KV caches when
-they are bound (`decode.SpecializedDecode.bind_caches`)."""
+they are bound (`decode.SpecializedDecode.prepare_kv`)."""
 
 from __future__ import annotations
 

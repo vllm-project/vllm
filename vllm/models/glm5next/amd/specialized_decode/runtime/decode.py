@@ -4,11 +4,13 @@
 then a whole-layer MonoKernel launch for every MoE decoder layer 3..43 inside the
 stock layer loop.
 
-Built by the model state once the weights are loaded (`Glm5NextModelState`): reads
-vLLM's loaded weights in place (`weights`) and builds every width's launches
-before memory profiling and graph capture. `bind_caches` binds them to every KV
-cache vLLM allocates (the CUDA-graph memory-profiling cache, then the real one).
-Each step `plan` returns a `Step` or None; `Step.layer(i)` is the launch
+Same interface as NVIDIA's executor (`nvidia/specialized_decode/runtime/decode.py`),
+which `common/model.py` picks by platform. Built by the model state once the weights
+are loaded (`Glm5NextModelState`): reads vLLM's loaded weights in place (`weights`)
+and builds every width's launches before memory profiling and graph capture.
+`prepare_kv` binds them to every KV cache vLLM allocates (the CUDA-graph
+memory-profiling cache, then the real one). Each step `plan` returns a `Step` or
+None (vLLM's step); `run` runs the backbone with `Step.layer(i)`, the launch
 replacing decoder layer i (None for vLLM's layers). Weight reloads are not
 supported."""
 
@@ -63,6 +65,10 @@ class Step:
     step: DecodeStep
     kernels: dict[int, Any]
 
+    @property
+    def positions(self) -> torch.Tensor:
+        return self.step.positions
+
     def layer(self, idx: int) -> Callable[..., Any] | None:
         """The launch replacing decoder layer idx (it takes and returns what
         `Glm5NextDecoderLayer` does), or None for vLLM's layer."""
@@ -94,6 +100,7 @@ class SpecializedDecode:
                 "--monokernel cannot run the GLM-5.3-Flash specialized decode on "
                 "this model: " + "; ".join(reasons) + "."
             )
+        self.backbone = backbone
         self.cfg = cfg
         start = getattr(backbone, "start_layer", 0)
         end = getattr(backbone, "end_layer", len(backbone.layers))
@@ -154,7 +161,11 @@ class SpecializedDecode:
                     out[f"{idx}.{name}"] = _resolve(layer, path)
         return out
 
-    def bind_caches(self) -> None:
+    def build_logits(self, logits_processor: Any, lm_head: Any) -> None:
+        """Nothing to build: the kernel layers end inside the backbone, so vLLM
+        computes the logits."""
+
+    def prepare_kv(self) -> None:
         """Check and bind the KV caches vLLM just bound (the CUDA-graph memory
         profiling cache, then the real one); a no-op if none moved."""
         caches = self.caches()
@@ -203,9 +214,16 @@ class SpecializedDecode:
             counters[key] += 1
             return None
         assert step is not None
-        self.bind_caches()
+        self.prepare_kv()
         counters["mono_steps"] += 1
         return Step(step, self.kernels[step.width])
+
+    def run(
+        self, step: Step, input_ids: torch.Tensor | None, inputs_embeds: Any
+    ) -> Any:
+        """The backbone's forward with this step's launches in place of the kernel
+        layers."""
+        return self.backbone(input_ids, step.positions, None, inputs_embeds, step=step)
 
     def health(self) -> torch.Tensor:
         return self.watch.health()
@@ -214,3 +232,10 @@ class SpecializedDecode:
         """Once per executed step, from compute_logits (eager on every rank, also
         under graph replay). Fail-stop on expired kernel waits."""
         self.watch.after_step()
+
+    def compute_logits(
+        self, logits_processor: Any, lm_head: Any, hidden_states: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Runs `after_step`; None: vLLM computes the logits."""
+        self.after_step()
+        return None

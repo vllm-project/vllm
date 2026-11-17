@@ -35,8 +35,9 @@ post contracts the streams) run vLLM's code.
 - `guards.py`: refusals of the loaded model;
 - `weights.py`: views of vLLM's loaded weights and their checks (no copy);
 - `layers.py`: packing, cache binding, eligibility and the launch per layer;
-- `decode.py`: `SpecializedDecode` (`plan()`, `bind_caches()`, `after_step()`)
-  and `Step.layer()`;
+- `decode.py`: `SpecializedDecode`, with the NVIDIA executor's interface
+  (`plan()`, `run()`, `prepare_kv()`, `build_logits()`, `compute_logits()`), and
+  `Step.layer()`;
 - `routing.py`: the rank-uniform per-step decision;
 - `failstop.py`: the health check of the kernels' error words.
 

@@ -104,7 +104,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 
-from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
@@ -112,12 +111,59 @@ from .multimodal import (
     Glm5NextProcessingInfo,
     Glm5NextVisionTransformer,
 )
-from .specialized_decode import requested
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
-    from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+    if current_platform.is_rocm():
+        from ..amd.specialized_decode.runtime.decode import SpecializedDecode
+    else:
+        from ..nvidia.specialized_decode.runtime.decode import (  # type: ignore[assignment,no-redef]
+            SpecializedDecode,
+        )
+
+# The specialized decode (RFC #60904) is the vendor's, picked here by platform. Both
+# vendors expose `specialized_decode_config(vllm_config)`, `SpecializedDecode(backbone,
+# config)` and `Glm5NextModelState`; the rest of this file does not know which one it
+# has. The executor and the model state are imported on first use.
+if current_platform.is_rocm():
+    from ..amd.specialized_decode.runtime import specialized_decode_config
+
+    def _specialized_decode_cls() -> "type[SpecializedDecode]":
+        from ..amd.specialized_decode.runtime.decode import SpecializedDecode
+
+        return SpecializedDecode
+
+    def _model_state_cls() -> "type[ModelState]":
+        from ..amd.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
+
+else:
+    from ..nvidia.specialized_decode.runtime import (
+        specialized_decode_config as _nvidia_specialized_decode_config,
+    )
+
+    def specialized_decode_config(vllm_config: VllmConfig):  # type: ignore[misc]
+        """NVIDIA's executor config; `--monokernel` (the ROCm kernels) is refused
+        here, without importing AMD code."""
+        if vllm_config.kernel_config.monokernel:
+            raise ValueError(
+                "--monokernel runs GLM-5.3-Flash's specialized decode only on ROCm "
+                f"CDNA4 (gfx950); drop it on {current_platform.device_name}"
+            )
+        return _nvidia_specialized_decode_config(vllm_config)
+
+    def _specialized_decode_cls() -> "type[SpecializedDecode]":
+        from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+
+        return SpecializedDecode  # type: ignore[return-value]
+
+    def _model_state_cls() -> "type[ModelState]":
+        from ..nvidia.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
+
 
 logger = init_logger(__name__)
 
@@ -134,36 +180,6 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     kpool = config.index_kpool
     assert kpool is not None
     return round_up(topk + kpool - 1, 128)
-
-
-def _specialized_decode_config(vllm_config: VllmConfig):
-    """The ROCm specialized decode's config (the backbone's per-layer kernels), None
-    unless it is requested on ROCm. Off ROCm, `decode_backend=latency_specialized`
-    is the NVIDIA executor's (`Glm5NextForCausalLM`) and `--monokernel` is refused,
-    so a stock deployment never reaches AMD code. A ROCm GPU other than gfx950 is
-    refused by the runtime's own checks (`spec.refusal_reasons`)."""
-    if not requested(vllm_config):
-        return None
-    if not current_platform.is_rocm():
-        if vllm_config.kernel_config.monokernel:
-            raise ValueError(
-                "--monokernel runs GLM-5.3-Flash's specialized decode only on ROCm "
-                f"CDNA4 (gfx950); drop it on {current_platform.device_name}"
-            )
-        return None
-    from vllm.models.glm5next.amd.specialized_decode.runtime import (
-        specialized_decode_config,
-    )
-
-    return specialized_decode_config(vllm_config)
-
-
-def _executor_config(vllm_config: VllmConfig):
-    """The NVIDIA specialized decode executor's config, None on ROCm, where the
-    backbone serves the same switch with its own kernels."""
-    if current_platform.is_rocm():
-        return None
-    return specialized_decode_config(vllm_config)
 
 
 _MHC_TAU = 0.05
@@ -987,21 +1003,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             "num_attention_heads must be divisible by world_size"
         )
         self.vllm_config = vllm_config
-        self.specialized_decode_config = _specialized_decode_config(vllm_config)
-        self.specialized_decode: Any = None
-
-    def build_specialized_decode(self) -> None:
-        """Called by `Glm5NextModelState` once the weights are loaded."""
-        from vllm.models.glm5next.amd.specialized_decode.runtime.decode import (
-            SpecializedDecode,
-        )
-
-        assert self.specialized_decode_config is not None
-        if self.specialized_decode is not None:
-            raise ValueError("--monokernel: reloading weights is not supported")
-        self.specialized_decode = SpecializedDecode(
-            self, self.specialized_decode_config
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1032,8 +1033,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        step: Any = None,
         **kwargs,
     ) -> torch.Tensor:
+        """`step` is a ROCm specialized decode step (`SpecializedDecode.run`):
+        `step.layer(i)` is the launch replacing decoder layer i, or None."""
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1055,8 +1059,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        decode = self.specialized_decode
-        step = None if decode is None else decode.plan(positions, intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self._active_layers, start=self.start_layer):
             if idx in self.aux_hidden_state_layers:
@@ -1331,15 +1333,17 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
-        # decode_backend=latency_specialized: a specialized decode executor over
-        # self.model, built by the model state once the weights are loaded.
-        self.specialized_decode_config = _executor_config(vllm_config)
+        # --monokernel or decode_backend=latency_specialized: the vendor's specialized
+        # decode over self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
         self.specialized_decode: SpecializedDecode | None = None
 
     def build_specialized_decode(self) -> None:
-        from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
-
-        self.specialized_decode = SpecializedDecode(
+        """Called by the vendor's `Glm5NextModelState` once the weights are loaded."""
+        assert self.specialized_decode_config is not None
+        if self.specialized_decode is not None:
+            raise ValueError("specialized decode: reloading weights is not supported")
+        self.specialized_decode = _specialized_decode_cls()(
             self.model, self.specialized_decode_config
         )
         self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
@@ -1408,8 +1412,6 @@ class Glm5NextForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        if self.model.specialized_decode is not None:
-            self.model.specialized_decode.after_step()
         decode = self.specialized_decode
         if decode is not None:
             logits = decode.compute_logits(
@@ -1421,13 +1423,7 @@ class Glm5NextForCausalLM(
         return logits
 
     def get_model_state_cls(self) -> "type[ModelState]":
-        if self.model.specialized_decode_config is not None:
-            from ..amd.model_state import Glm5NextModelState as AmdModelState
-
-            return AmdModelState
-        from ..nvidia.model_state import Glm5NextModelState
-
-        return Glm5NextModelState
+        return _model_state_cls()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

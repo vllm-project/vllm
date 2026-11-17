@@ -256,7 +256,9 @@ class Probe:
                 layer.mlp.register_forward_pre_hook(
                     lambda m, args, idx=idx: margin(idx, m, args[0])
                 )
-        decode = backbone.specialized_decode
+        if hasattr(model, "get_language_model"):
+            model = model.get_language_model()
+        decode = model.specialized_decode
         if decode is None:
             return
         plan = decode.plan
@@ -264,6 +266,10 @@ class Probe:
         class _Step:
             def __init__(self, step):
                 self.step = step
+
+            @property
+            def positions(self):
+                return self.step.positions
 
             def layer(self, idx):
                 kernel = self.step.layer(idx)

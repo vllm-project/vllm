@@ -141,7 +141,7 @@ def _decode(monkeypatch, log=None, rank=0, **fakes):
     kit.patch_layers(monkeypatch, log, rank=rank, **fakes)
     backbone = kit.FakeBackbone()
     d = SpecializedDecode(backbone, spec.DecodeConfig(tp_size=4))
-    d.bind_caches()
+    d.prepare_kv()
     return d, backbone, log
 
 
@@ -239,7 +239,7 @@ def test_moved_caches_are_rebound_and_rechecked(monkeypatch):
     fc = kit.forward_context(kit.decode_metadata(_names(backbone)))
     for _ in range(2):
         _plan(monkeypatch, d, fc, 2)
-    d.bind_caches()
+    d.prepare_kv()
     assert sum(e[0] == "bind" for e in log) == 1
     backbone.layers[2].cache = torch.zeros(16, 4)
     _plan(monkeypatch, d, fc, 2)
@@ -260,7 +260,7 @@ def test_caches_index_into_tuples_and_skip_other_layers(monkeypatch):
     for i in (1, 3):
         backbone.layers[i].pair = (torch.zeros(2), torch.zeros(3))
     d = SpecializedDecode(backbone, spec.DecodeConfig(tp_size=4))
-    d.bind_caches()
+    d.prepare_kv()
     assert ("bind", ("1.rec", "3.rec")) in log
     assert d.caches()["3.rec"].numel() == 3
 
