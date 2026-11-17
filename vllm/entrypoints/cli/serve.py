@@ -121,6 +121,13 @@ class ServeSubcommand(CLISubcommand):
                         "(%d) for hybrid LB mode.",
                         args.api_server_count,
                     )
+            elif (
+                args.enable_lora
+                and args.enable_expert_parallel
+                and args.data_parallel_size > 1
+                and vllm.EngineArgs.from_cli_args(args).create_model_config().is_moe
+            ):
+                args.api_server_count = 1
             else:
                 args.api_server_count = args.data_parallel_size
                 if args.api_server_count > 1:

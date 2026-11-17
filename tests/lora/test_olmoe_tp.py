@@ -601,9 +601,11 @@ async def olmoe_queue_observer(request, call_next):
     """Test-only HTTP observation; keep the real inference path unchanged."""
     from fastapi.responses import JSONResponse
 
-    if request.url.path not in ("/test/queued", "/test/slots"):
+    if request.url.path not in ("/test/queued", "/test/slots", "/test/pin"):
         return await call_next(request)
     engine = request.app.state.engine_client
+    if request.url.path == "/test/pin":
+        return JSONResponse(await engine.pin_lora(int(request.query_params["id"])))
     if request.url.path == "/test/slots":
         # Gather independent RPC responses in the frontend. A new worker-side
         # collective could interleave with a peer's final dummy forward pass.
@@ -630,8 +632,6 @@ def _olmoe_online_args(paths, dp, eager, baseline, prefix_caching=False):
     args = [
         "--host",
         "127.0.0.1",
-        "--api-server-count",
-        "1",
         "--served-model-name",
         "base",
         "--enable-lora",
@@ -825,7 +825,16 @@ async def _olmoe_online_checks(
         assert response.status_code == 404, response.text
         # Reverse load order relative to the preloaded reference.
         await load("b", paths[1])
+        b_id = next(slot for slot in await layout() if slot is not None)
         await load("a", paths[0])
+        await load("c", paths[2])
+        assert b_id not in await layout()
+        await post(f"/test/pin?id={b_id}")
+        assert b_id in await layout()
+        await batch("pinned-after-eviction", [("b", 0, dp - 1)])
+        await post("/v1/unload_lora_adapter", {"lora_name": "b"})
+        await post("/v1/unload_lora_adapter", {"lora_name": "c"})
+        await load("b", paths[1])
         cached_batch = [
             ("base", 0, dp - 1),
             ("a", 1, dp - 1),

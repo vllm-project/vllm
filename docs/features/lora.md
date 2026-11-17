@@ -506,8 +506,9 @@ vllm serve MODEL \
 ```
 
 DEP LoRA supports `AsyncLLM` and the API server with internal DP load balancing.
-Use a single API server process (`--api-server-count 1`) so dynamic adapter
-names and IDs have one registry. For runtime HTTP updates, set
+The API server defaults to one process in this mode so dynamic adapter names
+and IDs have one registry. Explicit `--api-server-count` values above 1 are
+unsupported. For runtime HTTP updates, set
 `VLLM_ALLOW_RUNTIME_LORA_UPDATING=1` and use `/v1/load_lora_adapter` and
 `/v1/unload_lora_adapter`. Unloading synchronizes removal across workers before
 removing the API name; a busy adapter stays registered when removal is rejected.
@@ -520,6 +521,7 @@ execution resumes. In-place replacement and removal
 are rejected while any rank has an unfinished request for that ID, including
 queued requests. Generation requests use `load_inplace=False`; explicitly
 replace an idle adapter with `add_lora(LoRARequest(..., load_inplace=True))`.
+Pinning a registered adapter makes it resident if capacity is available.
 Pinned adapters retain capacity until removed. Adapter IDs and paths must agree
 across ranks, and files at each path must contain identical, immutable weights.
 

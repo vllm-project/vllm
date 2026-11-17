@@ -113,8 +113,9 @@ class DPLoRASlots:
                     self.slots[i] = None
             return existed
         if kind == "pin":
-            if not any(s and s.request.lora_int_id == adapter_id for s in self.slots):
+            if adapter_id not in self.adapters:
                 raise ValueError("Load the LoRA before pinning it")
+            self.acquire([self.adapters[adapter_id].request], running)
             self.pinned.add(adapter_id)
             return True
         raise ValueError(f"Unknown LoRA update: {kind}")

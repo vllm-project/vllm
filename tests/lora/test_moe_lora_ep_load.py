@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.utils import multi_gpu_test
 from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.peft_helper import PEFTHelper
@@ -442,6 +443,7 @@ async def _check_lora_slots_dp_ep(model_path, paths, *, preload=True):
 
 
 @pytest.mark.parametrize("preload", [True, False], ids=["preloaded", "on-demand"])
+@multi_gpu_test(num_gpus=2)
 def test_lora_slots_dp2_ep(tmp_path, preload):
     """Different DP request histories must preserve remote expert LoRA identity."""
     import asyncio
