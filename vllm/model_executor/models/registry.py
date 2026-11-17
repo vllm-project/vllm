@@ -152,10 +152,7 @@ _TEXT_GENERATION_MODELS = {
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "Lfm3ForCausalLM": ("lfm3", "Lfm3ForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
-    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
-    # For decapoda-research/llama-*
-    "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
     "LongcatFlashNgramForCausalLM": (
         "longcat_flash_ngram",
@@ -232,14 +229,6 @@ _EMBEDDING_MODELS = {
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "Lfm2BidirectionalModel": ("lfm2", "Lfm2BidirectionalModel"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
-    "LlamaModel": ("llama", "LlamaForCausalLM"),
-    **{
-        # Multiple models share the same architecture, so we include them all
-        k: (mod, arch)
-        for k, (mod, arch) in _TEXT_GENERATION_MODELS.items()
-        if arch == "LlamaForCausalLM"
-    },
-    "MistralModel": ("llama", "LlamaForCausalLM"),
     "ModernBertModel": ("modernbert", "ModernBertModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
@@ -627,6 +616,7 @@ _MULTIMODAL_MODELS = {
         "vllm.models.qwen3_5",
         "Qwen3_5ForConditionalGeneration",
     ),
+    "Qwen3_5ForSlotDecision": ("qwen3_5_slot", "Qwen3_5ForSlotDecision"),
     "Qwen3_5MoeForConditionalGeneration": (
         "vllm.models.qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
@@ -784,6 +774,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Kolibri1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "LlamaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -800,6 +791,8 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Embedding models
+    "LlamaModel": ("transformers", "TransformersEmbeddingModel"),
+    "MistralModel": ("transformers", "TransformersEmbeddingModel"),
     "Qwen2Model": ("transformers", "TransformersEmbeddingModel"),
     # Multimodal models
     "AriaForConditionalGeneration": (
