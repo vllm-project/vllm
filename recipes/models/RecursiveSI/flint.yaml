@@ -6,7 +6,7 @@ meta:
   provider: "RecursiveSI"
   description: "39.8B-parameter (2.5B active) MoE with hybrid sliding-window / full attention, reasoning and tool calling; BF16 and NVFP4 checkpoints on a single Blackwell GPU."
   date_added: 2026-10-18
-  date_updated: 2026-10-21
+  date_updated: 2026-11-17
   tasks:
     - text
   performance_headline: "Single GB200, NVFP4: ~2.0 ms per output token at batch 1 with 100K context"
@@ -17,12 +17,10 @@ meta:
 
 model:
   model_id: "RecursiveSI/flint"
-  min_vllm_version: "nightly"
+  min_vllm_version: "0.33.0"
   install:
     pip:
-      note: "Use a nightly wheel. The NVFP4 GGUF checkpoint also needs `pip install 'gguf>=0.19.0'`."
-    docker:
-      note: "Use the vLLM nightly image."
+      note: "The NVFP4 GGUF checkpoint also needs `pip install 'gguf>=0.19.0'`."
   architecture: moe
   parameter_count: "39.8B"
   active_parameters: "2.5B"
