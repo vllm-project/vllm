@@ -99,8 +99,10 @@ struct Config {
 };
 using SmallM = Config<32, 4, 4, 2, 1>;
 using LargeM = Config<64, 4, 2, 1, 2>;
-// Measured crossover between the two configurations on B300.
-constexpr int64_t kLargeM = 1024;
+// Crossover between the two configurations, measured on GB300 with 152 and
+// (grid-capped) 148 SMs: anywhere in 1537..1664 is within ~1.5% of the faster
+// configuration on both, while 1536 or 2048 lose up to 5%.
+constexpr int64_t kLargeM = 1600;
 
 // K-major operand with 128B swizzle: 8-row atoms of 128 bytes (BLOCK_K bf16),
 // stacked 1024 bytes apart along M/N, advanced by k elements along K.
@@ -225,15 +227,17 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
   tcgen05_after_thread_sync();
   const uint32_t tmem_base = sm.tmem_base;
 
-  // Tiles are M-fastest so that concurrent CTAs share a w_up tile. lowrank and
+  // Tiles are N-fastest, so the tiles in flight at any time cover whole rows
+  // of xn rather than a 128-byte column slice of every row; all of w_up stays
+  // in L2. This measured 12% faster than M-fastest at M = 16384. lowrank and
   // w_up are re-read by other tiles; xn is read once.
   if (warp == 0) {
     if (cute::elect_one_sync()) {
       uint32_t stage = 0, phase = 0;
       for (uint32_t t = first_tile; t < num_tiles; t += tile_step) {
         const int32_t m0 =
-            (t % num_m_blocks) * BLOCK_M * kCtas + rank * BLOCK_M;
-        const int32_t c0 = (t / num_m_blocks) * BC;
+            (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
+        const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
         for (uint32_t kb = 0; kb < NUM_K_BLOCKS; ++kb) {
           sm.empty[stage].wait(phase ^ 1);
           auto* full = reinterpret_cast<uint64_t*>(&sm.full[stage]);
@@ -320,8 +324,8 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
         const uint32_t xs = iter % kXStages;
         sm.x_empty[xs].wait(((iter / kXStages) & 1) ^ 1);
         const int32_t m0 =
-            (t % num_m_blocks) * BLOCK_M * kCtas + rank * BLOCK_M;
-        const int32_t c0 = (t / num_m_blocks) * BC;
+            (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
+        const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
         auto* full = reinterpret_cast<uint64_t*>(&sm.x_full[xs]);
   #pragma unroll
         for (uint32_t s = 0; s < HC; ++s) {
@@ -344,8 +348,9 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
     uint32_t iter = 0;
     for (uint32_t t = first_tile; t < num_tiles; t += tile_step, ++iter) {
       const uint32_t acc = iter % kAccStages, xs = iter % kXStages;
-      const int32_t m0 = (t % num_m_blocks) * BLOCK_M * kCtas + rank * BLOCK_M;
-      const int32_t c0 = (t / num_m_blocks) * BC;
+      const int32_t m0 =
+          (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
+      const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
 
       // xn: kChunk columns of this row for every stream, undoing the swizzle.
       sm.x_full[xs].wait((iter / kXStages) & 1);
