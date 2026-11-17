@@ -336,9 +336,8 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        self.draft_vocab = DraftVocab(
-            self.logits_processor, vllm_config.model_config.get_vocab_size()
-        )
+        self.draft_vocab = DraftVocab(self.logits_processor, self.config.vocab_size)
+        # Registers the parameter on this module for the weight loader.
         self.draft_id_to_target_id = self.draft_vocab.draft_id_to_target_id
 
     def embed_input_ids(
