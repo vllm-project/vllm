@@ -202,8 +202,10 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     Runs once; reloads reuse the cold-start record."""
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
-    # Refused models record too (harmless); `check_direct_reload` refuses
-    # their updates.
+    if getattr(model, "_direct_reload_refusals", None):
+        # never updated directly (`check_direct_reload` refuses); some refused
+        # setups (torchao) hold tensors with no plain storage
+        return
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)

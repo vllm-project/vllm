@@ -667,3 +667,15 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
         with pytest.raises(RuntimeError, match=match) as err:
             start_reload(model)
         assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
+
+
+def test_refused_model_records_no_layout(monkeypatch):
+    # `load_model` checks before post-load processing; a model direct reload
+    # refuses records nothing (torchao's tensors have no plain storage)
+    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    with _DEVICE:
+        model = _ToyModel()
+    model.load_weights(_checkpoint().items())
+    log_direct_reload_support(model, _config(lora_config=object()))
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    assert not hasattr(model, "_ckpt_param_names")

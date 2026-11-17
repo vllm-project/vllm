@@ -120,9 +120,11 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
+            # before post-load processing, which records the checkpoint layout
+            # only for models direct reload can update
+            log_direct_reload_support(model, vllm_config)
             process_weights_after_loading(model, model_config, target_device)
             log_online_quantization_time(vllm_config)
-            log_direct_reload_support(model, vllm_config)
 
             gc.collect()
             torch.accelerator.empty_cache()

@@ -459,6 +459,9 @@ def test_aiter_moe_padding_numerically_transparent(
     (not just itself across flag settings) for an eligible weight shape,
     regardless of `VLLM_ROCM_MOE_PADDING`. Persisted parameter storage size
     must also be unaffected by the flag (see module docstring)."""
+    # direct reload (the default) keeps a re-laid-out weight's whole storage
+    # at cold start, so the padded size stays
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     assert default_vllm_config is not None
     assert workspace_init is None
 

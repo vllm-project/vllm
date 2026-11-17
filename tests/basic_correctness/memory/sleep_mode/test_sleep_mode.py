@@ -150,7 +150,7 @@ def test_deep_sleep_keeps_preserved_parameters(monkeypatch, gpu_memory_cleared):
 
 
 @create_new_process_for_each_test()
-def test_deep_sleep_lora(gpu_memory_cleared):
+def test_deep_sleep_lora(gpu_memory_cleared, monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True.
 
     LoRA wrapping moves parameters under base_layer and adds LoRA
@@ -158,6 +158,8 @@ def test_deep_sleep_lora(gpu_memory_cleared):
     reload machinery — reload must forward checkpoint weights through
     the wrappers and reset the LoRA state afterwards.
     """
+    # direct reload (the default) refuses LoRA
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     model = "vllm-project/tiny-random-LlamaForCausalLM"
     llm = LLM(
         model,
@@ -213,6 +215,8 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     reorder gathered logits. Level-2 sleep must preserve it, like the rest
     of the LoRA state.
     """
+    # direct reload (the default) refuses LoRA
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     # Needed for apply_model to reach the multiproc TP workers below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
