@@ -90,6 +90,15 @@
     },
     "GGUF_VERSION": {
       "default": ">=0.19.0"
+    },
+    "RUBIN_TRITON_PTXAS_VERSION": {
+      "default": "13.4.92"
+    },
+    "RUBIN_TRITON_PTXAS_SHA256_AARCH64": {
+      "default": "8aebd451afb3984bc0019e803ae8a01a3837b7c69f36db779a7ce77e70831f5f"
+    },
+    "RUBIN_TRITON_PTXAS_SHA256_X86_64": {
+      "default": "60998f40cc9df5826b2a846e2dcc328133fbc5ef539398ce0a21cf5dcac7193d"
     }
   }
 }

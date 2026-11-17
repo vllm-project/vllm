@@ -551,10 +551,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 
-# Build Triton from source when a repository is configured. Triton 3.8 pins
-# ptxas-blackwell 13.3, which cannot assemble SM107. Rubin CUDA 13.4 and 13.5
-# builds use their SM107-capable system ptxas during the wheel build and at
-# runtime.
+# Build Triton from source when a repository is configured. Rubin builds use the
+# Triton commit that their PyTorch nightly requires, and bundle the builder's
+# system ptxas as Triton's ptxas-blackwell. The final image's Triton install
+# step replaces it with the ptxas that Triton uses at runtime.
 COPY tools/build_triton_from_source.sh /tmp/build_triton_from_source.sh
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=cache,id=triton-source-${TARGETARCH},target=/root/.triton,sharing=locked \
@@ -1376,7 +1376,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 # Install source-built Triton last so dependency resolution cannot restore the
-# previously installed version.
+# previously installed version. Triton 3.9 assembles SM90 and newer kernels with
+# its ptxas-blackwell, which the install script links to the given ptxas. CUDA
+# 13.5 Rubin images link ptxas 13.4.92 because ptxas 13.5.37 miscompiles some
+# sm_107a code.
+ARG RUBIN_TRITON_PTXAS_VERSION=13.4.92
+ARG RUBIN_TRITON_PTXAS_SHA256_AARCH64=8aebd451afb3984bc0019e803ae8a01a3837b7c69f36db779a7ce77e70831f5f
+ARG RUBIN_TRITON_PTXAS_SHA256_X86_64=60998f40cc9df5826b2a846e2dcc328133fbc5ef539398ce0a21cf5dcac7193d
 COPY --from=extensions-build \
     /tmp/triton_from_source_workspace/dist/wheel.sha256 \
     /tmp/triton-source-wheel.sha256
@@ -1387,9 +1393,31 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
         if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
             case "${CUDA_MAJOR_MINOR}" in \
-                13.4|13.5) \
+                13.4) \
                     TRITON_SYSTEM_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-                    TRITON_EXPECTED_PTXAS_VERSION="${CUDA_MAJOR_MINOR}" \
+                    TRITON_EXPECTED_PTXAS_VERSION=13.4 \
+                        bash /tmp/install_triton_from_source.sh \
+                            /tmp/triton-source-dist \
+                            /tmp/triton-source-wheel.sha256 \
+                    ;; \
+                13.5) \
+                    case "$(uname -m)" in \
+                        aarch64) PTXAS_PLATFORM=sbsa; PTXAS_SHA256="${RUBIN_TRITON_PTXAS_SHA256_AARCH64}" ;; \
+                        x86_64) PTXAS_PLATFORM=x86_64; PTXAS_SHA256="${RUBIN_TRITON_PTXAS_SHA256_X86_64}" ;; \
+                        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+                    esac \
+                    && PTXAS_ARCHIVE="cuda_nvcc-linux-${PTXAS_PLATFORM}-${RUBIN_TRITON_PTXAS_VERSION}-archive" \
+                    && curl -fsSL --retry 3 --retry-all-errors \
+                        "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-${PTXAS_PLATFORM}/${PTXAS_ARCHIVE}.tar.xz" \
+                        -o "/tmp/${PTXAS_ARCHIVE}.tar.xz" \
+                    && echo "${PTXAS_SHA256}  /tmp/${PTXAS_ARCHIVE}.tar.xz" | sha256sum -c - \
+                    && mkdir -p /usr/local/triton-ptxas/bin \
+                    && python3 -c 'import sys, tarfile; open(sys.argv[3], "wb").write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())' \
+                        "/tmp/${PTXAS_ARCHIVE}.tar.xz" "${PTXAS_ARCHIVE}/bin/ptxas" /usr/local/triton-ptxas/bin/ptxas \
+                    && chmod 0755 /usr/local/triton-ptxas/bin/ptxas \
+                    && rm -f "/tmp/${PTXAS_ARCHIVE}.tar.xz" \
+                    && TRITON_SYSTEM_PTXAS_PATH=/usr/local/triton-ptxas/bin/ptxas \
+                    TRITON_EXPECTED_PTXAS_VERSION=13.4 \
                         bash /tmp/install_triton_from_source.sh \
                             /tmp/triton-source-dist \
                             /tmp/triton-source-wheel.sha256 \
