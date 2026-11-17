@@ -3,11 +3,11 @@
 """Muse Spark paged decode attention of the 8-token verify step, fused with the
 per-head output RMS norm (no weight) and the sigmoid gate, as one CuTe kernel.
 
-head_dim 64, 8 query heads per KV head, BF16 paged cache [pages, HKV, 16, 128]
-(K in columns 0:64, V in 64:128), 8 query rows per request (the last 8 cache
-entries of the request), any context length L >= 8, optionally a sliding
-window. One launch covers the rank's KV heads (grid y); the heads are
-independent.
+head_dim 64, 8 query heads per KV head, BF16 or FP8 (E4M3) paged cache
+([pages, HKV, P, 128], K in columns 0:64, V in 64:128), 8 query rows per
+request (the last 8 cache entries of the request), any context length L >= 8,
+optionally a sliding window. One launch covers the rank's KV heads (grid y);
+the heads are independent.
 
 Two variants, picked on the host from the deployment's maximum length:
 
@@ -31,6 +31,11 @@ Two variants, picked on the host from the deployment's maximum length:
   The launch shape depends on the deployment only, so a captured graph serves
   every step. With window W, row t sees keys [L - 8 + t - W + 1, L - 8 + t].
 
+FP8 pages (a compile-time variant, `kv_format`) load half the bytes and
+widen to BF16 in registers (exact), so the mma path is the BF16 one; the
+per-tensor k_scale folds into the softmax scale and v_scale into 1 / l. The
+query stays BF16 (the stock TRT-LLM decode quantizes it to FP8).
+
 Every FP32 operation is explicit PTX in the fast-math forms (subnormals
 flushed, ex2.approx, rcp.approx, rsqrt.approx) in a fixed order, so the result
 depends neither on the launch's timing nor on the device. Not bitwise to the
@@ -39,6 +44,7 @@ BF16 before P V and the partials merge in FP32.
 """
 
 import functools
+import math
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -58,6 +64,7 @@ from ..common.primitives import (
     cp_async_cg_16,
     cp_async_commit,
     cp_async_wait,
+    e4m3x4_to_bf16x4,
     ex2_approx_ftz,
     fence_mbarrier_init_cluster,
     fma_ftz_f32,
@@ -95,10 +102,11 @@ from ..common.primitives import (
     store_shared_f32x4_address,
     sub_ftz_f32,
 )
+from . import kv_format as kvf
 
 HEAD_DIM = 64
 PAGE = 16  # cache slots per page
-SLOT_ELEMS = 2 * HEAD_DIM  # BF16 per cache slot: K then V
+SLOT_ELEMS = 2 * HEAD_DIM  # elements per cache slot: K then V
 HEADS = 8  # query heads per KV head
 QUERY_ROWS = 8  # tokens per request (1 + 7 drafts)
 ROWS = 16  # query-head rows per cluster
@@ -129,7 +137,7 @@ MERGE_M_MAX = 16
 GROUP_PAGES = 4
 RING_GROUPS = 2
 RING_STAGES = GROUP_PAGES * RING_GROUPS
-PAGE_BYTES = PAGE * SLOT_ELEMS * 2
+PAGE_BYTES = PAGE * SLOT_ELEMS * 2  # a BF16 page; the ring slots are sized for it
 # One exchanged partial row: 64 o, m, l and 2 pad floats; the 66 floats
 # before the pad are pushed.
 SLOT = 68
@@ -162,6 +170,41 @@ SMEM_SPLIT = S_LONG_RECV + CLUSTER * WARPS * SLOT_BYTES
 
 assert QUERY_ROWS * HEADS == GROUPS * ROWS and CLUSTER == ROWS
 assert WARPS * 32 * 2 * 16 == PAGE_BYTES  # two 16-byte copies a thread per page
+
+
+def elem_bytes(fmt: kvf.KvLayout) -> int:
+    return kvf.elem_bytes(fmt.kind)
+
+
+def page_bytes(fmt: kvf.KvLayout) -> int:
+    """Bytes of one KV head's 16-slot sub-page (K | V slots)."""
+    return PAGE * SLOT_ELEMS * elem_bytes(fmt)
+
+
+def page_words(fmt: kvf.KvLayout) -> int:
+    """Registers a lane holds of one page as loaded (`_load_page`)."""
+    return {"bf16": 32, "fp8": 16}[fmt.kind]
+
+
+def _page_ref(bt_row, index, predicate, other, fmt: kvf.KvLayout):
+    """Sub-page `index` of a request as (block-table entry << shift) | sub:
+    its entry's `index >> shift`, or `other` (a ref) when not `predicate`."""
+    shift = fmt.shift
+    if shift == 0:
+        return load_global_nc_s32_or(bt_row + Int64(index) * 4, predicate, other)
+    entry = load_global_nc_s32_or(
+        bt_row + Int64(index >> shift) * 4, predicate, Int32(0)
+    )
+    ref = (entry << shift) | (index & ((1 << shift) - 1))
+    keep = Int32(predicate)
+    return ref * keep + other * (1 - keep)
+
+
+def _split_ref(ref, fmt: kvf.KvLayout):
+    """(block-table entry, sub-page) of a `_page_ref`."""
+    if fmt.shift == 0:
+        return ref, None
+    return ref >> fmt.shift, ref & ((1 << fmt.shift) - 1)
 
 
 # The kernel's scale of the scores, in log2 units, and eps (FP32 as the
@@ -201,11 +244,25 @@ def _load_rows(q_base, q_stride, token0, head0, token1, head1, t):
     )
 
 
-def _load_page(regs: cute.Tensor, kv_base, page_stride, entry, g, t) -> None:
-    """One KV page as a lane holds it: words 8 j .. 8 j + 7 the key slot
-    8 j + g, words 16 + 8 j .. the value slot 8 j + g, head dims
-    [16 t, 16 t + 16)."""
-    base = kv_base + (Int64(entry) * page_stride + Int64(16 * t)) * 2
+def _load_page(regs: cute.Tensor, kv_base, page_stride, entry, g, t, fmt) -> None:
+    """One KV page as a lane holds it, head dims [16 t, 16 t + 16): BF16,
+    words 8 j .. 8 j + 7 the key slot 8 j + g, words 16 + 8 j .. the value
+    slot 8 j + g; FP8, words 4 j .. 4 j + 3 the key slot, 8 + 4 j .. the
+    value slot."""
+    entry, sub = _split_ref(entry, fmt)
+    sub_bytes = Int64(0) if sub is None else Int64(sub) * page_bytes(fmt)
+    if fmt.kind == "fp8":
+        base = kv_base + Int64(entry) * page_stride + Int64(16 * t) + sub_bytes
+        for j in range(2):
+            slot = base + Int64((8 * j + g) * SLOT_ELEMS)
+            words = load_global_nc_u32x4_address(slot)
+            for w in range(4):
+                regs[4 * j + w] = words[w]
+            words = load_global_nc_u32x4_address(slot + HEAD_DIM)
+            for w in range(4):
+                regs[8 + 4 * j + w] = words[w]
+        return
+    base = kv_base + (Int64(entry) * page_stride + Int64(16 * t)) * 2 + sub_bytes
     for j in range(2):
         slot = base + Int64((8 * j + g) * SLOT_ELEMS * 2)
         for half, offset in enumerate((0, 16)):
@@ -215,6 +272,24 @@ def _load_page(regs: cute.Tensor, kv_base, page_stride, entry, g, t) -> None:
             words = load_global_nc_u32x4_address(slot + 2 * HEAD_DIM + offset)
             for w in range(4):
                 regs[16 + 8 * j + 4 * half + w] = words[w]
+
+
+def _widen(raw) -> list:
+    """Eight BF16 words of the 16 E4M3 head dims in four raw words, in the
+    BF16 cache's word order."""
+    words = []
+    for w in raw:
+        words.extend(e4m3x4_to_bf16x4(w))
+    return words
+
+
+def _kv_words(regs: cute.Tensor, j: int, value: bool, fmt: kvf.KvLayout) -> list:
+    """The eight BF16 words (head dims [16 t, 16 t + 16)) of the key or
+    value of slot 8 j + g in a page `_load_page` loaded."""
+    v = int(value)
+    if fmt.kind == "fp8":
+        return _widen([regs[8 * v + 4 * j + w] for w in range(4)])
+    return [regs[16 * v + 8 * j + w] for w in range(8)]
 
 
 def _scores(kw, qf) -> list:
@@ -284,13 +359,13 @@ def _pv(o: cute.Tensor, p0: list, p1: list, vlo, vhi) -> None:
             o[4 * j + i] = acc[i]
 
 
-def _attend_page(cur, qf, pos, lim0, lim1, low0, low1, sl2, state, o, windowed):
+def _attend_page(cur, qf, pos, lim0, lim1, low0, low1, sl2, state, o, windowed, fmt):
     """One page (16 keys) of online-softmax attention of the warp's rows g and
     g + 8 from registers; pos is the lane's first key, a row sees keys
     low <= key <= lim."""
     s0, s1 = [], []
     for j in range(2):
-        s = _scores([cur[8 * j + w] for w in range(8)], qf)
+        s = _scores(_kv_words(cur, j, False, fmt), qf)
         for e in range(2):
             key = pos + 8 * j + e
             s0.append(
@@ -300,7 +375,7 @@ def _attend_page(cur, qf, pos, lim0, lim1, low0, low1, sl2, state, o, windowed):
                 scale_or_neg_inf(s[2 + e], sl2, key, lim1, low1 if windowed else None)
             )
     p0, p1, state = _online_step(s0, s1, state, o)
-    _pv(o, p0, p1, [cur[16 + w] for w in range(8)], [cur[24 + w] for w in range(8)])
+    _pv(o, p0, p1, _kv_words(cur, 0, True, fmt), _kv_words(cur, 1, True, fmt))
     return state
 
 
@@ -357,15 +432,18 @@ def _merge_warps_and_push(smem, mbar, tid, rank) -> None:
     )
 
 
-def _finish_row(ox, oy, ls, gate2, eps, out_row, lane) -> None:
-    """The epilogue of one row (lane: dims 2 lane, 2 lane + 1): o / l rounded
-    to BF16, RMS norm without weight, sigmoid gate, BF16 store."""
+def _finish_row(ox, oy, ls, gate2, eps, out_row, lane, v_scale=None) -> None:
+    """The epilogue of one row (lane: dims 2 lane, 2 lane + 1): o / l (times
+    the FP8 cache's `v_scale`) rounded to BF16, RMS norm without weight,
+    sigmoid gate, BF16 store."""
     gx, gy = bf16x2_to_f32x2(gate2)
     neg_log2e = Float32(-LOG2E)
     one = Float32(1.0)
     sgx = rcp_approx_ftz(add_ftz_f32(ex2_approx_ftz(mul_ftz_f32(gx, neg_log2e)), one))
     sgy = rcp_approx_ftz(add_ftz_f32(ex2_approx_ftz(mul_ftz_f32(gy, neg_log2e)), one))
     inv = rcp_approx_ftz(ls)
+    if v_scale is not None:
+        inv = mul_ftz_f32(inv, v_scale)
     ox = round_bf16(mul_ftz_f32(ox, inv))
     oy = round_bf16(mul_ftz_f32(inv, oy))
     ss = fma_ftz_f32(ox, ox, mul_ftz_f32(oy, oy))
@@ -440,15 +518,14 @@ def _page_round(
     l1: Float32,
     o: cute.Tensor,
     windowed: cutlass.Constexpr[bool],
+    fmt: cutlass.Constexpr[kvf.KvLayout],
 ):
     """One round of the warp's page loop: page pg (in `cur`) attended while
     page pg + 64 loads into `nxt`, which then becomes `cur`."""
     pn = pg + CLUSTER_WARPS
     if pn < num_pages:
-        entry = load_global_nc_s32_or(
-            bt_row + Int64(first_page + pn) * 4, Int32(pg != gw), e_second
-        )
-        _load_page(nxt, kv_base, kv_page_stride, entry, g, t)
+        entry = _page_ref(bt_row, first_page + pn, Int32(pg != gw), e_second, fmt)
+        _load_page(nxt, kv_base, kv_page_stride, entry, g, t, fmt)
     state = _attend_page(
         cur,
         _read_qf(qf_frag),
@@ -461,8 +538,9 @@ def _page_round(
         (m0, m1, l0, l1),
         o,
         windowed,
+        fmt,
     )
-    for i in cutlass.range_constexpr(32):
+    for i in cutlass.range_constexpr(page_words(fmt)):
         cur[i] = nxt[i]
     return state
 
@@ -480,7 +558,9 @@ def _short_path(
     out_stride: Int64,
     sl2: Float32,
     eps: Float32,
+    v_scale: Float32,
     window: cutlass.Constexpr[int],
+    fmt: cutlass.Constexpr[kvf.KvLayout],
     smem: Int32,
     seq_len: Int32,
     b: Int32,
@@ -551,14 +631,15 @@ def _short_path(
     o = cute.make_rmem_tensor(cute.make_layout((32,)), Float32)
     for i in cutlass.range_constexpr(32):
         o[i] = Float32(0.0)
-    cur = cute.make_rmem_tensor(cute.make_layout((32,)), Uint32)
-    nxt = cute.make_rmem_tensor(cute.make_layout((32,)), Uint32)
+    words = page_words(fmt)
+    cur = cute.make_rmem_tensor(cute.make_layout((words,)), Uint32)
+    nxt = cute.make_rmem_tensor(cute.make_layout((words,)), Uint32)
     m0 = Float32(NEG_BIG)
     m1 = Float32(NEG_BIG)
     l0 = Float32(0.0)
     l1 = Float32(0.0)
     if gw < num_pages:
-        _load_page(cur, kv_base, kv_page_stride, e_first, g, t)
+        _load_page(cur, kv_base, kv_page_stride, e_first, g, t, fmt)
     round_args = (
         qf_frag,
         num_pages,
@@ -587,11 +668,17 @@ def _short_path(
                     if pn < num_pages:
                         entry = e_second
                         if const_expr(r > 0):
-                            entry = load_global_nc_s32_or(
-                                bt_row + Int64(first_page + pn) * 4, Int32(1), Int32(0)
+                            entry = _page_ref(
+                                bt_row, first_page + pn, Int32(1), Int32(0), fmt
                             )
                         _load_page(
-                            bufs[1 - r % 2], kv_base, kv_page_stride, entry, g, t
+                            bufs[1 - r % 2],
+                            kv_base,
+                            kv_page_stride,
+                            entry,
+                            g,
+                            t,
+                            fmt,
                         )
                 m0, m1, l0, l1 = _attend_page(
                     bufs[r % 2],
@@ -605,6 +692,7 @@ def _short_path(
                     (m0, m1, l0, l1),
                     o,
                     windowed,
+                    fmt,
                 )
     elif const_expr(split and not rolled):
         # Up to SHORT_ROUNDS rounds: a loop the compiler unrolls.
@@ -613,12 +701,10 @@ def _short_path(
         while pg < num_pages:
             pn = pg + CLUSTER_WARPS
             if pn < num_pages:
-                entry = load_global_nc_s32_or(
-                    bt_row + Int64(first_page + pn) * 4,
-                    Int32(it != Int32(0)),
-                    e_second,
+                entry = _page_ref(
+                    bt_row, first_page + pn, Int32(it != Int32(0)), e_second, fmt
                 )
-                _load_page(nxt, kv_base, kv_page_stride, entry, g, t)
+                _load_page(nxt, kv_base, kv_page_stride, entry, g, t, fmt)
             m0, m1, l0, l1 = _attend_page(
                 cur,
                 _read_qf(qf_frag),
@@ -631,8 +717,9 @@ def _short_path(
                 (m0, m1, l0, l1),
                 o,
                 windowed,
+                fmt,
             )
-            for i in cutlass.range_constexpr(32):
+            for i in cutlass.range_constexpr(words):
                 cur[i] = nxt[i]
             pg = pn
             it = it + 1
@@ -640,7 +727,7 @@ def _short_path(
         # A rolled loop.
         for pg in cutlass.range(gw, num_pages, CLUSTER_WARPS, unroll=1):
             m0, m1, l0, l1 = _page_round(
-                cur, nxt, pg, *round_args, m0, m1, l0, l1, o, windowed
+                cur, nxt, pg, *round_args, m0, m1, l0, l1, o, windowed, fmt
             )
 
     if rank < n_active:
@@ -661,40 +748,65 @@ def _short_path(
         out_row = (
             out_base + (out_token * out_stride + Int64(HEAD_DIM * (owned & 7))) * 2
         )
-        _finish_row(ox, oy, ls, gate2, eps, out_row, lane)
+        _finish_row(
+            ox,
+            oy,
+            ls,
+            gate2,
+            eps,
+            out_row,
+            lane,
+            v_scale if fmt.kind != "bf16" else None,
+        )
 
 
-def _issue_step(ring, step, count, first, bt_row, kv_base, kv_page_stride, tid):
+def _issue_step(ring, step, count, first, bt_row, kv_base, kv_page_stride, tid, fmt):
     """Copy the pages of ring step `step` (pages first + 4 step + [0, 4) of
     this CTA's `count`; none past it) into ring slots 4 (step % 2) + [0, 4):
-    thread i the 16-byte chunks i and i + 128 of each page. The block-table
-    entries load first, then the copies issue (traced inline)."""
+    thread i the 16-byte chunks i and i + 128 of each page (FP8: chunk i). The
+    block-table entries load first, then the copies issue (traced inline)."""
     pages = [step * GROUP_PAGES + pi for pi in range(GROUP_PAGES)]
     entries = [
-        load_global_nc_s32_or(bt_row + Int64(first + i) * 4, Int32(i < count), Int32(0))
-        for i in pages
+        _page_ref(bt_row, first + i, Int32(i < count), Int32(0), fmt) for i in pages
     ]
-    for pi, (i, entry) in enumerate(zip(pages, entries)):
-        src = kv_base + Int64(entry) * kv_page_stride * 2
+    for pi, (i, ref) in enumerate(zip(pages, entries)):
         dst = ring + ((step & (RING_GROUPS - 1)) * GROUP_PAGES + pi) * PAGE_BYTES
         keep = Int32(i < count)
+        entry, sub = _split_ref(ref, fmt)
+        src = kv_base + Int64(entry) * kv_page_stride * elem_bytes(fmt)
+        if sub is not None:
+            src = src + Int64(sub) * page_bytes(fmt)
         cp_async_cg_16(dst + tid * 16, src + Int64(tid * 16), keep)
-        cp_async_cg_16(
-            dst + (tid + THREADS) * 16, src + Int64((tid + THREADS) * 16), keep
-        )
+        if fmt.kind == "bf16":
+            cp_async_cg_16(
+                dst + (tid + THREADS) * 16, src + Int64((tid + THREADS) * 16), keep
+            )
 
 
-def _ring_scores(s: cute.Tensor, pi: int, page, pos, g, t, qf, lims, sl2) -> None:
+def _ring_kv_words(page, slot, t, value: bool, fmt: kvf.KvLayout) -> list:
+    """The eight BF16 words (head dims [16 t, 16 t + 16)) of the key or
+    value of `slot` in the ring page at shared address `page`."""
+    return _slot_words(
+        page + (slot * SLOT_ELEMS + HEAD_DIM * int(value) + 16 * t) * elem_bytes(fmt),
+        fmt,
+    )
+
+
+def _slot_words(address, fmt) -> list:
+    """The eight BF16 words of 16 head dims of a BF16 or FP8 ring slot at
+    `address`."""
+    if fmt.kind == "fp8":
+        return _widen(load_shared_u32x4_unpacked(address))
+    return [
+        *load_shared_u32x4_unpacked(address),
+        *load_shared_u32x4_unpacked(address + 16),
+    ]
+
+
+def _ring_scores(s: cute.Tensor, pi: int, page, pos, g, t, qf, lims, sl2, fmt) -> None:
     lim0, lim1, low0, low1 = lims
     for j in range(2):
-        key_words = page + ((8 * j + g) * SLOT_ELEMS + 16 * t) * 2
-        sc = _scores(
-            (
-                *load_shared_u32x4_unpacked(key_words),
-                *load_shared_u32x4_unpacked(key_words + 16),
-            ),
-            qf,
-        )
+        sc = _scores(_ring_kv_words(page, 8 * j + g, t, False, fmt), qf)
         for e in range(2):
             key = pos + 8 * j + e
             s[8 * pi + 4 * j + e] = scale_or_neg_inf(sc[e], sl2, key, lim0, low0)
@@ -703,11 +815,9 @@ def _ring_scores(s: cute.Tensor, pi: int, page, pos, g, t, qf, lims, sl2) -> Non
             )
 
 
-def _ring_pv(o: cute.Tensor, s: cute.Tensor, pi: int, page, g, t) -> None:
-    v0 = page + (g * SLOT_ELEMS + HEAD_DIM + 16 * t) * 2
-    v1 = v0 + 8 * SLOT_ELEMS * 2
-    vlo = (*load_shared_u32x4_unpacked(v0), *load_shared_u32x4_unpacked(v0 + 16))
-    vhi = (*load_shared_u32x4_unpacked(v1), *load_shared_u32x4_unpacked(v1 + 16))
+def _ring_pv(o: cute.Tensor, s: cute.Tensor, pi: int, page, g, t, fmt) -> None:
+    vlo = _ring_kv_words(page, g, t, True, fmt)
+    vhi = _ring_kv_words(page, 8 + g, t, True, fmt)
     p0 = [s[8 * pi + 4 * j + e] for j in range(2) for e in range(2)]
     p1 = [s[8 * pi + 4 * j + 2 + e] for j in range(2) for e in range(2)]
     _pv(o, p0, p1, vlo, vhi)
@@ -733,6 +843,7 @@ def _attend_group(
     o: cute.Tensor,
     s: cute.Tensor,
     windowed: cutlass.Constexpr[bool],
+    fmt: cutlass.Constexpr[kvf.KvLayout],
 ):
     """`_attend_page` for up to GROUP_PAGES pages staged in the ring (the
     slots from shared address `group`, pages page0 + p) in one
@@ -753,6 +864,7 @@ def _attend_group(
                 qf,
                 (lim0, lim1, low0 if windowed else None, low1 if windowed else None),
                 sl2,
+                fmt,
             )
     order = [
         (pi, j, e) for pi in range(GROUP_PAGES) for j in range(2) for e in range(2)
@@ -768,7 +880,7 @@ def _attend_group(
         s[8 * pi + 4 * j + 2 + e] = p1[k]
     for pi in cutlass.range_constexpr(GROUP_PAGES):
         if pi < npages:
-            _ring_pv(o, s, pi, group + pi * PAGE_BYTES, g, t)
+            _ring_pv(o, s, pi, group + pi * PAGE_BYTES, g, t, fmt)
     return state
 
 
@@ -970,7 +1082,9 @@ def _long_context(
     out_stride: Int64,
     sl2: Float32,
     eps: Float32,
+    v_scale: Float32,
     window: cutlass.Constexpr[int],
+    fmt: cutlass.Constexpr[kvf.KvLayout],
     counters: Int64,
     partials: Int64,
     smem: Int32,
@@ -1015,7 +1129,9 @@ def _long_context(
             out_stride,
             sl2,
             eps,
+            v_scale,
             window,
+            fmt,
             counters,
             partials,
             smem,
@@ -1050,7 +1166,9 @@ def _long_cluster(
     out_stride: Int64,
     sl2: Float32,
     eps: Float32,
+    v_scale: Float32,
     window: cutlass.Constexpr[int],
+    fmt: cutlass.Constexpr[kvf.KvLayout],
     counters: Int64,
     partials: Int64,
     smem: Int32,
@@ -1097,7 +1215,7 @@ def _long_cluster(
 
     steps = (cnt + GROUP_PAGES - 1) >> 2
     ring = smem + S_RING
-    _issue_step(ring, Int32(0), cnt, cbeg, bt_row, kv_base, kv_page_stride, tid)
+    _issue_step(ring, Int32(0), cnt, cbeg, bt_row, kv_base, kv_page_stride, tid, fmt)
     cp_async_commit()
 
     mbar = smem + S_BAR
@@ -1142,6 +1260,7 @@ def _long_cluster(
                 kv_base,
                 kv_page_stride,
                 tid,
+                fmt,
             )
         cp_async_commit()
         m0, m1, l0, l1 = _attend_group(
@@ -1163,6 +1282,7 @@ def _long_cluster(
             o,
             s,
             window > 0,
+            fmt,
         )
     cp_async_wait(0)
 
@@ -1211,15 +1331,24 @@ def _long_cluster(
         out_row = (
             out_base + (out_token * out_stride + Int64(HEAD_DIM * (owned & 7))) * 2
         )
-        _finish_row(ox, oy, ls, gate2, eps, out_row, lane)
+        _finish_row(
+            ox,
+            oy,
+            ls,
+            gate2,
+            eps,
+            out_row,
+            lane,
+            v_scale if fmt.kind != "bf16" else None,
+        )
 
 
 class _Attn2Kernel:
     """Grid (16 * 4 R, kv_heads, num_splits), cluster (16, 1, 1), 128 threads:
     cluster b * 4 + rg of KV head blockIdx.y computes rows 16 rg + [0, 16) of
     request b's 64 (token = row // 8, head = row % 8). The variant, PDL, the
-    KV heads, the z slices and the window are compile-time; shapes, strides
-    and addresses are read at the call."""
+    KV heads, the z slices, the window and the cache dtype are compile-time;
+    shapes, strides, addresses and the scales are read at the call."""
 
     def __init__(
         self,
@@ -1228,8 +1357,10 @@ class _Attn2Kernel:
         kv_heads: int,
         num_splits: int,
         window: int,
+        fmt: kvf.KvLayout,
     ) -> None:
-        self.split, self.enable_pdl = split, enable_pdl
+        assert fmt.kind in kvf.KINDS and fmt.slots in kvf.PAGE_SLOTS, fmt
+        self.split, self.enable_pdl, self.fmt = split, enable_pdl, fmt
         self.kv_heads, self.num_splits, self.window = kv_heads, num_splits, window
         self.merge, self.rolled = split_forms(kv_heads, num_splits)
         # A window of at most SHORT_ROUNDS rounds of pages leaves the
@@ -1254,6 +1385,8 @@ class _Attn2Kernel:
         seq_lens: cute.Tensor,
         out: cute.Tensor,
         workspace: cute.Tensor | None,
+        scale_log2: Float32,
+        v_scale: Float32,
         stream: cuda.CUstream,
     ) -> None:
         rows = Int64(q.shape[0])
@@ -1280,8 +1413,9 @@ class _Attn2Kernel:
             seq_lens.iterator.toint(),
             out.iterator.toint(),
             Int64(out.stride[0]),
-            Float32(SCALE_LOG2),
+            scale_log2,
             Float32(EPS_F32),
+            v_scale,
             counters,
             partials,
         ).launch(
@@ -1315,6 +1449,7 @@ class _Attn2Kernel:
         out_stride: Int64,
         scale_log2: Float32,
         eps: Float32,
+        v_scale: Float32,
         counters: Int64,
         partials: Int64,
     ) -> None:
@@ -1332,7 +1467,8 @@ class _Attn2Kernel:
         q_base = q + heads_bytes
         gate_base = gate + heads_bytes
         out_base = out + heads_bytes
-        kv_base = kv + Int64(kvh) * (PAGE * SLOT_ELEMS * 2)
+        subs = self.fmt.slots // PAGE
+        kv_base = kv + Int64(kvh) * (subs * page_bytes(self.fmt))
 
         cute.arch.griddepcontrol_wait()
 
@@ -1342,13 +1478,16 @@ class _Attn2Kernel:
         seq_len = load_global_nc_s32_or(seq_lens + Int64(b) * 4, Int32(1), Int32(0))
         gw = rank * WARPS + warp
         bt_row = bt + Int64(b) * bt_stride * 4
-        e_first = load_global_nc_s32_or(
-            bt_row + Int64(gw) * 4, Int32(gw < max_pages), Int32(0)
+        shift = self.fmt.shift
+        e_first = _page_ref(
+            bt_row, gw, Int32((gw >> shift) < max_pages), Int32(0), self.fmt
         )
-        e_second = load_global_nc_s32_or(
-            bt_row + Int64(gw + CLUSTER_WARPS) * 4,
-            Int32(gw + CLUSTER_WARPS < max_pages),
+        e_second = _page_ref(
+            bt_row,
+            gw + CLUSTER_WARPS,
+            Int32(((gw + CLUSTER_WARPS) >> shift) < max_pages),
             Int32(0),
+            self.fmt,
         )
         args = (
             q_base,
@@ -1362,7 +1501,9 @@ class _Attn2Kernel:
             out_stride,
             scale_log2,
             eps,
+            v_scale,
             self.window,
+            self.fmt,
         )
         if const_expr(self.split):
             # The pages from row 0's first visible key to the last.
@@ -1401,13 +1542,15 @@ class _Attn2Kernel:
                 # The entries above are those of pages from 0 (first_page is
                 # the constant 0 without a window).
                 if first_page != Int32(0):
-                    e_first = load_global_nc_s32_or(
-                        bt_row + Int64(first_page + gw) * 4, Int32(gw < pages), Int32(0)
+                    e_first = _page_ref(
+                        bt_row, first_page + gw, Int32(gw < pages), Int32(0), self.fmt
                     )
-                    e_second = load_global_nc_s32_or(
-                        bt_row + Int64(first_page + gw + CLUSTER_WARPS) * 4,
+                    e_second = _page_ref(
+                        bt_row,
+                        first_page + gw + CLUSTER_WARPS,
                         Int32(gw + CLUSTER_WARPS < pages),
                         Int32(0),
+                        self.fmt,
                     )
                 _short_path(
                     *args,
@@ -1455,24 +1598,36 @@ def compile_attn2(
     kv_heads: int,
     num_splits: int,
     window: int,
+    fmt: kvf.KvLayout = kvf.BF16,
     options: str = "",
 ):
     """cute.compile one variant of the kernel for `kv_heads` KV heads,
-    `num_splits` z slices (1 for the one-cluster kernel) and `window` (0:
-    none), with these extra compile `options`, before CUDA graph capture.
-    The result takes q, gate, kv_cache, block_table, seq_lens, out and the
-    workspace (None for the one-cluster kernel), checks their dtypes, ranks,
-    the static extents, unit strides, row-stride divisibility and alignment,
-    and launches on the current stream."""
+    `num_splits` z slices (1 for the one-cluster kernel), `window` (0:
+    none) and a cache of layout `fmt` (`kv_format`; FP8 as uint8), with
+    these extra compile `options`, before CUDA graph capture. The result
+    takes q, gate, kv_cache, block_table, seq_lens, out, the workspace (None
+    for the one-cluster kernel), the log2 score scale and v_scale, checks the
+    tensors' dtypes, ranks, the static extents, unit strides, row-stride
+    divisibility and alignment, and launches on the current stream."""
     assert_not_capturing("the attn2 kernel")
     rows = cute.sym_int32()
     width = kv_heads * HEADS * HEAD_DIM
-    head_stride = PAGE * SLOT_ELEMS if kv_heads > 1 else cute.sym_int64()
+    kv = make_fake_tensor(
+        Uint8 if fmt.kind == "fp8" else BFloat16,
+        (cute.sym_int32(), kv_heads, fmt.slots, SLOT_ELEMS),
+        (
+            cute.sym_int64(divisibility=16 // elem_bytes(fmt)),
+            fmt.slots * SLOT_ELEMS if kv_heads > 1 else cute.sym_int64(),
+            SLOT_ELEMS,
+            1,
+        ),
+        assumed_align=16,
+    )
     workspace = None
     if split:
         workspace = make_fake_tensor(Uint8, (cute.sym_int32(),), (1,), assumed_align=16)
     return cute.compile(
-        _Attn2Kernel(split, enable_pdl, kv_heads, num_splits, window),
+        _Attn2Kernel(split, enable_pdl, kv_heads, num_splits, window, fmt),
         make_fake_tensor(
             BFloat16,
             (rows, width),
@@ -1485,12 +1640,7 @@ def compile_attn2(
             (cute.sym_int64(divisibility=2), 1),
             assumed_align=4,
         ),
-        make_fake_tensor(
-            BFloat16,
-            (cute.sym_int32(), kv_heads, PAGE, SLOT_ELEMS),
-            (cute.sym_int64(divisibility=8), head_stride, SLOT_ELEMS, 1),
-            assumed_align=16,
-        ),
+        kv,
         make_fake_tensor(
             Int32,
             (cute.sym_int32(), cute.sym_int32()),
@@ -1507,6 +1657,8 @@ def compile_attn2(
             assumed_align=4,
         ),
         workspace,
+        Float32(SCALE_LOG2),
+        Float32(1.0),
         make_fake_stream(use_tvm_ffi_env_stream=True),
         options=f"--enable-tvm-ffi {options}".strip(),
     )
@@ -1553,13 +1705,24 @@ def prepare(
     kv_heads: int,
     num_splits: int,
     enable_pdl: bool = True,
+    fmt: kvf.KvLayout = kvf.BF16,
 ) -> None:
     """Compile the variant a deployment's layer launches (build time)."""
     split = split_kernel(max_seq_len, window)
-    compile_attn2(split, bool(enable_pdl), kv_heads, num_splits if split else 1, window)
+    compile_attn2(
+        split, bool(enable_pdl), kv_heads, num_splits if split else 1, window, fmt
+    )
 
 
 _INT32_MAX = 2**31 - 1
+
+
+def score_scales(kv_quant: kvf.KvQuant | None) -> tuple[float, float]:
+    """(log2 score scale, v_scale) the kernel takes (FP32 as it reads them):
+    the softmax scale times k_scale, and v_scale (1 for a BF16 cache)."""
+    if kv_quant is None:
+        return SCALE_LOG2, 1.0
+    return fp32(SCALE_LOG2 * fp32(kv_quant.k_scale)), fp32(kv_quant.v_scale)
 
 
 def _refusal(message: str) -> ValueError:
@@ -1578,11 +1741,19 @@ def _check(
     window,
     num_splits,
     workspace,
+    kv_quant,
 ) -> bool:
     """Raise ValueError naming the first condition the call fails, of those
     the kernel needs beyond the compiled call's own checks (dtypes, ranks,
     extents, unit strides, row strides, alignment); returns whether the split
     kernel runs."""
+    fmt = kvf.kind_of(kv_quant)
+    if fmt not in kvf.KINDS:
+        raise _refusal(f"KV cache format {fmt}")
+    if kv_quant is not None and not all(
+        math.isfinite(x) and x > 0 for x in (kv_quant.k_scale, kv_quant.v_scale)
+    ):
+        raise _refusal(f"{kv_quant} must have finite, positive scales")
     if not 1 <= kv_heads <= 65535:
         raise _refusal(f"kv_heads = {kv_heads} is outside 1..65535")
     if not QUERY_ROWS <= max_seq_len <= _INT32_MAX:
@@ -1597,14 +1768,10 @@ def _check(
     num_reqs = rows // QUERY_ROWS
     if num_reqs * CLUSTER * GROUPS > _INT32_MAX:
         raise _refusal("too many requests for one launch")
-    if not (
-        kv_cache.dim() == 4
-        and kv_cache.shape[1] == kv_heads
-        and kv_cache.stride(0) >= kv_heads * PAGE * SLOT_ELEMS
-    ):
+    if not kvf.layout_ok(kv_cache, kv_heads, fmt):
         raise _refusal(
-            f"kv_cache must be a BF16 [pages, {kv_heads}, {PAGE}, {SLOT_ELEMS}] "
-            "tensor of dense 16-byte aligned [heads, 16, 128] pages"
+            f"kv_cache must be a {fmt} cache of {kv_heads} KV heads in dense "
+            "16-byte aligned pages (kv_format)"
         )
     if not (
         block_table.dim() == 2
@@ -1665,6 +1832,7 @@ def attn2(
     window: int = 0,
     num_splits: int = 1,
     workspace: torch.Tensor | None = None,
+    kv_quant: kvf.KvQuant | None = None,
 ) -> None:
     """`out [8 R, 512 kv_heads] = sigmoid(gate) * rmsnorm(attention(q,
     kv_cache))` per query head for R = q.shape[0] / 8 requests whose 8 query
@@ -1673,7 +1841,8 @@ def attn2(
     q, gate and out hold the heads of each KV head contiguously (8 x 64
     columns per KV head); their rows may be strided (q and gate are column
     views of the attention front's output, `split_qkv`). kv_cache is the
-    layer's BF16 [pages, kv_heads, 16, 128] cache. Lengths must be
+    layer's cache: BF16 without `kv_quant`, else FP8 with its
+    per-tensor scales (`kv_format`). Lengths must be
     8..max_seq_len and covered by the first ceil(L / 16) block_table entries
     (device values, not checked here). max_seq_len is the deployment's maximum
     length: above 2048, or with `window` > 0 (row t of a request sees keys
@@ -1697,8 +1866,21 @@ def attn2(
         window,
         num_splits,
         workspace,
+        kv_quant,
     )
+    fmt = kvf.layout_of(kv_cache, kvf.kind_of(kv_quant))
     kernel = compile_attn2(
-        split, bool(enable_pdl), kv_heads, num_splits if split else 1, window
+        split, bool(enable_pdl), kv_heads, num_splits if split else 1, window, fmt
     )
-    kernel(q, gate, kv_cache, block_table, seq_lens, out, workspace if split else None)
+    scale_log2, v_scale = score_scales(kv_quant)
+    kernel(
+        q,
+        gate,
+        kv_cache.view(torch.uint8) if fmt.kind == "fp8" else kv_cache,
+        block_table,
+        seq_lens,
+        out,
+        workspace if split else None,
+        scale_log2,
+        v_scale,
+    )
