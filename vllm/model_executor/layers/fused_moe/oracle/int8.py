@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
@@ -56,9 +56,8 @@ def backend_to_kernel_cls(
     )
 
 
-map_int8_backend: Callable[[MoEBackend], Int8MoeBackend] = lambda runner_backend: (
-    Int8MoEKernelOracle.map_backend(runner_backend)
-)
+def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
+    return Int8MoEKernelOracle.map_backend(runner_backend)
 
 
 class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
