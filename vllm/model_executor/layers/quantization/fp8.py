@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
+    dequantize_block_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -710,6 +712,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
         self.moe_kernel.fused_experts.keep_constants(layer)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
+        requantization."""
+        return dequantize_block_fp8_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale_inv if self.block_quant else None,
+            layer.w2_weight,
+            layer.w2_weight_scale_inv if self.block_quant else None,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.weight_block_size if self.block_quant else None,
+            out_dtype=layer.orig_dtype,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
