@@ -41,6 +41,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
     _merge_dcp_topk_global,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerCache
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
@@ -814,6 +815,27 @@ class KimiK3DSAAttention(nn.Module):
             quant_config,
             prefix,
         )
+        self._w_uk_kdense: torch.Tensor | None = None
+        self._k_norm_bf16: torch.Tensor | None = None
+
+    @torch.no_grad()
+    def build_sd_front_weights(self) -> None:
+        """W_UK_T nope-dense and the index key norm's bf16 [weight, bias], read
+        by the specialized decode's DSA prologue (`runtime.dsa.DsaFront`).
+        Built on first use, then refilled in place by every reload."""
+        kn = self.dsa_indexer.k_index_norm
+        refill_derived(
+            self,
+            "_w_uk_kdense",
+            self.mla_attn.mla_attn.W_UK_T.transpose(1, 2).contiguous(),
+        )
+        refill_derived(
+            self, "_k_norm_bf16", torch.stack([kn.weight, kn.bias]).to(torch.bfloat16)
+        )
+
+    def process_weights_after_loading(self) -> None:
+        if self._w_uk_kdense is not None:
+            self.build_sd_front_weights()
 
     def get_input_quant_key(self) -> None:
         # The generic MLA wrapper also feeds these activations to the gate.

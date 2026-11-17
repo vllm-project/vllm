@@ -225,6 +225,8 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
+    VLLM_KIMI_SD_DSA: Literal["auto", "off"] = "auto"
+    VLLM_KIMI_SD_DSA_PROLOGUE: bool = False
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1781,6 +1783,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    # Kimi-K3.1 on the AMD specialized decode: "auto" runs the DSA layers' sparse
+    # attention in K2 (DCP1, one request a step), "off" runs vLLM's ops.
+    "VLLM_KIMI_SD_DSA": env_with_choices("VLLM_KIMI_SD_DSA", "auto", ["auto", "off"]),
+    # With VLLM_KIMI_SD_DSA: the DSA layers' prologue, indexer scoring and top-k
+    # as one launch (an MXFP4 indexer cache).
+    "VLLM_KIMI_SD_DSA_PROLOGUE": lambda: bool(
+        int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE", "0"))
+    ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP

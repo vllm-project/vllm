@@ -71,6 +71,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     hw_rcp,
     ld_i32,
     load_ptr64,
+    mfma_bf16,
     rsrc,
     traced,
     uniform,
@@ -114,6 +115,8 @@ class MlaPostBuild:
     timeline: bool = False
     splits: int = 0  # DCP1: M1c's KV splits (0: ``o`` the attention's output)
     ctok: int = 0  # tokens a combine task (0: ``ctok``'s)
+    src: str = "m1c"
+    uv: str = "fp4"
 
 
 ABI = KernelAbi(
@@ -243,6 +246,24 @@ def stage_combine(c, h, t0):
     gpu.barrier()
 
 
+def opt(c: dict, k: str, default: str) -> str:
+    return c.get(k, default)
+
+
+@traced
+def ardy_poll(c, t0, h, per, sp0):
+    tid = c["tid"]
+    if const_expr(opt(c, "src", "m1c") == "dsa"):
+        p, tc = c["splits"], c["TC"]
+        t = fx.min(t0 + tid // p, c["S"] - 1)
+        if tid < tc * p:
+            c["poll"]([(c["ardy"], t * p + tid % p, 1)])
+    else:
+        ht = c["m1c_ht"]
+        if tid < per:
+            c["poll"]([(c["ardy"], (sp0 + tid) * (NH // ht) + h // ht, 1)])
+
+
 @traced
 def combine_splits(c, t0, h):
     """`stage_combine` at DCP1 over M1c's partials: token t's request's splits
@@ -258,10 +279,7 @@ def combine_splits(c, t0, h):
     if const_expr("ardy" in c):
         # M1c in this launch (its VGPRs at the limit): the wave index scalar
         wv = uniform(wv)
-        # its CTAs' flags (split, head group of M1c's ``ht`` heads), a thread each
-        ht = c["m1c_ht"]
-        if tid < per:
-            c["poll"]([(c["ardy"], (sp0 + tid) * (NH // ht) + h // ht, 1)])
+        ardy_poll(c, t0, h, per, sp0)
         gpu.barrier()
     if wv < tc:
         t = fx.min(t0 + wv, s - 1)
@@ -324,7 +342,7 @@ def combine_splits(c, t0, h):
                 acc[2 * k + 1] = acc[2 * k + 1] + bf_hi(o[k]) * wt
         return acc
 
-    if const_expr("ardy" in c):
+    if const_expr("ardy" in c and opt(c, "src", "m1c") != "dsa"):
         # with M1c: unrolled, a load a batch (a loop, or wider batches, spill
         # M1c's Q fragment in its loop)
         for j0 in range_constexpr(nj):
@@ -441,7 +459,7 @@ def wv_loads(c, h):
 def stage_uv(c, h, t0, ops):
     """The LDS latents of tokens t0 .. t0 + 4 against W_V[h]'s 16 rows of this
     wave -> bf16, times the gate -> `core`."""
-    s, lane, wave, a, tc = c["S"], c["lane"], c["wave"], c["args"], c["TC"]
+    lane, tc = c["lane"], c["TC"]
     tl = lane % 16
     kb = lane // 16
     row = c["lat"] + fx.min(tl, tc - 1) * LROW
@@ -466,6 +484,53 @@ def stage_uv(c, h, t0, ops):
         xv = fx.Vector.from_elements(xs, fx.Int32)
         wv, sa = ops[st]
         acc = mfma_scaled(wv, xv, acc, sa, code, FP4, FP4, 0, 0)
+    store_core(c, h, t0, acc)
+
+
+KB = KVL // 32
+
+
+def wv_loads_bf16(c, h):
+    a, lane, wave = c["args"], c["lane"], c["wave"]
+    v = wave * 16 + lane % 16
+    kb = lane // 16
+    row = h * a["wv_sh"] + v * a["wv_sn"]
+    return [
+        fx.Vector(
+            bo.buffer_load(
+                rsrc(a["w_v"]), (row + st * 32 + kb * 8) // 2, vec_width=4, dtype=T.i32
+            )
+        )
+        for st in range(KB)
+    ]
+
+
+@traced
+def stage_uv_bf16(c, h, t0, ops):
+    lane, tc = c["lane"], c["TC"]
+    tl = lane % 16
+    kb = lane // 16
+    live = tl < tc
+    row = c["lat"] + fx.min(tl, tc - 1) * LROW
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for st in range_constexpr(KB):
+        xb = fx.Vector(
+            fx.ptr_load(
+                row + st * 16 + kb * 4, result_type=fx.Vector.make_type(4, fx.Int32)
+            )
+        )
+        xb = fx.Vector.from_elements(
+            [live.select(xb[d], fx.Int32(0)) for d in range(4)], fx.Int32
+        )
+        acc = mfma_bf16(ops[st].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc)
+    store_core(c, h, t0, acc)
+
+
+@traced
+def store_core(c, h, t0, acc):
+    s, lane, wave, a, tc = c["S"], c["lane"], c["wave"], c["args"], c["TC"]
+    tl = lane % 16
+    kb = lane // 16
     t = t0 + tl
     v0 = wave * 16 + 4 * kb
     col = h * VD + v0
@@ -513,9 +578,14 @@ def combine_tasks(c, ctas=BLOCKS, done=None):
     for task in range(first_task(bid, 0), tasks(s, tc), ctas):
         h = task % NH
         t0 = task // NH * tc
-        ops = wv_loads(c, h)
-        stage_combine(c, h, t0)
-        stage_uv(c, h, t0, ops)
+        if const_expr(opt(c, "uv", "fp4") == "bf16"):
+            ops = wv_loads_bf16(c, h)
+            stage_combine(c, h, t0)
+            stage_uv_bf16(c, h, t0, ops)
+        else:
+            ops = wv_loads(c, h)
+            stage_combine(c, h, t0)
+            stage_uv(c, h, t0, ops)
         if const_expr(done is not None):
             done(task)
 
@@ -543,7 +613,9 @@ def build(key: MlaPostBuild):
         not key.splits or key.splits // (s // key.qlen) % (WAVES // tc) == 0
     )
     name += f"_sp{key.splits}_c{tc}" if key.splits else ""
+    name += suffix(key)
     assert not key.splits or (R == 1 and key.splits % (s // key.qlen) == 0)
+    assert key.src in ("m1c", "dsa") and key.uv in ("fp4", "bf16")
     assert key.splits // (s // key.qlen) % 2 == 0
     assert key.splits // (s // key.qlen) <= WMAX
 
@@ -587,6 +659,8 @@ def build(key: MlaPostBuild):
             "Q": key.qlen,
             "R": R,
             "splits": key.splits,
+            "src": key.src,
+            "uv": key.uv,
             "TC": tc,
             "tid": tid,
             "bid": bid,
@@ -689,10 +763,19 @@ def build(key: MlaPostBuild):
     return launch
 
 
+def suffix(key: MlaPostBuild) -> str:
+    out = "" if key.src == "m1c" else f"_{key.src}"
+    return out + ("" if key.uv == "fp4" else f"_uv{key.uv}")
+
+
 def host_args(ranks, o, lse, seq_lens, qsl, w_v, w_v_scale, gate) -> list:
     """ABI's `o` .. `gate` (`mla_post`'s, or K2's fused M1b's)."""
     assert o.stride(-1) == 1 and w_v.stride(-1) == 1
     assert o.dtype == torch.bfloat16
+    assert (w_v.dtype == torch.bfloat16) == (w_v_scale is None)
+    if w_v_scale is None:
+        assert w_v.shape == (NH, VD, KVL) and w_v.data_ptr() % 16 == 0
+        assert w_v.stride(0) % 8 == 0 and w_v.stride(1) % 8 == 0
     assert lse is not None or ranks == 1  # DCP1: M1c's partials carry one
     assert lse is None or lse.dtype == torch.float32
     assert seq_lens.dtype == torch.int32 and qsl.dtype == torch.int32
@@ -709,10 +792,16 @@ def host_args(ranks, o, lse, seq_lens, qsl, w_v, w_v_scale, gate) -> list:
         w_v.data_ptr(),
         w_v.stride(0),
         w_v.stride(1),
-        w_v_scale.data_ptr(),
-        w_v_scale.stride(0),
-        w_v_scale.stride(1),
-        w_v_scale.stride(2),
+        *(
+            [0, 0, 0, 0]
+            if w_v_scale is None
+            else [
+                w_v_scale.data_ptr(),
+                w_v_scale.stride(0),
+                w_v_scale.stride(1),
+                w_v_scale.stride(2),
+            ]
+        ),
         gate.data_ptr(),
     ]
 
