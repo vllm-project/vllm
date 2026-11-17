@@ -535,6 +535,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # ---------- non-spec path (prefill or plain decode) ----------
         core_attn_out_non_spec = None
+        num_decode_tokens = 0
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
@@ -572,33 +573,58 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     for x in (q_ns, k_ns, v_ns)
                 )
 
-                assert non_spec_state_indices_tensor is not None
-                assert has_initial_state is not None
+                if spec_sequence_masks is None and m.num_decodes > 0:
+                    # The builder's prefill_* metadata then covers only the
+                    # prefill tail; update the decode-first slice in place.
+                    num_decode_tokens = m.num_decode_tokens
+                    assert non_spec_query_start_loc is not None
+                    assert non_spec_state_indices_tensor is not None
+                    fused_recurrent_kda(
+                        q=q_ns[:, :num_decode_tokens],
+                        k=k_ns[:, :num_decode_tokens],
+                        v=v_ns[:, :num_decode_tokens],
+                        raw_g=g1_ns[:, :num_decode_tokens],
+                        raw_beta=beta_ns[:, :num_decode_tokens],
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        initial_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
+                        ssm_state_indices=non_spec_state_indices_tensor[
+                            : m.num_decodes
+                        ],
+                        out=core_attn_out[:, :num_decode_tokens],
+                    )
+
+                prefill_state_indices = m.prefill_state_indices
+                prefill_has_initial_state = m.prefill_has_initial_state
+                assert prefill_state_indices is not None
+                assert prefill_has_initial_state is not None
                 initial_state = gather_initial_states(
                     recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
+                    prefill_state_indices,
+                    prefill_has_initial_state,
                 )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
                 ) = chunk_kda_with_fused_gate(
-                    q=q_ns,
-                    k=k_ns,
-                    v=v_ns,
-                    raw_g=g1_ns,
-                    raw_beta=beta_ns,
+                    q=q_ns[:, num_decode_tokens:],
+                    k=k_ns[:, num_decode_tokens:],
+                    v=v_ns[:, num_decode_tokens:],
+                    raw_g=g1_ns[:, num_decode_tokens:],
+                    raw_beta=beta_ns[:, num_decode_tokens:],
                     A_log=self.A_log,
                     g_bias=self.dt_bias,
                     lower_bound=self.gate_lower_bound,
                     initial_state=initial_state,
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=non_spec_query_start_loc,
+                    cu_seqlens=m.prefill_query_start_loc,
                 )
                 # Init cache
                 scatter_states(
-                    recurrent_state, last_recurrent_state, non_spec_state_indices_tensor
+                    recurrent_state, last_recurrent_state, prefill_state_indices
                 )
 
             else:
@@ -647,9 +673,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
             core_attn_out[0, :num_actual_tokens] = merged[0, :num_actual_tokens]
         elif core_attn_out_non_spec is not None:
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                0, :num_actual_tokens
-            ]
+            core_attn_out[0, num_decode_tokens:num_actual_tokens] = (
+                core_attn_out_non_spec[0, : num_actual_tokens - num_decode_tokens]
+            )
         else:
             assert core_attn_out_spec is not None
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
