@@ -38,6 +38,7 @@ _KERNEL_KWARGS = frozenset(
         "return_lse",
         "sink",
         "config",
+        "out_dtype",
     }
 )
 
@@ -128,12 +129,12 @@ def profile(
     current_workspace_manager().get_simultaneous(
         *_workspace_shapes(num_q_tokens, num_kv_tokens, num_q_heads, num_kv_heads)
     )
-    # aiter allocates an FP32 output inside the call, then it is cast.
+    # aiter allocates the output inside the call.
     torch.empty(
         (num_q_tokens, num_q_heads, _HEAD_DIM),
-        dtype=torch.float32,
+        dtype=query.dtype,
         device=query.device,
-    ).to(query.dtype)
+    )
 
 
 def _eligible(
@@ -313,6 +314,7 @@ def _triton_or_orig(
         descale_v=dv,
         sink=None,
         config=None,
+        out_dtype=q.dtype,
     )[:2]
 
     logger.info_once(
@@ -323,7 +325,7 @@ def _triton_or_orig(
         bool(causal),
         bool(return_lse),
     )
-    o = out.copy_(o) if out is not None else o.to(q.dtype)
+    o = out.copy_(o) if out is not None else o
     if not return_lse:
         return o
     return o, lse.transpose(0, 1)

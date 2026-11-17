@@ -55,7 +55,8 @@ def kernel(monkeypatch):
     @functools.wraps(mha._flash_attn_forward)
     def fake(q, k, v, **kw):
         calls.append(SimpleNamespace(q=q, k=k, v=v, **kw))
-        o = torch.full(q.shape[:-1] + v.shape[-1:], 0.5, dtype=torch.float32)
+        o_dtype = kw.get("out_dtype") or torch.float32
+        o = torch.full(q.shape[:-1] + v.shape[-1:], 0.5, dtype=o_dtype)
         lse = torch.arange(q.shape[0] * q.shape[1], dtype=torch.float32).view(
             q.shape[0], q.shape[1]
         )
