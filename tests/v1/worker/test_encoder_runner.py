@@ -531,9 +531,9 @@ def test_measure_encoder_output_layouts(monkeypatch, first_pp_rank, supports_mm)
     )
     budget = MagicMock()
     budget.mm_max_toks_per_item = dict.fromkeys(outputs, 8)
-    budget.get_dummy_encoder_profile_inputs.side_effect = (
-        lambda modality, count: [(modality, None)]
-    )
+    budget.get_dummy_encoder_profile_inputs.side_effect = lambda modality, count: [
+        (modality, None)
+    ]
     monkeypatch.setattr(
         parallel_state,
         "get_pp_group",
