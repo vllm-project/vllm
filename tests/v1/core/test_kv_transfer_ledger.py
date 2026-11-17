@@ -105,13 +105,14 @@ def test_drop_exports_keeps_imports():
     ledger.open_export(_req("h"), droppable=True)
     ledger.open_export(_req("s"))  # e.g. an async save: not droppable
     ledger.import_started(_req("i"))
-    dropped = ledger.drop_exports()
+    dropped = ledger.droppable_exports()
     assert sorted(e.request_id for e in dropped) == ["g", "h"]
-    assert all(e.state == TransferState.DROPPING for e in dropped)
+    for entry in dropped:
+        entry.state = TransferState.DROPPING
     # A dropped export still pins its blocks until the connector reports it.
     assert ledger.is_referenced("g") and ledger.has_retained()
     # Dropping again does not return the same exports.
-    assert ledger.drop_exports() == []
+    assert ledger.droppable_exports() == []
     for rid in ("g", "h", "s"):
         ledger.close(rid, EXPORT)
     assert not ledger.has_retained() and ledger.needs_driving()
@@ -146,7 +147,7 @@ def test_pins_blocks_only_for_open_imports_and_exports():
     assert not ledger.pins_blocks()  # received
     ledger.open_export(_req("k"), droppable=True)
     assert ledger.pins_blocks()
-    ledger.drop_exports()
+    ledger.droppable_exports()[0].state = TransferState.DROPPING
     assert ledger.pins_blocks()  # dropping: a read may still be running
     ledger.close("k", EXPORT)
     assert not ledger.pins_blocks()

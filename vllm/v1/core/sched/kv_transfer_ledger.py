@@ -55,8 +55,8 @@ class TransferEntry:
     state: TransferState
     # The request finished (e.g. was aborted) while the entry was open.
     request_finished: bool = False
-    # EXPORT only: the blocks are kept only for a remote reader, so an abort
-    # may drop them instead of waiting for the reader.
+    # EXPORT only: only the KV connector holds the blocks, so an abort may
+    # ask it to cancel the export instead of waiting for the reader.
     droppable: bool = False
     # IMPORT only: the scheduler no longer wants this KV (a pause that clears
     # the cache). Once the load settles, the request prefills locally.
@@ -156,22 +156,18 @@ class KVTransferLedger:
                 self._num_finished_imports -= 1
         return entry
 
-    def drop_exports(self) -> list[TransferEntry]:
-        """Mark every droppable export DROPPING and return the newly marked
-        ones: the engine stops holding blocks for remote readers. They still
-        pin their blocks until the connector reports them finished, or until
-        the caller closes them (a connector that cannot report). Other
-        exports stay until the connector reports them finished."""
-        dropped = []
-        for (_, direction), entry in self._entries.items():
-            if (
-                direction == TransferDirection.EXPORT
-                and entry.droppable
-                and entry.state == TransferState.OPEN
-            ):
-                entry.state = TransferState.DROPPING
-                dropped.append(entry)
-        return dropped
+    def droppable_exports(self) -> list[TransferEntry]:
+        """Open exports the engine may stop holding for remote readers. The
+        caller marks the ones the connector cancels DROPPING: they still pin
+        their blocks until the connector reports them finished, or until the
+        caller closes them."""
+        return [
+            entry
+            for (_, direction), entry in self._entries.items()
+            if direction == TransferDirection.EXPORT
+            and entry.droppable
+            and entry.state == TransferState.OPEN
+        ]
 
     def live_imports(self) -> list[TransferEntry]:
         """Imports of requests that have not finished, in any state."""
