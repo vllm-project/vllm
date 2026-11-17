@@ -222,13 +222,14 @@ class Base(
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
-        self._intermediate_hidden_states: torch.Tensor | None = None
+        # Prepare intermediate hidden states buffer for pipeline parallelism if needed
+        self._inject_hidden_states = False
         if not self.pp_group.is_first_rank and (layers := self._decoder_layers):
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             hidden_size = self.text_config.hidden_size
             # Piecewise CUDA graphs require a stable address for the saved input
             self.register_buffer(
-                "pp_hidden_states",
+                "_intermediate_hidden_states_buffer",
                 torch.zeros(1, max_tokens, hidden_size),
                 persistent=False,
             )
@@ -523,13 +524,16 @@ class Base(
         return layers if len(layers) == self.text_config.num_hidden_layers else None
 
     def _inject_intermediate_hidden_states(self, module, args, kwargs):
-        """Pass the hidden states from the previous pipeline rank to this rank's first
-        layer unchanged.
+        """Pass the hidden states from the previous pipeline rank to `module` unchanged.
 
         The decoder still runs its pre-layer code for masks and rotary embeddings, but
         anything it does to the hidden states was already done on the first rank."""
-        if (hidden_states := self._intermediate_hidden_states) is None:
+        if not self._inject_hidden_states:
             return None
+        hidden_states = args[0] if args else kwargs["hidden_states"]
+        # Sliced here so the token count stays dynamic under torch.compile
+        buffer = self._intermediate_hidden_states_buffer
+        hidden_states = buffer[:, : hidden_states.shape[1]]
         if args:
             return (hidden_states, *args[1:]), kwargs
         return args, kwargs | {"hidden_states": hidden_states}
@@ -908,8 +912,9 @@ class Base(
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"][None, ...]
             # Copied so that decoders which modify their input in place can't alter it
-            buffer = self.pp_hidden_states[:, : inputs_embeds.shape[1]]
-            self._intermediate_hidden_states = buffer.copy_(inputs_embeds)
+            buffer = self._intermediate_hidden_states_buffer
+            buffer[:, : inputs_embeds.shape[1]].copy_(inputs_embeds)
+            self._inject_hidden_states = True
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -940,7 +945,7 @@ class Base(
             **kwargs,
         )
         # Unset so modules which call the layers directly (e.g. MTP) skip the hook
-        self._intermediate_hidden_states = None
+        self._inject_hidden_states = False
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
