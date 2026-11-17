@@ -44,6 +44,15 @@ void mxfp4_swmmac_skinny_launch(const uint8_t* aq, const float* ascale,
                                 void* stream);
 
 torch::Tensor mxfp4_repack_rdna4(torch::Tensor const& b_q);
+torch::Tensor mxfp4_moe_repack_rdna4(torch::Tensor const& b_q);
+void moe_mxfp4_gemm_rdna4(
+    torch::Tensor const& a_fp8, torch::Tensor const& a_scale, torch::Tensor& c,
+    torch::Tensor const& b_q, torch::Tensor const& b_scales,
+    torch::Tensor const& topk_weights, torch::Tensor const& sorted_token_ids,
+    torch::Tensor const& expert_ids,
+    torch::Tensor const& num_tokens_post_padded, int64_t top_k,
+    int64_t block_size_m, bool mul_topk_weight,
+    const std::optional<torch::Tensor>& bias);
 
 torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
                                torch::Tensor const& a_fp8,
