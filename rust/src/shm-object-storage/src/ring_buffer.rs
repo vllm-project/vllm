@@ -70,7 +70,7 @@ impl SingleWriterShmRingBuffer {
     /// uses `shm_open`, so Python readers attach by the same name.
     pub fn create(data_buffer_size: usize, name: &str) -> Result<Self> {
         if data_buffer_size == 0 {
-            bail_shm_storage_create!(name = name.to_string(), "buffer size must be positive");
+            bail_shm_storage_create!(name = name, "buffer size must be positive");
         }
         let shm_name = format!("/{name}");
 
@@ -83,7 +83,7 @@ impl SingleWriterShmRingBuffer {
         ) {
             Ok(fd) => fd,
             Err(error) => {
-                bail_shm_storage_create!(name = name.to_string(), "{}", std::io::Error::from(error))
+                bail_shm_storage_create!(name = name, "{}", std::io::Error::from(error))
             }
         };
         // From here on, the segment is ours: unlink it on failure or drop.
@@ -100,7 +100,7 @@ impl SingleWriterShmRingBuffer {
             .and_then(|()| unsafe { MmapMut::map_mut(&file) })
         {
             Ok(map) => map,
-            Err(error) => bail_shm_storage_create!(name = name.to_string(), "{error}"),
+            Err(error) => bail_shm_storage_create!(name = name, "{error}"),
         };
 
         let mut buffer = Self {
