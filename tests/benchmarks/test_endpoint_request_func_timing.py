@@ -314,8 +314,8 @@ def test_server_metrics_tolerate_unavailable_values(data: dict[str, Any]) -> Non
 
 @pytest.mark.parametrize(
     "endpoint_id,request_func,api_url,chat",
-    STREAMING_ENDPOINTS[:2],
-    ids=[e[0] for e in STREAMING_ENDPOINTS[:2]],
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
 )
 def test_usage_on_token_chunk_preserves_counts_and_timing(
     monkeypatch: pytest.MonkeyPatch,

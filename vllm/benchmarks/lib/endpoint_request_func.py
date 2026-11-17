@@ -805,7 +805,7 @@ async def async_request_openai_audio(
                                     # end; the trailing usage chunk carries no
                                     # token.
                                     most_recent_timestamp = timestamp
-                                elif usage := data.get("usage"):
+                                if usage := data.get("usage"):
                                     output.output_tokens = usage.get(
                                         "completion_tokens"
                                     )
