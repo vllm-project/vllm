@@ -44,7 +44,6 @@ llm_config = LLMConfig(
         "max_model_len": 16384,
         "enable_chunked_prefill": True,
         "enable_prefix_caching": True,
-        "trust_remote_code": True,
     },
 )
 
