@@ -206,7 +206,10 @@ def test_required_tool_choice_keeps_native_syntax(parser):
     adjusted = parser.adjust_request(request)
 
     assert adjusted.structured_outputs is None
-    assert adjusted.skip_special_tokens
+    assert (
+        adjusted.to_sampling_params(1, default_sampling_params={}).skip_special_tokens
+        is True
+    )
 
 
 def test_non_streaming_nested_tool_call(parser):

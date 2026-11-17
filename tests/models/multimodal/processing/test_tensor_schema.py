@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from vllm import ModelRegistry
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
@@ -37,7 +38,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
-from ...utils import dummy_hf_overrides
+from ...utils import dummy_hf_overrides, skip_unavailable_models
 from .test_common import get_model_ids_to_test, get_token_prompt
 
 ImageInput = list[Image.Image]
@@ -45,11 +46,10 @@ VideoInput: TypeAlias = (
     list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
 )
 AudioInput = list[tuple[np.ndarray, int]]
+ResizedData: TypeAlias = Image.Image | np.ndarray | list[Image.Image]
 
 
-def _resize_data(
-    _data: Image.Image | np.ndarray, size_factor: float
-) -> Image.Image | np.ndarray:
+def _resize_data(_data: ResizedData, size_factor: float) -> ResizedData:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -75,7 +75,7 @@ def _resize_data(
 
 def resize_mm_data(
     data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
-) -> ImageInput | VideoInput | AudioInput:
+) -> list[ResizedData]:
     size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]
@@ -124,6 +124,12 @@ def create_batched_mm_kwargs(
     )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def fill_model_info_cache() -> None:
+    # Every case builds a different model: inspect them all once, not per case.
+    ModelRegistry.fill_model_info_cache()
+
+
 # TODO(Isotr0py): Don't initialize model during test
 @contextmanager
 def initialize_dummy_model(
@@ -156,7 +162,10 @@ def initialize_dummy_model(
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model_id", get_model_ids_to_test())
+@pytest.mark.parametrize(
+    "model_id",
+    skip_unavailable_models(get_model_ids_to_test(), HF_EXAMPLE_MODELS.find_hf_info),
+)
 def test_model_tensor_schema(model_id: str):
     if model_id == "moonshotai/Kimi-K2.5":
         # FIXME(Isotr0py): Fix Kimi-K2.5's offline inference about vision chunks.
@@ -174,12 +183,6 @@ def test_model_tensor_schema(model_id: str):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
-    model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
-    )
 
     model_arch = next(
         arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info

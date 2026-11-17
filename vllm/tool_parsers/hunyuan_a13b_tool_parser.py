@@ -128,7 +128,7 @@ class HunyuanA13BToolParser(ToolParser):
 
             tool_calls: list[ToolCall] = []
 
-            for idx, call in enumerate(tool_calls_data):
+            for call in tool_calls_data:
                 if (
                     not isinstance(call, dict)
                     or "name" not in call

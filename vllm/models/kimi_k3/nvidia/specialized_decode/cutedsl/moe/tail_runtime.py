@@ -5,7 +5,7 @@ latent partial and peer-stores the shared shard (three rotating parities), all-r
 and RMS-normalizes per K-slice, runs the K-split up projection and multicasts the output
 row into the next AttnRes mailbox. At TP8 B5+ and TP16 B9+ the experts publish the
 latent partial, WaveMoeTail.push the shared shard and WaveMoeTail does the rest. At
-``twoshot_batches`` the latent all-reduce is ``common.twoshot``: the experts push each
+`twoshot_batches` the latent all-reduce is `common.twoshot`: the experts push each
 partial chunk to its column owner, whose WaveMoeTail CTAs sum and multicast it."""
 
 from functools import cache
@@ -31,12 +31,25 @@ CAP, POLL_CAP = 64, 8
 # B32 52.20/53.18, B64 79.27/81.50; TP16 B16 33.98/34.49, B32 42.19/42.52, B64
 # 65.05/60.51.
 TWOSHOT = {8: "", 16: "33-64:1"}
-# WaveMoeTail batches that release the next AttnRes at entry.
-EARLY = {8: "9-64:1", 16: "9-64:1"}
+# WaveMoeTail batches that release the next AttnRes at entry (every published batch:
+# TP8 B5+, TP16 B9+). The AttnRes then runs its saved-block statistics and exchange
+# beside the tail and only its Lamport poll waits for the output rows; the next input
+# projection's weight prologue starts with it. GB300 TP8 K3.1 DSpark k=4 step, R1 (B5),
+# ms, release after the output multicast -> at entry: DCP8 136.5K 10.26 -> 10.21.
+EARLY = {8: "1-64:1", 16: "9-64:1"}
 # WaveMoeTail batches whose up projection runs on tcgen05 (B9+; 1-GPU WaveMoeTail us
 # mma.sync vs tcgen05, B16/32/64: TP8 4.53/5.80/9.05 vs 4.45/5.26/7.80, TP16 two-shot
 # 4.50/5.39/7.75 vs 4.52/5.46/7.21).
 UMMA = {8: "9-64:1", 16: "33-64:1"}
+# Front-mode MoeTail batches per (TP size, DCP size). TAIL_GATE: one CTA barrier
+# between the CTA's front tasks (routed finalize, shared-shard stores) and its
+# latent/RS poll. POLL_NS: the latent/RS poll's sleep between rounds, ns (absent:
+# MoeTail's default). The tail reads the same values and sums them in the same order:
+# the same output bits. TP16 + DCP16 B5-8 (DSpark verify steps of one request, k =
+# 4..7): faster per layer and per decode step than the defaults in A/B. Other (TP, DCP)
+# pairs and batches: the defaults.
+TAIL_GATE = {(16, 16): "5-8:1"}
+POLL_NS = {(16, 16): "5-8:0"}
 
 
 def flat(t):
@@ -47,6 +60,18 @@ def published(tp, batch):
     """The experts publish the latent and WaveMoeTail runs the tail (else MoeTail
     front)."""
     return batch > (4 if tp == 8 else 8)
+
+
+def front_gate(tp, dcp, batch):
+    """MoeTail front batch with the barrier before the latent/RS poll (TAIL_GATE)."""
+    table = batch_table(TAIL_GATE.get((tp, dcp), ""))
+    return not published(tp, batch) and bool(table.get(batch, 0))
+
+
+def front_poll_ns(tp, dcp, batch):
+    """MoeTail front batch's latent/RS poll sleep in ns (POLL_NS), or None."""
+    table = batch_table(POLL_NS.get((tp, dcp), ""))
+    return None if published(tp, batch) else table.get(batch)
 
 
 def twoshot_batches(tp):
@@ -81,12 +106,14 @@ class MoeTailBox:
     """Model-owned MoE tail mailboxes: latent [3, TP, CAP, 3584] (multicast), shared
     reduce-scatter [3, TP, CAP, 7168/TP] (peer stores), output [1, CAP, 7168], the
     local all-reduced latent rows [3, CAP, 3584] that WaveMoeTail clusters share and the
-    two-shot latent buffers (``twoshot_args``/``twoshot_tail`` replace args/tail)."""
+    two-shot latent buffers (`twoshot_args`/`twoshot_tail` replace args/tail)."""
 
     def __init__(self, group, device, tp, rank):
         self.rank = rank
         self.latent = OprojMailbox(group, device, tp, rank, (3, tp, CAP, 3584))
-        self.rs = OprojMailbox(group, device, tp, rank, (3, tp, CAP, 7168 // tp))
+        self.rs = OprojMailbox(  # peer stores only
+            group, device, tp, rank, (3, tp, CAP, 7168 // tp), multicast=False
+        )
         self.out = OprojMailbox(group, device, tp, rank, (1, CAP, 7168))
         ptrs = self.rs.handle.buffer_ptrs
         self.peers = torch.tensor(ptrs, dtype=torch.int64, device=device)
@@ -107,11 +134,23 @@ class MoeTailBox:
 
 
 @cache
-def compile_tail(tp, batch, device, mode="front", trigger=2, early=False, umma=False):
+def compile_tail(
+    tp,
+    batch,
+    device,
+    mode="front",
+    trigger=2,
+    early=False,
+    umma=False,
+    gate=False,
+    poll_ns=None,
+):
     """front: rows complete at the PDL wait; front_poll: three 0xffff-armed G/W/S parity
-    slots polled per row and re-armed after use; publish (``published``): WaveMoeTail
+    slots polled per row and re-armed after use; publish (`published`): WaveMoeTail
     over the published mailboxes, reading the weight shard directly, not by TMA;
-    twoshot: publish over the two-shot receive slots and gather."""
+    twoshot: publish over the two-shot receive slots and gather. `gate` and
+    `poll_ns`: MoeTail's barrier before the latent/RS poll and its poll sleep
+    (`front_gate`, `front_poll_ns`)."""
     m8, twoshot = mode in ("publish", "twoshot"), mode == "twoshot"
     vec = lambda n, dtype=BFloat16, align=16: fake((n,), None, dtype, align)
     slots = 3 * POLL_CAP if mode == "front_poll" else batch
@@ -128,7 +167,9 @@ def compile_tail(tp, batch, device, mode="front", trigger=2, early=False, umma=F
         kernel = wave = WaveMoeTail(batch, tp, twoshot, early, umma)
         scalars += (vec(3 * CAP * 3584),) if wave.reduce else ()
     else:
-        kernel = MoeTail(tp, batch, mode=mode, trigger=trigger)
+        kernel = MoeTail(
+            tp, batch, mode=mode, trigger=trigger, gate=gate, poll_ns=poll_ns
+        )
     options = "" if m8 else "--ptxas-options=--maxrregcount=120"
     with torch.accelerator.device_index(device):
         args = (*tensors, *scalars, make_fake_stream())
@@ -148,9 +189,12 @@ def compile_push(batch, device, tp=8):
 
 
 class MoeTailWeights:
-    """One layer's up-projection shard [7168/TP, 3584], RMS weight and TMA map."""
+    """One layer's up-projection shard [7168/TP, 3584], RMS weight and TMA map.
+    `dcp`: the deployment's DCP size (the TAIL_GATE / POLL_NS key)."""
 
-    def __init__(self, tp, weight, gamma, eps, ordinal, count, batches, twoshots=()):
+    def __init__(
+        self, tp, weight, gamma, eps, ordinal, count, batches, twoshots=(), dcp=1
+    ):
         self.weight, self.gamma = weight, gamma
         # Three parities rotate over the model's MoE layers; each launch re-arms the
         # previous MoE layer's slots of its batch (wrapping across decode steps, where
@@ -185,7 +229,9 @@ class MoeTailWeights:
             views = self.views if mode == "front" else (flat(weight), self.views[1])
             on = mode != "front" and b in umma
             views = self.umma_views if on else views
-            code = compile_tail(tp, b, device, mode, early=b in early, umma=on)
+            gate, sleep = front_gate(tp, dcp, b), front_poll_ns(tp, dcp, b)
+            kw = dict(early=b in early, umma=on, gate=gate, poll_ns=sleep)
+            code = compile_tail(tp, b, device, mode, **kw)
             self.codes[b] = code, views, shares(tp, b, twoshot), twoshot
         shared = any(shares(tp, b, b in twoshots) for b in batches)
         if shared and resident_clusters(device) < 7:
@@ -209,11 +255,12 @@ class MoeTailWeights:
 
 class PreparedTail:
     """The layer's MoE tail; placement = (model MoeTailBox, MoE ordinal, MoE layer
-    count). At WaveMoeTail batches the experts publish into latent slot ``publish[b]``
-    (multicast, parity, rank; at ``twoshots`` the two-shot push box) and the side
-    stream pushes the shared-expert output (``push``)."""
+    count). At WaveMoeTail batches the experts publish into latent slot `publish[b]`
+    (multicast, parity, rank; at `twoshots` the two-shot push box) and the side
+    stream pushes the shared-expert output (`push`). `dcp`: the deployment's DCP
+    size (MoeTailWeights)."""
 
-    def __init__(self, op, norm, up, batches, placement):
+    def __init__(self, op, norm, up, batches, placement, dcp=1):
         tp, rank = op.contract.tp_size, op.rank
         local_up = up.narrow(0, rank * (7168 // tp), 7168 // tp)
         self.tail_box, ordinal, count = placement
@@ -221,7 +268,7 @@ class PreparedTail:
         m8 = [b for b in batches if published(tp, b)]
         self.twoshots = twoshot_batches(tp) & set(m8)
         args = (tp, local_up, norm, eps, ordinal, count, batches, self.twoshots)
-        self.tail_weights = MoeTailWeights(*args)
+        self.tail_weights = MoeTailWeights(*args, dcp=dcp)
         self.peers, _, mc, _ = self.tail_box.tail
         self.ring = (self.tail_weights.parity, Int32(rank))
         self.pushers = {b: compile_push(b, norm.device.index, tp) for b in m8}
