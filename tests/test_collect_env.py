@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 import vllm.collect_env as collect_env
 
 
@@ -62,7 +64,8 @@ def test_pretty_str_uses_rocm_specific_labels(monkeypatch):
     assert "Nvidia driver version" not in rendered
 
 
-def test_pretty_str_keeps_cuda_labels_for_cuda_env(monkeypatch):
+@pytest.mark.parametrize("rocm_version", ["N/A", "7.1.0"])
+def test_pretty_str_keeps_cuda_labels_for_cuda_env(monkeypatch, rocm_version):
     monkeypatch.setattr(collect_env, "TORCH_AVAILABLE", False)
     rendered = collect_env.pretty_str(
         _make_system_env(
@@ -75,7 +78,7 @@ def test_pretty_str_keeps_cuda_labels_for_cuda_env(monkeypatch):
             hip_compiled_version="N/A",
             hip_runtime_version="N/A",
             miopen_runtime_version="N/A",
-            rocm_version="N/A",
+            rocm_version=rocm_version,
         )
     )
 

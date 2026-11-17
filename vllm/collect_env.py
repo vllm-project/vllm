@@ -1047,7 +1047,6 @@ vLLM XPU kernels version     : {vllm_xpu_kernels_version}
     has_rocm = (
         mutable_dict.get("hip_compiled_version") not in invalid_vers
         or mutable_dict.get("hip_runtime_version") not in invalid_vers
-        or mutable_dict.get("rocm_version") not in invalid_vers
     )
 
     if (
