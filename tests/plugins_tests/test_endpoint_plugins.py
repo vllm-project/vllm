@@ -489,11 +489,12 @@ async def _build_plugin_app(
     engine_client: _ServingEngineClient | None,
     native: _NativeServing | None = None,
     stop_timeout: int = 5,
+    cli_args: tuple[str, ...] = (),
 ) -> FastAPI:
     monkeypatch.setattr(
         "vllm.plugins.load_endpoint_plugins", lambda supported_tasks: plugins
     )
-    args = _build_args(f"--endpoint-plugin-stop-timeout={stop_timeout}")
+    args = _build_args(f"--endpoint-plugin-stop-timeout={stop_timeout}", *cli_args)
     app = build_app(args, supported_tasks=())
     app.state.engine_client = engine_client
     app.state.log_stats = False
@@ -574,6 +575,28 @@ def test_non_positive_stop_timeout_is_refused(timeout: str):
     args = _build_args(f"--endpoint-plugin-stop-timeout={timeout}")
     with pytest.raises(
         ValueError, match="--endpoint-plugin-stop-timeout must be positive"
+    ):
+        validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        pytest.param(("--endpoint-plugin-drain-timeout=-1",), id="negative"),
+        pytest.param(
+            ("--shutdown-timeout=2", "--endpoint-plugin-drain-timeout=3"),
+            id="above_shutdown_timeout",
+        ),
+    ],
+)
+def test_drain_timeout_outside_shutdown_timeout_is_refused(cli_args: tuple[str, ...]):
+    """The server refuses a drain time limit that is negative or exceeds
+    `--shutdown-timeout` before it loads the model."""
+    args = _build_args(*cli_args)
+    with pytest.raises(
+        ValueError,
+        match="--endpoint-plugin-drain-timeout must be between 0 and "
+        "--shutdown-timeout",
     ):
         validate_parsed_serve_args(args)
 
@@ -1045,9 +1068,12 @@ async def _serving(
     monkeypatch: pytest.MonkeyPatch,
     plugins: list,
     engine: _ServingEngineClient,
+    *cli_args: str,
 ):
     """Run real `serve_http` on a loopback socket; yield (state, task, url)."""
-    app = await _build_plugin_app(monkeypatch, plugins, engine, _NativeServing([]))
+    app = await _build_plugin_app(
+        monkeypatch, plugins, engine, _NativeServing([]), cli_args=cli_args
+    )
     sock = create_server_socket(("127.0.0.1", 0), reuse_port=False)
     port = sock.getsockname()[1]
     task = asyncio.create_task(
@@ -1312,6 +1338,29 @@ async def test_drain_past_half_the_shutdown_timeout_leaves_engine_the_rest(
     assert events == ["drain:drain", "settled:drain", "engine_shutdown", "stop:drain"]
     assert engine.shutdown_allowance is not None
     assert 0 < engine.shutdown_allowance <= 0.5
+
+
+@pytest.mark.asyncio
+async def test_drain_past_the_drain_timeout_leaves_engine_the_rest(monkeypatch):
+    """`--endpoint-plugin-drain-timeout` replaces the half split: a drain still
+    running after 1 of 3 seconds is cancelled, and engine shutdown gets the
+    remaining 2 seconds rather than 1.5."""
+    events: list[str] = []
+    plugin = _DrainPlugin(events)
+    engine = _ServingEngineClient(events, shutdown_timeout=3)
+    drain_timeout = "--endpoint-plugin-drain-timeout=1"
+    async with _serving(monkeypatch, [plugin], engine, drain_timeout) as (
+        state,
+        task,
+        _,
+    ):
+        await _wait_started(state, task)
+        state.request_shutdown()
+        await _wait_closed(task)
+    assert not plugin.release.is_set()
+    assert events == ["drain:drain", "settled:drain", "engine_shutdown", "stop:drain"]
+    assert engine.shutdown_allowance is not None
+    assert 1.5 < engine.shutdown_allowance <= 2
 
 
 @pytest.mark.asyncio

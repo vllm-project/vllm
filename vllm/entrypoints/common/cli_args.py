@@ -391,6 +391,11 @@ class FrontendArgs(BaseFrontendArgs):
     endpoint_plugin_stop_timeout: int = ENDPOINT_PLUGIN_STOP_TIMEOUT_DEFAULT
     """Total seconds the API server waits for all endpoint plugin `stop` hooks
     during shutdown. Must be positive."""
+    endpoint_plugin_drain_timeout: int | None = None
+    """Total seconds that endpoint plugin drains may run during shutdown, out of
+    `--shutdown-timeout`. Must be between 0 and `--shutdown-timeout`. If unset,
+    drains get half of `--shutdown-timeout`. Engine shutdown gets the time that
+    remains."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -578,6 +583,15 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     if getattr(args, "endpoint_plugin_stop_timeout", 1) <= 0:
         raise ValueError("Error: --endpoint-plugin-stop-timeout must be positive.")
+
+    drain_timeout = getattr(args, "endpoint_plugin_drain_timeout", None)
+    if drain_timeout is not None and not (
+        0 <= drain_timeout <= getattr(args, "shutdown_timeout", 0)
+    ):
+        raise ValueError(
+            "Error: --endpoint-plugin-drain-timeout must be between 0 and "
+            "--shutdown-timeout."
+        )
 
     if getattr(args, "enable_per_request_metrics", False) and getattr(
         args, "disable_log_stats", False

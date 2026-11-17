@@ -487,4 +487,11 @@ pub struct ServerUnsupportedArgs {
     /// Accepted as a no-op: the Rust frontend does not load endpoint plugins.
     #[arg(long)]
     pub endpoint_plugin_stop_timeout: Option<Noop>,
+
+    /// Total seconds that endpoint plugin drains may run during shutdown, out
+    /// of `--shutdown-timeout`.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not load endpoint plugins.
+    #[arg(long)]
+    pub endpoint_plugin_drain_timeout: Option<Noop>,
 }
