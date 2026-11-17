@@ -13,6 +13,31 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## Encoder cache memory budget
+
+`--encoder-cache-size` caps how many encoder-embedding tokens stay resident on
+GPU. The same token count uses different amounts of memory when models differ
+in encoder output width or dtype. `--encoder-cache-size-gb` sets that cap in
+GiB instead (1024³ bytes per GiB; fractional values such as `0.5` are
+allowed):
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct --encoder-cache-size-gb 2
+```
+
+Startup measures the real encoder output layout and converts the budget into
+an equivalent token capacity, using the largest bytes-per-embedding across
+modalities and ranks. The existing encoder cache manager, eviction, and
+memory profiling then use that capacity. The default, and
+`--encoder-cache-size`, are unchanged. The two flags cannot be set together.
+
+The budget is the logical size of cached encoder embeddings
+(`numel * element_size`). It does not limit encoder activations, temporary
+workspaces, or EC connector staging buffers. If one legal multimodal item
+does not fit, startup fails instead of raising the budget. A deployment that
+has removed the local encoder tower cannot measure the layout and does not
+support this flag.
+
 ## GLM-5.3-Flash
 
 `zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the

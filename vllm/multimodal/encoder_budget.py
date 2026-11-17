@@ -12,7 +12,10 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
+from vllm.v1.core.encoder_cache_manager import (
+    compute_mm_encoder_budget,
+    resolve_encoder_cache_token_capacity,
+)
 
 logger = init_logger(__name__)
 
@@ -123,6 +126,9 @@ class MultiModalBudget:
 
         self.encoder_compute_budget = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
+        self.encoder_cache_bytes_per_embedding = (
+            scheduler_config.encoder_cache_bytes_per_embedding
+        )
 
         mm_max_items_per_prompt = dict[str, int]()
         mm_max_items_per_batch = dict[str, int]()
@@ -219,3 +225,55 @@ class MultiModalBudget:
     def reset_cache(self) -> None:
         if self.cache is not None:
             self.cache.clear_cache()
+
+
+def apply_encoder_cache_byte_budget(
+    vllm_config: VllmConfig, bytes_per_embedding: int
+) -> int:
+    """Write the token capacity equivalent of `encoder_cache_size_gb`.
+
+    Called after the encoder output layout is measured and before KV-cache
+    profiling, so the scheduler and the residency reservation share one size.
+    """
+    scheduler_config = vllm_config.scheduler_config
+    encoder_cache_size_gb = scheduler_config.encoder_cache_size_gb
+    if encoder_cache_size_gb is None:
+        raise ValueError("encoder_cache_size_gb is not set.")
+    mm_config = vllm_config.model_config.multimodal_config
+    if mm_config is not None and mm_config.skip_mm_profiling:
+        raise ValueError(
+            "--encoder-cache-size-gb reserves encoder-cache memory during "
+            "startup profiling. It cannot be combined with --skip-mm-profiling."
+        )
+
+    from vllm.multimodal import MULTIMODAL_REGISTRY
+
+    saved_cache_size = scheduler_config.encoder_cache_size
+    # A temporary capacity lets MultiModalBudget read the model's max item
+    # size. The byte budget is not allowed to grow to fit that item.
+    scheduler_config.encoder_cache_size = 2**31 - 1
+    try:
+        budget = MultiModalBudget(vllm_config, MULTIMODAL_REGISTRY, enable_cache=False)
+        max_tokens_per_mm_item = max(budget.mm_max_toks_per_item.values(), default=0)
+    except Exception:
+        scheduler_config.encoder_cache_size = saved_cache_size
+        raise
+    budget.reset_cache()
+    try:
+        effective_cache_size = resolve_encoder_cache_token_capacity(
+            encoder_cache_size_gb,
+            bytes_per_embedding,
+            max_tokens_per_mm_item,
+        )
+    except Exception:
+        scheduler_config.encoder_cache_size = saved_cache_size
+        raise
+    scheduler_config.encoder_cache_size = effective_cache_size
+    scheduler_config.encoder_cache_bytes_per_embedding = bytes_per_embedding
+    logger.info(
+        "Encoder cache budget of %s GiB is %d embeddings (%d bytes each).",
+        encoder_cache_size_gb,
+        effective_cache_size,
+        bytes_per_embedding,
+    )
+    return effective_cache_size

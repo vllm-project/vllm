@@ -163,6 +163,9 @@ class EngineCoreReadyResponse:
     # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
     # which skips prompt tokens in some layers.
     supports_prompt_logprobs: bool = True
+    # Token capacity resolved from `--encoder-cache-size-gb`. None when that
+    # flag is unset, so a token-budget startup does not overwrite the frontend.
+    encoder_cache_size: int | None = None
 
 
 class EngineCoreRequest(

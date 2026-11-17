@@ -114,6 +114,7 @@ class EncoderRunner:
             self.encoder_cache.encoder_outputs,
             dummy_encoder_outputs,
             budget.encoder_cache_size,
+            bytes_per_embedding=budget.encoder_cache_bytes_per_embedding,
         )
 
     @torch.inference_mode()

@@ -172,7 +172,23 @@ class EngineCore:
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 self._eep_scale_up_before_kv_init()
 
-            measure_encoder_output_widths(vllm_config, self.collective_rpc)
+            bytes_per_embedding = measure_encoder_output_widths(
+                vllm_config, self.collective_rpc
+            )
+            if bytes_per_embedding is not None:
+                from vllm.multimodal.encoder_budget import (
+                    apply_encoder_cache_byte_budget,
+                )
+
+                cache_size = apply_encoder_cache_byte_budget(
+                    vllm_config, bytes_per_embedding
+                )
+                # Workers were spawned with the unresolved budget. Profiling
+                # reads the same token capacity the scheduler will use.
+                self.collective_rpc(
+                    "update_encoder_cache_budget",
+                    args=(cache_size, bytes_per_embedding),
+                )
 
             # Setup KV Caches and update CacheConfig after profiling.
             kv_cache_config = self._initialize_kv_caches(vllm_config)
@@ -2165,6 +2181,11 @@ class EngineCoreProc(EngineCore):
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             supports_prompt_logprobs=(
                 not self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ),
+            encoder_cache_size=(
+                scheduler_config.encoder_cache_size
+                if scheduler_config.encoder_cache_size_gb is not None
+                else None
             ),
         )
 

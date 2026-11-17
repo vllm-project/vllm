@@ -121,6 +121,7 @@ class LLMEngine:
             log_stats=self.log_stats,
             renderer=renderer,
         )
+        self.input_processor.apply_resolved_encoder_cache_size()
         self._profile_session_active = False
 
         self.logger_manager: StatLoggerManager | None = None

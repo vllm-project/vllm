@@ -121,6 +121,17 @@ class WorkerBase:
             cp_kv_cache_interleave_size
         )
 
+    def update_encoder_cache_budget(
+        self, encoder_cache_size: int, bytes_per_embedding: int
+    ) -> None:
+        """Install the token capacity resolved from `--encoder-cache-size-gb`.
+
+        Workers are spawned before the encoder layout is measured. Profiling
+        and the scheduler must see the same capacity.
+        """
+        self.scheduler_config.encoder_cache_size = encoder_cache_size
+        self.scheduler_config.encoder_cache_bytes_per_embedding = bytes_per_embedding
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
