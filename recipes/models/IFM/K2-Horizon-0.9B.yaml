@@ -26,8 +26,6 @@ model:
     - "bfloat16"
     - "--max-model-len"
     - "131072"
-    - "--gpu-memory-utilization"
-    - "0.85"
   base_env: {}
 features:
   reasoning:
@@ -70,7 +68,6 @@ guide: |
     --chat-template-content-format string \
     --dtype bfloat16 \
     --max-model-len 131072 \
-    --gpu-memory-utilization 0.85 \
     --reasoning-parser k2_horizon \
     --enable-auto-tool-choice \
     --tool-call-parser k2_horizon

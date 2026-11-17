@@ -84,7 +84,7 @@ def test_eagle3_pipeline_parallel_acceptance(model_impl: str):
 @pytest.mark.parametrize(
     "model,draft",
     [
-        # The text model inherits PP support from Qwen2Model but has its own
+        # The text model inherits PP support from Qwen3Model but has its own
         # forward, which must send this stage's aux hidden states.
         ("Qwen/Qwen3-VL-4B-Instruct", "AngelSlim/Qwen3-VL-4B-Instruct_eagle3"),
         ("openai/gpt-oss-20b", "RedHatAI/gpt-oss-20b-speculator.eagle3"),

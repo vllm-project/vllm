@@ -4,6 +4,7 @@
 import importlib.metadata
 import os
 import platform
+import threading
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -500,40 +501,6 @@ def use_rocm_custom_paged_attention(
         )
 
 
-@cache
-def flash_attn_triton_available() -> bool:
-    if not on_gfx1x():
-        return False
-    try:
-        from importlib.util import find_spec
-
-        # Locate the Triton-AMD kernels. Older ROCm/flash-attention (pre
-        # 2026-03) shipped them as the flash_attn.flash_attn_triton_amd
-        # subpackage. The main_perf migration commit 3f94643 moved them
-        # into aiter at aiter.ops.triton._triton_kernels.flash_attn_triton_amd,
-        # so accept either location.
-        def _has_spec(name: str) -> bool:
-            try:
-                return find_spec(name) is not None
-            except (ImportError, ValueError):
-                return False
-
-        if not (
-            _has_spec("flash_attn.flash_attn_triton_amd")
-            or _has_spec("aiter.ops.triton._triton_kernels.flash_attn_triton_amd")
-        ):
-            return False
-        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
-            logger.info_once(
-                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
-                "Flash Attention Triton backend on RDNA."
-            )
-            return False
-        return True
-    except ImportError:
-        return False
-
-
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
@@ -972,22 +939,11 @@ class RocmPlatform(Platform):
             return AttentionBackendEnum.ROCM_AITER_FA
 
         if (
-            on_cdna()
+            (on_cdna() or on_gfx1x())
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
             logger.info_once("Using Flash Attention backend for ViT model.")
-            return AttentionBackendEnum.FLASH_ATTN
-
-        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
-        if (
-            on_gfx1x()
-            and flash_attn_triton_available()
-            and (dtype == torch.float16 or dtype == torch.bfloat16)
-        ):
-            logger.info_once(
-                "Using Flash Attention (Triton backend) for ViT model on RDNA."
-            )
             return AttentionBackendEnum.FLASH_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
@@ -1101,8 +1057,9 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         try:
-            device = amdsmi_get_processor_handles()[device_id]
+            device = amdsmi_get_processor_handles()[physical_device_id]
         except AmdSmiException as error:
             logger.error("amdsmi device query failed ", exc_info=error)
             return ""
@@ -1344,6 +1301,35 @@ class RocmPlatform(Platform):
             torch.cuda.is_current_stream_capturing()
             or not isinstance(attn_metadata, dict)
         )
+
+    @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Fill torch's hipBLASLt handle pool for the microbatch threads.
+
+        hipblasLtCreate clears a new handle's Stream-K flags with a null-stream
+        hipMemset that can land after a GEMM on the comm stream has started, and
+        the GEMM then never finishes. Microbatch threads are new every step and
+        take their per-stream handles from the pool."""
+        # TODO: remove once hipblasLtCreate no longer issues a null-stream memset.
+        a = torch.zeros((64, 64), dtype=torch.bfloat16, device=device)
+
+        def touch() -> None:
+            torch.accelerator.set_device_index(device.index)
+            for stream in streams:
+                with torch.cuda.stream(stream):
+                    torch.mm(a, a, out_dtype=torch.float32)
+
+        threads = [threading.Thread(target=touch) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        torch.accelerator.synchronize(device)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
