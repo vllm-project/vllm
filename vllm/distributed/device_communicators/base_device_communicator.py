@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from weakref import WeakValueDictionary
 
@@ -189,7 +189,7 @@ class All2AllManagerBase:
         pass
 
     @contextmanager
-    def mask_remote_ranks(self) -> Iterator[None]:
+    def mask_remote_ranks(self) -> Generator[None]:
         yield
 
 
