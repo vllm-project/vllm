@@ -6,12 +6,21 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.utils import opcheck
+from vllm.model_executor.layers.utils import (
+    rocm_unquantized_gemm,
+    rocm_unquantized_gemm_impl,
+)
+from vllm.models.qwen4_exp.amd.ops import hc as hc_ops
 from vllm.models.qwen4_exp.amd.ops.hc import (
+    MIN_FUSED_UP_M,
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
     hc_silu,
+    hc_up_gate_mix,
+    hc_up_gate_mix_supported,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -129,3 +138,74 @@ def test_hc_combine_norm(num_tokens: int, norm_size: int) -> None:
     torch.testing.assert_close(
         actual_norm, _ref_grouped_gemma_rmsnorm(expected, weight)
     )
+
+
+def _up_gate_mix_inputs(
+    num_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    w_up = _randn(HYPER_HIDDEN_SIZE, LORA_RANK) / LORA_RANK**0.5
+    if not hc_up_gate_mix_supported(w_up, HC):
+        pytest.skip("the fused HC up projection + gate mix requires gfx950")
+    # lowrank is hc_silu's output, as in the model; the atol below assumes its range.
+    lowrank = hc_silu(_randn(num_tokens, LORA_RANK), HC)
+    xn = _randn(num_tokens, HYPER_HIDDEN_SIZE)
+    return lowrank, xn, w_up
+
+
+def _hc_up_gate_mix_counting_unfused(
+    monkeypatch: pytest.MonkeyPatch, *args: torch.Tensor
+) -> tuple[torch.Tensor, int]:
+    # A spy on the unfused GEMM rather than torch.profiler, which records
+    # nothing while the CI kernel recorder is registered.
+    calls = 0
+
+    def spy(*gemm_args):
+        nonlocal calls
+        calls += 1
+        return rocm_unquantized_gemm_impl(*gemm_args)
+
+    with monkeypatch.context() as m:
+        m.setattr(hc_ops, "rocm_unquantized_gemm_impl", spy)
+        out = hc_up_gate_mix(*args)
+    return out, calls
+
+
+# 4097 leaves a one-row last row tile.
+@pytest.mark.parametrize("num_tokens", [MIN_FUSED_UP_M, 4097])
+def test_hc_up_gate_mix(monkeypatch: pytest.MonkeyPatch, num_tokens: int) -> None:
+    set_random_seed(0)
+    lowrank, xn, w_up = _up_gate_mix_inputs(num_tokens)
+
+    actual, unfused_gemms = _hc_up_gate_mix_counting_unfused(
+        monkeypatch, lowrank, xn, w_up
+    )
+
+    assert unfused_gemms == 0
+    # The kernel rounds the gate to bf16 like the unfused GEMM output; its
+    # accumulation order can still move a gate by one bf16 ulp.
+    gate = (lowrank.float() @ w_up.float().T).to(torch.bfloat16).float()
+    expected = (
+        torch.sigmoid(gate.unflatten(-1, (HC, HIDDEN_SIZE)))
+        * xn.float().unflatten(-1, (HC, HIDDEN_SIZE))
+    ).mean(-2)
+    torch.testing.assert_close(
+        actual, expected.to(torch.bfloat16), atol=1e-3, rtol=1.6e-2
+    )
+    opcheck(torch.ops.vllm.qwen4_exp_hc_up_gate_mix, (lowrank, xn, w_up))
+
+
+def test_hc_up_gate_mix_below_threshold_is_unfused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_random_seed(0)
+    lowrank, xn, w_up = _up_gate_mix_inputs(MIN_FUSED_UP_M - 1)
+
+    actual, unfused_gemms = _hc_up_gate_mix_counting_unfused(
+        monkeypatch, lowrank, xn, w_up
+    )
+
+    # The kernel can match the unfused chain bit for bit, so the call count is
+    # what tells the two paths apart.
+    assert unfused_gemms == 1
+    expected = hc_gate_mix(xn, rocm_unquantized_gemm(None, lowrank, w_up), HC)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)

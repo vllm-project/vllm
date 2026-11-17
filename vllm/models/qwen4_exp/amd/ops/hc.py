@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -183,6 +184,133 @@ def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Te
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
+
+
+# Smallest M where the kernel beats the unfused chain on MI355X, cold and hot cache.
+MIN_FUSED_UP_M = 256
+_UP_GATE_MIX_HC = 4
+_UP_GATE_MIX_HS = 2560
+_UP_GATE_MIX_RANK = 320
+
+
+@triton.jit
+def _hc_gated_stream(acc, x_ptrs, mask_m):
+    # Round the gate to bf16, as the unfused up GEMM writes it.
+    gate = acc.to(tl.bfloat16).to(tl.float32)
+    x = tl.load(x_ptrs, mask=mask_m[:, None], other=0.0)
+    return tl.sigmoid(gate) * x.to(tl.float32)
+
+
+@triton.jit(do_not_specialize=["M"])
+def _hc_up_gate_mix_kernel(
+    a_ptr,
+    w_ptr,
+    x_ptr,
+    y_ptr,
+    M,
+    HS: tl.constexpr,
+    RANK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+) -> None:
+    GRID_N: tl.constexpr = HS // BLOCK_N
+    tl.static_assert(GRID_N % NUM_XCDS == 0)
+    tl.static_assert(RANK % BLOCK_K == 0)
+
+    # Workgroups are dealt round-robin over the XCDs; give each XCD a
+    # contiguous run of tiles, then group GROUP_M row tiles per column tile.
+    grid_m = tl.cdiv(M, BLOCK_M)
+    pid = tl.program_id(0)
+    pid = (pid % NUM_XCDS) * (grid_m * GRID_N // NUM_XCDS) + pid // NUM_XCDS
+    group_id = pid // (GROUP_M * GRID_N)
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + pid % group_size
+    pid_n = (pid % (GROUP_M * GRID_N)) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < M
+    offs_m = offs_m.to(tl.int64)
+    a_ptrs = a_ptr + offs_m[:, None] * RANK + offs_k[None, :]
+    w_ptrs = w_ptr + offs_n.to(tl.int64)[None, :] * RANK + offs_k[:, None]
+
+    acc0 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc1 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc2 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc3 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, RANK // BLOCK_K):
+        a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+        acc0 += tl.dot(a, tl.load(w_ptrs), out_dtype=tl.float32)
+        acc1 += tl.dot(a, tl.load(w_ptrs + HS * RANK), out_dtype=tl.float32)
+        acc2 += tl.dot(a, tl.load(w_ptrs + 2 * HS * RANK), out_dtype=tl.float32)
+        acc3 += tl.dot(a, tl.load(w_ptrs + 3 * HS * RANK), out_dtype=tl.float32)
+        a_ptrs += BLOCK_K
+        w_ptrs += BLOCK_K
+
+    # hc_gate_mix's order: an fp32 sum over the streams in turn, then the mean.
+    x_ptrs = x_ptr + offs_m[:, None] * (4 * HS) + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc += _hc_gated_stream(acc0, x_ptrs, mask_m)
+    acc += _hc_gated_stream(acc1, x_ptrs + HS, mask_m)
+    acc += _hc_gated_stream(acc2, x_ptrs + 2 * HS, mask_m)
+    acc += _hc_gated_stream(acc3, x_ptrs + 3 * HS, mask_m)
+    acc /= 4
+    tl.store(
+        y_ptr + offs_m[:, None] * HS + offs_n[None, :],
+        acc.to(y_ptr.dtype.element_ty),
+        mask=mask_m[:, None],
+    )
+
+
+def _hc_up_gate_mix(
+    lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
+) -> torch.Tensor:
+    M, DIM = xn.shape
+    # The model is compiled for a symbolic token count, so a branch on it in
+    # the model would be resolved once for every size; it has to be made here.
+    if M < MIN_FUSED_UP_M:
+        gate = rocm_unquantized_gemm_impl(lowrank, w_up)
+        return _hc_gate_mix(xn, gate, _UP_GATE_MIX_HC)
+
+    assert DIM == _UP_GATE_MIX_HC * _UP_GATE_MIX_HS
+    assert lowrank.shape == (M, _UP_GATE_MIX_RANK)
+    assert w_up.shape == (DIM, _UP_GATE_MIX_RANK)
+    assert lowrank.is_contiguous() and xn.is_contiguous() and w_up.is_contiguous()
+    out = xn.new_empty(M, DIM // _UP_GATE_MIX_HC)
+    BLOCK_M, BLOCK_N = 128, 32
+    _hc_up_gate_mix_kernel[(triton.cdiv(M, BLOCK_M) * (_UP_GATE_MIX_HS // BLOCK_N),)](
+        lowrank,
+        w_up,
+        xn,
+        out,
+        M,
+        HS=_UP_GATE_MIX_HS,
+        RANK=_UP_GATE_MIX_RANK,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=64,
+        GROUP_M=16,
+        NUM_XCDS=8,
+        num_warps=4,
+        num_stages=2,
+        matrix_instr_nonkdim=16,
+    )
+    return out
+
+
+def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
+    from vllm.platforms.rocm import on_gfx950
+
+    return (
+        on_gfx950()
+        and hc_count == _UP_GATE_MIX_HC
+        and w_up.dtype == torch.bfloat16
+        and tuple(w_up.shape) == (_UP_GATE_MIX_HC * _UP_GATE_MIX_HS, _UP_GATE_MIX_RANK)
+    )
 
 
 @triton.jit
@@ -386,6 +514,13 @@ def _hc_gate_mix_fake(
     return x.new_empty((x.shape[0], x.shape[1] // hc_count))
 
 
+def _hc_up_gate_mix_fake(
+    lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
+) -> torch.Tensor:
+    del lowrank, w_up
+    return xn.new_empty((xn.shape[0], xn.shape[1] // _UP_GATE_MIX_HC))
+
+
 def _hc_combine_fake(
     residual: torch.Tensor,
     block_output: torch.Tensor,
@@ -424,6 +559,11 @@ direct_register_custom_op(
     fake_impl=_hc_gate_mix_fake,
 )
 direct_register_custom_op(
+    op_name="qwen4_exp_hc_up_gate_mix",
+    op_func=_hc_up_gate_mix,
+    fake_impl=_hc_up_gate_mix_fake,
+)
+direct_register_custom_op(
     op_name="qwen4_exp_hc_combine",
     op_func=_hc_combine,
     fake_impl=_hc_combine_fake,
@@ -447,6 +587,20 @@ def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
 
 def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
     return torch.ops.vllm.qwen4_exp_hc_gate_mix(x, gate, hc_count)
+
+
+def hc_up_gate_mix(
+    lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
+) -> torch.Tensor:
+    """`hc_gate_mix(xn, lowrank @ w_up.T, 4)`, in one Triton kernel from
+    `MIN_FUSED_UP_M` rows.
+
+    The fused kernel rounds the gate to bf16 and sums the streams in the
+    unfused chain's order; only the GEMM's accumulation order differs.
+    Smaller inputs run the unfused chain. Only hc_count 4, hidden size 2560
+    and rank 320 are supported.
+    """
+    return torch.ops.vllm.qwen4_exp_hc_up_gate_mix(lowrank, xn, w_up)
 
 
 def hc_combine(
@@ -479,9 +633,12 @@ def hc_combine_norm(
 
 
 __all__ = [
+    "MIN_FUSED_UP_M",
     "grouped_gemma_rmsnorm",
     "hc_combine",
     "hc_combine_norm",
     "hc_gate_mix",
     "hc_silu",
+    "hc_up_gate_mix",
+    "hc_up_gate_mix_supported",
 ]
