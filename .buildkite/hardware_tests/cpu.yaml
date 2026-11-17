@@ -235,7 +235,7 @@ steps:
 - label: "Arm CPU Test Shard %N"
   key: arm-cpu-test
   depends_on:
-  - cpu-arm64-image-build
+  - image-build-cpu-arm64
   soft_fail: false
   device: arm_cpu
   no_plugin: true

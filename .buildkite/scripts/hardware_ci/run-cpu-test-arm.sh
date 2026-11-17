@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Run the Arm CPU test suites against the image built by cpu-arm64-image-build.
+# Run the Arm CPU test suites against the image built by image-build-cpu-arm64.
 set -euxo pipefail
 
 SHARD_ID=${1:?Usage: run-cpu-test-arm.sh SHARD_ID IMAGE}

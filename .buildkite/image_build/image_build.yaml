@@ -97,7 +97,7 @@ steps:
           limit: 2
 
   - label: ":docker: Build CPU arm64 image"
-    key: cpu-arm64-image-build
+    key: image-build-cpu-arm64
     depends_on: []
     optional: true
     commands:
