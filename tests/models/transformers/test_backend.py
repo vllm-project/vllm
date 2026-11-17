@@ -1092,6 +1092,35 @@ def test_output_head_calling_base_model_submodule():
     assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
 
 
+@pytest.mark.parametrize(
+    ("model_type", "arch", "overrides", "module_renames"),
+    [
+        (
+            "modernbert-decoder",
+            "ModernBertDecoderForCausalLM",
+            {},
+            {"lm_head.dense": "output_head.lm_head.dense", "decoder": "lm_head"},
+        ),
+        (
+            "roberta",
+            "RobertaForCausalLM",
+            {"is_decoder": True},
+            {
+                "lm_head.dense": "output_head.lm_head.dense",
+                "lm_head.decoder": "lm_head",
+            },
+        ),
+    ],
+)
+def test_output_head_renames_modules(model_type, arch, overrides, module_renames):
+    """Quantization configs name the head's layers (e.g. to skip them) by their
+    checkpoint names, so the renames cover modules as well as parameters."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    assert (output_head := to_output_head(model, type(model.base_model)))
+    mapper = output_head.weights_mapper()
+    assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
+
+
 def test_transformers_model_class_honours_remote_code_config(monkeypatch):
     """Remote code is loaded with the model's revisions and `trust_remote_code`."""
     calls = []

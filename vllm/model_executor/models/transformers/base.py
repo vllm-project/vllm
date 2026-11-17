@@ -201,6 +201,8 @@ class Base(
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
         # Remove layers not on this pipeline parallel rank
         self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
@@ -336,7 +338,6 @@ class Base(
         - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
-        - Any quantization config specific mappings
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
@@ -379,9 +380,6 @@ class Base(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
         )
-
-        # Apply mapping to quantization config if needed
-        self._maybe_apply_model_mapping()
 
     def _weight_conversions(self) -> list[WeightTransform]:
         """The Transformers weight conversions that apply to `self.model`."""

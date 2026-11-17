@@ -120,11 +120,19 @@ class OutputHead:
     bias: bool
     """Whether the output embeddings have a bias."""
     renames: dict[str, str]
-    """Checkpoint name -> vLLM name of the head's weights."""
+    """Checkpoint name -> vLLM name of the head's weights and their modules."""
     forward_kwargs: dict[str, bool]
     """The `_FORWARD_KWARGS` which `module.forward` takes."""
     scale: float = 1.0
     soft_cap: float | None = None
+
+    def weights_mapper(self) -> WeightsMapper:
+        renames = {
+            re.compile(rf"^{re.escape(k)}$"): v
+            for k, v in self.renames.items()
+            if k != v
+        }
+        return WeightsMapper(orig_to_new_regex=renames)
 
 
 def to_output_head(
@@ -176,6 +184,10 @@ def to_output_head(
                 setattr(module, child_name, output_embeddings)
     for name, _ in model.named_parameters():
         renames[name] = maybe_prefix(OUTPUT_HEAD_ATTR, name)
+    # Quantization configs name modules, not parameters
+    for name, new_name in list(renames.items()):
+        if "." in name:
+            renames.setdefault(name.rpartition(".")[0], new_name.rpartition(".")[0])
     parameters = forward_parameters(type(model))
     return OutputHead(
         module=model,
@@ -239,17 +251,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             self.lm_head = PPMissingLayer()
             return
 
-        try:
-            output_head = self._create_output_head()
-        except Exception as e:
-            logger.warning(
-                "Could not run the output head of %s, so `lm_head` and the "
-                "config's logit scaling are assumed: %r",
-                type(self.model).__name__,
-                e,
-            )
-            output_head = None
-
+        output_head = self._output_head
         vocab_size = self.text_config.vocab_size
         if output_head is None:
             in_features, bias = self.text_config.hidden_size, False
@@ -281,6 +283,26 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 self.lm_head, hidden_states, self.lm_head.bias, skip_gather=True
             )
 
+    def _create_hf_to_vllm_mapper(self):
+        super()._create_hf_to_vllm_mapper()
+        # Created here so the quantization config also gets the head's renames
+        self._output_head = None
+        if not self.pp_group.is_last_rank:
+            return
+        try:
+            self._output_head = self._create_output_head()
+        except Exception as e:
+            logger.warning(
+                "Could not run the output head of %s, so `lm_head` and the "
+                "config's logit scaling are assumed: %r",
+                type(self.model).__name__,
+                e,
+            )
+        if self._output_head is not None:
+            # Before the base model's mappings, which expect the base model's names
+            mapper = self._output_head.weights_mapper()
+            self.hf_to_vllm_mapper = mapper | self.hf_to_vllm_mapper
+
     def _create_output_head(self) -> OutputHead | None:
         """The output head of the model's Transformers class, or `None` if there is
         none, in which case `lm_head` and the config's logit scaling are assumed."""
@@ -303,17 +325,8 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         return output_head
 
     def _use_output_head(self, output_head: OutputHead):
-        """Load the head's weights by their vLLM names and, unless the head is only
-        the output embeddings, run it on the logits of `lm_head`."""
-        renames = {
-            re.compile(rf"^{re.escape(k)}$"): v
-            for k, v in output_head.renames.items()
-            if k != v
-        }
-        # Before the base model's mappings, which expect the base model's names
-        self.hf_to_vllm_mapper = (
-            WeightsMapper(orig_to_new_regex=renames) | self.hf_to_vllm_mapper
-        )
+        """Run the head on the logits of `lm_head`, unless it is only the output
+        embeddings."""
         if (module := output_head.module) is None:
             return
         # The head runs after the projection, so every rank needs all logits
