@@ -910,6 +910,8 @@ def _chunk_kda_fwd_with_cumulative_g(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ):
     # `g` must already be chunk-local cumulatively-summed AND scaled by
     # RCP_LN2 (so the downstream exp2-based kernels reproduce exp(g)).
@@ -949,6 +951,8 @@ def _chunk_kda_fwd_with_cumulative_g(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         use_exp2=True,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     del w, u, kg
     o = chunk_gla_fwd_o_gk(
@@ -1022,6 +1026,8 @@ def chunk_kda_with_fused_gate_fwd(
     cu_seqlens: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices = (
@@ -1051,6 +1057,8 @@ def chunk_kda_with_fused_gate_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
 
 
@@ -1103,6 +1111,8 @@ def chunk_kda_with_fused_gate(
     cu_seqlens: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
     **kwargs,
 ):
     """Run chunk KDA from raw gate projection using fused gate+cumsum."""
@@ -1127,6 +1137,8 @@ def chunk_kda_with_fused_gate(
         cu_seqlens=cu_seqlens,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     return o, final_state
 

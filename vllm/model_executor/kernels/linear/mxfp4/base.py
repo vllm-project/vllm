@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class MxFp4LinearLayerConfig:
     """Configuration for an MXFP4 linear layer.
 
@@ -101,3 +101,10 @@ class MxFp4LinearKernel(ABC):
     ) -> torch.Tensor:
         """Run the quantized GEMM."""
         raise NotImplementedError
+
+    def fuse_input_hadamard(self, size: int) -> bool:
+        """Rotate the input by the size-`size` block Hadamard matrix inside
+        `apply_weights` from now on, if supported (see
+        `InputHadamardFusable`). Call after
+        `process_weights_after_loading`."""
+        return False

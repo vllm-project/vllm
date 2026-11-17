@@ -538,7 +538,7 @@ def _pick_config(num_tokens: int, K: int, E: int, num_sms: int) -> tuple:
 class Sm90BF16x3RouterGemmKernel(
     VllmCuTeDSLJitKernel["Sm90BF16x3RouterGemmKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         k: int
         block_t: int
