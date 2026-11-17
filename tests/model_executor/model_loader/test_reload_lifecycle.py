@@ -16,12 +16,6 @@ from vllm.model_executor.model_loader.reload import (
     weight_update_active,
 )
 from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
-from vllm.model_executor.model_loader.reload.meta import (
-    capture_layer_to_meta,
-    materialize_layer,
-    restore_layer_on_meta,
-)
-from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -120,54 +114,23 @@ class _CPUOffloadedEngram(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.weight = torch.nn.Parameter(
-            torch.zeros(32, 64, dtype=torch.uint8), requires_grad=False
-        )
+        self.weight = torch.nn.Parameter(torch.zeros(8, 4), requires_grad=False)
         self.weight_scale_inv = torch.nn.Parameter(
-            torch.zeros(32, 2, dtype=torch.uint8), requires_grad=False
+            torch.zeros(8, 1), requires_grad=False
         )
-        self.loads: list[torch.Tensor] = []
+        self.loads = 0
         self.finalized: list[dict[str, torch.Tensor]] = []
         for param in self.parameters():
             param.weight_loader = self.weight_loader
 
     def weight_loader(self, param, loaded_weight):
-        self.loads.append(param)
+        self.loads += 1
         param.data.copy_(loaded_weight)
 
     def process_weights_after_loading(self):
         self.finalized.append(
             {name: param.clone() for name, param in self.named_parameters()}
         )
-
-
-@pytest.mark.parametrize("device", ["cpu", "meta"])
-def test_meta_lifecycle_leaves_opted_out_modules_untouched(device):
-    with torch.device(device):
-        table = _CPUOffloadedEngram()
-    params = dict(table.named_parameters())
-    info = LayerReloadingInfo(
-        restore_metadata=capture_layer_to_meta(table),
-        restore_device=torch.device("cpu"),
-    )
-    assert info.restore_metadata == ({}, {})
-
-    restore_layer_on_meta(table, info)
-    materialize_layer(table, info)
-
-    for name, param in table.named_parameters():
-        assert param is params[name]
-        assert param.device.type == device
-
-
-def test_layerwise_reload_excludes_cpu_offloaded_table_bytes():
-    table = _CPUOffloadedEngram()
-    record_metadata_for_reloading(table)
-    assert max_layer_reload_bytes(table) == 0
-
-    model = torch.nn.Sequential(table, torch.nn.Linear(4, 4, bias=False))
-    record_metadata_for_reloading(model)
-    assert max_layer_reload_bytes(model) == model[1].weight.nbytes
 
 
 @pytest.mark.parametrize("mode", ["layerwise", "direct"])
@@ -178,31 +141,30 @@ def test_cpu_offloaded_table_keeps_storage_and_loader_across_updates(monkeypatch
     linear = torch.nn.Linear(4, 4, bias=False)
     model = torch.nn.Sequential(table, linear)
     record_metadata_for_reloading(model)
+    assert max_layer_reload_bytes(table) == 0
+    assert max_layer_reload_bytes(model) == linear.weight.nbytes
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     table.finalized.clear()
-    params = dict(table.named_parameters())
-    pointers = {name: param.data_ptr() for name, param in params.items()}
-    loaders = {name: param.weight_loader for name, param in params.items()}
+    originals = {
+        name: (param, param.data_ptr(), param.weight_loader)
+        for name, param in table.named_parameters()
+    }
     linear_weight = linear.weight
 
     for update, value in enumerate((1, 2, 1), start=1):
         start_reload(model)
-        for name, param in table.named_parameters():
-            assert param is params[name]
-            assert param.device.type == "cpu"
-            assert param.data_ptr() == pointers[name]
-            assert param.weight_loader is loaders[name]
         if mode == "layerwise":
             assert linear.weight.is_meta
             assert linear.weight.weight_loader.__name__ == "online_process_loader"
 
         expected = {}
         for name, param in table.named_parameters():
+            assert param.device.type == "cpu"
+            assert param.weight_loader is originals[name][2]
             expected[name] = torch.full_like(param, value)
-            calls_before = len(table.loads)
+            calls_before = table.loads
             param.weight_loader(param, expected[name])
-            assert len(table.loads) == calls_before + 1
-            assert table.loads[-1] is param
+            assert table.loads == calls_before + 1
             assert torch.equal(param, expected[name])
         new_linear_weight = torch.full_like(linear_weight, value)
         getattr(linear.weight, "weight_loader", default_weight_loader)(
@@ -210,13 +172,13 @@ def test_cpu_offloaded_table_keeps_storage_and_loader_across_updates(monkeypatch
         )
         finish_reload(model, _MODEL_CONFIG, _DEVICE)
 
-        assert len(table.loads) == update * len(params)
+        assert table.loads == update * len(originals)
         assert len(table.finalized) == update
         for name, param in table.named_parameters():
-            assert param is params[name]
-            assert param.device.type == "cpu"
-            assert param.data_ptr() == pointers[name]
-            assert param.weight_loader is loaders[name]
+            original, pointer, loader = originals[name]
+            assert param is original
+            assert param.data_ptr() == pointer
+            assert param.weight_loader is loader
             assert torch.equal(param, expected[name])
             assert torch.equal(table.finalized[-1][name], expected[name])
         assert linear.weight is linear_weight

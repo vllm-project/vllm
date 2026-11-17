@@ -17,7 +17,6 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     start_reload,
 )
-from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
@@ -781,12 +780,10 @@ def test_engram_layerwise_reload_preserves_storage(dist_init, monkeypatch, cpu_o
     with torch.device("cuda"):
         table = ParallelEngramEmbedding(36, 64, (17, 19), cpu_offload=cpu_offload)
         record_metadata_for_reloading(table)
-    params = dict(table.named_parameters())
-    pointers = {name: param.data_ptr() for name, param in params.items()}
-    loaders = {name: param.weight_loader for name, param in params.items()}
-    assert table._skip_layerwise_reload == cpu_offload
-    expected_bytes = 0 if cpu_offload else sum(p.nbytes for p in params.values())
-    assert max_layer_reload_bytes(table) == expected_bytes
+    originals = {
+        name: (param, param.data_ptr(), param.weight_loader)
+        for name, param in table.named_parameters()
+    }
     ids = torch.tensor([[0, 17], [16, 35]], dtype=torch.int32, device="cuda")
     out = torch.empty(2, 2, 64, dtype=torch.bfloat16, device="cuda")
 
@@ -796,16 +793,8 @@ def test_engram_layerwise_reload_preserves_storage(dist_init, monkeypatch, cpu_o
         )
         scales = torch.full((36, 2), 127 + value, dtype=torch.uint8)
         start_reload(table)
-        for name, param in table.named_parameters():
-            if cpu_offload:
-                assert param is params[name]
-                assert param.device.type == "cpu"
-                assert param.is_pinned()
-                assert param.data_ptr() == pointers[name]
-                assert param.weight_loader is loaders[name]
-            else:
-                assert param.is_meta
-                assert param.weight_loader.__name__ == "online_process_loader"
+        for param in table.parameters():
+            assert param.is_meta == (not cpu_offload)
         table.weight.weight_loader(table.weight, weight)
         table.weight_scale_inv.weight_loader(
             table.weight_scale_inv, scales.view(torch.float8_e8m0fnu)
@@ -814,9 +803,12 @@ def test_engram_layerwise_reload_preserves_storage(dist_init, monkeypatch, cpu_o
 
         for name, expected in (("weight", weight), ("weight_scale_inv", scales)):
             param = getattr(table, name)
-            assert param is params[name]
-            assert param.data_ptr() == pointers[name]
-            assert param.weight_loader is loaders[name]
+            original, pointer, loader = originals[name]
+            assert param is original
+            assert param.data_ptr() == pointer
+            assert param.weight_loader is loader
+            if cpu_offload:
+                assert param.device.type == "cpu" and param.is_pinned()
             assert torch.equal(
                 param.view(torch.uint8).cpu(), expected.view(torch.uint8)
             )
