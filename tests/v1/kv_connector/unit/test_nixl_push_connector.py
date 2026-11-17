@@ -398,8 +398,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
-        w._submitting_pushes = set()
-        w._push_dst_engines = {}
+        w._inflight_pushes = {}
         w._next_held_lease_check = 0.0
 
         # Track _do_start_push_kv invocations.
@@ -830,7 +829,7 @@ def test_stale_engine_evicted_on_push(inflight):
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
     if inflight:
         w._sending_transfers["req-old"] = [7]
-        w._push_dst_engines["req-old"] = "D-old"
+        w._inflight_pushes["req-old"] = "D-old"
     # The engine being pushed to is already connected.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
 
@@ -980,6 +979,7 @@ class TestPushWriterNotifs:
     def _make_sending_req(self, w: _StubWriterWorker) -> str:
         request_id = "req-send-1"
         w._sending_transfers[request_id] = [101, 102]
+        w._inflight_pushes[request_id] = "decode-engine"
         w._reqs_to_send[request_id] = time.perf_counter() + 60
         w._reqs_to_process.add(request_id)
         return request_id
@@ -1164,8 +1164,7 @@ class TestPushWriterNotifs:
         )
 
         w._start_push_kv.assert_not_called()
-        assert not w._submitting_pushes
-        assert not w._push_dst_engines
+        assert not w._inflight_pushes
 
     def test_push_dst_engine_tracked_until_writes_finish(self):
         """TTL eviction keeps a D engine while WRITEs to it are in flight."""

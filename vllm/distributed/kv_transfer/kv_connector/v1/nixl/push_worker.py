@@ -120,11 +120,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
-        # Requests being submitted (in flight before their handles exist), and
-        # the destination engine of each request being submitted or written.
-        # Guarded by ``_sending_transfers_lock``.
-        self._submitting_pushes: set[ReqId] = set()
-        self._push_dst_engines: dict[ReqId, EngineId] = {}
+        # Requests being submitted or with WRITEs in flight -> destination
+        # engine. Guarded by ``_sending_transfers_lock``.
+        self._inflight_pushes: dict[ReqId, EngineId] = {}
         self._next_held_lease_check = 0.0
 
         # Cross-thread channels.
@@ -213,7 +211,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
             self._send_failures.clear()
-            self._push_dst_engines.clear()
+            self._inflight_pushes.clear()
         super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
@@ -501,9 +499,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def _has_inflight_send(self, req_id: str) -> bool:
         # Called by the reaper above, under ``_sending_transfers_lock``.
-        return req_id in self._submitting_pushes or bool(
-            self._sending_transfers.get(req_id)
-        )
+        return req_id in self._inflight_pushes
 
     def _evict_stale_engines(self) -> None:
         # The writer and engine threads both start handshakes. The lock
@@ -514,7 +510,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
         # Called by the eviction above, under ``_sending_transfers_lock``.
         busy = super()._engines_with_inflight_transfers()
-        return busy | set(self._push_dst_engines.values())
+        return busy | set(self._inflight_pushes.values())
 
     def _do_start_push_kv(
         self,
@@ -530,15 +526,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             ):
                 logger.warning("Not pushing KV for %s: already released.", request_id)
                 return
-            self._submitting_pushes.add(request_id)
-            self._push_dst_engines[request_id] = registration_data["decode_engine_id"]
+            self._inflight_pushes[request_id] = registration_data["decode_engine_id"]
         try:
             self._start_push_kv(request_id, local_block_ids, registration_data)
         finally:
             with self._sending_transfers_lock:
-                self._submitting_pushes.discard(request_id)
                 if not self._sending_transfers.get(request_id):
-                    self._push_dst_engines.pop(request_id, None)
+                    self._inflight_pushes.pop(request_id, None)
 
     def _start_push_kv(
         self,
@@ -901,8 +895,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             done_pushing, failed_pushing = self._pop_done_transfers(
                 self._sending_transfers
             )
-            for req_id in done_pushing - self._submitting_pushes:
-                self._push_dst_engines.pop(req_id, None)
+            for req_id in done_pushing:
+                self._inflight_pushes.pop(req_id, None)
             # Remember failures until the final sibling WRITE completes.
             self._send_failures.update(failed_pushing)
             successful = {

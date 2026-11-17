@@ -5214,9 +5214,7 @@ class _BackendRecordingNixlWrapper(FakeNixlWrapper):
 def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_backends):
     """kv_connector_extra_config.ucx_backend_params reaches UCX's create_backend."""
 
-    def agent_config(
-        backends=None, num_threads=0, capture_telemetry=False, sync_mode=None
-    ):
+    def agent_config(backends=None, num_threads=0, capture_telemetry=False):
         return SimpleNamespace(
             backends=["UCX"] if backends is None else backends,
             num_threads=num_threads,
@@ -5252,12 +5250,10 @@ def test_agent_is_synchronized(dist_init, transfer_mode):
     """Handshake threads load remote agents while other threads post, so the
     agent locks in both modes. Push posts from its writer thread with no UCX
     thread pool, whose posting waits on the pool's threads."""
-    configs: list[dict[str, Any]] = []
     rw = object()
 
     def agent_config(**kwargs):
-        configs.append(kwargs)
-        return SimpleNamespace(backends=kwargs.get("backends", ["UCX"]))
+        return SimpleNamespace(**{"backends": ["UCX"], **kwargs})
 
     block_size = maybe_update_block_size(16)
     vllm_config = create_vllm_config(block_size=block_size)
@@ -5282,7 +5278,7 @@ def test_agent_is_synchronized(dist_init, transfer_mode):
             KVConnectorRole.WORKER,
             make_kv_cache_config(block_size=block_size),
         )
+        config = connector.connector_worker.nixl_wrapper.config
         connector.shutdown()
-    [config] = configs
-    assert config["num_threads"] == (0 if transfer_mode == "push" else 4)
-    assert config["sync_mode"] is rw
+    assert config.num_threads == (0 if transfer_mode == "push" else 4)
+    assert config.sync_mode is rw

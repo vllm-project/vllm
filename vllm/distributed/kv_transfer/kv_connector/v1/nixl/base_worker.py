@@ -792,25 +792,14 @@ class NixlBaseConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", self._DEFAULT_NUM_THREADS
         )
-        # Handshake threads load remote agents while others post, and NIXL only
-        # locks the agent given a sync mode. RW keeps posting/status concurrent.
-        sync_params = (
-            {"sync_mode": nixl_thread_sync_t.NIXL_THREAD_SYNC_RW}
-            if nixl_thread_sync_t is not None
-            else {}
-        )
         if nixl_agent_config is None:
             config = None
         else:
             # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(
-                    backends=self.nixl_backends, capture_telemetry=True, **sync_params
-                )
+                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(
-                    num_threads=num_threads, capture_telemetry=True, **sync_params
-                )
+                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
         # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
@@ -822,9 +811,11 @@ class NixlBaseConnectorWorker:
             bool(ucx_backend_params) and "UCX" in self.nixl_backends
         )
         if sleep_mode or explicit_backends:
-            config = nixl_agent_config(
-                backends=[], capture_telemetry=True, **sync_params
-            )
+            config = nixl_agent_config(backends=[], capture_telemetry=True)
+        if config is not None and nixl_thread_sync_t is not None:
+            # Handshake threads load remote agents while others post, and NIXL
+            # only locks the agent given a sync mode. RW keeps posting concurrent.
+            config.sync_mode = nixl_thread_sync_t.NIXL_THREAD_SYNC_RW
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
             # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
