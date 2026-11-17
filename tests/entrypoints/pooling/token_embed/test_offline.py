@@ -124,7 +124,6 @@ def test_nomic_late_chunking_without_special_tokens(vllm_runner):
     with vllm_runner(
         "nomic-ai/nomic-embed-text-v1",
         revision="720244025c1a7e15661a174c63cce63c8218e52b",
-        trust_remote_code=True,
         runner="pooling",
         pooler_config=PoolerConfig(task="token_embed"),
         dtype="float32",
