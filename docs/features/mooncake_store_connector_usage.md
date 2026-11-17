@@ -299,6 +299,9 @@ example, if the PP = 2 instances of an 80-layer model run with
   and PP size, for example PP = 2, TP = 1 and PP = 1, TP = 2 with
   `"store_tp_size": 2`.
 
+`pp_sizes` does not support Falcon-H1: an instance that stores more than one
+object per block fails to start.
+
 The connector logs a warning and ignores `pp_sizes` when:
 
 - HiSparse is enabled.
