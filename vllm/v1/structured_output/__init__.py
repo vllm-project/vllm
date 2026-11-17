@@ -323,28 +323,19 @@ class StructuredOutputManager:
                     return ConstraintBounds(end.offset, constraint_start)
                 return ConstraintBounds(constraint_start, constraint_start)
 
-        # Fallback: the grammar starts after the end token. A view, not a copy,
-        # of all_token_ids: most parsers don't read it every step.
-        if spec_tokens_committed:
-            if not spec_tokens or not reasoner.is_reasoning_end_streaming(
-                request.all_token_ids, spec_tokens
-            ):
-                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
-
-            input_ids = TokenIdsView(request._all_token_ids)
-            delta_ids = list(spec_tokens)
-        else:
-            input_ids = TokenIdsView(request._all_token_ids, spec_tokens)
-            if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
-                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
-            delta_ids = list(spec_tokens)
-
-        for i in range(num_spec_tokens - 1, 0, -1):
+        # Keep the earliest ended prefix even if a later draft reopens reasoning.
+        # Reuse the token view while checking every nonempty draft prefix.
+        input_ids = TokenIdsView(
+            request._all_token_ids, () if spec_tokens_committed else spec_tokens
+        )
+        delta_ids = list(spec_tokens)
+        constraint_start = num_spec_tokens + 1
+        for i in range(num_spec_tokens, 0, -1):
+            if reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
+                constraint_start = i
             input_ids.pop()
             delta_ids.pop()
-            if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
-                return ConstraintBounds(i + 1, i + 1)
-        return ConstraintBounds(1, 1)
+        return ConstraintBounds(constraint_start, constraint_start)
 
     def trim_spec_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
         """Trim structured-output padding and grammar-invalid suffixes."""
