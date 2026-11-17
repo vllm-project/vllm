@@ -51,7 +51,9 @@ VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
 ```
 
 There are no other required options. `decode_backend=auto` (the default) runs
-vLLM's decode.
+vLLM's decode. On Kimi-K3.1 the fused DSA attention (`VLLM_KIMI_SD_DSA=auto`)
+needs a bf16 W_UV, so leave `VLLM_ROCM_USE_AITER_FP4BMM` unset (or 0) there;
+with it set, the DSA layers run vLLM's sparse MLA, then K2.
 
 `latency_specialized` also turns on the c1 / c4 levers in `levers/`, each an env
 flag that defaults to 1 and is ignored without it: `VLLM_K31_BEAT_MARKOV`,
@@ -60,6 +62,47 @@ flag that defaults to 1 and is ignored without it: `VLLM_K31_BEAT_MARKOV`,
 `VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER` (the last only with `VLLM_KIMI_SD_DSA_PROLOGUE=1`,
 which defaults to 0, and `VLLM_K3_FUSED_INDEXER_PREP=1`). Set one to 0 to turn
 that lever off.
+
+## Drafters
+
+The specialized decode serves the target model's layers. The draft runs vLLM's
+DSpark speculator either way, with its own KV cache group(s). Both Kimi-K3.1
+DSpark drafts are served:
+
+- **Preview** (`Inferact/Kimi-K3.1-Pro-DSpark-preview`, `K3DSparkForCausalLM`):
+  5 dense MLA layers (kv_lora 512) with their own fp8 cache on `ROCM_AITER_MLA`.
+- **Release** (`Inferact/Kimi-K3.1-Pro-DSpark`, a speculators checkpoint served
+  as `Qwen3DSparkForCausalLM`): 5 GQA layers (96 query / 16 KV heads, head dim
+  64, 12 / 2 a TP rank) with a 2048-token sliding window, their own bf16
+  sliding-window cache on `TRITON_ATTN`, and a confidence head (read only by
+  adaptive verification, which is refused).
+
+`configure_dense_draft` (`kimi_k3/nvidia/dense_draft.py`) picks the draft's
+backend and cache dtype unless `--speculative-config` sets
+`attention_backend` / `kv_cache_dtype`. On ROCm a GQA draft gets `TRITON_ATTN`:
+`FLASH_ATTN` (the default elsewhere) needs vllm_flash_attn, and `ROCM_ATTN`,
+`ROCM_AITER_FA` and `ROCM_AITER_UNIFIED_ATTN` exclude the block-outermost
+(BLHNC) layout the DSA indexer pins the worker to. Do not pick the draft's
+backend with the global `--attention-backend`: that applies to the target's
+DSA layers too.
+
+The levers by drafter:
+
+- `VLLM_K31_BEAT_MARKOV`: both drafts (their `DSparkMarkovHead`, the target
+  vocabulary, no draft-to-target map), greedy or probabilistic drafts, one
+  request a rank (`ops/markov_sample.MAX_ROWS`). A confidence head the
+  speculator uses is computed from the drafted tokens' Markov embeddings, as in
+  vLLM's loop. Other drafts keep vLLM's loop and startup logs why.
+- `VLLM_K31_BEAT_DRAFTMETA`: the target step skips the draft-only attention
+  groups for both. The bs1 MLA planner replaces AITER's MLA schedule, which only
+  the preview's MLA draft builds. The release's `TRITON_ATTN` plans none, so the
+  planner is not used. Startup logs the draft's backend and which applies.
+- `VLLM_K31_BEAT_K2SYNC`, `_EAGERPREP`, `_KDAK1`, `VLLM_K3_INDEXER_SAMPLED_TOPK`
+  and the DSA prologue indexer touch only the target.
+
+The release draft's sliding-window cache group turns off fine-grained
+(`--prefix-match-unit`) prefix-cache hits: vLLM's sliding-window manager needs
+block-aligned lookups.
 
 ## Supported deployments
 
@@ -158,7 +201,8 @@ model runner's sample) patch it at runtime from `levers/`, only once
 hooks.py         SpecializedDecodeMixin: the model-side hooks
 model_state.py   KimiK3ModelState: builds the executor after load, binds KV caches
 levers/          the c1 / c4 levers: the gate (lever_on), the v1 patches
-    dspark.py    DSpark fused Markov sampling, the draft layers for DRAFTMETA
+    dspark.py    DSpark fused Markov sampling, the draft layers for DRAFTMETA,
+                 the draft's attention backends (MLA or not) at startup
     mla.py       the bs1 MLA planner hook, the sparse MLA fused indptr
     mla_bs1_meta.py  the closed-form bs=1 MLA planner
     runner.py    the identity logits rows slice

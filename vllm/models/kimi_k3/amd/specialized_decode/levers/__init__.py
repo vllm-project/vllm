@@ -17,9 +17,11 @@ Kimi-K3 model state (``model_state``) and the model's own paths read
 
 import vllm.envs as envs
 
-# DSpark's sequential Markov draft steps as one launch each (ops/markov_sample).
+# DSpark's sequential Markov draft steps as one launch each (ops/markov_sample),
+# for the preview's MLA draft and the release's GQA sliding-window draft.
 MARKOV = "VLLM_K31_BEAT_MARKOV"
-# The target step skips draft-only attention groups; the bs1 MLA planner.
+# The target step skips draft-only attention groups; the bs1 MLA planner (AITER
+# MLA groups only: the preview's MLA draft; a GQA draft plans no schedule).
 DRAFTMETA = "VLLM_K31_BEAT_DRAFTMETA"
 # The mono kernels' cheap spin waits and bounded router ranking.
 K2SYNC = "VLLM_K31_BEAT_K2SYNC"
