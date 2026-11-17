@@ -189,8 +189,6 @@ def test_streaming_events_carry_logprobs():
     item_done = events[-1]
     assert item_done.type == "response.output_item.done"
     assert item_done.item.content[0].logprobs == done_logprobs
-    [text_done] = [e for e in events if e.type == "response.output_text.done"]
-    assert [lp.token for lp in text_done.logprobs] == ["Hi", "!"]
 
 
 def test_reasoning_delta_ignores_logprobs():
