@@ -1344,11 +1344,27 @@ class RocmPlatform(Platform):
         with the default of 4, the extra queue can share a command-processor
         pipe with the compute stream's queue and slow both.
 
+        With HIP's static queues and stream priority honoured
+        (`DEBUG_HIP_DYNAMIC_QUEUES=0` and `DEBUG_HIP_IGNORE_STREAM_PRIORITY=0`),
+        the high-priority pooled stream already gets a queue of its own, while
+        a CU-masked queue would share a command-processor pipe with the compute
+        stream's queue, so the pooled stream is kept.
+
         The call takes no flags, so the stream is a blocking one: work on the
         legacy default stream is ordered against it. vLLM computes on a
         dedicated stream on ROCm (`vllm.utils.torch_utils.current_stream`),
         never on the default one.
         """
+        if (
+            os.environ.get("DEBUG_HIP_DYNAMIC_QUEUES") == "0"
+            and os.environ.get("DEBUG_HIP_IGNORE_STREAM_PRIORITY") == "0"
+        ):
+            logger.info_once(
+                "DBO comm stream: pooled with high priority, as HIP's static "
+                "queues are set"
+            )
+            return super().create_ubatch_comm_stream(device, priority)
+
         import ctypes
 
         from vllm.utils.system_utils import find_loaded_library

@@ -68,3 +68,17 @@ def test_failed_cu_mask_create_falls_back_to_a_pooled_stream(monkeypatch):
 
     x = torch.ones(1 << 10, device=device)
     assert torch.equal(x * 2, torch.full_like(x, 2))
+
+
+def test_static_hip_queues_keep_the_pooled_stream(monkeypatch):
+    """With HIP's static queues and stream priority honoured, the high-priority
+    pooled stream already has a queue of its own, so the hook keeps it."""
+    monkeypatch.setenv("DEBUG_HIP_DYNAMIC_QUEUES", "0")
+    monkeypatch.setenv("DEBUG_HIP_IGNORE_STREAM_PRIORITY", "0")
+    _, comm_stream = _comm_stream()
+    assert not isinstance(comm_stream, torch.cuda.ExternalStream)
+    assert comm_stream.priority == dbo_comm_stream_priority()
+
+    monkeypatch.setenv("DEBUG_HIP_IGNORE_STREAM_PRIORITY", "1")
+    _, comm_stream = _comm_stream()
+    assert isinstance(comm_stream, torch.cuda.ExternalStream)
