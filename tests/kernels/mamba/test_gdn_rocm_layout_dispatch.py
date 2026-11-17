@@ -355,9 +355,13 @@ def test_hip_prefill_backend_without_kernel():
         (2, "interleaved", torch.float32),
     ],
 )
+# Key heads per rank of a 16-key-head model at TP 8..1; the kernel supports
+# K = V = 128 only.
+@pytest.mark.parametrize("heads", [2, 4, 8, 16])
+@pytest.mark.parametrize("decodes", [1, 6, 33, 64])
 @torch.inference_mode()
 def test_fused_decode_matches_unfused(
-    ratio, qkvz_layout, state_dtype, default_vllm_config
+    ratio, qkvz_layout, state_dtype, heads, decodes, default_vllm_config
 ):
     """The fused AITER decode (conv1d + recurrence + gated RMSNorm) matches the
     unfused AITER decode followed by `RMSNormGated`, output and both states."""
@@ -369,7 +373,7 @@ def test_fused_decode_matches_unfused(
     if not qwen_gdn_linear_attn.GDN_AITER_FUSED_DECODE_AVAILABLE:
         pytest.skip("needs AITER's fused GDN decode kernel (gfx950)")
     torch.manual_seed(0)
-    heads, dim, decodes = 4, 128, 6
+    dim = 128
     v_heads = heads * ratio
     qkv_dim = (2 * heads + v_heads) * dim
     conv_shape, ssm_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
