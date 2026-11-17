@@ -192,6 +192,26 @@ class SchedulerConfig:
 
     Resolved in `__post_init__`; never None afterwards."""
 
+    max_num_prompt_embeds_tokens: int | None = Field(default=None, ge=1)
+    """Maximum number of `prompt_embeds` rows held on the GPU at once, summed
+    over the requests whose prompts are not yet fully computed, or None to use
+    `max_model_len`. Only used with `enable_prompt_embeds`.
+
+    This is a capacity, like `encoder_cache_size`, not a per-step budget like
+    `max_num_batched_tokens`: A request's whole prompt is uploaded when it is
+    admitted and held until its last chunk is computed, so this must be at
+    least `max_model_len` even when steps are much smaller. A request with
+    `prompt_embeds` waits until its rows fit. Smaller values are raised to
+    `max_model_len`.
+
+    Costs `hidden_size * dtype size` bytes of GPU memory per row,
+    reserved during memory profiling and taken from the KV cache.
+    
+    Raise it to let more long prompts prefill concurrently.
+
+    Resolved by `VllmConfig` when `enable_prompt_embeds` is set; None
+    otherwise."""
+
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:
 
@@ -351,6 +371,7 @@ class SchedulerConfig:
             "is_multimodal_model",
             "max_num_encoder_input_tokens",
             "encoder_cache_size",
+            "max_num_prompt_embeds_tokens",
             "policy",
             "disable_chunked_mm_input",
             "scheduler_cls",

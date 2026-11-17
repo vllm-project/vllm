@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.utils import keep_prompt_embeds_until_finished
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -45,7 +46,11 @@ class DefaultModelState(ModelState):
         self.prompt_embeds_state: PromptEmbedsState | None = None
         if self.model_config.enable_prompt_embeds:
             self.prompt_embeds_state = PromptEmbedsState(
-                self.max_num_reqs, self.inputs_embeds_size, self.dtype, self.device
+                self.max_num_reqs,
+                self.inputs_embeds_size,
+                self.dtype,
+                self.device,
+                keep_until_finished=keep_prompt_embeds_until_finished(vllm_config),
             )
             if not self.supports_mm_inputs:
                 # Persistent buffer analogous to encoder_runner.inputs_embeds.
