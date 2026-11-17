@@ -26,7 +26,7 @@ TEST_SPOOL_BATCH_SIZE = 100
 # thousands of tests uploads them all, up to a cap that bounds how long a slow
 # endpoint can hold the job.
 FLUSH_SECONDS = 3.0
-FLUSH_SECONDS_PER_EXTRA_BATCH = 2.0
+FLUSH_SECONDS_PER_EXTRA_BATCH = 3.0
 FLUSH_MAX_SECONDS = 20.0
 
 

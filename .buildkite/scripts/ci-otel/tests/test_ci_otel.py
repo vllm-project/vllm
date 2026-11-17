@@ -355,7 +355,7 @@ def test_flush_sends_command_spans_before_test_spans(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     ("spans", "seconds"),
-    [(2, 3.0), (5, 3.0 + 2 * 2.0), (200, 20.0)],
+    [(2, 3.0), (5, 3.0 + 2 * 3.0), (200, 20.0)],
 )
 def test_flush_budget_grows_with_batches_up_to_a_cap(
     monkeypatch, tmp_path, spans, seconds

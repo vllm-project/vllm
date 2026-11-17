@@ -26,7 +26,7 @@ flushing traces, allows at most three seconds for shutdown, and preserves the
 original command exit status. Samples already uploaded survive an interrupted
 job; the last unflushed batch may be lost on forced termination.
 The job-end flush sends command spans before test spans, so a timeout never
-strands uploaded tests without their parent. It allows three seconds plus two
+strands uploaded tests without their parent. It allows three seconds plus three
 per batch after the first, up to twenty seconds.
 
 These are device readings during each test's time interval, not process-level
