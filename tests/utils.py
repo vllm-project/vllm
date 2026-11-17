@@ -572,9 +572,9 @@ class RemoteVLLMServer:
     def _get_gpu_memory_used(self) -> float | None:
         """Get GPU memory used across this server's devices in bytes.
 
-        Only the devices this server occupies are counted (``self.
-        _engine_device_ids``, i.e. the pinned ``device_ids`` or the contiguous
-        ``[0, world_size)`` fallback). On a shared node this avoids attributing
+        Only the devices this server occupies are counted (`self.
+        _engine_device_ids`, i.e. the pinned `device_ids` or the contiguous
+        `[0, world_size)` fallback). On a shared node this avoids attributing
         a neighbor's memory on unrelated GPUs to this server, which would
         otherwise stall the teardown memory-release wait.
 
@@ -1575,20 +1575,21 @@ def resolve_engine_devices(
 
     The result scopes GPU memory-settle waits to just these devices. The
     memory-query path indexes devices by their *visible* ordinal -- the index
-    into ``CUDA_VISIBLE_DEVICES`` / ``ZE_AFFINITY_MASK`` (or all GPUs when
-    unset) -- on both CUDA and XPU. Integer ``device_ids`` are exactly those
+    into `CUDA_VISIBLE_DEVICES` / `ZE_AFFINITY_MASK` (or all GPUs when
+    unset) -- on both CUDA and XPU. Integer `device_ids` are exactly those
     visible ordinals, so they are returned as-is (this handles non-contiguous
-    pins such as ``[2, 3, 5, 7]``). When there is no explicit integer mapping
-    (``device_ids`` unset or given as UUID strings), fall back to the
-    contiguous range ``[0, num_devices)``.
+    pins such as `[2, 3, 5, 7]`). When there is no explicit integer mapping
+    (`device_ids` unset or given as UUID strings), fall back to the
+    contiguous range `[0, num_devices)`.
 
     Args:
-        device_ids: The ``device_ids`` passed to the engine, or ``None``.
+        device_ids: The `device_ids` passed to the engine, or `None`.
         num_devices: Number of devices the engine occupies, used for the
             contiguous fallback.
 
     Returns:
         The visible-set device indices the engine occupies.
+
     """
     if device_ids and all(isinstance(d, int) for d in device_ids):
         return [int(d) for d in device_ids]
@@ -1809,8 +1810,9 @@ def wait_for_memory_to_settle(
         devices: Logical device indices to wait on. Defaults to every visible
             device. Pass the indices the current engine actually used so the
             wait does not block on GPUs owned by other processes sharing the
-            node (e.g. under an ``ZE_AFFINITY_MASK``/``CUDA_VISIBLE_DEVICES``
+            node (e.g. under an `ZE_AFFINITY_MASK`/`CUDA_VISIBLE_DEVICES`
             that still exposes several devices).
+
     """
     if not current_platform.is_rocm() and not current_platform.is_xpu():
         return

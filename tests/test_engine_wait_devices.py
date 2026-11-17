@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test for scoping the ``VllmRunner`` memory-settle wait to the
+"""Regression test for scoping the `VllmRunner` memory-settle wait to the
 devices an engine actually occupies, so it never blocks on GPUs pinned to a
 different, concurrently-running engine.
 """
@@ -18,16 +18,16 @@ def test_two_engines_do_not_cross_wait_on_memory(vllm_runner):
     waits -- the pre-construction wait (XPU/ROCm) and the teardown wait (every
     platform) -- must be scoped to B's own device, never device 0. Otherwise
     the bounded wait blocks on A's still-occupied GPU and times out with
-    ``ValueError: Memory of devices ... not free``.
+    `ValueError: Memory of devices ... not free`.
 
     Instead of relying only on that slow (240 s) timeout, this spies on
-    ``wait_for_memory_to_settle`` and asserts every wait B issues is scoped to
-    ``[1]``. The regression then fails fast and stays meaningful even on CUDA,
-    where the wait itself is a no-op but the ``devices`` argument still carries
+    `wait_for_memory_to_settle` and asserts every wait B issues is scoped to
+    `[1]`. The regression then fails fast and stays meaningful even on CUDA,
+    where the wait itself is a no-op but the `devices` argument still carries
     the scope.
 
-    ``device_ids`` are visible ordinals within whatever set the launcher's mask
-    (``ZE_AFFINITY_MASK`` / ``CUDA_VISIBLE_DEVICES``) assigned to this process,
+    `device_ids` are visible ordinals within whatever set the launcher's mask
+    (`ZE_AFFINITY_MASK` / `CUDA_VISIBLE_DEVICES`) assigned to this process,
     so the test does not depend on which physical GPUs CI happens to hand out.
     """
     from tests import utils as test_utils
