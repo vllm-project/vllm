@@ -11,4 +11,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("failed to create shm object storage {name:?}: {message}")]
     ShmStorageCreate { name: String, message: String },
+    #[error("max object size {max_object_size} exceeds the chunk size limit {limit}")]
+    MaxObjectSizeTooLarge {
+        max_object_size: usize,
+        limit: usize,
+    },
 }

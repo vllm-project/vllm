@@ -12,7 +12,8 @@ use std::collections::{HashMap, HashSet};
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
 
-use super::ring_buffer::SingleWriterShmRingBuffer;
+use super::ring_buffer::{MD_SIZE, SingleWriterShmRingBuffer};
+use crate::error::{Error, Result};
 
 /// HMAC-SHA256 handle signature, keyed by the shm segment's auth secret.
 type HmacSha256 = Hmac<Sha256>;
@@ -78,8 +79,16 @@ pub struct SingleWriterShmObjectStorage {
 }
 
 impl SingleWriterShmObjectStorage {
-    pub fn new(ring_buffer: SingleWriterShmRingBuffer, max_object_size: usize) -> Self {
-        Self {
+    pub fn new(ring_buffer: SingleWriterShmRingBuffer, max_object_size: usize) -> Result<Self> {
+        // Readers decode the chunk size header as a signed 32-bit integer.
+        let limit = i32::MAX as usize - MD_SIZE;
+        if max_object_size > limit {
+            return Err(Error::MaxObjectSizeTooLarge {
+                max_object_size,
+                limit,
+            });
+        }
+        Ok(Self {
             ring_buffer,
             max_object_size,
             // Learned from the engine handshake; callers gate all operations
@@ -90,7 +99,7 @@ impl SingleWriterShmObjectStorage {
             id_index: HashMap::new(),
             writer_flag: HashMap::new(),
             touched: HashSet::new(),
-        }
+        })
     }
 
     pub fn set_n_readers(&mut self, n_readers: u32) {
@@ -175,7 +184,7 @@ impl SingleWriterShmObjectStorage {
     /// `body` is the serialized object payload as produced by
     /// `super::serde::serialize_mm_item`: the 0x01 format marker followed by
     /// the msgpack body.
-    pub fn put(&mut self, key: &str, body: &[u8]) -> Result<(usize, u32), PutFailure> {
+    pub fn put(&mut self, key: &str, body: &[u8]) -> std::result::Result<(usize, u32), PutFailure> {
         match self.put_with::<std::convert::Infallible>(key, body.len(), |buf| {
             buf.copy_from_slice(body);
             Ok(())
@@ -194,7 +203,7 @@ impl SingleWriterShmObjectStorage {
         key: &str,
         payload_len: usize,
         write: impl FnOnce(&mut [u8]) -> std::result::Result<(), E>,
-    ) -> std::result::Result<Result<(usize, u32), PutFailure>, E> {
+    ) -> std::result::Result<std::result::Result<(usize, u32), PutFailure>, E> {
         if self.key_index.contains_key(key) {
             return Ok(Err(PutFailure::DuplicateKey));
         }
@@ -300,7 +309,7 @@ mod tests {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("vllm-mm-shm-test-storage-{}-{id}", std::process::id());
         let ring_buffer = SingleWriterShmRingBuffer::create(data_buffer_size, &name).unwrap();
-        let mut storage = SingleWriterShmObjectStorage::new(ring_buffer, max_object_size);
+        let mut storage = SingleWriterShmObjectStorage::new(ring_buffer, max_object_size).unwrap();
         storage.set_n_readers(1);
         storage
     }
@@ -380,6 +389,14 @@ mod tests {
             Err(PutFailure::DuplicateKey)
         );
         assert_eq!(storage.writer_flag[&id], flags_before);
+    }
+
+    #[test]
+    fn new_rejects_max_object_size_beyond_the_chunk_size_header() {
+        let name = format!("vllm-mm-shm-test-storage-max-{}", std::process::id());
+        let ring_buffer = SingleWriterShmRingBuffer::create(4096, &name).unwrap();
+        let result = SingleWriterShmObjectStorage::new(ring_buffer, i32::MAX as usize);
+        assert!(matches!(result, Err(Error::MaxObjectSizeTooLarge { .. })));
     }
 
     #[test]
