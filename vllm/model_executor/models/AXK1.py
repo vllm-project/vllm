@@ -46,6 +46,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -118,7 +119,7 @@ class AXK1MoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        divide_shared_output_in_fp16: bool = False,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.OUTPUT,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -203,8 +204,9 @@ class AXK1MoE(nn.Module):
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
-            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+            routed_scale_mode=RoutedScaleMode.ROUTER
+            if self.is_rocm_aiter_moe_enabled
+            else routed_scale_mode,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -643,7 +645,9 @@ class AXK1DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 # forward() only compensates in FP16 when not using MHA.
-                divide_shared_output_in_fp16=not use_mha,
+                routed_scale_mode=RoutedScaleMode.OUTPUT
+                if use_mha
+                else RoutedScaleMode.OUTPUT_FP16_GUARD,
             )
         else:
             self.mlp = AXK1MLP(
