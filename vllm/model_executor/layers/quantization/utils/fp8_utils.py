@@ -1137,13 +1137,7 @@ def requant_weight_ue8m0_inplace(
         s_old = s_view[idx]
 
         # De-quantise with the *old* scaling factors (float32).
-        m_cur, k_cur = w_q.shape
-        s_float = s_old.to(torch.float32)
-        # Expand scales along rows and cols by block size, then crop.
-        s_exp_r = torch.repeat_interleave(s_float, block_m, dim=0)
-        s_exp = torch.repeat_interleave(s_exp_r, block_k, dim=1)
-        s_exp = s_exp[:m_cur, :k_cur]
-        w_dq = w_q.to(torch.float32) * s_exp
+        w_dq = dequant_block_fp8(w_q, s_old, [block_m, block_k], torch.float32)
         # Re-quantise using power-of-two scaling (UE8M0).
         w_requant, s_requant = per_block_cast_to_fp8(
             w_dq, [block_m, block_k], use_ue8m0=True
@@ -1586,7 +1580,7 @@ def process_fp8_input_tensor_strategy_moe(
     )
 
 
-def dequant_block_fp8_to_bf16(
+def dequant_block_fp8(
     weight: torch.Tensor,
     scale_inv: torch.Tensor,
     block_size: Sequence[int],
@@ -1656,7 +1650,7 @@ def dequantize_block_fp8_moe_weights(
                 f"FP8 scale grid {tuple(scale.shape[-2:])} does not match block "
                 f"shape {list(weight_block_size)} for a {(n, k)} weight."
             )
-        return dequant_block_fp8_to_bf16(w, scale, weight_block_size, out_dtype)
+        return dequant_block_fp8(w, scale, weight_block_size, out_dtype)
 
     for start in range(0, num_experts, experts_per_chunk):
         experts = slice(start, min(start + experts_per_chunk, num_experts))

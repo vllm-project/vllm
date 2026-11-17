@@ -717,14 +717,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
         """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
-        requantization."""
+        requantization. Other FP8 weight schemes are not supported."""
+        if not self.block_quant:
+            raise NotImplementedError(
+                "MoE requantization from FP8 is only supported for block-scaled "
+                "weights."
+            )
         return dequantize_block_fp8_moe_weights(
             layer.w13_weight,
-            layer.w13_weight_scale_inv if self.block_quant else None,
+            layer.w13_weight_scale_inv,
             layer.w2_weight,
-            layer.w2_weight_scale_inv if self.block_quant else None,
+            layer.w2_weight_scale_inv,
             num_w13_shards=self.moe.w13_num_shards,
-            weight_block_size=self.weight_block_size if self.block_quant else None,
+            weight_block_size=self.weight_block_size,
             out_dtype=layer.orig_dtype,
         )
 

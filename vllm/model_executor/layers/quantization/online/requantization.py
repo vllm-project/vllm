@@ -83,11 +83,19 @@ class OnlineRequantizationMixin:
             return False
 
         existing_parameter_names = set(layer._parameters)
+        # The source's `create_weights` describes the serialized weights (e.g. a block
+        # size) on the layer: the target, not the source, owns these attributes.
+        had_block_size = hasattr(layer, "weight_block_size")
+        block_size = getattr(layer, "weight_block_size", None)
         # Schemes may select kernels in `create_weights`: skip them for sources.
         with skip_checkpoint_backend_selection():
             self.requantization_source.create_weights(
                 layer, *weight_args, **extra_weight_attrs
             )
+        if had_block_size:
+            layer.weight_block_size = block_size
+        else:
+            layer.__dict__.pop("weight_block_size", None)
         self.requantization_source_parameters = {
             name: parameter
             for name, parameter in layer._parameters.items()

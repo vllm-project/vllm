@@ -180,6 +180,7 @@ from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
     _get_original_loader,
+    finalize_layerwise_processing,
     finalize_layerwise_reload,
     get_layerwise_info,
     initialize_layerwise_reload,
@@ -3321,8 +3322,76 @@ def test_non_block_fp8_moe_dequantize_weight_is_not_implemented(source) -> None:
         w2_weight_scale=torch.ones(2),
         orig_dtype=torch.bfloat16,
     )
+    # Rejected when called, not lazily when the first group of experts is read.
     with pytest.raises(NotImplementedError, match="block-scaled"):
-        next(iter(method.dequantize_weight(layer)))
+        method.dequantize_weight(layer)
+
+
+@pytest.mark.parametrize("requantization_source", [True, False])
+@pytest.mark.skip_global_cleanup
+def test_finalize_rejects_partially_loaded_requantization_source(
+    requantization_source, monkeypatch
+) -> None:
+    """A missing serialized tensor would be materialized as zeros and silently
+    requantized: only padded full-precision weights may be partially loaded."""
+    from vllm.model_executor.model_loader.reload import layerwise
+
+    processed = []
+    monkeypatch.setattr(
+        layerwise, "_layerwise_process", lambda layer, info: processed.append(layer)
+    )
+    layer = torch.nn.Linear(2, 2)
+    layer.quant_method = SimpleNamespace(
+        requantization_source=object() if requantization_source else None
+    )
+    info = get_layerwise_info(layer)
+    info.load_numel_total = 10
+    info.load_numel = 4
+    model = torch.nn.Sequential(layer)
+
+    if requantization_source:
+        with pytest.raises(ValueError, match="missing weights to requantize"):
+            finalize_layerwise_processing(model, SimpleNamespace())
+        assert not processed
+    else:
+        finalize_layerwise_processing(model, SimpleNamespace())
+        assert processed == [layer]
+
+
+@pytest.mark.parametrize("before", [None, [1, 32]])
+@pytest.mark.skip_global_cleanup
+def test_requantization_source_does_not_leak_layer_attributes(before) -> None:
+    """The serialized weights' block size, set on the layer by the source's
+    `create_weights`, must not reach a non-block target's kernel selection."""
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        OnlineRequantizationMixin,
+    )
+
+    class Source:
+        def create_weights(self, layer, *args, **kwargs):
+            layer.weight_block_size = [128, 128]
+            layer.register_parameter(
+                "weight",
+                torch.nn.Parameter(
+                    torch.empty(8, 8, device="meta", dtype=torch.float8_e4m3fn),
+                    requires_grad=False,
+                ),
+            )
+
+    mixin = OnlineRequantizationMixin()
+    mixin.set_requantization_source(Source())
+    layer = torch.nn.Module()
+    layer.weight_block_size = before
+    assert mixin.create_requantization_source_weights(layer)
+    assert layer.weight_block_size == before
+    assert layer.weight.is_meta
+
+    # Without a previous value, the attribute is not left behind either.
+    layer = torch.nn.Module()
+    mixin = OnlineRequantizationMixin()
+    mixin.set_requantization_source(Source())
+    mixin.create_requantization_source_weights(layer)
+    assert not hasattr(layer, "weight_block_size")
 
 
 def _naive_block_fp8_dequant(
