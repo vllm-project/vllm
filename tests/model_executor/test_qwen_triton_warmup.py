@@ -65,10 +65,12 @@ def test_qwen_gdn_prefill_warmup_kernels_compile_on_gpu() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only prefill layout")
-def test_qwen_gdn_post_conv_warmup_covers_packed_ba_layout() -> None:
+@pytest.mark.parametrize("hv", [8, 12])
+def test_qwen_gdn_post_conv_warmup_covers_packed_ba_layout(hv: int) -> None:
     """The ROCm prefill passes b/a as the halves of the packed ba projection;
     serving that layout must reuse the warmed kernel variants."""
-    hv = 8  # a/b strides 8 (contiguous) and 16 (packed) specialize differently
+    # hv 8: the a/b strides (8 contiguous, 16 packed) specialize differently.
+    # hv 12: only the 16-byte alignment of the packed a (24 bytes in) differs.
     device = torch.device("cuda")
     config = replace(
         _cuda_gdn_config(),
