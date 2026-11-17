@@ -32,6 +32,9 @@ class ECConnector:
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
+    def reset(self) -> None:
+        return
+
 
 class ActiveECConnector(ECConnector):
     def __init__(
@@ -45,6 +48,9 @@ class ActiveECConnector(ECConnector):
         # Every producer offloads freshly computed encoder outputs, including
         # an ec_both node that also reloads them.
         self.save_new_caches = self.ec_connector.is_producer
+
+    def reset(self) -> None:
+        self.ec_connector.reset()
 
     @contextmanager
     def maybe_get_output(

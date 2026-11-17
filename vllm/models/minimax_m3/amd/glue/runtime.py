@@ -1,22 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-model runtime of the MiniMax-M3.1 SP (sequence-parallel) prefill MoE
-half.
+"""Per-model runtime of the MiniMax-M3.1 decode glue and SP prefill paths.
 
 Lifecycle (every phase that can fail on one rank ends in a TP agreement, so all
 ranks keep or drop the path together):
 
 * `create` (model __init__): config checks only; registers on the MoE layers.
 * `after_load_weights` (end of MiniMaxM3Model.load_weights): marks the weights
-  loaded. The setup (the replicated shared-expert weights, all-gathered from
-  the TP shards, and the fused combine + reduce-scatter buffers) runs at the
-  first eager, uncaptured forward, the profile run, every rank at the same
-  point.
+  loaded. The setup (derived shared-expert weights, with the SP all-gathers, the
+  decode peer buffer, per-width buffers and compiled kernels, the SP combine +
+  reduce-scatter buffers) runs at the first eager, uncaptured forward, the
+  profile run, every rank at the same point. That forward itself takes the
+  stock path.
 * `begin_forward` / `end_forward` (MiniMaxM3Model.forward): one plan a forward,
-  from rank-uniform data only (forward context, row count, capture state); kept
-  thread-locally for the decoder layers.
+  from rank-uniform data only (forward context, attention metadata, row count,
+  capture state); kept thread-locally for the decoder layers.
 * `moe_half` (MiniMaxM3DecoderLayer.forward, after attention): the layer's MoE
-  half on the SP path, or None for the stock path."""
+  half on the planned path (decode glue or SP prefill), or None for the stock
+  path. When the next layer is a MoE layer taking MXFP8 attention input, the
+  all-reduce after the MoE hands that layer its quantized input (an
+  Mxfp8Carry): SP through the fused reduce-scatter + MXFP8 gather, decode when
+  the installed AITER has the fused all-reduce + RMSNorm + MXFP8 quant.
+* `output_step` (MiniMaxM3ModelState.postprocess_state, every sampled step,
+  eager or replayed): the periodic collective epoch reset."""
 
 from __future__ import annotations
 
@@ -29,15 +35,17 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-SP = "sp"
-# Eager steps of MIN_ROWS .. MAX_ROWS tokens take the SP path. Measured on
-# MI355X (TP4, the MoE half from the o_proj partial to the gemm1 inputs):
-# 1208 rows ~-2%, 2343 -12%, 5857 -24%, 14394 -26%; at 500 rows it is slower
-# (the reduce-scatter saves little at that size). Steps of more tokens than the
-# measured range keep the stock path (with DBO they are split anyway: DBO
-# micro-batches always run the stock path).
-MIN_ROWS = 1024
-MAX_ROWS = 16384
+DECODE, SP = "decode", "sp"
+# SP: eager steps of SP_MIN_ROWS .. SP_MAX_ROWS tokens. Measured on MI355X (TP4,
+# the MoE half from the o_proj partial to the gemm1 inputs): 1208 rows ~-2%,
+# 2343 -12%, 5857 -24%, 14394 -26%; slower at 500 rows. Larger steps keep the
+# stock path (with DBO they are split anyway: DBO micro-batches run the stock
+# path).
+SP_MIN_ROWS = 1024
+SP_MAX_ROWS = 16384
+# Epoch reset period in counted launches (the kernel's tag limit is
+# EPOCH_LIMIT = 2^17 - 2^12, minus the uncounted startup launches).
+RESET_LAUNCHES = (1 << 17) - (1 << 14)
 
 
 class StepPlan(NamedTuple):
@@ -56,7 +64,7 @@ class M3Glue:
     def create(cls, model, vllm_config) -> M3Glue | None:
         reasons = cls._refusals(model, vllm_config)
         if reasons:
-            logger.debug("MiniMax-M3 SP prefill off: %s", "; ".join(reasons))
+            logger.debug("MiniMax-M3 glue paths off: %s", "; ".join(reasons))
             return None
         return cls(model, vllm_config)
 
@@ -93,7 +101,7 @@ class M3Glue:
         }
         for k, v in expect.items():
             if getattr(cfg, k, None) != v:
-                reasons.append(f"{k}={getattr(cfg, k, None)} (built for {v})")
+                reasons.append(f"{k}={getattr(cfg, k, None)} (kernel built for {v})")
         if not getattr(cfg, "use_routing_bias", False):
             reasons.append("no routing bias")
         layers = [
@@ -108,6 +116,8 @@ class M3Glue:
     def __init__(self, model, vllm_config) -> None:
         from vllm.distributed import get_tp_group
 
+        from .decode import WIDTHS
+
         self.group = get_tp_group()
         self.model = model
         self.layers = [
@@ -115,12 +125,20 @@ class M3Glue:
         ]
         for layer in self.layers:
             layer._m3_glue = self
+        self.meta_key = getattr(self.layers[0].self_attn, "layer_name", None)
+        self.widths = WIDTHS
+        self.decode: Any = None  # DecodeGlue, once set up
         self.sp: Any = None  # SpPrefill, once set up
-        self.shared: dict[int, object] = {}  # layer id -> SharedWeights
-        self._tls = threading.local()
-        self._moe: dict[int, object] = {}  # layer id -> AiterMoe (lazy, host only)
         # padded M -> True, or None when refused
         self._sp_ok: dict[int, bool | None] = {}
+        self.shared: dict[int, object] = {}  # layer id -> SharedWeights
+        self.shared_fused: str | None = None  # "mxfp8" / "bf16": inside the MoE
+        self._tls = threading.local()
+        self._moe: dict[int, object] = {}  # layer id -> AiterMoe (lazy, host only)
+        # width -> (tuned row, activation dtype), or None when refused
+        self._decode_ok: dict[int, tuple | None] = {}
+        self._since_reset = 0
+        self.resets = 0
         self._seen: set = set()
         self._loaded = False  # load_weights finished at least once
         self._ready = False  # the setup ran (first eager forward)
@@ -132,7 +150,7 @@ class M3Glue:
         derived here: the setup runs at the first eager, uncaptured forward."""
         if self._ready:
             logger.warning(
-                "MiniMax-M3 SP prefill: weights reloaded after setup; derived "
+                "MiniMax-M3 decode glue: weights reloaded after setup; derived "
                 "weights not rebuilt"
             )
         self._loaded = True
@@ -146,31 +164,99 @@ class M3Glue:
         self._setup()
 
     def _setup(self) -> None:
-        from .shared import build_shared_weights
-        from .sp import SpPrefill
+        from .shared import build_shared_weights, fused_shared_supported
 
         ok, err = True, None
         try:
             for layer in self.layers:
-                mlp, lid = layer.block_sparse_moe.shared_experts, layer.layer_id
+                moe, lid = layer.block_sparse_moe, layer.layer_id
+                mlp = moe.shared_experts
                 for lin in (mlp.gate_up_proj, mlp.down_proj):
                     if lin.weight.element_size() != 1 or not hasattr(
                         lin, "weight_scale"
                     ):
                         raise ValueError(f"layer {lid}: shared expert is not MXFP8")
+                # what the glue kernel reads through raw pointers
+                checks = (
+                    (layer.post_attention_layernorm.weight, torch.bfloat16, (6144,)),
+                    (moe.gate.weight, torch.float32, (128, 6144)),
+                    (moe.e_score_correction_bias, torch.float32, (128,)),
+                )
+                for t, dtype, shape in checks:
+                    if (
+                        t.dtype != dtype
+                        or tuple(t.shape) != shape
+                        or not t.is_contiguous()
+                    ):
+                        raise ValueError(
+                            f"layer {lid}: {tuple(t.shape)} {t.dtype}, "
+                            f"want {shape} {dtype}"
+                        )
         except Exception as e:  # noqa: BLE001
             ok, err = False, e
         if not _tp_agree(ok, self.group):
             logger.warning(
-                "MiniMax-M3 SP prefill off: %s", err or "refused on another rank"
+                "MiniMax-M3 glue paths off: %s", err or "refused on another rank"
             )
             return
-        for layer in self.layers:  # all-gathers in layer order on every rank
+        # the shared expert inside the a16w4 MoE launches when the installed AITER
+        # takes it and the model's SwiGLU is the kernels' (MXFP8 weights when that
+        # AITER reads them, else their bf16 upcast); else separate MXFP8 GEMMs
+        fmts = {
+            fused_shared_supported(layer.block_sparse_moe.shared_experts)
+            for layer in self.layers
+        }
+        self.shared_fused = fmts.pop() if len(fmts) == 1 else None
+        for layer in self.layers:  # SP: all-gathers in layer order on every rank
             self.shared[layer.layer_id] = build_shared_weights(
-                layer.block_sparse_moe.shared_experts, False, True, self.group
+                layer.block_sparse_moe.shared_experts,
+                True,
+                True,
+                self.group,
+                fused=self.shared_fused,
             )
-        self.sp = SpPrefill(self.group, MIN_ROWS, MAX_ROWS)
+        from .sp import SpPrefill
+
+        self.sp = SpPrefill(self.group, SP_MIN_ROWS, SP_MAX_ROWS)
+        self._setup_decode()
         torch.accelerator.synchronize()
+
+    def _setup_decode(self) -> None:
+        from .decode import DecodeGlue
+
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        inter_tp = self.layers[0].block_sparse_moe.shared_experts.down_proj.weight
+        glue = DecodeGlue(
+            self.widths,
+            self.group,
+            device,
+            shared_inter=inter_tp.shape[1] if self.shared_fused else 0,
+        )
+        ok, err = True, None
+        try:
+            glue.setup()
+        except Exception as e:  # noqa: BLE001
+            ok, err = False, e
+        if not _tp_agree(ok, self.group):
+            logger.warning(
+                "MiniMax-M3 decode glue off: setup failed on %s rank: %s",
+                "this" if err else "another",
+                err,
+            )
+            glue.close()
+            return
+        self.decode = glue
+        self.widths = glue.widths  # AITER's fused op: every width 1 .. AITER_MAX_ROWS
+        glue.setup_post_moe()  # collective; agrees internally
+        logger.info(
+            "MiniMax-M3 decode glue ready: %s, widths %d-%d, shared expert %s",
+            "AITER fused op" if glue.fused is not None else "FlyDSL kernel",
+            min(glue.widths),
+            max(glue.widths),
+            f"fused into the a16w4 MoE launches ({self.shared_fused})"
+            if self.shared_fused
+            else "separate (MXFP8 GEMMs)",
+        )
 
     # ------------------------------------------------------------ per forward
     def begin_forward(
@@ -192,7 +278,9 @@ class M3Glue:
 
     def end_forward(self, plan: StepPlan | None) -> None:
         self._tls.plan = None
-        if plan is not None:
+        if plan is not None and plan.mode == DECODE:
+            self.decode.assert_healthy()
+        elif plan is not None:
             self.sp.assert_healthy()
 
     def _decide(self, rows: int, intermediate_tensors) -> StepPlan | None:
@@ -204,23 +292,52 @@ class M3Glue:
         from vllm.v1.worker.ubatching import dbo_enabled
 
         if (
-            self.sp is None
-            or not self.sp.min_rows <= rows <= self.sp.max_rows
-            or intermediate_tensors is not None
+            intermediate_tensors is not None
             or not is_forward_context_available()
             or dbo_enabled()
-            or torch.cuda.is_current_stream_capturing()
         ):
             return None
         ctx = get_forward_context()
+        if ctx.ubatch_slices is not None:
+            return None
+        mode = ctx.cudagraph_runtime_mode
+        # Decode: FULL capture runs the forward with mode NONE; PIECEWISE graphs
+        # are keyed by token count alone and replay mixed steps, so they stay
+        # stock.
         if (
-            ctx.ubatch_slices is not None
-            or ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            self.decode is not None
+            and rows in self.decode.bufs
+            and mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and self._pure_decode(ctx, rows)
+            and self._decode_row(rows) is not None
         ):
-            return None
-        if self._sp_row(rows) is None:
-            return None
-        return StepPlan(SP, rows)
+            return StepPlan(DECODE, rows)
+        # SP: eager steps only (its collectives are not captured)
+        if (
+            self.sp is not None
+            and self.sp.min_rows <= rows <= self.sp.max_rows
+            and mode == CUDAGraphMode.NONE
+            and not torch.cuda.is_current_stream_capturing()
+            and self._sp_row(rows) is not None
+        ):
+            return StepPlan(SP, rows)
+        return None
+
+    def _pure_decode(self, ctx, rows: int) -> bool:
+        from vllm.models.minimax_m3.common.sparse_attention import (
+            MiniMaxM3SparseMetadata,
+        )
+
+        attn = ctx.attn_metadata
+        md = attn.get(self.meta_key) if isinstance(attn, dict) else None
+        if not isinstance(md, MiniMaxM3SparseMetadata):
+            return False
+        return (
+            md.num_prefills == 0
+            and md.num_prefill_tokens == 0
+            and md.num_decodes > 0
+            and 0 < md.num_decode_tokens <= rows
+        )
 
     # ------------------------------------------------------------ tuned rows
     def aiter_moe(self, layer):
@@ -233,7 +350,23 @@ class M3Glue:
             self._moe[layer.layer_id] = moe
         return moe
 
+    def _decode_row(self, rows: int):
+        """The tuned A16W4 row at `rows`, if it takes the glue's sort (one
+        answer for every layer and rank: same shapes, same table)."""
+        if rows not in self._decode_ok:
+            try:
+                moe = [self.aiter_moe(layer) for layer in self.layers][0]
+                why = moe.decode_refusal(rows, exact=True)
+                info = why or moe.describe(rows, exact=True)
+            except Exception as e:  # noqa: BLE001 - a refusal, not a crash
+                why = info = f"{type(e).__name__}: {e}"
+            self._decode_ok[rows] = None if why else moe.metadata(rows, exact=True)
+            self._note(DECODE, rows, ("refused: " if why else "") + info)
+        return self._decode_ok[rows]
+
     def _sp_row(self, rows: int):
+        """Whether the tuned row at `rows` (padded M, as the stock call looks
+        it up) takes SP's prequantized input."""
         from aiter.fused_moe import get_padded_M
 
         key = get_padded_M(rows)
@@ -245,14 +378,13 @@ class M3Glue:
             except Exception as e:  # noqa: BLE001 - a refusal, not a crash
                 why = info = f"{type(e).__name__}: {e}"
             self._sp_ok[key] = None if why else True
-            if self.group.rank_in_group == 0 and key not in self._seen:
-                self._seen.add(key)
-                logger.info(
-                    "MiniMax-M3 SP prefill rows %d (tuned row): %s",
-                    key,
-                    ("refused: " if why else "") + info,
-                )
+            self._note(SP, key, ("refused: " if why else "") + info)
         return self._sp_ok[key]
+
+    def _note(self, mode: str, rows: int, what: str) -> None:
+        if self.group.rank_in_group == 0 and (mode, rows) not in self._seen:
+            self._seen.add((mode, rows))
+            logger.info("MiniMax-M3 glue %s rows %d (tuned row): %s", mode, rows, what)
 
     # ------------------------------------------------------------ per layer
     def current(self) -> StepPlan | None:
@@ -264,20 +396,37 @@ class M3Glue:
         plan = self.current()
         if plan is None or plan.rows != hidden_states.shape[0]:
             return None
-        return self.sp.run(
+        if plan.mode == SP:
+            return self.sp.run(
+                layer,
+                hidden_states,
+                residual,
+                self.shared[layer.layer_id],
+                self.aiter_moe(layer),
+                self._next_norm(layer),
+            )
+        md, q = self._decode_row(plan.rows)  # same tuned row for every layer
+        # a specialized decode kernel can take the next layer's place (it reads
+        # all-reduced rows)
+        special = getattr(self.model, "specialized_decode", None) is not None
+        return self.decode.run(
             layer,
             hidden_states,
             residual,
             self.shared[layer.layer_id],
             self.aiter_moe(layer),
-            self._next_norm(layer),
+            md,
+            q,
+            None if special else self._next_norm(layer),
         )
 
     def _next_norm(self, layer):
-        """The next layer's input norm when the all-reduce after this MoE can be
-        an SP reduce-scatter + MXFP8 gather: the next layer is a MoE layer taking
-        MXFP8 attention input, and no drafter hidden state is taken between them
-        (those need full rows); else None (all-reduce)."""
+        """The next layer's input norm when the all-reduce after this MoE can
+        also norm and quantize that layer's attention input (SP: reduce-scatter +
+        MXFP8 gather; decode: AITER's fused all-reduce + norm + MXFP8): the next
+        layer is a MoE layer taking MXFP8 attention input, and no drafter hidden
+        state is taken between them (those need the all-reduced rows); else
+        None."""
         nid = layer.layer_id + 1
         layers = self.model.layers
         if nid >= len(layers) or nid in getattr(
@@ -290,3 +439,36 @@ class M3Glue:
         ):
             return None
         return nxt.input_layernorm
+
+    # ------------------------------------------------------------ epoch reset
+    def output_step(self) -> None:
+        """Every rank, every sampled step: reset the decode epoch before the
+        launches since the last reset (counted as if every step ran every MoE
+        layer on the glue) could reach the kernel's tag limit."""
+        if self.decode is None:
+            return
+        self._since_reset += 1
+        if self._since_reset * len(self.layers) >= RESET_LAUNCHES:
+            self.reset_epoch()
+
+    def reset_epoch(self) -> None:
+        """Collective, between steps: drain, clear, agree (a phase failing on
+        any rank fails the reset on every rank)."""
+        for phase, fn in (
+            ("drain", torch.accelerator.synchronize),
+            ("clear", self.decode.reset),
+            ("post-MoE clear", self.decode.reset_post_moe),
+        ):
+            ok, err = True, None
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001
+                ok, err = False, e
+            if not _tp_agree(ok, self.group):
+                raise RuntimeError(
+                    f"MiniMax-M3 decode glue epoch reset ({phase}) failed on "
+                    f"{'this' if err else 'another'} rank"
+                ) from err
+        self._since_reset = 0
+        self.resets += 1
+        logger.info("MiniMax-M3 decode glue: epoch reset %d", self.resets)

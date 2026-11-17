@@ -3,8 +3,12 @@
 """MiniMax-M3.1 TP4 MoE-half paths on gfx950 (`runtime.M3Glue` decides per
 forward which one, if any, a MoE layer takes).
 
+Decode glue: pure-decode steps of the compiled widths run one FlyDSL launch from
+the o_proj partial to the MoE inputs (`kernel.py`, `decode.py`).
+
 SP prefill: eager prefill steps run a sequence-parallel norm / router / shared
-expert / quant around the stock AITER MoE (`sp.py`)."""
+expert / quant around the stock AITER MoE (`sp.py`).
+"""
 
 from .runtime import M3Glue
 
