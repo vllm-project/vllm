@@ -26,7 +26,7 @@ use pyo3::types::{PyBytes, PyList, PyTuple};
 use rustc_hash::FxHashSet;
 use thiserror_ext::AsReport;
 use vllm_engine_core::hash::BlockHash;
-use vllm_engine_core::kv_cache::{KvCacheGroupRole, KvCacheSpec, ManagerType, SpecGroup};
+use vllm_engine_core::kv_cache::{KvCacheSpec, ManagerType, SpecGroup};
 use vllm_engine_core_connectors::mooncake_store::{
     ExternalCachedBlockPool, LookupCandidates, LookupGroup, MooncakeStoreError, StoreCoordinator,
     StoreLookup,
@@ -97,8 +97,7 @@ fn spec_and_manager(
 ) -> PyResult<(KvCacheSpec, ManagerType)> {
     let converted = convert_spec(spec, 0)?;
     let manager = manager_type(manager_cls)?;
-    let expected =
-        ManagerType::for_group(&converted, KvCacheGroupRole::Default).map_err(kv_cache_py_err)?;
+    let expected = ManagerType::for_spec(&converted).map_err(kv_cache_py_err)?;
     if manager != expected {
         return Err(PyNotImplementedError::new_err(format!(
             "{spec} is registered with {manager_cls}"

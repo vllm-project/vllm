@@ -165,7 +165,6 @@ impl Scheduler {
         if self.defer_block_free && scheduler_output.total_num_scheduled_tokens > 0 {
             self.processed_step_seq += 1;
             self.drain_deferred_frees();
-            self.drain_deferred_loads();
         }
 
         let mut outputs: IndexMap<usize, Vec<EngineCoreOutput>> = IndexMap::new();

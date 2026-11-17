@@ -64,11 +64,6 @@ pub enum KvCacheSpecType {
     CrossAttention,
     /// `EncoderOnlyAttentionSpec`. Has no registered manager.
     EncoderOnlyAttention,
-    /// `HiSparseHotSpec`: ephemeral per-request HiSparse hot-cache allocation.
-    HiSparseHot { blocks_per_request: usize },
-    /// `HiSparseResidentSpec`: reclaimable GPU-resident pages for host-backed
-    /// HiSparse KV.
-    HiSparseResident,
 }
 
 /// A base class for specifying the KV cache format of one layer.
@@ -152,9 +147,7 @@ impl KvCacheSpec {
     /// Whether this spec's group participates in prefix caching.
     pub fn prefix_cacheable(&self) -> bool {
         match self.spec_type {
-            KvCacheSpecType::HiSparseHot { .. }
-            | KvCacheSpecType::HiSparseResident
-            | KvCacheSpecType::CircularBuffer => false,
+            KvCacheSpecType::CircularBuffer => false,
             KvCacheSpecType::SlidingWindowMla { bounded_replay, .. } => !bounded_replay,
             _ => true,
         }
@@ -211,10 +204,6 @@ impl KvCacheSpec {
                 let num_tokens = (attention_chunk_size + max_in_flight_tokens).min(max_model_len);
                 Some(cdiv(num_tokens, self.block_size))
             }
-            KvCacheSpecType::HiSparseResident => {
-                let num_tokens = max_in_flight_tokens.min(max_model_len);
-                Some(cdiv(num_tokens, self.block_size))
-            }
             _ => None,
         }
     }
@@ -231,9 +220,7 @@ impl KvCacheSpec {
             KvCacheSpecType::Mamba { .. } => "mamba",
             KvCacheSpecType::EncoderOnlyAttention => "encoder_only_attention",
             KvCacheSpecType::CrossAttention => "cross_attention",
-            KvCacheSpecType::CircularBuffer
-            | KvCacheSpecType::HiSparseHot { .. }
-            | KvCacheSpecType::HiSparseResident => "unknown",
+            KvCacheSpecType::CircularBuffer => "unknown",
         }
     }
 }
@@ -253,20 +240,8 @@ impl KvCacheSpecType {
 
     /// `isinstance(spec, AttentionSpec)`.
     pub fn is_attention(&self) -> bool {
-        !matches!(
-            self,
-            Self::Mamba { .. } | Self::HiSparseHot { .. } | Self::HiSparseResident
-        )
+        !matches!(self, Self::Mamba { .. })
     }
-}
-
-/// `KVCacheGroupRole`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum KvCacheGroupRole {
-    #[default]
-    Default,
-    HiSparseSource,
-    HiSparseIndexer,
 }
 
 /// Represents a group of model layers that share the same KV cache block table.
@@ -277,11 +252,8 @@ pub struct KvCacheGroupSpec {
     pub kv_cache_spec: KvCacheSpec,
     /// Whether this group holds draft layers and takes the EAGLE last-block drop.
     pub is_eagle_group: bool,
-    /// Host groups use the dedicated HiSparse pool; others share the device pool.
-    pub host_resident: bool,
     /// Whether this group is part of the externally transferable KV state.
     pub enable_kv_transfer: bool,
-    pub role: KvCacheGroupRole,
 }
 
 impl KvCacheGroupSpec {
@@ -289,9 +261,7 @@ impl KvCacheGroupSpec {
         Self {
             kv_cache_spec,
             is_eagle_group: false,
-            host_resident: false,
             enable_kv_transfer: true,
-            role: KvCacheGroupRole::Default,
         }
     }
 }
@@ -308,8 +278,6 @@ pub struct KvCacheConfig {
     /// Whether newly allocated attention blocks must be zeroed before use.
     /// Python derives it from the layer dtypes, which this port does not model.
     pub needs_kv_cache_zeroing: bool,
-    /// Capacity of the dedicated HiSparse host-block manager, when enabled.
-    pub hisparse_host_num_blocks: Option<usize>,
 }
 
 impl KvCacheConfig {
@@ -319,7 +287,6 @@ impl KvCacheConfig {
             kv_cache_groups,
             prefix_cache_retention_interval: None,
             needs_kv_cache_zeroing: false,
-            hisparse_host_num_blocks: None,
         };
         // `has_mamba_layers or has_mixed_precision_kv_cache`; precision is not
         // modeled, so callers set the flag explicitly for mixed precision.

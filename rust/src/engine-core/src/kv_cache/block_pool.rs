@@ -170,15 +170,6 @@ pub struct BlockPool {
     pub use_int_block_hashes: bool,
     kv_event_queue: Vec<KvCacheEvent>,
     pub metrics_collector: Option<KvCacheMetricsCollector>,
-    /// Blocks released with `unpin_blocks` whose contents are still being
-    /// read until the pool reuses them.
-    ///
-    /// Python registers an `on_reuse` callback per block and calls it from
-    /// `get_new_blocks`; here the reused blocks queue up in `reused_blocks`
-    /// for their reader (the HiSparse coordinator, the only one) to drain
-    /// with [`Self::take_reused_blocks`] before it next reads its state.
-    reuse_watchers: IndexSet<BlockId, FxBuildHasher>,
-    reused_blocks: Vec<BlockId>,
 }
 
 impl std::fmt::Debug for BlockPool {
@@ -235,8 +226,6 @@ impl BlockPool {
             use_int_block_hashes: false,
             kv_event_queue: Vec::new(),
             metrics_collector,
-            reuse_watchers: IndexSet::default(),
-            reused_blocks: Vec::new(),
         };
         pool.blocks[null_block as usize].is_null = true;
         pool
@@ -734,10 +723,6 @@ impl BlockPool {
 
         let ret = self.free_block_queue.popleft_n(num_blocks);
 
-        if !self.reuse_watchers.is_empty() {
-            self.notify_reuse(&ret);
-        }
-
         // In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching {
             if self.metrics_collector.is_some() {
@@ -772,52 +757,6 @@ impl BlockPool {
             }
         }
         ret
-    }
-
-    fn notify_reuse(&mut self, blocks: &[BlockId]) {
-        for &block in blocks {
-            if self.reuse_watchers.shift_remove(&block) {
-                self.reused_blocks.push(block);
-            }
-        }
-    }
-
-    /// Release references to blocks that stay readable until reused.
-    ///
-    /// The blocks become last-resort eviction candidates regardless of prefix
-    /// caching: they join the tail of the free queue and count as free.
-    /// Once `get_new_blocks` hands a block out (or the cache is reset), it is
-    /// reported by [`Self::take_reused_blocks`], so the caller can stop
-    /// reading it.
-    pub fn unpin_blocks(&mut self, blocks: &[BlockId]) {
-        let mut released = Vec::new();
-        for &block in blocks {
-            let blk = &mut self.blocks[block as usize];
-            assert!(blk.ref_cnt > 0 && !blk.is_null);
-            blk.ref_cnt -= 1;
-            self.reuse_watchers.insert(block);
-            if blk.ref_cnt == 0 {
-                released.push(block);
-            }
-        }
-        self.free_block_queue.append_n(&released);
-    }
-
-    /// Drain the unpinned blocks the pool reused since the last call, in
-    /// reuse order (the order Python calls their `on_reuse` callbacks).
-    pub fn take_reused_blocks(&mut self) -> Vec<BlockId> {
-        std::mem::take(&mut self.reused_blocks)
-    }
-
-    /// Move this pool's queued KV events to the end of `owner`'s queue.
-    ///
-    /// Python's `SharedEventQueueBlockPool` (the HiSparse host pool) appends
-    /// to its owner's live queue; the owner of this pool calls this after
-    /// each operation on it, keeping the events in order.
-    pub(crate) fn forward_events_to(&mut self, owner: &mut BlockPool) {
-        if !self.kv_event_queue.is_empty() {
-            owner.kv_event_queue.append(&mut self.kv_event_queue);
-        }
     }
 
     /// If a block is cached in `cached_block_hash_to_block`, we reset its hash
@@ -876,12 +815,6 @@ impl BlockPool {
     ///     evict_first: Also put freed cached blocks at the front of the free
     ///         queue, so they are evicted before other cached blocks. For
     ///         blocks whose contents another tier already holds.
-    ///
-    /// Python routes blocks owned by another pool (HiSparse host blocks) to
-    /// that pool; here [`KvCacheManager::free_blocks`] does, for block lists
-    /// that mix pools.
-    ///
-    /// [`KvCacheManager::free_blocks`]: super::KvCacheManager::free_blocks
     pub fn free_blocks(
         &mut self,
         ordered_blocks: impl IntoIterator<Item = BlockId>,
@@ -953,10 +886,6 @@ impl BlockPool {
         // Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block.clear();
         self.cached_block_hashes_by_block.clear();
-        if !self.reuse_watchers.is_empty() {
-            let watched: Vec<BlockId> = self.reuse_watchers.iter().copied().collect();
-            self.notify_reuse(&watched);
-        }
 
         // Remove all hashes from all blocks.
         for block in &mut self.blocks {

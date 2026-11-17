@@ -3,14 +3,13 @@
 
 //! Python views of the Rust scheduler's KV cache manager
 //! (`vllm_engine_core::kv_cache`), for the Python code that reads it: KV
-//! connectors, HiSparse, and callers inspecting the scheduler.
+//! connectors and callers inspecting the scheduler.
 
 // The methods mirror the Python signatures.
 #![allow(clippy::too_many_arguments)]
 
 pub(crate) mod config;
 pub(crate) mod events;
-mod hisparse;
 pub(crate) mod views;
 
 use pyo3::prelude::*;
@@ -24,7 +23,5 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<views::SingleTypeManagerView>()?;
     m.add_class::<views::ReqToBlocks>()?;
     m.add_class::<views::FreeBlockQueue>()?;
-    m.add_class::<hisparse::HiSparseCoordinatorView>()?;
-    m.add_class::<hisparse::RequestStates>()?;
     Ok(())
 }

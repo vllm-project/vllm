@@ -8,6 +8,7 @@ selected."""
 import pytest
 
 from tests.v1.core.rust_core_diff import FuzzConfig, build_scheduler, run_one
+from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_config
 from tests.v1.core.utils import create_scheduler
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -93,3 +94,12 @@ def test_env_selects_rust_scheduler_with_python_fallback(
     assert type(fallback) is (AsyncScheduler if async_scheduling else Scheduler)
     with pytest.raises(NotImplementedError, match="a test configuration"):
         RustScheduler(**args)
+
+
+def test_hisparse_falls_back_to_python():
+    """HiSparse is not ported: its KV cache layout is rejected, so
+    `VLLM_USE_RUST_CORE` uses the Python scheduler."""
+    base = create_scheduler()
+    kv_cache_config = make_hisparse_kv_cache_config(num_blocks=48, host_num_blocks=80)
+    reason = rust_scheduler.unsupported_reason(base.vllm_config, kv_cache_config)
+    assert reason == 'KV cache group role "hisparse_source"'

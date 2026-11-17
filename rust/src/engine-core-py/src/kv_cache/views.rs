@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyList, PySet, PyTuple};
 use vllm_engine_core::hash::BlockHash;
 use vllm_engine_core::kv_cache::{
-    BlockHashWithGroupId, BlockId, BlockPool, HOST_BLOCK_FLAG, KvCacheBlocks, KvCacheManager,
+    BlockHashWithGroupId, BlockId, BlockPool, KvCacheBlocks, KvCacheManager,
 };
 
 use super::events::events_to_py;
@@ -129,32 +129,12 @@ fn convert_block_hashes(block_hashes: &Bound<'_, PyAny>) -> PyResult<Vec<BlockHa
         .collect()
 }
 
-/// The device pool, or the HiSparse host pool if `host`.
-fn pool_of(m: &KvCacheManager, host: bool) -> &BlockPool {
-    match m.host_block_pool() {
-        Some(pool) if host => pool,
-        _ => m.block_pool(),
-    }
-}
-
-/// `ids` with [`HOST_BLOCK_FLAG`] set if they are blocks of group
-/// `group_id` and that group is the HiSparse host group.
-fn tag_group(m: &KvCacheManager, group_id: usize, ids: &[BlockId]) -> Vec<BlockId> {
-    if m.coordinator.host_group_id() == Some(group_id) {
-        ids.iter().map(|b| b | HOST_BLOCK_FLAG).collect()
-    } else {
-        ids.to_vec()
-    }
-}
-
 /// `KVCacheBlock`: a view of one block of the pool.
 #[pyclass(frozen, module = "vllm._rust_core", name = "KVCacheBlock")]
 pub struct Block {
     owner: Owner,
     #[pyo3(get)]
     block_id: BlockId,
-    /// Whether this is a block of the HiSparse host pool.
-    host: bool,
 }
 
 impl Block {
@@ -163,16 +143,7 @@ impl Block {
         py: Python<'_>,
         f: impl FnOnce(&vllm_engine_core::kv_cache::KvCacheBlock) -> R,
     ) -> PyResult<R> {
-        self.owner.with(py, |m| f(pool_of(m, self.host).block(self.block_id)))
-    }
-
-    /// The block id, with [`HOST_BLOCK_FLAG`] for a host block.
-    fn tagged_id(&self) -> BlockId {
-        if self.host {
-            self.block_id | HOST_BLOCK_FLAG
-        } else {
-            self.block_id
-        }
+        self.owner.with(py, |m| f(m.block_pool().block(self.block_id)))
     }
 }
 
@@ -210,7 +181,7 @@ impl Block {
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other
             .cast::<Block>()
-            .is_ok_and(|o| o.get().tagged_id() == self.tagged_id() && o.get().owner.is(&self.owner))
+            .is_ok_and(|o| o.get().block_id == self.block_id && o.get().owner.is(&self.owner))
     }
 
     fn __hash__(&self) -> u64 {
@@ -234,15 +205,14 @@ impl Block {
     }
 }
 
-fn block_view(owner: &Owner, id: BlockId) -> Block {
+fn block_view(owner: &Owner, block_id: BlockId) -> Block {
     Block {
         owner: owner.clone(),
-        block_id: id & !HOST_BLOCK_FLAG,
-        host: id & HOST_BLOCK_FLAG != 0,
+        block_id,
     }
 }
 
-/// Views of `ids` (host blocks with [`HOST_BLOCK_FLAG`]), as a Python list.
+/// Views of `ids`, as a Python list.
 pub fn block_list<'py>(
     py: Python<'py>,
     owner: &Owner,
@@ -255,22 +225,10 @@ pub fn block_list<'py>(
     PyList::new(py, views)
 }
 
-/// Views of the blocks `ids` of group `group_id`.
-fn group_block_list<'py>(
-    py: Python<'py>,
-    owner: &Owner,
-    group_id: usize,
-    ids: &[BlockId],
-) -> PyResult<Bound<'py, PyList>> {
-    let ids = owner.with(py, |m| tag_group(m, group_id, ids))?;
-    block_list(py, owner, &ids)
-}
-
-/// The block id of a block view (with [`HOST_BLOCK_FLAG`] for a host block),
-/// a Python `KVCacheBlock` or an int.
+/// The block id of a block view, a Python `KVCacheBlock` or an int.
 pub fn block_id_of(obj: &Bound<'_, PyAny>) -> PyResult<BlockId> {
     if let Ok(block) = obj.cast::<Block>() {
-        return Ok(block.get().tagged_id());
+        return Ok(block.get().block_id);
     }
     if obj.is_instance_of::<PyInt>() {
         return obj.extract();
@@ -293,11 +251,7 @@ pub fn grouped_block_ids(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<BlockId>>> 
     } else {
         obj.clone()
     };
-    // A group's blocks all come from one pool: drop the host flag.
-    groups
-        .try_iter()?
-        .map(|g| Ok(block_ids_of(&g?)?.into_iter().map(|b| b & !HOST_BLOCK_FLAG).collect()))
-        .collect()
+    groups.try_iter()?.map(|g| block_ids_of(&g?)).collect()
 }
 
 pub fn group_tuple<'py>(
@@ -343,12 +297,11 @@ impl KVCacheBlocksView {
             .blocks
             .blocks
             .iter()
-            .enumerate()
-            .map(|(group_id, g)| {
+            .map(|g| {
                 if self.blocks.is_empty() {
                     Ok(PyTuple::empty(py).into_any())
                 } else {
-                    group_block_list(py, self.owner()?, group_id, g).map(Bound::into_any)
+                    block_list(py, self.owner()?, g).map(Bound::into_any)
                 }
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -387,7 +340,7 @@ impl KVCacheBlocksView {
             assert!(self.blocks.blocks.len() == 1, "Only one group is supported");
             return Ok(Vec::new());
         }
-        self.owner()?.with(py, |m| self.blocks.get_unhashed_block_ids(m.group_pool(0)))
+        self.owner()?.with(py, |m| self.blocks.get_unhashed_block_ids(m.block_pool()))
     }
 
     /// Get block_ids of unhashed blocks from KVCacheBlocks instance.
@@ -396,7 +349,7 @@ impl KVCacheBlocksView {
             return Ok(self.blocks.new_empty().blocks);
         }
         self.owner()?.with(py, |m| {
-            self.blocks.get_unhashed_block_ids_all_groups(|g| m.group_pool(g))
+            self.blocks.get_unhashed_block_ids_all_groups(m.block_pool())
         })
     }
 
@@ -428,13 +381,12 @@ impl KVCacheBlocksView {
 #[pyclass(frozen, module = "vllm._rust_core", name = "BlockList", sequence)]
 pub struct BlockList {
     owner: Owner,
-    host: bool,
 }
 
 #[pymethods]
 impl BlockList {
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        self.owner.with(py, |m| pool_of(m, self.host).num_gpu_blocks)
+        self.owner.with(py, |m| m.block_pool().num_gpu_blocks)
     }
 
     fn __getitem__(&self, py: Python<'_>, idx: isize) -> PyResult<Block> {
@@ -443,66 +395,27 @@ impl BlockList {
         if !(0..len).contains(&idx) {
             return Err(PyIndexError::new_err("block index out of range"));
         }
-        Ok(Block {
-            owner: self.owner.clone(),
-            block_id: idx as BlockId,
-            host: self.host,
-        })
+        Ok(block_view(&self.owner, idx as BlockId))
     }
 }
 
-/// `BlockPool` facade: the device pool, or the HiSparse host pool.
+/// `BlockPool` facade.
 #[pyclass(frozen, module = "vllm._rust_core", name = "BlockPool")]
 pub struct BlockPoolView {
     owner: Owner,
-    host: bool,
 }
 
 impl BlockPoolView {
     pub fn new(owner: Owner) -> Self {
-        Self { owner, host: false }
-    }
-
-    /// The HiSparse host pool.
-    pub fn host(owner: Owner) -> Self {
-        Self { owner, host: true }
+        Self { owner }
     }
 
     fn with<R>(&self, py: Python<'_>, f: impl FnOnce(&BlockPool) -> R) -> PyResult<R> {
-        self.owner.with(py, |m| f(pool_of(m, self.host)))
+        self.owner.with(py, |m| f(m.block_pool()))
     }
 
     fn with_mut<R>(&self, py: Python<'_>, f: impl FnOnce(&mut BlockPool) -> R) -> PyResult<R> {
-        self.owner.with_mut(py, |m| m.with_pool_mut(self.host, f))
-    }
-
-    /// Ids of this pool: ints are its block ids.
-    fn own_ids(&self, blocks: &Bound<'_, PyAny>) -> PyResult<Vec<BlockId>> {
-        blocks
-            .try_iter()?
-            .map(|b| {
-                let b = b?;
-                let id = block_id_of(&b)?;
-                Ok(if self.host && b.cast::<Block>().is_err() {
-                    id | HOST_BLOCK_FLAG
-                } else {
-                    id
-                })
-            })
-            .collect()
-    }
-
-    /// `own_ids` of this pool's blocks, without the host flag.
-    fn raw_ids(&self, blocks: &Bound<'_, PyAny>) -> PyResult<Vec<BlockId>> {
-        Ok(self.own_ids(blocks)?.into_iter().map(|b| b & !HOST_BLOCK_FLAG).collect())
-    }
-
-    fn tag(&self, ids: &[BlockId]) -> Vec<BlockId> {
-        if self.host {
-            ids.iter().map(|b| b | HOST_BLOCK_FLAG).collect()
-        } else {
-            ids.to_vec()
-        }
+        self.owner.with_mut(py, |m| f(m.block_pool_mut()))
     }
 }
 
@@ -510,9 +423,7 @@ impl BlockPoolView {
 impl BlockPoolView {
     /// Views of the same pool are equal (Python hands out the pool itself).
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other
-            .cast::<Self>()
-            .is_ok_and(|o| o.get().host == self.host && o.get().owner.is(&self.owner))
+        other.cast::<Self>().is_ok_and(|o| o.get().owner.is(&self.owner))
     }
 
     #[getter]
@@ -548,18 +459,13 @@ impl BlockPoolView {
     #[getter]
     fn null_block(&self, py: Python<'_>) -> PyResult<Block> {
         let block_id = self.with(py, |p| p.null_block)?;
-        Ok(Block {
-            owner: self.owner.clone(),
-            block_id,
-            host: self.host,
-        })
+        Ok(block_view(&self.owner, block_id))
     }
 
     #[getter]
     fn blocks(&self) -> BlockList {
         BlockList {
             owner: self.owner.clone(),
-            host: self.host,
         }
     }
 
@@ -597,7 +503,6 @@ impl BlockPoolView {
     fn free_block_queue(&self) -> FreeBlockQueue {
         FreeBlockQueue {
             owner: self.owner.clone(),
-            host: self.host,
         }
     }
 
@@ -619,7 +524,7 @@ impl BlockPoolView {
     ) -> PyResult<Option<Bound<'py, PyList>>> {
         let hash = vllm_engine_core::hash::BlockHash::from_slice(block_hash);
         let blocks = self.with(py, |p| p.get_cached_block(&hash, &kv_cache_group_ids))?;
-        blocks.map(|b| block_list(py, &self.owner, &self.tag(&b))).transpose()
+        blocks.map(|b| block_list(py, &self.owner, &b)).transpose()
     }
 
     /// Get new blocks from the free block pool.
@@ -636,20 +541,19 @@ impl BlockPoolView {
                 "Cannot get {num_blocks} free blocks from the pool"
             )));
         };
-        block_list(py, &self.owner, &self.tag(&blocks))
+        block_list(py, &self.owner, &blocks)
     }
 
     fn is_block_writable(&self, py: Python<'_>, block: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let block = block_id_of(block)? & !HOST_BLOCK_FLAG;
+        let block = block_id_of(block)?;
         self.with(py, |p| p.is_block_writable(block))
     }
 
     fn touch(&self, py: Python<'_>, blocks: &Bound<'_, PyAny>) -> PyResult<()> {
-        let ids = self.raw_ids(blocks)?;
+        let ids = block_ids_of(blocks)?;
         self.with_mut(py, |p| p.touch(&ids))
     }
 
-    /// Free blocks; blocks of the other pool (HiSparse) go back to it.
     #[pyo3(signature = (ordered_blocks, evict_first=false))]
     fn free_blocks(
         &self,
@@ -657,12 +561,12 @@ impl BlockPoolView {
         ordered_blocks: &Bound<'_, PyAny>,
         evict_first: bool,
     ) -> PyResult<()> {
-        let ids = self.own_ids(ordered_blocks)?;
-        self.owner.with_mut(py, |m| m.free_blocks_from(ids, evict_first, self.host))
+        let ids = block_ids_of(ordered_blocks)?;
+        self.with_mut(py, |p| p.free_blocks(ids, evict_first))
     }
 
     fn evict_blocks(&self, py: Python<'_>, block_ids: &Bound<'_, PyAny>) -> PyResult<()> {
-        let ids = self.raw_ids(block_ids)?;
+        let ids = block_ids_of(block_ids)?;
         self.with_mut(py, |p| p.evict_blocks(ids))
     }
 
@@ -670,10 +574,9 @@ impl BlockPoolView {
         self.with_mut(py, BlockPool::reset_prefix_cache)
     }
 
-    /// Take the KV cache events. The HiSparse host pool publishes into the
-    /// device pool's queue, so both take the same events.
+    /// Take the KV cache events.
     fn take_events<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let events = self.owner.with_mut(py, |m| m.block_pool_mut().take_events())?;
+        let events = self.with_mut(py, BlockPool::take_events)?;
         events_to_py(py, events)
     }
 }
@@ -682,25 +585,19 @@ impl BlockPoolView {
 #[pyclass(frozen, module = "vllm._rust_core", name = "FreeKVCacheBlockQueue")]
 pub struct FreeBlockQueue {
     owner: Owner,
-    host: bool,
 }
 
 #[pymethods]
 impl FreeBlockQueue {
     #[getter]
     fn num_free_blocks(&self, py: Python<'_>) -> PyResult<usize> {
-        self.owner.with(py, |m| pool_of(m, self.host).get_num_free_blocks())
+        self.owner.with(py, |m| m.block_pool().get_num_free_blocks())
     }
 
     /// The free blocks, in eviction order.
     fn get_all_free_blocks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let ids = self.owner.with(py, |m| {
-            let ids = pool_of(m, self.host).free_block_queue.get_all_free_blocks();
-            if self.host {
-                ids.into_iter().map(|b| b | HOST_BLOCK_FLAG).collect()
-            } else {
-                ids
-            }
+            m.block_pool().free_block_queue.get_all_free_blocks()
         })?;
         block_list(py, &self.owner, &ids)
     }
@@ -715,13 +612,6 @@ pub struct SingleTypeManagerView {
 }
 
 impl SingleTypeManagerView {
-    pub(crate) fn new(owner: Owner, kv_cache_group_id: usize) -> Self {
-        Self {
-            owner,
-            kv_cache_group_id,
-        }
-    }
-
     fn with<R>(
         &self,
         py: Python<'_>,
@@ -757,39 +647,13 @@ impl SingleTypeManagerView {
     }
 
     #[getter]
-    fn block_pool(&self, py: Python<'_>) -> PyResult<BlockPoolView> {
-        let host = self.owner.with(py, |m| {
-            m.coordinator.host_group_id() == Some(self.kv_cache_group_id)
-        })?;
-        Ok(BlockPoolView {
-            owner: self.owner.clone(),
-            host,
-        })
+    fn block_pool(&self) -> BlockPoolView {
+        BlockPoolView::new(self.owner.clone())
     }
 
     #[getter]
     fn max_admission_blocks_per_request(&self, py: Python<'_>) -> PyResult<Option<usize>> {
         self.with(py, |m| m.max_admission_blocks_per_request)
-    }
-
-    /// `HiSparseHotManager.require_hot`.
-    fn require_hot(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        self.owner.with_mut(py, |m| {
-            m.coordinator.single_type_managers[self.kv_cache_group_id].require_hot(request_id);
-        })
-    }
-
-    /// `HiSparseHotManager.hot_required`: a snapshot.
-    #[getter]
-    fn hot_required<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PySet>> {
-        let ids: Vec<String> =
-            self.with(py, |m| m.hot_required_ids().map(str::to_owned).collect())?;
-        PySet::new(py, ids)
-    }
-
-    #[getter]
-    fn blocks_per_request(&self, py: Python<'_>) -> PyResult<usize> {
-        self.with(py, |m| m.blocks_per_request())
     }
 
     #[pyo3(signature = (
@@ -814,12 +678,8 @@ impl SingleTypeManagerView {
         apply_admission_cap: bool,
         prefill_end: usize,
     ) -> PyResult<i64> {
-        let new_computed_blocks: Vec<BlockId> = block_ids_of(new_computed_blocks)?
-            .into_iter()
-            .map(|b| b & !HOST_BLOCK_FLAG)
-            .collect();
+        let new_computed_blocks = block_ids_of(new_computed_blocks)?;
         self.owner.with_mut(py, |m| {
-            m.coordinator.sync_hisparse();
             m.coordinator.group_get_num_blocks_to_allocate(
                 self.kv_cache_group_id,
                 request_id,
@@ -842,7 +702,6 @@ impl SingleTypeManagerView {
         num_tokens_main_model: usize,
     ) -> PyResult<Bound<'py, PyList>> {
         let blocks = self.owner.with_mut(py, |m| {
-            m.coordinator.sync_hisparse();
             m.coordinator.group_allocate_new_blocks(
                 self.kv_cache_group_id,
                 request_id,
@@ -850,35 +709,7 @@ impl SingleTypeManagerView {
                 num_tokens_main_model,
             )
         })?;
-        group_block_list(py, &self.owner, self.kv_cache_group_id, &blocks)
-    }
-
-    /// `HiSparseHotManager.has_hot`.
-    fn has_hot(&self, py: Python<'_>, request_id: &str) -> PyResult<bool> {
-        self.with(py, |m| m.has_hot(request_id))
-    }
-
-    /// `HiSparseResidentManager.get_resident_page`.
-    fn get_resident_page(
-        &self,
-        py: Python<'_>,
-        request_id: &str,
-        block_idx: usize,
-    ) -> PyResult<Option<Block>> {
-        let block = self.with(py, |m| m.get_resident_page(request_id, block_idx))?;
-        Ok(block.map(|id| block_view(&self.owner, id)))
-    }
-
-    /// `HiSparseResidentManager.get_residency_row`.
-    #[pyo3(signature = (request_id, start=0))]
-    fn get_residency_row<'py>(
-        &self,
-        py: Python<'py>,
-        request_id: &str,
-        start: usize,
-    ) -> PyResult<Bound<'py, PyList>> {
-        let ids = self.with(py, |m| m.get_residency_row(request_id, start))?;
-        block_list(py, &self.owner, &ids)
+        block_list(py, &self.owner, &blocks)
     }
 
     /// `req_to_blocks`: a live read-only view of the block tables.
@@ -911,7 +742,7 @@ impl SingleTypeManagerView {
         let ids = self.with(py, |m| {
             m.req_blocks(request_id).unwrap_or_default().to_vec()
         })?;
-        group_block_list(py, &self.owner, self.kv_cache_group_id, &ids)
+        block_list(py, &self.owner, &ids)
     }
 }
 
@@ -934,11 +765,7 @@ fn hit_blocks<'py>(
 ) -> PyResult<Bound<'py, PyTuple>> {
     PyTuple::new(
         py,
-        blocks
-            .iter()
-            .enumerate()
-            .map(|(group_id, g)| group_block_list(py, owner, group_id, g))
-            .collect::<PyResult<Vec<_>>>()?,
+        blocks.iter().map(|g| block_list(py, owner, g)).collect::<PyResult<Vec<_>>>()?,
     )
 }
 
@@ -1118,8 +945,7 @@ impl ReqToBlocks {
         request_id: &str,
     ) -> PyResult<Option<Bound<'py, PyList>>> {
         let ids = self.with(py, |m| m.req_blocks(request_id).map(<[BlockId]>::to_vec))?;
-        ids.map(|ids| group_block_list(py, &self.owner, self.kv_cache_group_id, &ids))
-            .transpose()
+        ids.map(|ids| block_list(py, &self.owner, &ids)).transpose()
     }
 }
 
@@ -1249,15 +1075,5 @@ impl SchedulerKvManagerView {
             m.get_block_ids_for_computed_tokens(request_id, num_computed_tokens)
         })?;
         group_tuple(py, tables)
-    }
-
-    /// `get_hisparse_coordinator(kv_cache_manager, import_step_tokens=...)`.
-    #[pyo3(signature = (import_step_tokens=None))]
-    fn hisparse_coordinator(
-        &self,
-        py: Python<'_>,
-        import_step_tokens: Option<usize>,
-    ) -> PyResult<super::hisparse::HiSparseCoordinatorView> {
-        super::hisparse::HiSparseCoordinatorView::bind(py, self.owner.clone(), import_step_tokens)
     }
 }

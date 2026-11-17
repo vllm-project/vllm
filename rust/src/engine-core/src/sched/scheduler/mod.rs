@@ -279,7 +279,6 @@ pub struct Scheduler {
     kv_transfer: Option<KvTransferConfig>,
     recompute_kv_load_failures: bool,
     defer_block_free: bool,
-    defer_async_loads: bool,
     /// Whether a preempted request's in-flight output must be dropped; see
     /// `KVConnectorBase_V1.requires_kv_delivery`.
     requires_kv_delivery: bool,
@@ -399,10 +398,6 @@ pub struct Scheduler {
     /// FIFO of (fence_seq, blocks): blocks become safe to free once
     /// processed_step_seq >= fence_seq.
     deferred_frees: VecDeque<(u64, Vec<BlockId>)>,
-    /// Request id -> (fence_seq, num_external_tokens, connector prefix cache
-    /// queries, hits): async KV loads started once processed_step_seq >=
-    /// fence_seq.
-    deferred_loads: IndexMap<String, (u64, usize, usize, usize)>,
 
     pause_state: PauseState,
 
@@ -471,11 +466,6 @@ impl Scheduler {
             }
             requires_kv_delivery = connector.requires_kv_delivery();
         }
-        // HiSparse keeps reading a released page until the pool reuses it,
-        // so a load into a reused page must also wait for in-flight steps.
-        let defer_async_loads =
-            defer_block_free && kv_cache_config.hisparse_host_num_blocks.is_some();
-
         let prefix_replay_group_ids: Vec<usize> = kv_cache_config
             .kv_cache_groups
             .iter()
@@ -612,7 +602,6 @@ impl Scheduler {
             kv_transfer: config.kv_transfer,
             recompute_kv_load_failures,
             defer_block_free,
-            defer_async_loads,
             requires_kv_delivery,
             max_num_encoder_input_tokens: config.max_num_encoder_input_tokens,
             num_spec_tokens: config.num_spec_tokens,
@@ -674,7 +663,6 @@ impl Scheduler {
             sched_step_seq: 0,
             processed_step_seq: 0,
             deferred_frees: VecDeque::new(),
-            deferred_loads: IndexMap::new(),
             pause_state: PauseState::Unpaused,
             inflight_prefills: FxHashSet::default(),
             parked_reservations: FxHashMap::default(),
@@ -903,9 +891,7 @@ impl Scheduler {
             let mut delay_free_blocks = false;
             let request_id = self.requests[h].request_id.clone();
             if self.requests[h].status == RequestStatus::WaitingForRemoteKvs {
-                // A deferred load never started, so it will not report done.
-                delay_free_blocks = self.deferred_loads.shift_remove(&request_id).is_none()
-                    && !self.finished_recving_kv_req_ids.contains(&request_id);
+                delay_free_blocks = !self.finished_recving_kv_req_ids.contains(&request_id);
                 self.finished_recving_kv_req_ids.remove(&request_id);
                 self.failed_recving_kv_req_ids.remove(&request_id);
             }
@@ -988,13 +974,12 @@ impl Scheduler {
     /// Free the request's KV blocks, deferring the return to the block
     /// pool when an in-flight GPU step may still write them.
     fn free_request_blocks(&mut self, h: usize) {
-        let request = &self.requests[h];
-        let (request_id, finished) = (&request.request_id, request.is_finished());
+        let request_id = &self.requests[h].request_id;
         if self.request_blocks_can_be_freed(h) {
-            self.kv_cache_manager.free(request_id, finished);
+            self.kv_cache_manager.free(request_id);
             return;
         }
-        let blocks = self.kv_cache_manager.pop_blocks_for_free(request_id, finished);
+        let blocks = self.kv_cache_manager.pop_blocks_for_free(request_id);
         if !blocks.is_empty() {
             self.deferred_frees.push_back((self.sched_step_seq, blocks));
         }

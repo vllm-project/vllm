@@ -15,7 +15,7 @@ outputs:
   checks and stats;
 - the KV cache manager: block pool, free queue, every single-type manager
   (full attention, sliding window, chunked local attention, Mamba, cross
-  attention, HiSparse) and the coordinators;
+  attention) and the coordinators;
 - prefix-caching block hashing (`sha256`, `sha256_cbor`, `xxhash`,
   `xxhash_cbor`);
 - the scheduler halves of the NIXL and Mooncake store KV connectors, and the
@@ -148,7 +148,8 @@ used instead and the reason is logged once.
       outside `vllm.v1.core.single_type_kv_cache_manager`);
     - KV cache layouts the port does not model, for example
       `EncoderOnlyAttentionSpec` or spec subclasses that change prefix-caching
-      properties.
+      properties;
+    - HiSparse (HiSparse specs and group roles, host-resident groups).
 
   With `--scheduler-cls ...RustScheduler`, these raise `NotImplementedError`
   at startup instead. Requests with prompt embeddings are rejected when KV

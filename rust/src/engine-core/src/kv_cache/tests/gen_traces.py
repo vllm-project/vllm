@@ -25,21 +25,17 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "traces")
 
@@ -188,20 +184,19 @@ def fmt_hash(h):
     return str(h) if isinstance(h, int) else h[:8].hex()
 
 
-def fmt_events(events, medium=False):
+def fmt_events(events):
     out = []
     for e in events:
-        m = f" m={e.medium}" if medium else ""
         if isinstance(e, BlockStored):
             out.append(
                 f"S g={e.group_idx} h={','.join(fmt_hash(h) for h in e.block_hashes)}"
                 f" p={fmt_hash(e.parent_block_hash)} t={len(e.token_ids)}"
                 f" bs={e.block_size} k={e.kv_cache_spec_kind}"
                 f" w={e.kv_cache_spec_sliding_window}"
-                f" la={e.lookahead_token_ids}{m}"
+                f" la={e.lookahead_token_ids}"
             )
         elif isinstance(e, BlockRemoved):
-            out.append(f"R g={e.group_idx} h={fmt_hash(e.block_hashes[0])}{m}")
+            out.append(f"R g={e.group_idx} h={fmt_hash(e.block_hashes[0])}")
         elif isinstance(e, AllBlocksCleared):
             out.append("C")
     return ";".join(out)
@@ -443,408 +438,10 @@ def gen(name, groups, opts, seed, num_steps=80):
     return lines
 
 
-HISPARSE_BS = 16
-
-# name -> options of `gen_hisparse`.
-HISPARSE_CONFIGS = {
-    "hisparse": dict(num_blocks=48, host_blocks=80, enable_caching=True, events=True),
-    "hisparse_nocache": dict(num_blocks=40, host_blocks=60, enable_caching=False),
-    "hisparse_hash8": dict(
-        num_blocks=48,
-        host_blocks=64,
-        enable_caching=True,
-        events=True,
-        hash_block_size=8,
-    ),
-    "hisparse_2res_mtp": dict(
-        num_blocks=64,
-        host_blocks=80,
-        enable_caching=True,
-        num_resident_groups=2,
-        num_prefill_lookahead=3,
-        import_step_tokens=3,
-        max_in_flight_tokens=64,
-    ),
-}
-
-
-def hisparse_groups(num_resident_groups):
-    """The layout of `make_hisparse_kv_cache_config` in
-    `tests/v1/core/test_prefix_caching.py`."""
-    source = FullAttentionSpec(
-        block_size=HISPARSE_BS, num_kv_heads=1, head_size=1, dtype=torch.float32
-    )
-    groups = [
-        (
-            KVCacheGroupSpec(
-                ["source"],
-                source,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-                host_resident=True,
-            ),
-            f"source {HISPARSE_BS}",
-        ),
-        (
-            KVCacheGroupSpec(
-                ["indexer"], source, role=KVCacheGroupRole.HISPARSE_INDEXER
-            ),
-            f"indexer {HISPARSE_BS}",
-        ),
-    ]
-    for i in range(num_resident_groups):
-        groups.append(
-            (
-                KVCacheGroupSpec(
-                    [f"resident_{i}"],
-                    HiSparseResidentSpec(
-                        block_size=HISPARSE_BS, page_size=HISPARSE_BS * 4
-                    ),
-                ),
-                f"resident {HISPARSE_BS}",
-            )
-        )
-        groups.append(
-            (
-                KVCacheGroupSpec(
-                    [f"hot_{i}"],
-                    HiSparseHotSpec(
-                        block_size=HISPARSE_BS,
-                        page_size=HISPARSE_BS * 4,
-                        blocks_per_request=2,
-                    ),
-                    enable_kv_transfer=False,
-                ),
-                f"hot {HISPARSE_BS} 2",
-            )
-        )
-    return groups
-
-
-def gen_hisparse(name, opts, seed, num_steps=70):
-    """A scheduler-like workload driving a HiSparse KV cache manager and its
-    coordinator as the HiSparse connector does, with a simulated worker that
-    completes host transfers and copies at random."""
-    rng = random.Random(seed)
-    num_blocks = opts["num_blocks"]
-    host_blocks = opts["host_blocks"]
-    enable_caching = opts["enable_caching"]
-    events = opts.get("events", False)
-    num_prefill_lookahead = opts.get("num_prefill_lookahead", 0)
-    import_step_tokens = opts.get("import_step_tokens", 0)
-    max_in_flight_tokens = opts.get("max_in_flight_tokens")
-    groups = hisparse_groups(opts.get("num_resident_groups", 1))
-    hash_bs = opts.get("hash_block_size", HISPARSE_BS)
-    max_model_len = 512
-    config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[g for g, _ in groups],
-        hisparse_host_num_blocks=host_blocks,
-    )
-    manager = KVCacheManager(
-        config,
-        max_model_len=max_model_len,
-        max_in_flight_tokens=max_in_flight_tokens,
-        scheduler_block_size=HISPARSE_BS,
-        hash_block_size=hash_bs,
-        enable_caching=enable_caching,
-        num_prefill_lookahead=num_prefill_lookahead,
-        enable_kv_cache_events=events,
-        log_stats=True,
-    )
-    coordinator = get_hisparse_coordinator(
-        manager, import_step_tokens=import_step_tokens
-    )
-    host_pool = coordinator.host_manager.block_pool
-    lines = [
-        (
-            f"config num_blocks={num_blocks} hash_block_size={hash_bs} "
-            f"scheduler_block_size={HISPARSE_BS} "
-            f"enable_caching={int(enable_caching)} "
-            f"use_eagle=0 num_hash_lookahead_tokens=0 "
-            f"max_model_len={max_model_len} events={int(events)} retention=none "
-            f"zeroing={int(config.needs_kv_cache_zeroing)} "
-            f"int_hashes={int(envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES)} dcp=1 "
-            f"shared_ckpt=0 hisparse_host_blocks={host_blocks} "
-            f"import_step_tokens={import_step_tokens} "
-            f"max_in_flight_tokens={max_in_flight_tokens or 'none'} "
-            f"num_prefill_lookahead={num_prefill_lookahead}"
-        )
-    ]
-    lines += [f"group {desc}" for _, desc in groups]
-
-    prefixes = [
-        [rng.randrange(1000) for _ in range(rng.randrange(8, 160))] for _ in range(3)
-    ]
-    reqs: dict[str, Request] = {}
-    synced: dict[str, tuple] = {}
-    waiting: list[str] = []
-    running: list[str] = []
-    # rid -> (local computed tokens, external tokens) of an async load.
-    loading: dict[str, tuple[int, int]] = {}
-    in_flight: list[int] = []
-    enqueued: set[int] = set()
-    copies_in_flight: list[int] = []
-    deferred_frees: list[list] = []
-    counter = 0
-
-    def sync(rid):
-        req = reqs[rid]
-        n_tok, n_hash, _, _ = synced.get(rid, (0, 0, -1, -1))
-        state = (
-            req.num_tokens,
-            len(req.block_hashes),
-            req.num_computed_tokens,
-            req.shared_prefix_boundary,
-        )
-        if synced.get(rid) == state:
-            return
-        toks = req.all_token_ids[n_tok:]
-        hashes = req.block_hashes[n_hash:]
-        lines.append(
-            f"sync {rid} {req.num_prompt_tokens} {req.num_computed_tokens} "
-            f"{req.shared_prefix_boundary} "
-            f"{','.join(map(str, toks)) or '-'} "
-            f"{','.join((h[:8] + h[-8:]).hex() for h in hashes) or '-'}"
-        )
-        synced[rid] = state
-
-    def emit(op, result):
-        lines.append(op)
-        lines.append(f"= {result}")
-
-    def fmt_block(b):
-        return f"h{b.block_id}" if b.pool() is host_pool else str(b.block_id)
-
-    def free(rid, finished):
-        req = reqs[rid]
-        if finished:
-            req.status = RequestStatus.FINISHED_STOPPED
-        if rng.random() < 0.3:
-            blocks = manager.pop_blocks_for_free(req)
-            emit(f"pop {rid} {int(finished)}", ",".join(map(fmt_block, blocks)))
-            deferred_frees.append(list(reversed(blocks)))
-        else:
-            lines.append(f"free {rid} {int(finished)}")
-            manager.free(req)
-
-    def alloc(rid, num_new, n_computed=0, computed=None, ext=0, cap=False):
-        req = reqs[rid]
-        sync(rid)
-        delay = ext > 0
-        out = manager.allocate_slots(
-            req,
-            num_new,
-            num_new_computed_tokens=n_computed,
-            new_computed_blocks=computed,
-            num_external_computed_tokens=ext,
-            delay_cache_blocks=delay,
-            full_sequence_must_fit=cap,
-        )
-        emit(
-            f"alloc {rid} {num_new} {n_computed} 0 {int(computed is not None)} "
-            f"{ext} {int(cap)} {int(delay)}",
-            fmt_groups(None if out is None else out.blocks),
-        )
-        return out
-
-    def chunk_for(remaining):
-        if rng.random() < 0.5:
-            return remaining
-        return min(remaining, HISPARSE_BS * rng.randrange(1, 4))
-
-    for _step in range(num_steps):
-        manager.new_step_starts()
-        lines.append("step")
-        for blocks in deferred_frees:
-            lines.append(f"freeblocks {','.join(map(fmt_block, blocks)) or '-'}")
-            manager.block_pool.free_blocks(blocks)
-        deferred_frees.clear()
-        for _ in range(rng.randrange(0, 3)):
-            counter += 1
-            rid = f"r{counter}"
-            if reqs and rng.random() < 0.3:
-                tokens = list(reqs[rng.choice(list(reqs))].prompt_token_ids)
-            else:
-                prefix = rng.choice(prefixes)
-                cut = rng.randrange(0, len(prefix) + 1)
-                tokens = prefix[:cut] + [
-                    rng.randrange(1000) for _ in range(rng.randrange(1, 100))
-                ]
-            sp = SamplingParams(max_tokens=48)
-            sp.update_from_generation_config({}, eos_token_id=100000)
-            reqs[rid] = Request(
-                request_id=rid,
-                prompt_token_ids=tokens,
-                sampling_params=sp,
-                pooling_params=None,
-                block_hasher=get_request_block_hasher(hash_bs, sha256, 0),
-            )
-            waiting.append(rid)
-        scheduled: list[tuple[str, int, int]] = []
-        # Finished async loads.
-        for rid in list(loading):
-            if rng.random() < 0.5:
-                continue
-            n, ext = loading.pop(rid)
-            failed = rng.random() < 0.15
-            lines.append(f"finish_import {rid} {int(failed)}")
-            coordinator.finish_host_import(rid, failed=failed)
-            req = reqs[rid]
-            if failed:
-                free(rid, False)
-                req.num_computed_tokens = 0
-                waiting.append(rid)
-                continue
-            req.num_computed_tokens = n + ext
-            sync(rid)
-            lines.append(f"cache {rid} {req.num_computed_tokens}")
-            manager.cache_blocks(req, req.num_computed_tokens)
-            running.append(rid)
-        for rid in list(running):
-            req = reqs[rid]
-            if req.num_computed_tokens >= req.num_tokens:
-                if rng.random() < 0.1 or req.num_tokens >= max_model_len - 8:
-                    running.remove(rid)
-                    free(rid, True)
-                    continue
-                req.append_output_token_ids(rng.randrange(1000))
-            remaining = req.num_tokens - req.num_computed_tokens
-            num_new = chunk_for(remaining)
-            out = alloc(rid, num_new)
-            if out is None:
-                running.remove(rid)
-                free(rid, False)
-                req.num_computed_tokens = 0
-                waiting.append(rid)
-            else:
-                scheduled.append((rid, req.num_computed_tokens, num_new))
-                req.num_computed_tokens += num_new
-        for rid in list(waiting):
-            req = reqs[rid]
-            sync(rid)
-            computed, n, boundary = manager.get_computed_blocks(req)
-            emit(f"get {rid}", f"{n} {boundary} {fmt_groups(computed.blocks)}")
-            req.shared_prefix_boundary = boundary
-            remaining = req.num_tokens - n
-            ext = 0
-            if remaining > HISPARSE_BS and rng.random() < 0.25:
-                ext = rng.randrange(1, remaining)
-            cap = rng.random() < 0.5
-            if ext:
-                out = alloc(rid, 0, n, computed, ext=ext, cap=cap)
-                if out is None:
-                    break
-                waiting.remove(rid)
-                loading[rid] = (n, ext)
-                continue
-            num_new = chunk_for(remaining)
-            out = alloc(rid, num_new, n, computed, cap=cap)
-            if out is None:
-                break
-            waiting.remove(rid)
-            running.append(rid)
-            scheduled.append((rid, n, num_new))
-            req.num_computed_tokens = n + num_new
-        # HiSparseConnectorScheduler.build_connector_meta.
-        advance = [
-            (rid, min(start + count, reqs[rid].num_tokens))
-            for rid, start, count in scheduled
-        ]
-        lines.append("advance " + (",".join(f"{rid}:{n}" for rid, n in advance) or "-"))
-        coordinator.advance_scheduled(advance)
-        command = coordinator.build_offload_command()
-        emit(
-            "offload",
-            ";".join(
-                f"{t.transfer_id}:{t.host_block_id}:"
-                f"{'/'.join(map(str, t.resident_block_ids))}:{int(t.restore)}"
-                for t in command.page_transfers
-            ),
-        )
-        in_flight.extend(t.transfer_id for t in command.page_transfers)
-        host_copies = coordinator.take_host_block_copies()
-        emit(
-            "hcopies",
-            ",".join(f"{c.src_block_id}>{c.dst_block_id}" for c in host_copies),
-        )
-        for rid, start, count in scheduled:
-            mirrors = coordinator.build_row_mirrors(((rid, start, count),))
-            emit(
-                f"mirrors {rid} {start} {count}",
-                ";".join(
-                    f"{'/'.join(map(str, m.source_starts))}:"
-                    f"{m.destination_start}:{m.num_rows}"
-                    for m in mirrors
-                ),
-            )
-        sched = ",".join(f"{rid}:{s}:{c}" for rid, s, c in scheduled) or "-"
-        emit(f"allres {sched}", str(coordinator.all_context_pages_resident(scheduled)))
-        updates = coordinator.take_residency_updates([rid for rid, _, _ in scheduled])
-        emit(
-            f"updates {','.join(rid for rid, _, _ in scheduled) or '-'}",
-            ";".join(
-                f"{rid}:{','.join(map(str, u.pages))}:"
-                f"{'/'.join(','.join(map(str, g)) for g in u.block_ids)}"
-                for rid, u in updates.items()
-            ),
-        )
-        # HiSparseConnectorScheduler.update_connector_output, one transfer at
-        # a time: Python publishes the requests completed by one call in set
-        # order, which depends on PYTHONHASHSEED.
-        if copies_in_flight:
-            lines.append(f"release {','.join(map(str, copies_in_flight))}")
-            coordinator.release_completed_host_copies(copies_in_flight)
-        copies_in_flight = [c.dst_block_id for c in host_copies]
-        for spill_id in list(in_flight):
-            r = rng.random()
-            if r < 0.4:
-                continue
-            enq = {spill_id: 1} if spill_id not in enqueued else {}
-            comp = {spill_id: 1} if r < 0.85 else {}
-            lines.append(f"spill {spill_id} {len(enq)} {len(comp)}")
-            coordinator.update_spills(enq, comp)
-            enqueued.add(spill_id)
-            if comp:
-                in_flight.remove(spill_id)
-        emit(
-            "pending",
-            f"{int(coordinator.has_pending_work())} "
-            f"{int(coordinator.has_pending_reclamation())}",
-        )
-        for rid in running[:2]:
-            emit(f"blocks {rid}", fmt_groups(manager.get_blocks(rid).blocks))
-            emit(
-                f"row {rid}",
-                "|".join(
-                    ",".join(str(b.block_id) for b in m.get_residency_row(rid))
-                    for m in coordinator.resident_managers
-                ),
-            )
-            sync(rid)
-            emit(f"estimate {rid}", str(manager.estimate_cached_tokens(reqs[rid])))
-        emit("zero", ",".join(map(str, manager.take_new_block_ids())))
-        emit("state", fmt_pool_state(manager.block_pool, manager.usage))
-        emit("hstate", fmt_pool_state(host_pool, host_pool.get_usage()))
-        if events:
-            emit("events_m", fmt_events(manager.take_events(), medium=True))
-        if rng.random() < 0.03:
-            for rid in running:
-                free(rid, False)
-                reqs[rid].num_computed_tokens = 0
-                waiting.append(rid)
-            running.clear()
-            emit("reset", str(manager.reset_prefix_cache()))
-    stats = manager.make_prefix_cache_stats()
-    emit("stats", f"{stats.requests} {stats.queries} {stats.hits}")
-    return lines
-
-
 # The checked-in traces (config, seed, steps), kept small.
 CHECKED_IN = (
     ("full_swa_mamba", 0, 12),
     ("full_mamba_fine_eagle_shared", 0, 12),
-    ("hisparse", 0, 12),
 )
 
 
@@ -859,9 +456,6 @@ def main():
     jobs = {
         name: functools.partial(gen, name, groups, opts)
         for name, (groups, opts) in CONFIGS.items()
-    } | {
-        name: functools.partial(gen_hisparse, name, opts)
-        for name, opts in HISPARSE_CONFIGS.items()
     }
     parser = argparse.ArgumentParser()
     parser.add_argument("--seeds", help="a count or `lo-hi`: every config per seed")

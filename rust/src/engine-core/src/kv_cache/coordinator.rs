@@ -9,12 +9,11 @@
 
 use std::collections::BTreeSet;
 
-use super::block::{BlockId, HOST_BLOCK_FLAG};
+use super::block::BlockId;
 use super::block_hash_list::{eagle_proof_margin, partial_hash_hits_enabled};
 use super::block_pool::{BlockPool, CachedBlockLookup};
 use super::cdiv;
 use super::error::KvCacheError;
-use super::hisparse::{HiSparseCoordinator, HiSparseCtx};
 use super::metrics::KvCacheMetricsCollector;
 use super::request::KvRequest;
 use super::single_type::{ManagerType, SingleTypeKvCacheManager};
@@ -150,27 +149,6 @@ pub struct KvCacheCoordinator {
     /// Dense reference group for per-group lookups (None when the model
     /// has no full-attention layers).
     pub full_attention_group_id: Option<usize>,
-    /// The HiSparse coordinator, with a HiSparse host source group.
-    pub hisparse: Option<HiSparseCoordinator>,
-    /// The private pool of the HiSparse host source group
-    /// (`HiSparseSourceManager.bind_host_pool`); the other groups share
-    /// `block_pool`.
-    pub host_pool: Option<BlockPool>,
-}
-
-/// Run `$body` with `$pool` bound to the lookup of group `$group_id`: the
-/// HiSparse host pool for the host group when `$host` is given, else
-/// `$lookup`.
-macro_rules! with_group_lookup {
-    ($self:ident, $group_id:expr, $lookup:expr, $host:expr, |$pool:ident| $body:expr) => {
-        match $host.filter(|_| $self.host_group_id() == Some($group_id)) {
-            Some($pool) => $body,
-            None => {
-                let $pool = $lookup;
-                $body
-            }
-        }
-    };
 }
 
 impl KvCacheCoordinator {
@@ -307,7 +285,6 @@ impl KvCacheCoordinator {
         for (i, group) in kv_cache_config.kv_cache_groups.iter().enumerate() {
             single_type_managers.push(SingleTypeKvCacheManager::new(
                 group.kv_cache_spec.clone(),
-                group.role,
                 max_in_flight_tokens,
                 max_model_len,
                 enable_caching,
@@ -327,16 +304,6 @@ impl KvCacheCoordinator {
             }
         }
         let group_block_sizes = single_type_managers.iter().map(|m| m.block_size).collect();
-        let (hisparse, host_pool) = match HiSparseCoordinator::new(
-            &kv_cache_config,
-            &single_type_managers,
-            &block_pool,
-            max_model_len,
-            num_reprefillable_tokens,
-        )? {
-            Some((hisparse, host_pool)) => (Some(hisparse), Some(host_pool)),
-            None => (None, None),
-        };
 
         let retention_interval = kv_cache_config.prefix_cache_retention_interval;
         validate_prefix_cache_retention_interval(
@@ -360,66 +327,7 @@ impl KvCacheCoordinator {
             hash_block_size,
             attention_groups: Vec::new(),
             full_attention_group_id: None,
-            hisparse,
-            host_pool,
         })
-    }
-
-    /// The HiSparse host source group, if any.
-    pub fn host_group_id(&self) -> Option<usize> {
-        self.hisparse.as_ref().map(|h| h.host_group_id)
-    }
-
-    /// The block pool of a group: the HiSparse host pool for the host
-    /// source group, else the shared device pool (`manager.block_pool`).
-    pub fn group_pool(&self, group_id: usize) -> &BlockPool {
-        match &self.host_pool {
-            Some(host) if self.host_group_id() == Some(group_id) => host,
-            _ => &self.block_pool,
-        }
-    }
-
-    /// The HiSparse coordinator and the state it works on.
-    pub(crate) fn hisparse_parts(&mut self) -> Option<(&mut HiSparseCoordinator, HiSparseCtx<'_>)> {
-        let hisparse = self.hisparse.as_mut()?;
-        Some((
-            hisparse,
-            HiSparseCtx {
-                managers: &mut self.single_type_managers,
-                device: &mut self.block_pool,
-                host: self.host_pool.as_mut().expect("HiSparse has a host pool"),
-            },
-        ))
-    }
-
-    /// Handle the unpinned blocks the device pool reused since the last call
-    /// (`HiSparseCoordinator._on_block_reused`, which Python runs from
-    /// `get_new_blocks`).
-    pub fn sync_hisparse(&mut self) {
-        if let Some((hisparse, mut cx)) = self.hisparse_parts() {
-            hisparse.process_reused_blocks(&mut cx);
-        }
-    }
-
-    /// The managers, the device pool and the pool of group `group_id`, for a
-    /// manager call that touches blocks.
-    fn manager_and_pool(
-        &mut self,
-        group_id: usize,
-    ) -> (&mut SingleTypeKvCacheManager, &mut BlockPool) {
-        let manager = &mut self.single_type_managers[group_id];
-        match &mut self.host_pool {
-            Some(host) if manager.manager_type == ManagerType::HiSparseSource => (manager, host),
-            _ => (manager, &mut self.block_pool),
-        }
-    }
-
-    /// After an operation on the HiSparse host pool: its events go to the
-    /// device pool's queue (`SharedEventQueueBlockPool`).
-    pub(crate) fn forward_host_events(&mut self) {
-        if let Some(host) = &mut self.host_pool {
-            host.forward_events_to(&mut self.block_pool);
-        }
     }
 
     fn init_unitary(&mut self, enable_caching: bool, hash_block_size: usize) {
@@ -617,7 +525,6 @@ impl KvCacheCoordinator {
         } else {
             prefill_end
         };
-        self.sync_hisparse();
         for i in 0..self.single_type_managers.len() {
             num_blocks_to_allocate +=
                 if self.single_type_managers[i].manager_type == ManagerType::CrossAttention {
@@ -664,46 +571,17 @@ impl KvCacheCoordinator {
         apply_admission_cap: bool,
         prefill_end: usize,
     ) -> i64 {
-        let manager = &self.single_type_managers[group_id];
-        match manager.manager_type {
-            ManagerType::HiSparseSource => {
-                let (hisparse, mut cx) = self.hisparse_parts().expect("HiSparse group");
-                hisparse.source_get_num_blocks_to_allocate(
-                    &mut cx,
-                    request_id,
-                    num_tokens,
-                    new_computed_blocks,
-                    total_computed_tokens,
-                    num_local_computed_tokens,
-                    apply_admission_cap,
-                )
-            }
-            ManagerType::HiSparseHot => manager.hot_get_num_blocks_to_allocate(
-                request_id,
-                new_computed_blocks,
-                total_computed_tokens,
-                num_local_computed_tokens,
-            ),
-            ManagerType::HiSparseResident => manager.resident_get_num_blocks_to_allocate(
-                request_id,
-                num_tokens,
-                new_computed_blocks,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                apply_admission_cap,
-            ),
-            _ => self.single_type_managers[group_id].get_num_blocks_to_allocate(
-                &self.block_pool,
-                request_id,
-                num_tokens,
-                new_computed_blocks,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap,
-                prefill_end,
-            ),
-        }
+        self.single_type_managers[group_id].get_num_blocks_to_allocate(
+            &self.block_pool,
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap,
+            prefill_end,
+        )
     }
 
     /// Add the new computed blocks to the request. Optionally allocate new
@@ -736,75 +614,24 @@ impl KvCacheCoordinator {
         // cache-hit blocks, then allocate external blocks for every group. This
         // ensures an earlier group's external `get_new_blocks` cannot evict a
         // later group's not-yet-touched cache-hit blocks.
-        self.sync_hisparse();
-        let has_resident_managers =
-            self.hisparse.as_ref().is_some_and(|h| !h.resident_group_ids.is_empty());
-        for i in 0..self.single_type_managers.len() {
-            let new_computed_blocks = new_computed_blocks.get(i).map_or(&[][..], Vec::as_slice);
-            match self.single_type_managers[i].manager_type {
-                ManagerType::HiSparseHot => self.single_type_managers[i]
-                    .hot_add_local_computed_blocks(
-                        request_id,
-                        new_computed_blocks,
-                        num_local_computed_tokens,
-                        has_resident_managers,
-                    ),
-                ManagerType::HiSparseResident => {
-                    let (hisparse, mut cx) = self.hisparse_parts().expect("HiSparse group");
-                    hisparse.resident_add_local_computed_blocks(
-                        &mut cx,
-                        i,
-                        request_id,
-                        new_computed_blocks,
-                        num_local_computed_tokens,
-                    );
-                }
-                _ => {
-                    let (manager, pool) = self.manager_and_pool(i);
-                    manager.add_local_computed_blocks(
-                        pool,
-                        request_id,
-                        new_computed_blocks,
-                        num_local_computed_tokens,
-                        num_external_computed_tokens,
-                    );
-                }
-            }
+        for (i, manager) in self.single_type_managers.iter_mut().enumerate() {
+            manager.add_local_computed_blocks(
+                &mut self.block_pool,
+                request_id,
+                new_computed_blocks.get(i).map_or(&[][..], Vec::as_slice),
+                num_local_computed_tokens,
+                num_external_computed_tokens,
+            );
         }
         if num_external_computed_tokens > 0 {
-            for i in 0..self.single_type_managers.len() {
-                let record_for_zeroing = !skip_zeroing_group_ids.contains(&i);
-                match self.single_type_managers[i].manager_type {
-                    ManagerType::HiSparseSource => {
-                        let (hisparse, mut cx) = self.hisparse_parts().expect("HiSparse group");
-                        hisparse.source_allocate_external_computed_blocks(
-                            &mut cx,
-                            request_id,
-                            num_local_computed_tokens,
-                            num_external_computed_tokens,
-                            record_for_zeroing,
-                        );
-                    }
-                    ManagerType::HiSparseHot => {
-                        self.single_type_managers[i].require_hot(request_id);
-                    }
-                    ManagerType::HiSparseResident => {
-                        self.single_type_managers[i].resident_allocate_external_computed_blocks(
-                            &mut self.block_pool,
-                            request_id,
-                            num_local_computed_tokens,
-                            num_external_computed_tokens,
-                        );
-                    }
-                    _ => self.single_type_managers[i].allocate_external_computed_blocks(
-                        &mut self.block_pool,
-                        request_id,
-                        num_local_computed_tokens,
-                        num_external_computed_tokens,
-                        record_for_zeroing,
-                    ),
-                }
-                self.sync_hisparse();
+            for (i, manager) in self.single_type_managers.iter_mut().enumerate() {
+                manager.allocate_external_computed_blocks(
+                    &mut self.block_pool,
+                    request_id,
+                    num_local_computed_tokens,
+                    num_external_computed_tokens,
+                    !skip_zeroing_group_ids.contains(&i),
+                );
             }
         }
     }
@@ -818,7 +645,6 @@ impl KvCacheCoordinator {
         num_tokens_main_model: usize,
         num_encoder_tokens: usize,
     ) -> Vec<Vec<BlockId>> {
-        self.sync_hisparse();
         let mut new_blocks = Vec::with_capacity(self.single_type_managers.len());
         for i in 0..self.single_type_managers.len() {
             let num_tokens =
@@ -845,27 +671,12 @@ impl KvCacheCoordinator {
         num_tokens: usize,
         num_tokens_main_model: usize,
     ) -> Vec<BlockId> {
-        let manager = &mut self.single_type_managers[group_id];
-        let blocks = match manager.manager_type {
-            ManagerType::HiSparseSource => {
-                let (hisparse, mut cx) = self.hisparse_parts().expect("HiSparse group");
-                hisparse.source_allocate_new_blocks(&mut cx, request_id, num_tokens)
-            }
-            ManagerType::HiSparseHot => {
-                manager.hot_allocate_new_blocks(&mut self.block_pool, request_id)
-            }
-            ManagerType::HiSparseResident => {
-                manager.resident_allocate_new_blocks(&mut self.block_pool, request_id, num_tokens)
-            }
-            _ => manager.allocate_new_blocks(
-                &mut self.block_pool,
-                request_id,
-                num_tokens,
-                num_tokens_main_model,
-            ),
-        };
-        self.sync_hisparse();
-        blocks
+        self.single_type_managers[group_id].allocate_new_blocks(
+            &mut self.block_pool,
+            request_id,
+            num_tokens,
+            num_tokens_main_model,
+        )
     }
 
     /// Largest prefix of `num_tokens` a future cache hit could match.
@@ -922,23 +733,11 @@ impl KvCacheCoordinator {
                 continue;
             }
             let num_tokens = self.get_num_cacheable_tokens(num_computed_tokens, group_id);
-            let retention_interval = self.retention_interval;
-            if self.single_type_managers[group_id].manager_type == ManagerType::HiSparseSource {
-                let (hisparse, mut cx) = self.hisparse_parts().expect("HiSparse group");
-                hisparse.publish_when_ready(
-                    &mut cx,
-                    request,
-                    num_tokens,
-                    retention_interval,
-                    &boundaries,
-                );
-                continue;
-            }
             self.single_type_managers[group_id].cache_blocks(
                 &mut self.block_pool,
                 request,
                 num_tokens,
-                retention_interval,
+                self.retention_interval,
                 &boundaries,
             );
         }
@@ -953,9 +752,12 @@ impl KvCacheCoordinator {
             if !group_blocks.is_empty() {
                 let block_size =
                     self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec.block_size;
-                let (_, pool) = self.manager_and_pool(group_idx);
-                pool.emit_cached_block_events(request, group_blocks.len(), block_size, group_idx);
-                self.forward_host_events();
+                self.block_pool.emit_cached_block_events(
+                    request,
+                    group_blocks.len(),
+                    block_size,
+                    group_idx,
+                );
             }
         }
     }
@@ -967,109 +769,28 @@ impl KvCacheCoordinator {
         if self.single_type_managers.is_empty() {
             return true;
         }
-        // Pools in the order their managers first use them; every pool is
-        // reset even if an earlier one fails.
-        let host_group_id = self.host_group_id();
-        let ok = match (&mut self.host_pool, host_group_id) {
-            (Some(host), Some(0)) => {
-                let host_ok = host.reset_prefix_cache();
-                self.forward_host_events();
-                let device_ok =
-                    self.single_type_managers.len() == 1 || self.block_pool.reset_prefix_cache();
-                host_ok & device_ok
-            }
-            (Some(host), _) => {
-                let device_ok = self.block_pool.reset_prefix_cache();
-                let host_ok = host.reset_prefix_cache();
-                self.forward_host_events();
-                device_ok & host_ok
-            }
-            (None, _) => self.block_pool.reset_prefix_cache(),
-        };
-        self.sync_hisparse();
-        ok
+        self.block_pool.reset_prefix_cache()
     }
 
     /// Free the blocks for the request.
-    ///
-    /// `finished`: whether the request finished (`request.is_finished()`),
-    /// which only HiSparse reads: the host prefix of a finished request is
-    /// still published once its in-flight host writes complete.
-    pub fn free(&mut self, request_id: &str, finished: bool) {
-        self.sync_hisparse();
-        for i in 0..self.single_type_managers.len() {
-            let blocks = self.pop_group_blocks_for_free(i, request_id, finished);
+    pub fn free(&mut self, request_id: &str) {
+        for manager in &mut self.single_type_managers {
+            let blocks = manager.pop_blocks_for_free(request_id);
             // Free blocks in reverse order so that the tail blocks are freed first.
-            let (_, pool) = self.manager_and_pool(i);
-            pool.free_blocks(blocks.into_iter().rev(), false);
-        }
-    }
-
-    /// `manager.pop_blocks_for_free` of group `group_id`.
-    fn pop_group_blocks_for_free(
-        &mut self,
-        group_id: usize,
-        request_id: &str,
-        finished: bool,
-    ) -> Vec<BlockId> {
-        match self.single_type_managers[group_id].manager_type {
-            ManagerType::HiSparseSource | ManagerType::HiSparseResident => {
-                let (hisparse, mut cx) = self.hisparse_parts().expect("HiSparse group");
-                hisparse.pop_blocks_for_free(&mut cx, group_id, request_id, finished)
-            }
-            ManagerType::HiSparseHot => {
-                self.single_type_managers[group_id].hot_pop_blocks_for_free(request_id)
-            }
-            _ => self.single_type_managers[group_id].pop_blocks_for_free(request_id),
+            self.block_pool.free_blocks(blocks.into_iter().rev(), false);
         }
     }
 
     /// Pop the request's bookkeeping from all single-type managers and
     /// return its blocks without returning them to the block pool. The
-    /// caller must eventually pass the returned blocks to
-    /// `KvCacheManager::free_blocks`, freeing them in reverse order (so that
-    /// tail blocks are evicted first). HiSparse host blocks carry
-    /// [`HOST_BLOCK_FLAG`].
-    ///
-    /// `finished`: see [`Self::free`].
-    pub fn pop_blocks_for_free(&mut self, request_id: &str, finished: bool) -> Vec<BlockId> {
-        self.sync_hisparse();
+    /// caller must eventually free them in reverse order (so that tail
+    /// blocks are evicted first).
+    pub fn pop_blocks_for_free(&mut self, request_id: &str) -> Vec<BlockId> {
         let mut blocks = Vec::new();
-        for i in 0..self.single_type_managers.len() {
-            let group_blocks = self.pop_group_blocks_for_free(i, request_id, finished);
-            if self.host_group_id() == Some(i) {
-                blocks.extend(group_blocks.into_iter().map(|b| b | HOST_BLOCK_FLAG));
-            } else {
-                blocks.extend(group_blocks);
-            }
+        for manager in &mut self.single_type_managers {
+            blocks.extend(manager.pop_blocks_for_free(request_id));
         }
         blocks
-    }
-
-    /// Free blocks that may mix the device and HiSparse host pools
-    /// ([`HOST_BLOCK_FLAG`]), as `BlockPool.free_blocks` on `own` (the host
-    /// pool if `host_first`, else the device pool) does in Python: the own
-    /// pool's blocks first, then the other pool's, each in the given order.
-    pub fn free_mixed_blocks(
-        &mut self,
-        ordered_blocks: impl IntoIterator<Item = BlockId>,
-        evict_first: bool,
-        host_first: bool,
-    ) {
-        let Some(host) = &mut self.host_pool else {
-            self.block_pool.free_blocks(ordered_blocks, evict_first);
-            return;
-        };
-        let (host_blocks, device_blocks): (Vec<BlockId>, Vec<BlockId>) =
-            ordered_blocks.into_iter().partition(|&b| b & HOST_BLOCK_FLAG != 0);
-        let host_blocks = host_blocks.into_iter().map(|b| b & !HOST_BLOCK_FLAG);
-        if host_first {
-            host.free_blocks(host_blocks, evict_first);
-            self.block_pool.free_blocks(device_blocks, evict_first);
-        } else {
-            self.block_pool.free_blocks(device_blocks, evict_first);
-            host.free_blocks(host_blocks, evict_first);
-        }
     }
 
     /// Remove the blocks that are no longer needed from `blocks` and replace
@@ -1088,10 +809,9 @@ impl KvCacheCoordinator {
         processed_computed_tokens: usize,
         num_prompt_tokens: Option<usize>,
     ) {
-        for i in 0..self.single_type_managers.len() {
-            let (manager, pool) = self.manager_and_pool(i);
+        for manager in &mut self.single_type_managers {
             manager.remove_skipped_blocks(
-                pool,
+                &mut self.block_pool,
                 request_id,
                 processed_computed_tokens,
                 num_prompt_tokens,
@@ -1117,12 +837,7 @@ impl KvCacheCoordinator {
         block_hashes: &[BlockHash],
         max_cache_hit_length: usize,
     ) -> (Vec<Vec<BlockId>>, usize, usize) {
-        self.find_longest_cache_hit_with(
-            &self.block_pool,
-            self.host_pool.as_ref(),
-            block_hashes,
-            max_cache_hit_length,
-        )
+        self.find_longest_cache_hit_in(&self.block_pool, block_hashes, max_cache_hit_length)
     }
 
     /// [`Self::find_longest_cache_hit`] against an arbitrary cache presence
@@ -1133,42 +848,28 @@ impl KvCacheCoordinator {
         block_hashes: &[BlockHash],
         max_cache_hit_length: usize,
     ) -> (Vec<Vec<BlockId>>, usize, usize) {
-        self.find_longest_cache_hit_with(lookup, None, block_hashes, max_cache_hit_length)
-    }
-
-    /// Looks up the HiSparse host group in `host` if given, the other groups
-    /// in `lookup`.
-    fn find_longest_cache_hit_with(
-        &self,
-        lookup: &impl CachedBlockLookup,
-        host: Option<&BlockPool>,
-        block_hashes: &[BlockHash],
-        max_cache_hit_length: usize,
-    ) -> (Vec<Vec<BlockId>>, usize, usize) {
         match self.kind {
             CoordinatorKind::NoPrefixCache => {
                 (vec![Vec::new(); self.single_type_managers.len()], 0, 0)
             }
             CoordinatorKind::Unitary => {
                 let manager = &self.single_type_managers[0];
-                let (hit_blocks, hit_length) = with_group_lookup!(self, 0, lookup, host, |pool| {
-                    manager.manager_type.find_longest_cache_hit(
-                        block_hashes,
-                        max_cache_hit_length,
-                        &[0],
-                        pool,
-                        &manager.kv_cache_spec,
-                        self.drop_eagle_group_ids.contains(&0),
-                        manager.block_size,
-                        manager.dcp_world_size,
-                        manager.pcp_world_size,
-                    )
-                });
+                let (hit_blocks, hit_length) = manager.manager_type.find_longest_cache_hit(
+                    block_hashes,
+                    max_cache_hit_length,
+                    &[0],
+                    lookup,
+                    &manager.kv_cache_spec,
+                    self.drop_eagle_group_ids.contains(&0),
+                    manager.block_size,
+                    manager.dcp_world_size,
+                    manager.pcp_world_size,
+                );
                 // Single group: nothing "uncached common" -- no other group to lag it.
                 (hit_blocks, hit_length, 0)
             }
             CoordinatorKind::Hybrid => {
-                self.hybrid_find_longest_cache_hit(lookup, host, block_hashes, max_cache_hit_length)
+                self.hybrid_find_longest_cache_hit(lookup, block_hashes, max_cache_hit_length)
             }
         }
     }
@@ -1182,7 +883,6 @@ impl KvCacheCoordinator {
     fn hybrid_find_longest_cache_hit(
         &self,
         lookup: &impl CachedBlockLookup,
-        host: Option<&BlockPool>,
         block_hashes: &[BlockHash],
         max_cache_hit_length: usize,
     ) -> (Vec<Vec<BlockId>>, usize, usize) {
@@ -1238,20 +938,17 @@ impl KvCacheCoordinator {
                     max_length = (curr_hit_length + eagle_margin)
                         .min(block_hashes.len() * self.hash_block_size);
                 }
-                let (hit_blocks, new_hit_length) =
-                    with_group_lookup!(self, first_group_id, lookup, host, |pool| {
-                        group.manager_type.find_longest_cache_hit(
-                            block_hashes,
-                            max_length,
-                            &group.group_ids,
-                            pool,
-                            &group.spec,
-                            drop_eagle_block,
-                            alignment_tokens,
-                            manager.dcp_world_size,
-                            manager.pcp_world_size,
-                        )
-                    });
+                let (hit_blocks, new_hit_length) = group.manager_type.find_longest_cache_hit(
+                    block_hashes,
+                    max_length,
+                    &group.group_ids,
+                    lookup,
+                    &group.spec,
+                    drop_eagle_block,
+                    alignment_tokens,
+                    manager.dcp_world_size,
+                    manager.pcp_world_size,
+                );
                 if drop_eagle_block {
                     eagle_verified.insert(idx);
                 } else if new_hit_length < curr_hit_length {
@@ -1283,9 +980,6 @@ impl KvCacheCoordinator {
                 continue;
             }
             let manager = &self.single_type_managers[group.group_ids[0]];
-            if manager.manager_type.retains_longer_hit() {
-                continue;
-            }
             let num_blocks = cdiv(hit_length, manager.block_size);
             for &group_id in &group.group_ids {
                 if let Some(blks) = &mut hit_blocks_by_group[group_id] {
@@ -1340,7 +1034,7 @@ impl KvCacheCoordinator {
                 block_hashes,
                 lookup_length,
                 &group.group_ids,
-                self.group_pool(group.group_ids[0]),
+                &self.block_pool,
                 &group.spec,
                 group.use_eagle,
                 self.cache_hit_alignment_tokens(),

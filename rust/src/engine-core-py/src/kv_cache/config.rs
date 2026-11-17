@@ -8,8 +8,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyType};
 use vllm_engine_core::kv_cache::{
-    KvCacheConfig, KvCacheError, KvCacheGroupRole, KvCacheGroupSpec, KvCacheSpec, KvCacheSpecType,
-    MambaCacheMode,
+    KvCacheConfig, KvCacheError, KvCacheGroupSpec, KvCacheSpec, KvCacheSpecType, MambaCacheMode,
 };
 
 /// Map a [`KvCacheError`] to the Python exception the Python manager raises
@@ -43,11 +42,12 @@ enum SpecClass {
     Mamba,
     CrossAttention,
     EncoderOnlyAttention,
-    HiSparseHot,
-    HiSparseResident,
 }
 
-const SPEC_CLASSES: [(&str, SpecClass); 14] = [
+// TODO(rust-engine-core): HiSparse (`HiSparseHotSpec`, `HiSparseResidentSpec`,
+// the `hisparse_*` group roles and host-resident groups) is not ported; such
+// configurations use the Python scheduler.
+const SPEC_CLASSES: [(&str, SpecClass); 12] = [
     ("FullAttentionSpec", SpecClass::FullAttention),
     ("MLAAttentionSpec", SpecClass::MlaAttention),
     ("HiddenStateCacheSpec", SpecClass::HiddenStateCache),
@@ -63,8 +63,6 @@ const SPEC_CLASSES: [(&str, SpecClass); 14] = [
     ("MambaSpec", SpecClass::Mamba),
     ("CrossAttentionSpec", SpecClass::CrossAttention),
     ("EncoderOnlyAttentionSpec", SpecClass::EncoderOnlyAttention),
-    ("HiSparseHotSpec", SpecClass::HiSparseHot),
-    ("HiSparseResidentSpec", SpecClass::HiSparseResident),
 ];
 
 static SPEC_TYPES: PyOnceLock<Vec<(Py<PyType>, SpecClass)>> = PyOnceLock::new();
@@ -154,10 +152,6 @@ pub(crate) fn convert_spec(spec: &Bound<'_, PyAny>, fingerprint: u64) -> PyResul
         }
         SpecClass::CrossAttention => KvCacheSpecType::CrossAttention,
         SpecClass::EncoderOnlyAttention => KvCacheSpecType::EncoderOnlyAttention,
-        SpecClass::HiSparseHot => KvCacheSpecType::HiSparseHot {
-            blocks_per_request: get_usize("blocks_per_request")?,
-        },
-        SpecClass::HiSparseResident => KvCacheSpecType::HiSparseResident,
     };
     let converted = KvCacheSpec {
         block_size: get_usize("block_size")?,
@@ -202,18 +196,16 @@ pub fn convert_config<'py>(
         }
         let kv_cache_spec = convert_spec(&spec, fingerprint)?;
         let role: String = group.getattr("role")?.getattr("value")?.extract()?;
-        let role = match role.as_str() {
-            "default" => KvCacheGroupRole::Default,
-            "hisparse_source" => KvCacheGroupRole::HiSparseSource,
-            "hisparse_indexer" => KvCacheGroupRole::HiSparseIndexer,
-            _ => return Err(unsupported(format!("KV cache group role {role:?}"))),
-        };
+        if role != "default" {
+            return Err(unsupported(format!("KV cache group role {role:?}")));
+        }
+        if group.getattr("host_resident")?.extract()? {
+            return Err(unsupported("host-resident KV cache groups"));
+        }
         rust_groups.push(KvCacheGroupSpec {
             kv_cache_spec,
             is_eagle_group: group.getattr("is_eagle_group")?.extract()?,
-            host_resident: group.getattr("host_resident")?.extract()?,
             enable_kv_transfer: group.getattr("enable_kv_transfer")?.extract()?,
-            role,
         });
         py_specs.push(spec);
     }
@@ -221,6 +213,8 @@ pub fn convert_config<'py>(
     rust_config.prefix_cache_retention_interval =
         config.getattr("prefix_cache_retention_interval")?.extract()?;
     rust_config.needs_kv_cache_zeroing = config.getattr("needs_kv_cache_zeroing")?.extract()?;
-    rust_config.hisparse_host_num_blocks = config.getattr("hisparse_host_num_blocks")?.extract()?;
+    if !config.getattr("hisparse_host_num_blocks")?.is_none() {
+        return Err(unsupported("HiSparse host KV cache blocks"));
+    }
     Ok((rust_config, py_specs))
 }

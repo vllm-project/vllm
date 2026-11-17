@@ -30,7 +30,6 @@ mod coordinator;
 mod error;
 mod events;
 mod free_queue;
-mod hisparse;
 mod manager;
 mod metrics;
 mod request;
@@ -41,8 +40,8 @@ mod spec;
 mod tests;
 
 pub use self::block::{
-    BlockHashWithGroupId, BlockId, HOST_BLOCK_FLAG, KvCacheBlock, KvCacheBlockCopy, NULL_BLOCK_ID,
-    null_head_len, trim_null_head,
+    BlockHashWithGroupId, BlockId, KvCacheBlock, KvCacheBlockCopy, NULL_BLOCK_ID, null_head_len,
+    trim_null_head,
 };
 pub use self::block_hash_list::{
     BlockHashListWithBlockSize, eagle_proof_margin, partial_hash_hits_enabled, resolve_block_hashes,
@@ -55,10 +54,6 @@ pub use self::events::{
     KvCacheEvent, MEDIUM_CPU, MEDIUM_GPU, MEDIUM_STORAGE,
 };
 pub use self::free_queue::FreeKvCacheBlockQueue;
-pub use self::hisparse::{
-    ACTIVE_TAIL_PAGES, HiSparseCoordinator, HiSparseHandle, RequestState, SparseKvPageTransfer,
-    SparseKvResidencyUpdate, SparseKvRowMirror,
-};
 pub use self::manager::{
     AllocateSlotsArgs, BoundaryStateOffload, KvCacheBlocks, KvCacheManager, KvCacheManagerConfig,
 };
@@ -68,8 +63,8 @@ pub use self::single_type::{
     CacheHit, ManagerType, PendingBoundaryStateOffload, SingleTypeKvCacheManager,
 };
 pub use self::spec::{
-    KvCacheConfig, KvCacheGroupRole, KvCacheGroupSpec, KvCacheSpec, KvCacheSpecType,
-    MambaCacheMode, get_mamba_prefill_checkpoint_position, is_mamba_prefill_checkpoint_valid,
+    KvCacheConfig, KvCacheGroupSpec, KvCacheSpec, KvCacheSpecType, MambaCacheMode,
+    get_mamba_prefill_checkpoint_position, is_mamba_prefill_checkpoint_valid,
 };
 
 /// `vllm.utils.math_utils.cdiv` for non-negative operands.

@@ -293,8 +293,8 @@ fn prefill() {
     }
     assert_eq!(manager.block_pool().get_num_free_blocks(), 5);
 
-    manager.free("0", false);
-    manager.free("1", false);
+    manager.free("0");
+    manager.free("1");
     assert_eq!(manager.block_pool().get_num_free_blocks(), 10);
     // [partial without hashes from req1 and req0 (5, 4) - prepended for immediate reuse]
     // [unallocated (6, 7, 8, 9, 10)]
@@ -309,7 +309,7 @@ fn prefill() {
     let blocks = alloc(&mut manager, &req2, 54 - 48, 48, Some(&computed)).unwrap();
     assert_eq!(blocks.blocks, vec![vec![5]]);
     assert_eq!(manager.block_pool().get_num_free_blocks(), 6);
-    manager.free("2", false);
+    manager.free("2");
 
     // Cache miss and eviction.
     let req3 = make_request("3", vec![99; 160], bs);
@@ -336,10 +336,10 @@ fn evict() {
     assert_eq!(blocks.blocks[0].len(), 3);
     assert_eq!(manager.block_pool().get_num_free_blocks(), 1);
 
-    manager.free("0", false);
+    manager.free("0");
     // partial blocks (without hash) at head, other at tail (LRU policy):
     assert_eq!(free_list(&manager), vec![6, 10, 5, 4, 3, 2, 1]);
-    manager.free("1", false);
+    manager.free("1");
     assert_eq!(free_list(&manager), vec![6, 10, 5, 4, 3, 2, 1, 9, 8, 7]);
 
     // Touch the first 2 blocks.
@@ -378,7 +378,7 @@ fn partial_request_hit(
     for (k, block) in saved {
         manager.block_pool_mut().cached_block_hash_to_block.insert(k, block);
     }
-    manager.free(id, false);
+    manager.free(id);
 }
 
 /// `test_prefill_hybrid_model`.
@@ -422,8 +422,8 @@ fn prefill_hybrid_model() {
         assert_eq!(manager.block_pool().block(b).ref_cnt, 2);
     }
     let hashes = req1.block_hashes.clone();
-    manager.free("0", false);
-    manager.free("1", false);
+    manager.free("0");
+    manager.free("1");
 
     let k = |i: usize, g: usize| BlockHashWithGroupId::new(hashes[i].clone(), g);
     // Evict the blocks outside sliding window, does not affect the hit length.
@@ -531,19 +531,8 @@ fn sliding_window_cache_hit_with_finer_hash_alignment() {
 
 fn manager_with_table(spec: KvCacheSpec, ids: &[BlockId]) -> (SingleTypeKvCacheManager, BlockPool) {
     let pool = BlockPool::new(2000, true, spec.block_size, false, None, 0, MEDIUM_GPU);
-    let mut manager = SingleTypeKvCacheManager::new(
-        spec,
-        KvCacheGroupRole::Default,
-        8192,
-        8192,
-        true,
-        0,
-        2,
-        1,
-        1,
-        false,
-    )
-    .unwrap();
+    let mut manager =
+        SingleTypeKvCacheManager::new(spec, 8192, 8192, true, 0, 2, 1, 1, false).unwrap();
     manager.req_to_blocks.insert("test".to_owned(), ids.to_vec());
     (manager, pool)
 }
@@ -653,7 +642,7 @@ fn kv_cache_events() {
     assert_eq!(stored.group_idx, Some(0));
     let stored_hashes = stored.block_hashes.clone();
 
-    manager.free("0", false);
+    manager.free("0");
     let req1 = make_request("1", (0..num_tokens as i32).map(|t| t + 1000).collect(), bs);
     alloc(&mut manager, &req1, num_tokens, 0, None).unwrap();
     let events = manager.take_events();
@@ -668,7 +657,7 @@ fn kv_cache_events() {
         .collect();
     assert_eq!(removed, stored_hashes.into_iter().rev().collect::<Vec<_>>());
 
-    manager.free("1", false);
+    manager.free("1");
     assert!(manager.reset_prefix_cache());
     let events = manager.take_events();
     assert_eq!(
@@ -686,7 +675,7 @@ fn reset_prefix_cache_requires_all_blocks_free() {
     let req = make_request("0", (0..40).collect(), bs);
     alloc(&mut manager, &req, 40, 0, None).unwrap();
     assert!(!manager.reset_prefix_cache());
-    manager.free("0", false);
+    manager.free("0");
     assert!(manager.reset_prefix_cache());
     assert!(manager.block_pool().blocks().iter().all(|b| b.block_hash.is_none()));
 }
@@ -744,7 +733,7 @@ fn hybrid_mamba_hits_partial_prompt_boundary() {
     assert!(alloc(&mut manager, &first, 1, 0, None).is_some());
     first.num_computed_tokens = 1249;
     manager.new_step_starts();
-    manager.free("first", false);
+    manager.free("first");
 
     let second = make_request_with_lookahead("second", tokens, hbs, 1);
     let (_, n, _) = manager.get_computed_blocks(&second, None);
@@ -754,36 +743,6 @@ fn hybrid_mamba_hits_partial_prompt_boundary() {
         .coordinator
         .find_longest_cache_hit_per_group(&second.block_hashes, 2 * hbs);
     assert_eq!(per_group_hits[0], 2 * hbs);
-}
-
-#[test]
-fn hisparse_configs_without_host_source_are_rejected() {
-    let spec = KvCacheSpec::new(
-        KvCacheSpecType::HiSparseHot {
-            blocks_per_request: 2,
-        },
-        16,
-    );
-    let err = KvCacheManager::new(
-        make_config(10, vec![full_spec(16), spec]),
-        KvCacheManagerConfig::new(64, 16, 16),
-    )
-    .unwrap_err();
-    expect![[r#"
-        InvalidConfig {
-            message: "No HiSparse cache group is configured.",
-        }
-    "#]]
-    .assert_debug_eq(&err);
-    let mut config = make_config(10, vec![full_spec(16)]);
-    config.kv_cache_groups[0].role = KvCacheGroupRole::HiSparseSource;
-    let err = KvCacheManager::new(config, KvCacheManagerConfig::new(64, 16, 16)).unwrap_err();
-    expect![[r#"
-        InvalidConfig {
-            message: "HiSparse host group needs host capacity.",
-        }
-    "#]]
-    .assert_debug_eq(&err);
 }
 
 #[test]

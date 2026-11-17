@@ -87,19 +87,17 @@ impl ManagerType {
         pcp_world_size: usize,
     ) -> CacheHit {
         match self {
-            Self::FullAttention | Self::Rswa | Self::SinkFullAttention | Self::HiSparseSource => {
-                full_attention_hit(
-                    self,
-                    block_hashes,
-                    max_length,
-                    kv_cache_group_ids,
-                    block_pool,
-                    kv_cache_spec,
-                    drop_eagle_block,
-                    alignment_tokens,
-                    dcp_world_size,
-                )
-            }
+            Self::FullAttention | Self::Rswa | Self::SinkFullAttention => full_attention_hit(
+                self,
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                kv_cache_spec,
+                drop_eagle_block,
+                alignment_tokens,
+                dcp_world_size,
+            ),
             Self::SlidingWindow => sliding_window_hit(
                 block_hashes,
                 max_length,
@@ -111,10 +109,7 @@ impl ManagerType {
                 dcp_world_size,
                 pcp_world_size,
             ),
-            // `_HiSparseAuxiliaryManager`: the host source owns prefix caching.
-            Self::CircularBuffer | Self::HiSparseHot | Self::HiSparseResident => {
-                (vec![Vec::new(); kv_cache_group_ids.len()], 0)
-            }
+            Self::CircularBuffer => (vec![Vec::new(); kv_cache_group_ids.len()], 0),
             Self::ChunkedLocalAttention => chunked_local_hit(
                 block_hashes,
                 max_length,

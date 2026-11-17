@@ -12,16 +12,6 @@ pub type BlockId = u32;
 /// The placeholder block: the first block popped from a fresh pool.
 pub const NULL_BLOCK_ID: BlockId = 0;
 
-/// Marks a HiSparse host-pool block id in block lists that mix the device and
-/// host pools: those [`KvCacheManager::pop_blocks_for_free`] returns, to be
-/// handed back to [`KvCacheManager::free_blocks`]. Python blocks carry their
-/// pool instead (`KVCacheBlock.pool`). Block tables never carry the flag: a
-/// group's blocks all come from one pool.
-///
-/// [`KvCacheManager::pop_blocks_for_free`]: super::KvCacheManager::pop_blocks_for_free
-/// [`KvCacheManager::free_blocks`]: super::KvCacheManager::free_blocks
-pub const HOST_BLOCK_FLAG: BlockId = 1 << 31;
-
 /// `BlockHashWithGroupId` combines a `BlockHash` with its KV cache group ID.
 ///
 /// Python packs the group id as 4 big-endian bytes appended to the block hash
@@ -62,9 +52,7 @@ impl std::fmt::Debug for BlockHashWithGroupId {
 /// KV-cache block metadata.
 ///
 /// The free-list links (`prev_free_block` / `next_free_block` in Python) live
-/// in [`FreeKvCacheBlockQueue`](super::FreeKvCacheBlockQueue). Python's
-/// `pool` back-reference, which routes frees of HiSparse host blocks to their
-/// own pool, is [`HOST_BLOCK_FLAG`] here.
+/// in [`FreeKvCacheBlockQueue`](super::FreeKvCacheBlockQueue).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvCacheBlock {
     /// Block ID, ranging from 0 to num_gpu_blocks - 1.

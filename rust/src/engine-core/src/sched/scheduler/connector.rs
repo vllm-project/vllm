@@ -275,11 +275,6 @@ impl Scheduler {
     /// Cache a parked async KV load's reservation. Set when parked and refreshed
     /// at promotion, the only points where the load's held blocks change.
     pub(super) fn reserve_parked(&mut self, h: usize) {
-        if self.kv_cache_manager.kv_cache_config.hisparse_host_num_blocks.is_some() {
-            // HiSparse's depends on free host blocks, so it is summed on demand.
-            self.inflight_prefills.insert(h);
-            return;
-        }
         let blocks = self.request_remaining_blocks(h);
         let cached = self.parked_reservations.get(&h).copied().unwrap_or(0);
         self.parked_reserved_blocks += blocks - cached;
@@ -357,8 +352,7 @@ impl Scheduler {
                 // There may be a local cache hit on retry.
                 // (Freed blocks are re-recorded for zeroing when
                 // reallocated, so the skipped blocks need no handling.)
-                let finished = self.requests[h].is_finished();
-                self.kv_cache_manager.free(&request_id, finished);
+                self.kv_cache_manager.free(&request_id);
             }
 
             self.failed_recving_kv_req_ids.remove(&request_id);
@@ -690,37 +684,6 @@ impl Scheduler {
                     + self.kv_fetch_counts.completed_waiting
                     + self.aborted_kv_loads.len()
                     < limit
-            }
-        }
-    }
-
-    /// Start deferred async loads whose fence step has completed.
-    pub(super) fn drain_deferred_loads(&mut self) {
-        while let Some((_, &(fence, num_tokens, queries, hits))) = self.deferred_loads.first() {
-            if fence > self.processed_step_seq {
-                break;
-            }
-            let (request_id, _) = self.deferred_loads.shift_remove_index(0).unwrap();
-            let connector = self.connector.as_mut().expect("KV connector is configured");
-            let h = self.requests.handle(&request_id).expect("deferred load request exists");
-            let request = &self.requests[h];
-            let blocks = self.kv_cache_manager.get_blocks(&request_id);
-            connector.update_state_after_alloc(
-                request,
-                &blocks,
-                &mut self.kv_cache_manager,
-                num_tokens,
-            );
-            if let Some(stats) = &mut self.connector_prefix_cache_stats
-                && queries != 0
-            {
-                let preempted = request.num_preemptions > 0;
-                let hits_by_source = if hits > 0 && !preempted {
-                    connector.get_external_cache_hit_sources(request, hits)
-                } else {
-                    None
-                };
-                stats.record(queries, hits, preempted, hits_by_source);
             }
         }
     }

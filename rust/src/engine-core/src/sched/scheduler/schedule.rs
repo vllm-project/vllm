@@ -1110,32 +1110,15 @@ impl Scheduler {
                 // This information is used to determine if a load is
                 // needed for this request.
                 if let Some(connector) = self.connector.as_mut() {
-                    let defer_load = load_kv_async
-                        && self.defer_async_loads
-                        && self.sched_step_seq > self.processed_step_seq;
-                    if defer_load {
-                        self.requests[h].last_sched_seq = self.sched_step_seq;
-                        self.deferred_loads.insert(
-                            request_id.clone(),
-                            (
-                                self.sched_step_seq,
-                                num_external_computed_tokens,
-                                connector_prefix_cache_queries,
-                                connector_prefix_cache_hits,
-                            ),
-                        );
-                    } else {
-                        let blocks = self.kv_cache_manager.get_blocks(&request_id);
-                        connector.update_state_after_alloc(
-                            &self.requests[h],
-                            &blocks,
-                            &mut self.kv_cache_manager,
-                            num_external_computed_tokens,
-                        );
-                    }
+                    let blocks = self.kv_cache_manager.get_blocks(&request_id);
+                    connector.update_state_after_alloc(
+                        &self.requests[h],
+                        &blocks,
+                        &mut self.kv_cache_manager,
+                        num_external_computed_tokens,
+                    );
                     if let Some(stats) = &mut self.connector_prefix_cache_stats
                         && connector_prefix_cache_queries != 0
-                        && !defer_load
                     {
                         let request = &self.requests[h];
                         let preempted = request.num_preemptions > 0;

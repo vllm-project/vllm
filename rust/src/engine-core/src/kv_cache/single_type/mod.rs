@@ -9,13 +9,7 @@
 //! `remove_skipped_blocks` calling Mamba's `_remove_blocks_in_range`).
 //! Managers do not own the block pool; every method that touches blocks takes
 //! it as an argument.
-//!
-//! The HiSparse managers (`HiSparseSourceManager`, `HiSparseHotManager`,
-//! `HiSparseResidentManager`) call into their shared HiSparse coordinator, so
-//! their overrides live in [`super::hisparse`] and are dispatched by the KV
-//! cache coordinator; `hisparse` here holds their per-manager state.
 
-mod hisparse;
 mod hit;
 mod mamba;
 
@@ -27,7 +21,7 @@ use super::block_pool::BlockPool;
 use super::cdiv;
 use super::error::KvCacheError;
 use super::request::KvRequest;
-use super::spec::{KvCacheGroupRole, KvCacheSpec, KvCacheSpecType, MambaCacheMode};
+use super::spec::{KvCacheSpec, KvCacheSpecType, MambaCacheMode};
 
 /// The manager class registered for a spec (`KVCacheSpecRegistry`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -49,25 +43,12 @@ pub enum ManagerType {
     CrossAttention,
     /// `SinkFullAttentionManager` (a `FullAttentionManager`).
     SinkFullAttention,
-    /// `HiSparseSourceManager` (a `FullAttentionManager`): the host tier,
-    /// with a private host block pool. Selected by the
-    /// `KVCacheGroupRole.HISPARSE_SOURCE` role.
-    HiSparseSource,
-    /// `HiSparseHotManager`: `HiSparseHotSpec`.
-    HiSparseHot,
-    /// `HiSparseResidentManager`: `HiSparseResidentSpec`.
-    HiSparseResident,
 }
 
 impl ManagerType {
-    /// The manager class registered for a group's spec and role
+    /// The manager class registered for a group's spec
     /// (`KVCacheSpecRegistry.get_manager_class`).
-    pub fn for_group(spec: &KvCacheSpec, role: KvCacheGroupRole) -> Result<Self, KvCacheError> {
-        // A role-registered manager takes precedence; only the HiSparse source
-        // role registers one.
-        if role == KvCacheGroupRole::HiSparseSource {
-            return Ok(Self::HiSparseSource);
-        }
+    pub fn for_spec(spec: &KvCacheSpec) -> Result<Self, KvCacheError> {
         Ok(match spec.spec_type {
             KvCacheSpecType::FullAttention
             | KvCacheSpecType::MlaAttention
@@ -87,36 +68,15 @@ impl ManagerType {
                         .to_owned(),
                 });
             }
-            KvCacheSpecType::HiSparseHot { .. } => Self::HiSparseHot,
-            KvCacheSpecType::HiSparseResident => Self::HiSparseResident,
         })
-    }
-
-    /// Whether this is one of the HiSparse managers, whose overrides the
-    /// coordinator dispatches to its HiSparse coordinator.
-    pub fn is_hisparse(self) -> bool {
-        matches!(
-            self,
-            Self::HiSparseSource | Self::HiSparseHot | Self::HiSparseResident
-        )
     }
 
     /// `supports_fine_grained_hash_lookup` class attribute.
     pub fn supports_fine_grained_hash_lookup(self) -> bool {
         matches!(
             self,
-            Self::FullAttention
-                | Self::Rswa
-                | Self::SinkFullAttention
-                | Self::Mamba
-                | Self::HiSparseSource
+            Self::FullAttention | Self::Rswa | Self::SinkFullAttention | Self::Mamba
         )
-    }
-
-    /// Keep this group's longer prefix until external cache lookup completes.
-    /// The host tier keeps prefixes the device groups have already lost.
-    pub fn retains_longer_hit(self) -> bool {
-        self == Self::HiSparseSource
     }
 }
 
@@ -221,8 +181,6 @@ pub struct SingleTypeKvCacheManager {
     /// right hash. Populated only by mamba "align".
     pending_boundary_state_offloads: Vec<PendingBoundaryStateOffload>,
     pub(crate) mamba: MambaState,
-    /// State of the HiSparse hot and resident managers.
-    pub(crate) hisparse: hisparse::HiSparseManagerState,
     /// `RSWASpec.rswa_window`.
     rswa_window: usize,
 }
@@ -231,7 +189,6 @@ impl SingleTypeKvCacheManager {
     /// `get_manager_for_kv_cache_spec` followed by the manager constructor.
     pub fn new(
         kv_cache_spec: KvCacheSpec,
-        role: KvCacheGroupRole,
         max_in_flight_tokens: usize,
         max_model_len: usize,
         enable_caching: bool,
@@ -241,7 +198,7 @@ impl SingleTypeKvCacheManager {
         pcp_world_size: usize,
         needs_kv_cache_zeroing: bool,
     ) -> Result<Self, KvCacheError> {
-        let manager_type = ManagerType::for_group(&kv_cache_spec, role)?;
+        let manager_type = ManagerType::for_spec(&kv_cache_spec)?;
         // SlidingWindow / ChunkedLocalAttention managers recycle blocks;
         // the runtime admission cap must match the recycling-aware bound the
         // startup pool sizer uses (single source of truth: the spec method).
@@ -267,7 +224,6 @@ impl SingleTypeKvCacheManager {
             && manager_type != ManagerType::SinkFullAttention;
 
         let mut mamba = MambaState::default();
-        let mut hisparse = hisparse::HiSparseManagerState::default();
         let mut rswa_window = 0;
         match kv_cache_spec.spec_type {
             KvCacheSpecType::Mamba {
@@ -286,9 +242,6 @@ impl SingleTypeKvCacheManager {
                     mamba_cache_mode == MambaCacheMode::Align && num_prefill_checkpoint_blocks > 0;
             }
             KvCacheSpecType::Rswa { rswa_window: w } => rswa_window = w,
-            KvCacheSpecType::HiSparseHot { blocks_per_request } => {
-                hisparse.blocks_per_request = blocks_per_request;
-            }
             KvCacheSpecType::SinkFullAttention { sink_len } => {
                 assert!(
                     sink_len.is_some_and(|s| s > 0 && s.is_multiple_of(block_size)),
@@ -319,7 +272,6 @@ impl SingleTypeKvCacheManager {
             pending_cow_copies: Vec::new(),
             pending_boundary_state_offloads: Vec::new(),
             mamba,
-            hisparse,
             rswa_window,
         })
     }
@@ -733,32 +685,16 @@ impl SingleTypeKvCacheManager {
 
     /// Whether this manager's new blocks are zeroed by the worker.
     pub fn records_new_block_ids(&self) -> bool {
-        // Host blocks are never zeroed by the worker.
-        self.record_new_block_ids && self.manager_type != ManagerType::HiSparseSource
+        self.record_new_block_ids
     }
 
     /// Drain and return block IDs allocated since the last call.
     pub fn take_new_block_ids(&mut self) -> Vec<BlockId> {
-        let ids = std::mem::take(&mut self.new_block_ids);
-        if self.manager_type == ManagerType::HiSparseSource {
-            return Vec::new();
-        }
-        ids
+        std::mem::take(&mut self.new_block_ids)
     }
 
     /// Drain pending CoW source and destination block pairs.
     pub fn take_pending_cow_copies(&mut self) -> Vec<(BlockId, BlockId)> {
-        // Host copies never reach the worker's generic block-copy path; the
-        // HiSparse coordinator drains them (`take_host_cow_copies`).
-        if self.manager_type == ManagerType::HiSparseSource {
-            return Vec::new();
-        }
-        std::mem::take(&mut self.pending_cow_copies)
-    }
-
-    /// `HiSparseSourceManager.take_host_cow_copies`: drain host copies for
-    /// the HiSparse coordinator to hand to the connector.
-    pub(crate) fn take_host_cow_copies(&mut self) -> Vec<(BlockId, BlockId)> {
         std::mem::take(&mut self.pending_cow_copies)
     }
 
@@ -849,12 +785,7 @@ impl SingleTypeKvCacheManager {
                 retention_interval,
                 replay_boundaries,
             ),
-            // `_HiSparseAuxiliaryManager`: the host source owns prefix caching.
-            ManagerType::HiSparseHot | ManagerType::HiSparseResident => {}
-            ManagerType::FullAttention
-            | ManagerType::Rswa
-            | ManagerType::SinkFullAttention
-            | ManagerType::HiSparseSource => {
+            ManagerType::FullAttention | ManagerType::Rswa | ManagerType::SinkFullAttention => {
                 self.base_cache_blocks(
                     pool,
                     request,

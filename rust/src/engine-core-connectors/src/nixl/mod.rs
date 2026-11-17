@@ -69,16 +69,15 @@ pub struct ManagerBlocks<'a> {
 impl AllocatedBlocks for ManagerBlocks<'_> {
     fn unhashed_block_ids_all_groups(&self) -> Vec<Vec<BlockId>> {
         self.blocks
-            .get_unhashed_block_ids_all_groups(|g| self.kv_cache_manager.group_pool(g))
+            .get_unhashed_block_ids_all_groups(self.kv_cache_manager.block_pool())
     }
 
     fn num_computed_blocks(&self) -> Vec<usize> {
+        let pool = self.kv_cache_manager.block_pool();
         self.blocks
             .blocks
             .iter()
-            .enumerate()
-            .map(|(group_id, group)| {
-                let pool = self.kv_cache_manager.group_pool(group_id);
+            .map(|group| {
                 group
                     .iter()
                     .filter(|&&b| {

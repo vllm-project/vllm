@@ -52,19 +52,12 @@ fn fmt_lookahead(la: &Option<Vec<Vec<i32>>>) -> String {
     }
 }
 
-fn fmt_events(events: &[KvCacheEvent], with_medium: bool) -> String {
-    let medium = |m: &Option<String>| {
-        if with_medium {
-            format!(" m={}", m.as_deref().unwrap_or("None"))
-        } else {
-            String::new()
-        }
-    };
+fn fmt_events(events: &[KvCacheEvent]) -> String {
     events
         .iter()
         .map(|e| match e {
             KvCacheEvent::BlockStored(e) => format!(
-                "S g={} h={} p={} t={} bs={} k={} w={} la={}{}",
+                "S g={} h={} p={} t={} bs={} k={} w={} la={}",
                 e.group_idx.map_or("None".to_owned(), |g| g.to_string()),
                 e.block_hashes.iter().map(|h| fmt_hash(Some(h))).collect::<Vec<_>>().join(","),
                 fmt_hash(e.parent_block_hash.as_ref()),
@@ -73,13 +66,11 @@ fn fmt_events(events: &[KvCacheEvent], with_medium: bool) -> String {
                 e.kv_cache_spec_kind.unwrap_or("None"),
                 e.kv_cache_spec_sliding_window.map_or("None".to_owned(), |w| w.to_string()),
                 fmt_lookahead(&e.lookahead_token_ids),
-                medium(&e.medium),
             ),
             KvCacheEvent::BlockRemoved(e) => format!(
-                "R g={} h={}{}",
+                "R g={} h={}",
                 e.group_idx.map_or("None".to_owned(), |g| g.to_string()),
                 fmt_hash(e.block_hashes.first()),
-                medium(&e.medium),
             ),
             KvCacheEvent::AllBlocksCleared(_) => "C".to_owned(),
         })
@@ -96,71 +87,6 @@ fn fmt_tuples(v: &[BoundaryStateOffload]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
-}
-
-/// A group line: a spec, or a HiSparse group of `hisparse_groups` in
-/// `gen_traces.py`.
-fn parse_group(args: &[&str]) -> KvCacheGroupSpec {
-    let bs = || args[1].parse::<usize>().unwrap();
-    match args[0] {
-        "source" => KvCacheGroupSpec {
-            host_resident: true,
-            role: KvCacheGroupRole::HiSparseSource,
-            ..KvCacheGroupSpec::new(KvCacheSpec::new(KvCacheSpecType::FullAttention, bs()))
-        },
-        "indexer" => KvCacheGroupSpec {
-            role: KvCacheGroupRole::HiSparseIndexer,
-            ..KvCacheGroupSpec::new(KvCacheSpec::new(KvCacheSpecType::FullAttention, bs()))
-        },
-        "resident" => {
-            KvCacheGroupSpec::new(KvCacheSpec::new(KvCacheSpecType::HiSparseResident, bs()))
-        }
-        "hot" => KvCacheGroupSpec {
-            enable_kv_transfer: false,
-            ..KvCacheGroupSpec::new(KvCacheSpec::new(
-                KvCacheSpecType::HiSparseHot {
-                    blocks_per_request: args[2].parse().unwrap(),
-                },
-                bs(),
-            ))
-        },
-        _ => KvCacheGroupSpec::new(parse_spec(args)),
-    }
-}
-
-/// Block ids with HiSparse host blocks as `h<id>`.
-fn fmt_mixed_blocks(blocks: impl IntoIterator<Item = BlockId>) -> String {
-    blocks
-        .into_iter()
-        .map(|b| {
-            if b & HOST_BLOCK_FLAG != 0 {
-                format!("h{}", b & !HOST_BLOCK_FLAG)
-            } else {
-                b.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn join<T: ToString>(items: impl IntoIterator<Item = T>, sep: &str) -> String {
-    items.into_iter().map(|x| x.to_string()).collect::<Vec<_>>().join(sep)
-}
-
-/// `rid:a:b` items of a comma-separated list, or none for `-`.
-fn parse_scheduled(s: &str) -> Vec<(String, usize, usize)> {
-    if s == "-" {
-        return Vec::new();
-    }
-    s.split(',')
-        .map(|item| {
-            let mut parts = item.split(':');
-            let rid = parts.next().unwrap().to_owned();
-            let a = parts.next().unwrap().parse().unwrap();
-            let b = parts.next().map_or(0, |b| b.parse().unwrap());
-            (rid, a, b)
-        })
-        .collect()
 }
 
 fn parse_spec(args: &[&str]) -> KvCacheSpec {
@@ -229,13 +155,12 @@ fn replay(name: &str, text: &str) -> Result<usize, String> {
         && line.starts_with("group ")
     {
         let args: Vec<&str> = line.split_whitespace().skip(1).collect();
-        groups.push(parse_group(&args));
+        groups.push(KvCacheGroupSpec::new(parse_spec(&args)));
         lines.next();
     }
     let mut config = KvCacheConfig::new(num("num_blocks"), groups);
     config.prefix_cache_retention_interval = kv["retention"].parse().ok();
     config.needs_kv_cache_zeroing = num("zeroing") == 1;
-    config.hisparse_host_num_blocks = kv.get("hisparse_host_blocks").map(|v| v.parse().unwrap());
     let mut manager_config = KvCacheManagerConfig::new(
         num("max_model_len"),
         num("scheduler_block_size"),
@@ -254,12 +179,6 @@ fn replay(name: &str, text: &str) -> Result<usize, String> {
     manager_config.num_prefill_lookahead =
         kv.get("num_prefill_lookahead").map_or(0, |v| v.parse().unwrap());
     let mut manager = KvCacheManager::new(config, manager_config).unwrap();
-    if let Some(import_step_tokens) = kv.get("import_step_tokens") {
-        manager
-            .hisparse_mut()
-            .unwrap()
-            .set_import_step_tokens(import_step_tokens.parse().unwrap());
-    }
 
     let mut reqs: HashMap<String, TestRequest> = HashMap::new();
     let mut last_hit: HashMap<String, KvCacheBlocks> = HashMap::new();
@@ -287,7 +206,7 @@ fn replay(name: &str, text: &str) -> Result<usize, String> {
                 continue;
             }
             "free" => {
-                manager.free(args[1], args.get(2) == Some(&"1"));
+                manager.free(args[1]);
                 continue;
             }
             "record" => {
@@ -320,148 +239,10 @@ fn replay(name: &str, text: &str) -> Result<usize, String> {
                     .unwrap();
                 fmt_groups(out.as_ref().map(|b| b.blocks.as_slice()))
             }
-            "pop" => fmt_mixed_blocks(manager.pop_blocks_for_free(args[1], args[2] == "1")),
-            "freeblocks" => {
-                let blocks = if args[1] == "-" {
-                    Vec::new()
-                } else {
-                    args[1]
-                        .split(',')
-                        .map(|b| match b.strip_prefix('h') {
-                            Some(h) => h.parse::<BlockId>().unwrap() | HOST_BLOCK_FLAG,
-                            None => b.parse().unwrap(),
-                        })
-                        .collect()
-                };
-                manager.free_blocks(blocks, false);
-                continue;
-            }
             "cache" => {
                 manager.cache_blocks(&reqs[args[1]], args[2].parse().unwrap());
                 continue;
             }
-            "finish_import" => {
-                manager.hisparse_mut().unwrap().finish_host_import(args[1], args[2] == "1");
-                continue;
-            }
-            "advance" => {
-                let scheduled = parse_scheduled(args[1]);
-                manager
-                    .hisparse_mut()
-                    .unwrap()
-                    .advance_scheduled(scheduled.iter().map(|(r, n, _)| (r.as_str(), *n)));
-                continue;
-            }
-            "offload" => {
-                join(
-                    manager.hisparse_mut().unwrap().build_offload_command().unwrap().iter().map(
-                        |t| {
-                            format!(
-                                "{}:{}:{}:{}",
-                                t.transfer_id,
-                                t.host_block_id,
-                                join(&t.resident_block_ids, "/"),
-                                u8::from(t.restore)
-                            )
-                        },
-                    ),
-                    ";",
-                )
-            }
-            "hcopies" => join(
-                manager
-                    .hisparse_mut()
-                    .unwrap()
-                    .take_host_block_copies()
-                    .iter()
-                    .map(|c| format!("{}>{}", c.src_block_id, c.dst_block_id)),
-                ",",
-            ),
-            "release" => {
-                manager
-                    .hisparse_mut()
-                    .unwrap()
-                    .release_completed_host_copies(parse_list::<BlockId>(args[1]));
-                continue;
-            }
-            "mirrors" => {
-                let p = |i: usize| args[i].parse::<usize>().unwrap();
-                let mirrors =
-                    manager.hisparse_mut().unwrap().build_row_mirrors([(args[1], p(2), p(3))]);
-                join(
-                    mirrors.iter().map(|m| {
-                        format!(
-                            "{}:{}:{}",
-                            join(&m.source_starts, "/"),
-                            m.destination_start,
-                            m.num_rows
-                        )
-                    }),
-                    ";",
-                )
-            }
-            "allres" => {
-                let scheduled = parse_scheduled(args[1]);
-                let resident = manager.hisparse_mut().unwrap().all_context_pages_resident(
-                    scheduled.iter().map(|(r, s, c)| (r.as_str(), *s, *c)),
-                );
-                if resident { "True" } else { "False" }.to_owned()
-            }
-            "updates" => {
-                let ids: Vec<&str> = if args[1] == "-" {
-                    Vec::new()
-                } else {
-                    args[1].split(',').collect()
-                };
-                let updates = manager.hisparse_mut().unwrap().take_residency_updates(ids);
-                join(
-                    updates.iter().map(|(rid, u)| {
-                        format!(
-                            "{rid}:{}:{}",
-                            join(&u.pages, ","),
-                            join(u.block_ids.iter().map(|g| join(g, ",")), "/")
-                        )
-                    }),
-                    ";",
-                )
-            }
-            "spill" => {
-                let spill_id: u64 = args[1].parse().unwrap();
-                let enqueued = (args[2] == "1").then_some((spill_id, 1));
-                let completed = (args[3] == "1").then_some((spill_id, 1));
-                manager.hisparse_mut().unwrap().update_spills(enqueued, completed);
-                continue;
-            }
-            "pending" => {
-                let hisparse = manager.hisparse_mut().unwrap();
-                format!(
-                    "{} {}",
-                    u8::from(hisparse.has_pending_work()),
-                    u8::from(hisparse.has_pending_reclamation())
-                )
-            }
-            "row" => {
-                let coordinator = &manager.coordinator;
-                let hisparse = coordinator.hisparse.as_ref().unwrap();
-                join(
-                    hisparse.resident_group_ids.iter().map(|&g| {
-                        join(
-                            coordinator.single_type_managers[g].get_residency_row(args[1], 0),
-                            ",",
-                        )
-                    }),
-                    "|",
-                )
-            }
-            "hstate" => {
-                let host = manager.host_block_pool().unwrap();
-                format!(
-                    "{} {:.6}",
-                    join(host.free_block_queue.get_all_free_blocks(), ","),
-                    host.get_usage()
-                )
-            }
-            "events_m" => fmt_events(&manager.take_events(), true),
             "getc" => {
                 let (blocks, n, boundary, diverged) =
                     manager.get_computed_blocks_for_connector(&reqs[args[1]], None);
@@ -518,7 +299,7 @@ fn replay(name: &str, text: &str) -> Result<usize, String> {
                     manager.usage()
                 )
             }
-            "events" => fmt_events(&manager.take_events(), false),
+            "events" => fmt_events(&manager.take_events()),
             "reset" => if manager.reset_prefix_cache() {
                 "True"
             } else {

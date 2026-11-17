@@ -26,7 +26,6 @@ steps:
     - vllm/v1/engine/rust_core_io.py
     - vllm/config/scheduler.py
     - vllm/v1/core/
-    - vllm/v1/hisparse/
     - vllm/v1/structured_output/
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/distributed/kv_transfer/kv_connector/v1/mooncake_store/
@@ -76,7 +75,6 @@ steps:
     - rust-toolchain.toml
     - vllm/config/scheduler.py
     - vllm/v1/core/
-    - vllm/v1/hisparse/
     - vllm/v1/kv_cache_interface.py
     - vllm/v1/request.py
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/

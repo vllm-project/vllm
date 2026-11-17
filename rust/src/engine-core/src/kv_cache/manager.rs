@@ -3,8 +3,6 @@
 
 //! `kv_cache_manager.py`: `KVCacheBlocks` and `KVCacheManager`.
 
-use std::borrow::Cow;
-
 use indexmap::IndexMap;
 
 use super::block::{BlockId, KvCacheBlockCopy, trim_null_head};
@@ -82,19 +80,11 @@ impl KvCacheBlocks {
     }
 
     /// Get block_ids of unhashed blocks from KVCacheBlocks instance.
-    ///
-    /// `group_pool` maps a group to its block pool (see
-    /// [`KvCacheManager::group_pool`]).
-    pub fn get_unhashed_block_ids_all_groups<'a>(
-        &self,
-        group_pool: impl Fn(usize) -> &'a BlockPool,
-    ) -> Vec<Vec<BlockId>> {
+    pub fn get_unhashed_block_ids_all_groups(&self, pool: &BlockPool) -> Vec<Vec<BlockId>> {
         // Skip padding blocks.
         self.blocks
             .iter()
-            .enumerate()
-            .map(|(group_id, group)| {
-                let pool = group_pool(group_id);
+            .map(|group| {
                 trim_null_head(group)
                     .iter()
                     .copied()
@@ -209,7 +199,6 @@ pub struct KvCacheManager {
     /// cannot end a chunk at a junction the manager would refuse.
     pub mamba_shared_prefix_checkpoint: bool,
     pub num_kv_cache_groups: usize,
-    pub retained_hit_group_ids: Vec<usize>,
     pub kv_cache_config: KvCacheConfig,
     /// Watermark: minimum number of KV cache blocks to keep free when
     /// admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -240,9 +229,6 @@ impl KvCacheManager {
             true,
         )?;
         coordinator.block_pool.use_int_block_hashes = config.kv_events_use_int_block_hashes;
-        if let Some(host) = &mut coordinator.host_pool {
-            host.use_int_block_hashes = config.kv_events_use_int_block_hashes;
-        }
         // Multi-module MTP is excluded because ``cache_blocks`` then hands the
         // manager ``num_computed - num_reprefillable`` rather than the chunk end.
         let mamba_shared_prefix_checkpoint = config.enable_mamba_shared_prefix_checkpoint
@@ -256,12 +242,6 @@ impl KvCacheManager {
                 }
             }
         }
-        let retained_hit_group_ids = coordinator
-            .single_type_managers
-            .iter()
-            .filter(|m| m.manager_type.retains_longer_hit())
-            .map(|m| m.kv_cache_group_id)
-            .collect();
         assert!(config.watermark >= 0.0, "watermark must be non-negative");
         let watermark_blocks = (config.watermark * kv_cache_config.num_blocks as f64) as usize;
         let kv_cache_event_metadata = kv_cache_config
@@ -279,7 +259,6 @@ impl KvCacheManager {
             coordinator,
             mamba_shared_prefix_checkpoint,
             num_kv_cache_groups: kv_cache_config.kv_cache_groups.len(),
-            retained_hit_group_ids,
             kv_cache_config,
             watermark_blocks,
             kv_cache_event_metadata,
@@ -290,63 +269,20 @@ impl KvCacheManager {
         &self.coordinator.block_pool
     }
 
-    /// The (device) block pool, for callers (KV connectors) that touch and
-    /// free blocks directly. Blocks from [`Self::pop_blocks_for_free`] go back
-    /// through [`Self::free_blocks`], which also routes HiSparse host blocks.
+    /// The block pool, for callers (KV connectors) that touch and free
+    /// blocks directly.
     pub fn block_pool_mut(&mut self) -> &mut BlockPool {
         &mut self.coordinator.block_pool
     }
 
-    /// The private block pool of the HiSparse host source group, if any.
-    pub fn host_block_pool(&self) -> Option<&BlockPool> {
-        self.coordinator.host_pool.as_ref()
-    }
-
-    pub fn host_block_pool_mut(&mut self) -> Option<&mut BlockPool> {
-        self.coordinator.host_pool.as_mut()
-    }
-
-    /// The block pool of a group (`manager.block_pool`): the HiSparse host
-    /// pool for the host source group, else the device pool.
-    pub fn group_pool(&self, group_id: usize) -> &BlockPool {
-        self.coordinator.group_pool(group_id)
-    }
-
     /// Free blocks returned by [`Self::pop_blocks_for_free`] (or retained
-    /// copy endpoints), routing HiSparse host blocks
-    /// ([`HOST_BLOCK_FLAG`](super::HOST_BLOCK_FLAG)) to the host pool as
-    /// Python's `block_pool.free_blocks` does.
+    /// copy endpoints).
     pub fn free_blocks(
         &mut self,
         ordered_blocks: impl IntoIterator<Item = BlockId>,
         evict_first: bool,
     ) {
-        self.coordinator.free_mixed_blocks(ordered_blocks, evict_first, false);
-    }
-
-    /// [`Self::free_blocks`] as `free_blocks` of the HiSparse host pool if
-    /// `host`: that pool's blocks are freed first.
-    pub fn free_blocks_from(
-        &mut self,
-        ordered_blocks: impl IntoIterator<Item = BlockId>,
-        evict_first: bool,
-        host: bool,
-    ) {
-        self.coordinator.free_mixed_blocks(ordered_blocks, evict_first, host);
-    }
-
-    /// Run `f` on the device pool, or on the HiSparse host pool if `host`,
-    /// for callers that operate on a pool directly; then forwards the host
-    /// pool's events and handles the blocks the device pool reused, as
-    /// Python's pools do as part of the operation.
-    pub fn with_pool_mut<R>(&mut self, host: bool, f: impl FnOnce(&mut BlockPool) -> R) -> R {
-        let out = match (&mut self.coordinator.host_pool, host) {
-            (Some(pool), true) => f(pool),
-            _ => f(&mut self.coordinator.block_pool),
-        };
-        self.coordinator.forward_host_events();
-        self.coordinator.sync_hisparse();
-        out
+        self.coordinator.block_pool.free_blocks(ordered_blocks, evict_first);
     }
 
     pub fn empty_kv_cache_blocks(&self) -> KvCacheBlocks {
@@ -607,23 +543,11 @@ impl KvCacheManager {
         // Python distinguishes the shared empty `KVCacheBlocks` by identity; it is
         // the only all-empty instance the manager hands out, so all-empty
         // input is treated as that instance.
-        let mut new_computed_block_list: Cow<'_, [Vec<BlockId>]> = Cow::Borrowed(&[]);
-        let mut is_empty_singleton = true;
-        if let Some(blocks) = new_computed_blocks
-            && !blocks.is_empty()
-        {
-            is_empty_singleton = false;
-            new_computed_block_list = Cow::Borrowed(&blocks.blocks);
-            if !self.retained_hit_group_ids.is_empty() {
-                // Only retain the prefix covered by the local and external hits.
-                let reused = num_new_computed_tokens + num_external_computed_tokens;
-                let groups = new_computed_block_list.to_mut();
-                for &group_id in &self.retained_hit_group_ids {
-                    let block_size = self.coordinator.single_type_managers[group_id].block_size;
-                    groups[group_id].truncate(cdiv(reused, block_size));
-                }
-            }
-        }
+        let new_computed_block_list: &[Vec<BlockId>] = match new_computed_blocks {
+            Some(blocks) if !blocks.is_empty() => &blocks.blocks,
+            _ => &[],
+        };
+        let is_empty_singleton = new_computed_block_list.is_empty();
 
         // The number of computed tokens is the number of computed tokens plus
         // the new prefix caching hits
@@ -649,7 +573,7 @@ impl KvCacheManager {
             let num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
                 request_id,
                 full_num_tokens,
-                &new_computed_block_list,
+                new_computed_block_list,
                 num_encoder_tokens,
                 total_computed_tokens,
                 num_local_computed_tokens,
@@ -685,7 +609,7 @@ impl KvCacheManager {
         let num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id,
             num_tokens_need_slot,
-            &new_computed_block_list,
+            new_computed_block_list,
             num_encoder_tokens,
             num_local_computed_tokens + num_external_computed_tokens,
             num_local_computed_tokens,
@@ -709,7 +633,7 @@ impl KvCacheManager {
             // avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(
                 request_id,
-                &new_computed_block_list,
+                new_computed_block_list,
                 num_local_computed_tokens,
                 num_external_computed_tokens,
                 skip_zeroing_group_ids,
@@ -744,12 +668,8 @@ impl KvCacheManager {
     /// Free the blocks allocated for the request.
     /// We free the blocks in reverse order so that the tail blocks are evicted
     /// first when caching is enabled.
-    ///
-    /// `finished`: whether the request finished (`request.is_finished()`);
-    /// HiSparse still publishes a finished request's host prefix once its
-    /// in-flight host writes complete.
-    pub fn free(&mut self, request_id: &str, finished: bool) {
-        self.coordinator.free(request_id, finished);
+    pub fn free(&mut self, request_id: &str) {
+        self.coordinator.free(request_id);
     }
 
     /// Remove the blocks that are no longer needed from `blocks` and replace
@@ -771,10 +691,8 @@ impl KvCacheManager {
     /// returning them to the block pool. The caller must eventually free
     /// them with [`Self::free_blocks`] in reverse order (so that tail blocks
     /// are evicted first).
-    ///
-    /// `finished`: see [`Self::free`].
-    pub fn pop_blocks_for_free(&mut self, request_id: &str, finished: bool) -> Vec<BlockId> {
-        self.coordinator.pop_blocks_for_free(request_id, finished)
+    pub fn pop_blocks_for_free(&mut self, request_id: &str) -> Vec<BlockId> {
+        self.coordinator.pop_blocks_for_free(request_id)
     }
 
     /// Evict blocks from the prefix cache by their block IDs.
@@ -862,14 +780,13 @@ impl KvCacheManager {
     /// Estimate the number of tokens cached by the request.
     pub fn estimate_cached_tokens(&self, request: &impl KvRequest) -> usize {
         let mut cached_tokens: Option<usize> = None;
-        for (group_id, (group, blocks)) in self
+        let pool = &self.coordinator.block_pool;
+        for (group, blocks) in self
             .kv_cache_config
             .kv_cache_groups
             .iter()
             .zip(self.coordinator.get_blocks(request.request_id()))
-            .enumerate()
         {
-            let pool = self.coordinator.group_pool(group_id);
             if !group.kv_cache_spec.prefix_cacheable() {
                 continue;
             }
