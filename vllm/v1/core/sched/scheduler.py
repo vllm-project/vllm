@@ -431,9 +431,7 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
-        # PP microbatch cap (see `_pp_microbatch_cap`); 0 disables it. Unchunked
-        # prefills or media, and Mamba-aligned prefills, need chunks the cap can't
-        # promise.
+        # 0 disables the PP microbatch cap, which needs freely chunkable prefills.
         self.pp_microbatch_min_tokens = (
             self.scheduler_config.pp_microbatch_min_tokens
             if self.scheduler_config.enable_chunked_prefill
@@ -441,7 +439,7 @@ class Scheduler(SchedulerInterface):
             and not self.need_mamba_block_aligned_split
             else 0
         )
-        # Waiting requests' prefix-cache hits for the cap, by num_tokens.
+        # (num_tokens, prefix-cache hit) of waiting requests, for the cap.
         self._pp_cached_tokens = weakref.WeakKeyDictionary[Request, tuple[int, int]]()
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
@@ -724,13 +722,10 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def _pp_microbatch_cap(self, budget: int) -> int:
-        """Token budget: ceil(outstanding uncached prefill tokens / pp_size), at
-        least `pp_microbatch_min_tokens`, plus the running decodes' tokens,
-        clamped to `budget`. A small backlog runs as small chunks that fill every
-        stage; a backlog of pp_size x budget or more gets the full budget."""
+        """Step token budget: the uncached prefill backlog / pp_size (at least
+        `pp_microbatch_min_tokens`) plus running decode tokens."""
         waiting_queues = (self.kv_holding_waiting, self.waiting, self.async_kv_waiting)
-        # Running prefills not yet fully scheduled (a last chunk in flight adds
-        # nothing). Parked async KV loads are counted with the waiting requests.
+        # Parked async KV loads are counted with the waiting requests.
         prefill = sum(
             max(0, request.num_tokens - request.num_computed_tokens)
             for request in self._inflight_prefills
@@ -747,13 +742,10 @@ class Scheduler(SchedulerInterface):
         for i, request in enumerate(itertools.chain(*waiting_queues)):
             if prefill >= budget * self.pp_size:
                 break  # cap already at the full budget
-            # Prefix-cache lookup only for the first pp_size requests; later ones
-            # count in full, which errs toward the full budget. num_tokens: a
-            # preempted request's hit can cover its generated tokens too.
+            # Look up hits only for the first pp_size; later ones count in full.
             hit = self._pp_num_cached_tokens(request) if i < self.pp_size else 0
             prefill += max(0, request.num_tokens - hit)
-        # At least num_prefill_lookahead, so the MTP lookahead reservation still
-        # leaves a token to schedule.
+        # num_prefill_lookahead: the MTP lookahead reservation must leave a token.
         cap = max(
             self.pp_microbatch_min_tokens,
             self.num_prefill_lookahead,
@@ -762,9 +754,7 @@ class Scheduler(SchedulerInterface):
         return min(budget, cap + decode)
 
     def _pp_num_cached_tokens(self, request: Request) -> int:
-        """`get_num_cached_tokens`, remembered while a request waits, since the
-        lookup walks all its block hashes. It is redone if num_tokens changes
-        (preemption); a stale hit only skews the cap's chunk sizes."""
+        """`get_num_cached_tokens`, kept until num_tokens changes (preemption)."""
         cached = self._pp_cached_tokens.get(request)
         if cached is None or cached[0] != request.num_tokens:
             num_cached = self.kv_cache_manager.get_num_cached_tokens(request)
@@ -3451,9 +3441,7 @@ class Scheduler(SchedulerInterface):
         )
 
     def has_decode_awaiting_cadence(self) -> bool:
-        """PP+async: whether a running request still needs a decode step but is
-        not yet eligible (`next_decode_eligible_step`). Only then do empty steps
-        help, by advancing `current_step`."""
+        """Whether a running request still needs a decode but awaits the cadence."""
         return any(
             self.current_step < r.next_decode_eligible_step
             and not self._needs_no_more_steps(r)

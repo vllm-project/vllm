@@ -841,13 +841,7 @@ def test_resumable_request_handoff():
 
 @pytest.mark.parametrize("max_tokens", [1, 4])
 def test_decode_awaiting_cadence(max_tokens: int):
-    """PP+async: empty steps only help a request that still needs a decode step.
-
-    The engine stops scheduling empty steps when this is False, so they don't fill
-    the batch queue behind prefill-only requests (max_tokens=1) and block new
-    arrivals; a request that will decode keeps the empty steps that advance the
-    cadence.
-    """
+    """Only a request that will decode waits on the PP cadence."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4)
     (request,) = create_requests(
         num_requests=1, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
@@ -957,9 +951,8 @@ def test_pp_microbatch_cap_default_on(monkeypatch: pytest.MonkeyPatch):
     "unchunked", [None, "enable_chunked_prefill", "disable_chunked_mm_input"]
 )
 def test_pp_microbatch_cap_progress(unchunked: str | None):
-    """No zero-token steps: the cap stays at least the MTP prefill lookahead (which
-    trims chunks near the prompt end), and is skipped when prompts or media can't
-    be chunked (a media item larger than the cap would otherwise never fit)."""
+    """No zero-token steps; the cap is skipped when prompts or media can't be
+    chunked."""
     kwargs = {unchunked: unchunked == "disable_chunked_mm_input"} if unchunked else {}
     scheduler = _create_async_pp_scheduler(
         num_spec=0, pp_size=4, num_blocks=1000, **kwargs

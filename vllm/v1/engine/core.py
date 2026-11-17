@@ -236,9 +236,7 @@ class EngineCore:
             self.batch_queue = deque(maxlen=self.batch_queue_size)
         # Step awaiting prior outputs before sampling (see step_with_batch_queue).
         self.deferred_step: tuple[SchedulerOutput, Future[Any]] | None = None
-        # The admission changes in step_with_batch_queue apply only with PP and
-        # without DP (its busy loop runs a blocking dummy batch on every step that
-        # executes nothing); other batch-queue users keep the upstream loop.
+        # Not with DP, whose busy loop runs a dummy batch on idle steps.
         parallel_config = vllm_config.parallel_config
         self._pp_admission = (
             self.batch_queue_size > 1
@@ -754,9 +752,8 @@ class EngineCore:
     def _handle_inputs_while_waiting(
         self, future: Future[Any], stop_on_add: bool = False
     ) -> bool:
-        """Handle new inputs until the future's output is ready. Returns True if
-        `stop_on_add` and it returned early because a request was added. No-op
-        without an input queue."""
+        """Handle inputs until the output is ready. Returns True if `stop_on_add`
+        and a request was added first."""
         return False
 
     def post_step(self, model_executed: bool) -> None:
@@ -835,10 +832,7 @@ class EngineCore:
                     model_executed
                     or (
                         self.scheduler.has_requests()
-                        # PP: empty steps advance the decode cadence. When no
-                        # request is waiting on it they would only fill the queue,
-                        # so wait on the oldest batch below instead, returning
-                        # early if a request arrives.
+                        # PP: otherwise empty steps only fill the queue.
                         and (
                             not self._pp_admission
                             or self.scheduler.has_decode_awaiting_cadence()
@@ -861,8 +855,7 @@ class EngineCore:
             and len(batch_queue) < self.batch_queue_size
             and self._handle_inputs_while_waiting(batch_queue[-1][0], stop_on_add=True)
         ):
-            # A request arrived while waiting on the oldest batch (up to a full PP
-            # pass); return to schedule it into the free slot.
+            # Schedule the newly arrived request into the free slot.
             return None, model_executed
 
         # Block until the next result is available.
@@ -1987,8 +1980,7 @@ class EngineCoreProc(EngineCore):
     def _handle_inputs_while_waiting(
         self, future: Future[Any], stop_on_add: bool = False
     ) -> bool:
-        """Handle new requests and aborts as they arrive while waiting for a
-        step's model output."""
+        """Handle new requests and aborts while waiting for a step's output."""
         poll: Callable[[], bool] | None = getattr(future, "poll", None)
         wait_briefly: Callable[[Sized, float], None] | None = getattr(
             future, "wait_briefly", None

@@ -208,9 +208,8 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     def has_decode_awaiting_cadence(self) -> bool:
-        """Whether an empty step could still help a running request (by advancing
-        the PP+async decode cadence). Defaults to True, which keeps scheduling empty
-        steps whenever there are requests."""
+        """Whether an empty step would advance the PP decode cadence for a running
+        request."""
         return True
 
     @property
