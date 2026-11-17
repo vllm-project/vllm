@@ -43,6 +43,9 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         return runner.block_tables.input_block_tables[group_id]
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
+        qsa_prefill_logits_width,
+        use_gvr2_topk,
+        warmup_gvr2_topk,
         warmup_qsa_mqa_paged_decode,
     )
 
@@ -58,6 +61,33 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         max_num_batched_tokens=runner.max_num_tokens,
     )
     logger.info("Warmed up Qwen4Exp QSA decode kernels: %s.", profiles)
+
+    # Pre-compile gvr_2 so neither CUDA-graph capture nor serving compiles it.
+    block_topk = indexer.token_topk // indexer.compress_ratio
+    decode_width = (
+        block_table_for(indexer.compressed_key_cache.prefix).shape[1] * k_cache.shape[1]
+    )
+    prefill_width = qsa_prefill_logits_width(
+        worker.vllm_config.model_config.max_model_len,
+        indexer.compress_ratio,
+        decode_width,
+    )
+    # prefill_width is float4-aligned, so this only checks platform and k.
+    if use_gvr2_topk(indexer.topk_backend, block_topk, prefill_width):
+        warmup_gvr2_topk(
+            indexer.topk_backend,
+            block_topk,
+            decode_width=decode_width,
+            max_decode_rows=runner.max_num_reqs * runner.decode_query_len,
+            prefill_width=prefill_width,
+        )
+        logger.info(
+            "Warmed up Qwen4Exp QSA gvr_2 top-k (k=%d, decode width %d, "
+            "prefill width %d).",
+            block_topk,
+            decode_width,
+            prefill_width,
+        )
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa import (
         warmup_qsa_sparse_paged_attention,

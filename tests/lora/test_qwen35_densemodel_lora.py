@@ -89,7 +89,7 @@ def _run_text_lora_sample(
     outputs = llm.generate(
         input_templates,
         vllm.SamplingParams(temperature=0, max_tokens=512),
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path),
+        lora_request=LoRARequest("qwen35-text", lora_id, lora_path),
     )
 
     generated_texts: list[str] = []
@@ -131,7 +131,7 @@ def _run_vl_lora_sample(
         prompts,
         vllm.SamplingParams(temperature=0, max_tokens=128),
         lora_request=(
-            LoRARequest(str(lora_id), lora_id, lora_path)
+            LoRARequest("qwen35-vl", lora_id, lora_path)
             if lora_path is not None
             else None
         ),
