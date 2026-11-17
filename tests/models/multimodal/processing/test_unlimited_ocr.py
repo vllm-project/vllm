@@ -24,6 +24,15 @@ def test_v2_output_window_reaches_runtime_config(overrides, expected):
     assert config.hf_text_config.rswa_window == expected
 
 
+def test_v2_rejects_extensible_kv_cache_at_config_time():
+    from vllm.engine.arg_utils import EngineArgs
+
+    with pytest.raises(ValueError, match="does not support the extensible KV cache"):
+        EngineArgs(
+            model="baidu/Unlimited-OCR-2", enable_extensible_kv_cache=True
+        ).create_engine_config()
+
+
 def test_v2_dummy_layers_preserve_dash_configuration():
     """Generic initialization and schema tests must shrink per-layer DASH metadata."""
     from functools import partial
