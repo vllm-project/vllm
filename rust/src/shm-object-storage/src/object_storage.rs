@@ -21,12 +21,10 @@ type HmacSha256 = Hmac<Sha256>;
 /// Number of payload bytes reserved for the reader reference-count flag.
 const FLAG_BYTES: usize = 4;
 
-/// Why a `put` could not cache the item; the sender cache turns every variant
-/// into an inline fallback, mirroring the Python sender.
+/// Why a `put` could not store the object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PutFailure {
-    /// The key already exists in the storage (concurrent duplicate insert).
-    /// Benign: no warning is logged for this case.
+    /// The key already exists in the storage.
     #[error("key already exists in the storage")]
     DuplicateKey,
     /// Serialized object size exceeds `max_object_size`.
@@ -45,24 +43,18 @@ struct CachedEntry {
     monotonic_id: u32,
 }
 
-/// A single-writer, multiple-reader object storage system built on top of a
-/// shared memory ring buffer. Provides key-value storage with automatic memory
-/// management and cross-process serialization support.
+/// Writer-side key-value store of serialized objects in the shm ring buffer.
 ///
-/// This storage system follows a FIFO (First-In-First-Out) eviction policy
-/// where the oldest objects are automatically freed when memory runs low.
-/// Memory is reclaimed based on reader reference counting - objects are only
-/// freed when all readers have finished accessing them.
+/// Each object is one chunk whose payload is `[4-byte reader_count][bytes]`.
+/// Readers increment `reader_count` after each read. The writer counts the
+/// handles it hands out per chunk in `writer_flag`, and a chunk is reclaimable
+/// once `reader_count >= writer_flag * n_readers`, i.e. every reader has read
+/// every handout. Reclamation is FIFO and only happens when a `put` runs out
+/// of space, so one unread chunk at the head blocks all later ones.
 ///
-/// Handle Signatures:
-/// - Handles are signed with an HMAC of (key, address, monotonic_id),
-///   keyed by a random secret stored at the start of the shared memory
-/// - The writer signs the handles it issues and rejects stale or forged
-///   handles supplied by requests
-/// - Readers verify the signature in get/touch before reading shared memory
-///
-/// Memory Layout per Object:
-/// `[4-byte reference_count][0x01 format marker][msgpack body]`
+/// Handles are `(address, monotonic_id)` signed with an HMAC over
+/// `(key, address, monotonic_id)`, keyed by the secret at the start of the
+/// segment; readers verify the signature before reading.
 pub struct SingleWriterShmObjectStorage {
     ring_buffer: SingleWriterShmRingBuffer,
     max_object_size: usize,
@@ -167,8 +159,8 @@ impl SingleWriterShmObjectStorage {
 
     /// Touch an existing cached item.
     ///
-    /// For writers (`ShmObjectStoreSenderCache`): protect the item from
-    /// eviction until get_cached or release_touches.
+    /// Protect the item from eviction until `get_cached` or
+    /// `release_touches`.
     pub fn touch(&mut self, key: &str) {
         let Some(entry) = self.key_index.get(key) else {
             return;
@@ -180,10 +172,6 @@ impl SingleWriterShmObjectStorage {
     ///
     /// Attempts to free `2 * max_object_size` bytes using FIFO order when the
     /// ring buffer runs out of space during a put() operation.
-    ///
-    /// `body` is the serialized object payload as produced by
-    /// `super::serde::serialize_mm_item`: the 0x01 format marker followed by
-    /// the msgpack body.
     pub fn put(&mut self, key: &str, body: &[u8]) -> std::result::Result<(usize, u32), PutFailure> {
         match self.put_with::<std::convert::Infallible>(key, body.len(), |buf| {
             buf.copy_from_slice(body);

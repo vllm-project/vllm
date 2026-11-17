@@ -31,43 +31,23 @@ const CHUNK_ALIGN: usize = 8;
 const _: () =
     assert!(DATA_OFFSET.is_multiple_of(CHUNK_ALIGN) && MD_SIZE.is_multiple_of(CHUNK_ALIGN));
 
-/// Marker for `MemoryError: "Not enough space in the data buffer"`.
+/// The ring buffer has no contiguous space for the chunk; free chunks with
+/// [`SingleWriterShmRingBuffer::free_buf`] and retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("not enough space in the data buffer, try freeing up space first")]
 pub struct NotEnoughSpace;
 
-/// A single-writer, multiple-reader ring buffer implementation using shared
-/// memory. This struct provides a thread-safe ring buffer where one process
-/// can write data while multiple processes/threads can read from it.
+/// Writer of a shared-memory ring buffer read by other processes.
 ///
-/// Architecture:
-/// - Uses shared memory for cross-process communication
-/// - Maintains metadata for each allocated buffer chunk in the writer process
-/// - Supports custom "is_free_fn" functions to determine when buffers can be
-///   reused
-/// - Each buffer chunk contains: `[4-byte id][4-byte size][actual_data]`
+/// Segment layout: `[32-byte handle-signing secret][chunks...]`, where each
+/// chunk is `[4-byte monotonic_id][4-byte chunk_size][payload]` with
+/// little-endian signed integers, as the Python readers decode them.
 ///
-/// Key Concepts:
-/// - monotonic_id_start/end: Track the range of active buffer IDs
-/// - data_buffer_start/end: Track the physical memory range in use
-/// - Automatic wraparound when reaching buffer end
-/// - Lazy garbage collection based on is_free_fn checks
-///
-/// Thread Safety:
-/// - Single writer: Only one process/thread should write (allocate_buf)
-/// - Multiple readers: Multiple processes/threads can read (access_buf)
-/// - Reader synchronization handled by is_free_fn callback
-/// - Writer handles garbage collection (free_buf) based on reader feedback
-///
-/// Shared Memory Layout:
-/// `[32-byte handle-signing secret][ring buffer chunks...]`
-///
-/// Memory Layout per Buffer Chunk:
-/// `[4-byte monotonic_id][4-byte chunk_size][actual_data...]`
-/// ^metadata_start                         ^data_start
-///
-/// The monotonic_id ensures data integrity - readers can verify they're
-/// accessing the correct data even after buffer wraparound or reuse.
+/// Chunks are allocated in FIFO order at increasing logical addresses; the
+/// physical position is `logical % data_buffer_size`, and a chunk that does
+/// not fit before the end starts the next lap. Allocation bookkeeping lives
+/// only in this process: readers locate a chunk by the address in its handle
+/// and check its `monotonic_id` to detect reuse after wraparound.
 pub struct SingleWriterShmRingBuffer {
     /// POSIX shm object name without the leading slash, as reported to the
     /// Python engine via `VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME`.
@@ -268,8 +248,8 @@ impl SingleWriterShmRingBuffer {
     /// Free buffers in FIFO order while `is_free_fn` accepts them, reclaiming
     /// at most `nbytes` worth of chunks.
     ///
-    /// This is a no-op in shared memory, but we need to keep track of the
-    /// metadata.
+    /// Freeing only updates this process's bookkeeping; shared memory is not
+    /// touched.
     ///
     /// If freed memory spreads across the end and start of the ring buffer,
     /// the actual freed memory will be in two segments. In this case there
