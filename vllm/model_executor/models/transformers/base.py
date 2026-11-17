@@ -70,10 +70,11 @@ from vllm.model_executor.models.transformers.fusers.attention import (
     VLLM_ATTN_IMPL,
     VLLM_MLA_ATTN_IMPL,
 )
-from vllm.model_executor.models.transformers.fusers.ssd import VLLM_LINEAR_ATTN_IMPL
 from vllm.model_executor.models.transformers.linear_attention import (
     VLLM_SSD_ATTR,
     TransformersMamba2SSM,
+    attach_ssd,
+    kernelize_linear_attention,
 )
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
@@ -99,6 +100,7 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.offloader import BaseOffloader, NoopOffloader, get_offloader
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -220,6 +222,8 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
+        if any(isinstance(f, SSDFuser) for _, f in self.attention_fusers.values()):
+            kernelize_linear_attention(self.model, current_platform.device_type)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -235,13 +239,12 @@ class Base(
     def _patch_config(self):
         """Patch the config to ensure that the model is created correctly:
 
-        - Sets the attention and linear attention implementations to "vllm" so the
-        instances from `_create_attention_instances` are used
+        - Sets the attention implementation to "vllm" so the instances from
+        `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
         """
         self.text_config._attn_implementation = VLLM_ATTN_IMPL
-        self.text_config._linear_attn_implementation = VLLM_LINEAR_ATTN_IMPL
         self.config.dtype = torch.get_default_dtype()
 
     @contextmanager
@@ -729,7 +732,7 @@ class Base(
                 ssd = TransformersMamba2SSM(
                     attn_module, self.vllm_config, prefix=f"{i}.{VLLM_SSD_ATTR}"
                 )
-                setattr(attn_module, VLLM_SSD_ATTR, ssd)
+                attach_ssd(attn_module, ssd)
                 continue
 
             # `[i]` is the whole-model config unless the checkpoint is

@@ -252,6 +252,80 @@ class TransformersMamba2SSM(Mamba2SSM):
         return self.mixer.conv1d.bias
 
 
+def attach_ssd(mixer: nn.Module, ssd: TransformersMamba2SSM) -> None:
+    """Attach `ssd` to `mixer` and to its `conv1d`, from which the replacements
+    of `ssd_forward` and `causal_conv1d_forward` find it."""
+    setattr(mixer, VLLM_SSD_ATTR, ssd)
+    # Weak and not a submodule, so `ssd` stays a child of the mixer only
+    mixer.conv1d.__dict__[VLLM_SSD_ATTR] = weakref.ref(ssd)
+
+
+class VllmCausalConv1dForward(nn.Module):
+    """Replaces Transformers' `causal_conv1d_forward` for a vLLM-served mixer."""
+
+    def forward(
+        self,
+        conv1d: nn.Module,
+        hidden_states: torch.Tensor,
+        cache: object,
+        layer_idx: int,
+        activation: str | None = None,
+        state_idx: int = 0,
+        **kwargs,
+    ) -> torch.Tensor:
+        ssd: Mamba2SSM = conv1d.__dict__[VLLM_SSD_ATTR]()
+        # [batch=1, dim, num_tokens] -> [num_tokens, dim] and back
+        return ssd.forward_conv(hidden_states[0].T).T[None]
+
+
+class VllmSSDForward(nn.Module):
+    """Replaces Transformers' `ssd_forward` for a vLLM-served mixer."""
+
+    def forward(
+        self,
+        module: nn.Module,
+        hidden_states: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        dt: torch.Tensor,
+        recurrent_state: torch.Tensor | None,
+        cache: object,
+        **kwargs,
+    ) -> torch.Tensor:
+        ssd: Mamba2SSM = getattr(module, VLLM_SSD_ATTR)
+        # [batch=1, num_tokens, dim] -> [num_tokens, dim] and back
+        return ssd.forward_scan(hidden_states[0], B[0], C[0], dt[0])[None]
+
+
+@dataclass(frozen=True)
+class _InProcessRepository:
+    """A `kernels` repository whose layer is a class in this process."""
+
+    layer: type[nn.Module]
+
+    def load(self) -> type[nn.Module]:
+        return self.layer
+
+
+CAUSAL_CONV1D_FORWARD = "causal_conv1d_forward"
+SSD_FORWARD = "ssd_forward"
+
+
+def kernelize_linear_attention(model: nn.Module, device_type: str) -> None:
+    """Replace the conv and scan of `model`'s linear attention layers with vLLM's,
+    using the `kernels` mapping of Transformers' kernelizable functions."""
+    from kernels import Mode, kernelize, use_kernel_mapping
+
+    mapping = {
+        CAUSAL_CONV1D_FORWARD: {
+            device_type: _InProcessRepository(VllmCausalConv1dForward)
+        },
+        SSD_FORWARD: {device_type: _InProcessRepository(VllmSSDForward)},
+    }
+    with use_kernel_mapping(mapping, inherit_mapping=False):
+        kernelize(model, mode=Mode.INFERENCE, device=device_type)
+
+
 class LinearAttentionMixin(HasInnerState, SupportsMambaPrefixCaching):
     """State interfaces for models whose linear attention layers are all SSD.
 
