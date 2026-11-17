@@ -97,7 +97,7 @@ def test_producer_refuses_to_start_without_a_trustworthy_width(reports, match):
 
 def test_byte_budget_uses_the_largest_embedding_and_ignores_empty_ranks():
     config = create_ec_vllm_config(ec_role="ec_consumer")
-    config.scheduler_config.encoder_cache_size_gb = 2.0
+    config.scheduler_config.encoder_cache_bytes = 2 << 30
     reports = [
         {"image": (8192, 2), "audio": (2048, 2)},
         {},
@@ -108,13 +108,13 @@ def test_byte_budget_uses_the_largest_embedding_and_ignores_empty_ranks():
 
 def test_byte_budget_keeps_the_max_when_ranks_disagree_on_width():
     config = create_ec_vllm_config(ec_role="ec_consumer")
-    config.scheduler_config.encoder_cache_size_gb = 1.0
+    config.scheduler_config.encoder_cache_bytes = 1 << 30
     reports = [{"image": (8192, 2)}, {"image": (4096, 4)}]
     assert eow.measure_encoder_output_widths(config, lambda fn: reports) == 16384
 
 
 def test_byte_budget_without_a_local_encoder_is_rejected():
     config = create_ec_vllm_config(ec_role="ec_consumer")
-    config.scheduler_config.encoder_cache_size_gb = 1.0
+    config.scheduler_config.encoder_cache_bytes = 1 << 30
     with pytest.raises(ValueError, match="local encoder tower"):
         eow.measure_encoder_output_widths(config, lambda fn: [{}, {}])

@@ -398,6 +398,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_batched_tokens",
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
+                "encoder_cache_bytes",
                 "safetensors_prefetch_block_size",
                 "max_num_queued_tokens",
             }
@@ -719,7 +720,7 @@ class EngineArgs:
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
     encoder_cache_size: int | None = None
-    encoder_cache_size_gb: float | None = None
+    encoder_cache_bytes: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
@@ -1834,8 +1835,8 @@ class EngineArgs:
             "--encoder-cache-size", **scheduler_kwargs["encoder_cache_size"]
         )
         scheduler_group.add_argument(
-            "--encoder-cache-size-gb",
-            **scheduler_kwargs["encoder_cache_size_gb"],
+            "--encoder-cache-bytes",
+            **scheduler_kwargs["encoder_cache_bytes"],
         )
         scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
@@ -2735,7 +2736,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             encoder_cache_size=self.encoder_cache_size,
-            encoder_cache_size_gb=self.encoder_cache_size_gb,
+            encoder_cache_bytes=self.encoder_cache_bytes,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,

@@ -545,16 +545,19 @@ def test_encoder_cache_size_rejects_non_positive_values():
         _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size=0)
 
 
-@pytest.mark.parametrize("gib", [0, -1, float("nan"), float("inf")])
-def test_encoder_cache_size_gb_rejects_non_positive_values(gib):
-    with pytest.raises(ValueError, match="finite"):
-        _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size_gb=gib)
+@pytest.mark.parametrize("nbytes", [0, -1])
+def test_encoder_cache_bytes_rejects_non_positive_values(nbytes):
+    with pytest.raises(ValueError, match="positive"):
+        _scheduler_config(max_num_batched_tokens=16384, encoder_cache_bytes=nbytes)
 
 
-def test_encoder_cache_size_gb_accepts_a_fraction_and_excludes_the_token_budget():
-    config = _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size_gb=0.5)
+def test_encoder_cache_bytes_accepts_two_gib_and_excludes_the_token_budget():
+    two_gib = 2 << 30  # CLI: --encoder-cache-bytes 2G
+    config = _scheduler_config(
+        max_num_batched_tokens=16384, encoder_cache_bytes=two_gib
+    )
     assert config.encoder_cache_size is None
-    assert config.encoder_cache_size_gb == 0.5
+    assert config.encoder_cache_bytes == two_gib
 
 
 def test_encoder_cache_budgets_are_mutually_exclusive():
@@ -562,21 +565,23 @@ def test_encoder_cache_budgets_are_mutually_exclusive():
         _scheduler_config(
             max_num_batched_tokens=16384,
             encoder_cache_size=1024,
-            encoder_cache_size_gb=1,
+            encoder_cache_bytes=1 << 30,
         )
 
 
 def test_byte_budget_resolves_to_the_design_example_and_floors():
     from vllm.v1.core.encoder_cache_manager import resolve_encoder_cache_token_capacity
 
-    # 2 GiB, width 16384, bf16: 32768 bytes per embedding -> 65536 slots.
+    # 2G, width 16384, bf16: 32768 bytes per embedding -> 65536 slots.
     assert (
-        resolve_encoder_cache_token_capacity(2, 16384 * 2, max_tokens_per_mm_item=1024)
+        resolve_encoder_cache_token_capacity(
+            2 << 30, 16384 * 2, max_tokens_per_mm_item=1024
+        )
         == 65536
     )
     # 1 GiB is not divisible by 1000 bytes.
     assert (
-        resolve_encoder_cache_token_capacity(1, 1000, max_tokens_per_mm_item=1)
+        resolve_encoder_cache_token_capacity(1 << 30, 1000, max_tokens_per_mm_item=1)
         == (1 << 30) // 1000
     )
 
@@ -585,18 +590,24 @@ def test_byte_budget_rejects_an_item_it_cannot_hold():
     from vllm.v1.core.encoder_cache_manager import resolve_encoder_cache_token_capacity
 
     with pytest.raises(ValueError, match="cannot hold"):
-        resolve_encoder_cache_token_capacity(0.5, 32768, max_tokens_per_mm_item=20000)
+        resolve_encoder_cache_token_capacity(
+            1 << 29, 32768, max_tokens_per_mm_item=20000
+        )
 
 
 def test_byte_budget_does_not_grow_to_fit_an_item():
-    config = _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size_gb=2)
+    config = _scheduler_config(
+        max_num_batched_tokens=16384, encoder_cache_bytes=2 << 30
+    )
     config.encoder_cache_size = 1000
     with pytest.raises(ValueError, match="cannot hold"):
         compute_mm_encoder_budget(config, {"image": 2048})
 
 
 def test_resolved_byte_budget_keeps_the_compute_budget():
-    config = _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size_gb=2)
+    config = _scheduler_config(
+        max_num_batched_tokens=16384, encoder_cache_bytes=2 << 30
+    )
     config.encoder_cache_size = 65536
     compute_budget, cache_size = compute_mm_encoder_budget(config, {"image": 2048})
     assert compute_budget == 16384

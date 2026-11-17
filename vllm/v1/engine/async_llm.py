@@ -200,7 +200,6 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
             renderer=renderer,
         )
-        self.input_processor.apply_resolved_encoder_cache_size()
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None

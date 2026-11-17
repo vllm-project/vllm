@@ -66,22 +66,10 @@ class InputProcessor:
 
         self.supports_mm_inputs = model_config.supports_multimodal_inputs
         self.mm_encoder_cache_size = 0
-        self._encoder_cache_byte_budget_pending = False
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
-            scheduler_config = vllm_config.scheduler_config
-            # The GiB budget becomes a token capacity only after the engine
-            # measures the encoder layout. Reject multimodal inputs until then.
-            self._encoder_cache_byte_budget_pending = (
-                scheduler_config.encoder_cache_size_gb is not None
-                and scheduler_config.encoder_cache_size is None
-            )
             mm_budget = MultiModalBudget(vllm_config, mm_registry)
-            self.mm_encoder_cache_size = (
-                0
-                if self._encoder_cache_byte_budget_pending
-                else mm_budget.encoder_cache_size
-            )
+            self.mm_encoder_cache_size = mm_budget.encoder_cache_size
             self.skip_prompt_length_check = (
                 mm_budget.processor.info.skip_prompt_length_check
             )
@@ -93,19 +81,6 @@ class InputProcessor:
         self.process_inputs_async = make_async(
             self.process_inputs, executor=self.renderer._executor
         )
-
-    def apply_resolved_encoder_cache_size(self) -> None:
-        """Use the token capacity the engine resolved from a GiB budget."""
-        if not self._encoder_cache_byte_budget_pending:
-            return
-        size = self.scheduler_config.encoder_cache_size
-        if size is None:
-            raise RuntimeError(
-                "--encoder-cache-size-gb was set, but startup did not resolve "
-                "an encoder-cache token capacity."
-            )
-        self.mm_encoder_cache_size = size
-        self._encoder_cache_byte_budget_pending = False
 
     @property
     def tokenizer(self) -> TokenizerLike | None:

@@ -2182,11 +2182,6 @@ class EngineCoreProc(EngineCore):
             supports_prompt_logprobs=(
                 not self.vllm_config.cache_config.kv_sharing_fast_prefill
             ),
-            encoder_cache_size=(
-                scheduler_config.encoder_cache_size
-                if scheduler_config.encoder_cache_size_gb is not None
-                else None
-            ),
         )
 
     def process_input_sockets(

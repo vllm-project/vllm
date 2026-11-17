@@ -96,7 +96,7 @@ def measure_encoder_output_widths(
     """Measure encoder output layouts once, before the KV cache is allocated.
 
     EC producers still record per-modality widths for transfer sizing. When
-    `--encoder-cache-size-gb` is set, the same dummy encode also supplies the
+    `--encoder-cache-bytes` is set, the same dummy encode also supplies the
     bytes per embedding used to resolve the token capacity. Ranks without an
     encoder contribute nothing. Widths must agree across ranks that do measure;
     byte cost uses the maximum so one token budget covers every layout.
@@ -111,7 +111,7 @@ def measure_encoder_output_widths(
     """
     ec_config = vllm_config.ec_transfer_config
     need_widths = ec_config is not None and ec_config.is_ec_producer
-    need_bytes = vllm_config.scheduler_config.encoder_cache_size_gb is not None
+    need_bytes = vllm_config.scheduler_config.encoder_cache_bytes is not None
     if not need_widths and not need_bytes:
         return None
     reports = [layouts for layouts in collective_rpc(_measure_on_worker) if layouts]
@@ -122,7 +122,7 @@ def measure_encoder_output_widths(
                 "model encoded no dummy multimodal input."
             )
         raise ValueError(
-            "--encoder-cache-size-gb requires a local encoder tower so startup "
+            "--encoder-cache-bytes requires a local encoder tower so startup "
             "can measure the encoder output layout. This process encoded no "
             "dummy multimodal input. Instances that drop the encoder tower and "
             "have no local layout measurement are not supported."

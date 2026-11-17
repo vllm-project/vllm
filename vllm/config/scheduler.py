@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
@@ -191,28 +190,29 @@ class SchedulerConfig:
     Raised to the largest single item if that would not fit. Costs GPU memory at
     the model's multimodal embedding width, which is taken from the KV cache.
 
-    Resolved in `__post_init__` when `encoder_cache_size_gb` is unset; never None
-    afterwards in that mode. When `encoder_cache_size_gb` is set, this stays
+    Resolved in `__post_init__` when `encoder_cache_bytes` is unset; never None
+    afterwards in that mode. When `encoder_cache_bytes` is set, this stays
     None until startup measures the encoder output layout and writes the
     equivalent token capacity."""
 
-    encoder_cache_size_gb: float | None = None
-    """GPU encoder-cache budget in GiB (1024³ bytes) of logical encoder-embedding
-    payload, or None to keep the token budget in `encoder_cache_size`.
+    encoder_cache_bytes: int | None = None
+    """GPU encoder-cache budget in bytes, or None to keep `encoder_cache_size`.
 
-    Resolved at startup to `encoder_cache_size` using the measured encoder
-    output width and dtype (`bytes_per_embedding = width * element_size`, the
-    maximum across modalities and ranks). Mutually exclusive with
-    `encoder_cache_size`. The budget is not raised to fit an oversized item:
-    startup fails if one legal multimodal item does not fit. It limits logical
-    cached embedding bytes, not allocator reserved memory or encoder activations.
+    Accepts the same suffixes as other byte arguments: `2G` is 2 GiB
+    (2 × 1024³). Resolved at startup to `encoder_cache_size` using the
+    measured encoder output width and dtype
+    (`bytes_per_embedding = width * element_size`, the maximum across
+    modalities and ranks). Mutually exclusive with `encoder_cache_size`.
+    The budget is not raised to fit an oversized item: startup fails if one
+    legal multimodal item does not fit. It limits logical cached embedding
+    bytes, not allocator reserved memory or encoder activations.
 
-    Example: `vllm serve MODEL --encoder-cache-size-gb 2`."""
+    Example: `vllm serve MODEL --encoder-cache-bytes 2G`."""
 
     encoder_cache_bytes_per_embedding: int | None = None
     """Bytes of one cached encoder embedding after startup measurement.
 
-    Set only when `encoder_cache_size_gb` is resolved. Profiling reserves this
+    Set only when `encoder_cache_bytes` is resolved. Profiling reserves this
     many bytes per cache slot so a narrower dummy modality cannot under-reserve
     the budget. Not a user-facing knob."""
 
@@ -366,7 +366,7 @@ class SchedulerConfig:
             "is_multimodal_model",
             "max_num_encoder_input_tokens",
             "encoder_cache_size",
-            "encoder_cache_size_gb",
+            "encoder_cache_bytes",
             "encoder_cache_bytes_per_embedding",
             "policy",
             "disable_chunked_mm_input",
@@ -398,21 +398,16 @@ class SchedulerConfig:
             )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        if self.encoder_cache_size_gb is not None:
+        if self.encoder_cache_bytes is not None:
             if self.encoder_cache_size is not None:
                 raise ValueError(
-                    "--encoder-cache-size and --encoder-cache-size-gb are "
+                    "--encoder-cache-size and --encoder-cache-bytes are "
                     "mutually exclusive."
                 )
-            if (
-                isinstance(self.encoder_cache_size_gb, bool)
-                or not isinstance(self.encoder_cache_size_gb, (int, float))
-                or not math.isfinite(self.encoder_cache_size_gb)
-                or self.encoder_cache_size_gb <= 0
-            ):
+            if self.encoder_cache_bytes <= 0:
                 raise ValueError(
-                    "encoder_cache_size_gb must be a finite number of GiB "
-                    f"greater than 0, got {self.encoder_cache_size_gb!r}."
+                    "encoder_cache_bytes must be a positive byte count, "
+                    f"got {self.encoder_cache_bytes!r}."
                 )
         elif self.encoder_cache_size is None:
             self.encoder_cache_size = self.max_num_batched_tokens

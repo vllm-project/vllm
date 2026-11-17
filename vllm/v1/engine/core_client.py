@@ -902,22 +902,6 @@ class MPClient(EngineCoreClient):
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
-        # Byte-budget startup resolves the token capacity after workers start.
-        # Every routable engine must be able to honor the frontend's limit.
-        if response.encoder_cache_size is not None:
-            scheduler_config = vllm_config.scheduler_config
-            current = scheduler_config.encoder_cache_size
-            resolved = response.encoder_cache_size
-            if current is not None and current != resolved:
-                logger.warning(
-                    "Encoder cache capacities differ across engines (%d vs %d). "
-                    "Using %d embeddings so every engine can admit the request.",
-                    current,
-                    resolved,
-                    min(current, resolved),
-                )
-                resolved = min(current, resolved)
-            scheduler_config.encoder_cache_size = resolved
 
         # Setup KV cache config with initialization state from
         # engine core process. Sum num_gpu_blocks from all engines in DP case.

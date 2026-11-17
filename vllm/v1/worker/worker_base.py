@@ -124,7 +124,7 @@ class WorkerBase:
     def update_encoder_cache_budget(
         self, encoder_cache_size: int, bytes_per_embedding: int
     ) -> None:
-        """Install the token capacity resolved from `--encoder-cache-size-gb`.
+        """Install the token capacity resolved from `--encoder-cache-bytes`.
 
         Workers are spawned before the encoder layout is measured. Profiling
         and the scheduler must see the same capacity.

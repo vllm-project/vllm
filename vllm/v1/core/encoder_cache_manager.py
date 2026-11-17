@@ -370,19 +370,19 @@ def compute_mm_encoder_budget(
         scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
     )
     largest_modality = max(mm_max_toks_per_item, key=lambda m: mm_max_toks_per_item[m])
-    if scheduler_config.encoder_cache_size_gb is not None:
+    if scheduler_config.encoder_cache_bytes is not None:
         # Unresolved until startup measurement. Callers that run before then
-        # (frontend input setup) must not treat this as the real capacity.
+        # must not treat this as the real capacity.
         requested_cache_size = scheduler_config.encoder_cache_size
         if requested_cache_size is None:
             return encoder_compute_budget, max_tokens_per_mm_item
         if requested_cache_size < max_tokens_per_mm_item:
             raise ValueError(
                 "Encoder cache budget of "
-                f"{scheduler_config.encoder_cache_size_gb} GiB resolves to "
+                f"{scheduler_config.encoder_cache_bytes} bytes resolves to "
                 f"{requested_cache_size} embeddings, which cannot hold one "
                 f"{largest_modality} item ({max_tokens_per_mm_item} embeddings). "
-                "Increase --encoder-cache-size-gb or tighten the multimodal "
+                "Increase --encoder-cache-bytes or tighten the multimodal "
                 "input limits."
             )
         return encoder_compute_budget, requested_cache_size
@@ -404,11 +404,11 @@ def compute_mm_encoder_budget(
 
 
 def resolve_encoder_cache_token_capacity(
-    encoder_cache_size_gb: float,
+    encoder_cache_bytes: int,
     bytes_per_embedding: int,
     max_tokens_per_mm_item: int,
 ) -> int:
-    """Convert a GiB encoder-cache budget into an embedding-token capacity.
+    """Convert a byte encoder-cache budget into an embedding-token capacity.
 
     Uses floor division so the logical payload never exceeds the budget.
     `max_tokens_per_mm_item` is the largest single item the model can legally
@@ -416,17 +416,15 @@ def resolve_encoder_cache_token_capacity(
     """
     if bytes_per_embedding <= 0:
         raise ValueError(
-            "Cannot resolve --encoder-cache-size-gb without a positive "
+            "Cannot resolve --encoder-cache-bytes without a positive "
             f"measured encoder-embedding size, got {bytes_per_embedding}."
         )
-    capacity_bytes = int(encoder_cache_size_gb * (1 << 30))
-    effective_cache_size = capacity_bytes // bytes_per_embedding
+    effective_cache_size = encoder_cache_bytes // bytes_per_embedding
     if effective_cache_size < 1 or effective_cache_size < max_tokens_per_mm_item:
         raise ValueError(
-            f"--encoder-cache-size-gb {encoder_cache_size_gb} is "
-            f"{capacity_bytes} bytes. At {bytes_per_embedding} bytes per "
-            f"embedding that is {effective_cache_size} embeddings, which "
-            f"cannot hold the largest multimodal item "
+            f"--encoder-cache-bytes {encoder_cache_bytes} is "
+            f"{effective_cache_size} embeddings at {bytes_per_embedding} bytes "
+            "each, which cannot hold the largest multimodal item "
             f"({max_tokens_per_mm_item} embeddings). Increase the budget or "
             "tighten --limit-mm-per-prompt / media size limits."
         )
