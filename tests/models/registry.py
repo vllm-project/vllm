@@ -391,9 +391,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "vllm-project/tiny-random-LlamaForCausalLM",
         },
     ),
-    "LLaMAForCausalLM": _HfExamplesInfo(
-        "decapoda-research/llama-7b-hf", is_available_online=False
-    ),
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
