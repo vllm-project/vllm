@@ -1293,6 +1293,7 @@ class Glm5NextForCausalLM(
 
     def build_specialized_decode(self) -> None:
         """Called by the vendor's `Glm5NextModelState` once the weights are loaded."""
+        assert self.specialized_decode_config is not None
         self.specialized_decode = _specialized_decode_cls()(
             self.model, self.specialized_decode_config
         )
