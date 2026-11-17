@@ -10,7 +10,7 @@ Compares:
 
 Metrics:
   - latency      (median of N iters, CUDA events)
-  - memory delta (torch.cuda.max_memory_allocated during call)
+  - memory delta (torch.accelerator.max_memory_allocated during call)
   - numerical    (max rel err vs fp64 ground truth)
 
 Usage:
@@ -84,7 +84,7 @@ def _bench(fn, iters: int, warmup: int = 20) -> float:
     """Median latency in ms."""
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     times = []
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -92,7 +92,7 @@ def _bench(fn, iters: int, warmup: int = 20) -> float:
         start.record()
         fn()
         end.record()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         times.append(start.elapsed_time(end))
     times.sort()
     return times[len(times) // 2]
@@ -100,12 +100,12 @@ def _bench(fn, iters: int, warmup: int = 20) -> float:
 
 def _peak_memory_delta_bytes(fn) -> int:
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    base = torch.cuda.memory_allocated()
+    torch.accelerator.empty_cache()
+    torch.accelerator.reset_peak_memory_stats()
+    base = torch.accelerator.memory_allocated()
     fn()
-    torch.cuda.synchronize()
-    peak = torch.cuda.max_memory_allocated()
+    torch.accelerator.synchronize()
+    peak = torch.accelerator.max_memory_allocated()
     return max(0, peak - base)
 
 
@@ -156,7 +156,7 @@ def run_benchmark(n, H, r, temp, iters, check_accuracy=True):
 
     # torch.compile warmup (compile once, then measure)
     compiled_call()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     lat_compiled = _bench(compiled_call, iters)
     mem_compiled = _peak_memory_delta_bytes(compiled_call)
     err_compiled = (
@@ -174,7 +174,7 @@ def run_benchmark(n, H, r, temp, iters, check_accuracy=True):
 
         # Compile-trigger call once (TileLang JIT caches by static dims).
         fused_call()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         lat_fused = _bench(fused_call, iters)
         mem_fused = _peak_memory_delta_bytes(fused_call)
         err_fused = _max_rel_err(out_fused, ref) if check_accuracy else float("nan")
