@@ -83,7 +83,10 @@ def test_explicit_dbo_schedule_is_kept():
 def _config(tp=4, dp=1, ep=False, spec=False, mm=False, enc_dec=False):
     return SimpleNamespace(
         model_config=SimpleNamespace(
-            is_multimodal_model=mm, is_encoder_decoder=enc_dec, is_hybrid=False
+            is_multimodal_model=mm,
+            supports_multimodal_inputs=mm,
+            is_encoder_decoder=enc_dec,
+            is_hybrid=False,
         ),
         parallel_config=_parallel_config(tp, dp, ep),
         lora_config=None,

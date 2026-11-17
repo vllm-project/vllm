@@ -23,7 +23,10 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.mxfp4_mla.read import load_mxfp4_rows
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import (
@@ -1426,40 +1429,47 @@ def rocm_aiter_sparse_attn_indexer(
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
-        # Profiling early-exit: reserve memory to account for runtime
-        # allocations. Must be in the real impl, not the fake impl —
-        # torch.compile calls the fake impl under FakeTensor mode where
-        # workspace manager operations on the locked real workspace
-        # would corrupt PyTorch's dispatch state.
-        workspace_manager = current_workspace_manager()
+        # Once the workspace is locked, no metadata means a DBO microbatch
+        # wholly in the DP padding, not the profile run: there is nothing
+        # to simulate, and reserving would grow its locked workspace.
+        if not (
+            is_workspace_manager_initialized()
+            and current_workspace_manager().is_locked()
+        ):
+            # Profiling early-exit: reserve memory to account for runtime
+            # allocations. Must be in the real impl, not the fake impl —
+            # torch.compile calls the fake impl under FakeTensor mode where
+            # workspace manager operations on the locked real workspace
+            # would corrupt PyTorch's dispatch state.
+            workspace_manager = current_workspace_manager()
 
-        # Prefill k_fp8 and k_scale buffers, used by
-        # rocm_aiter_sparse_attn_indexer's prefill path
-        workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), FP8_DTYPE),
-            ((total_seq_lens, 4), torch.uint8),
-        )
-
-        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
-            _decode_logits_workspace(decode_rows, decode_max_model_len)
-        else:
+            # Prefill k_fp8 and k_scale buffers, used by
+            # rocm_aiter_sparse_attn_indexer's prefill path
             workspace_manager.get_simultaneous(
-                (
-                    (q_fp8.shape[1], decode_rows, decode_max_model_len),
-                    torch.float32,
-                ),
+                ((total_seq_lens, head_dim), FP8_DTYPE),
+                ((total_seq_lens, 4), torch.uint8),
             )
-        # Transient logits tensor peak memory, produced by
-        # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
-        # (decode). Prefill logits are bounded by
-        # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
-        # split_indexer_prefill_chunks; decode logits are smaller.
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
-        )
+
+            # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+            decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+            if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
+                _decode_logits_workspace(decode_rows, decode_max_model_len)
+            else:
+                workspace_manager.get_simultaneous(
+                    (
+                        (q_fp8.shape[1], decode_rows, decode_max_model_len),
+                        torch.float32,
+                    ),
+                )
+            # Transient logits tensor peak memory, produced by
+            # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
+            # (decode). Prefill logits are bounded by
+            # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
+            # split_indexer_prefill_chunks; decode logits are smaller.
+            max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            _ = torch.empty(
+                max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            )
 
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
