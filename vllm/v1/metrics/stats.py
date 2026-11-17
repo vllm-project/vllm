@@ -236,8 +236,8 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    iteration_details: SchedulerIterationDetails | None = None
-    # Iterations timed on the GPU whose timing has completed.
+    # Timed iterations to report: from the output worker (GPU time) or from
+    # EngineCore (wall clock).
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

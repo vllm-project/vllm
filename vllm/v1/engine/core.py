@@ -673,7 +673,7 @@ class EngineCore:
         self, iteration_details: SchedulerIterationDetails
     ) -> SchedulerStats:
         stats = self.scheduler.make_stats() or SchedulerStats()
-        stats.iteration_details = iteration_details
+        stats.iteration_records = [iteration_details]
         return stats
 
     def _attach_iteration_details(
@@ -689,7 +689,8 @@ class EngineCore:
         if eco.scheduler_stats is None:
             eco.scheduler_stats = self._make_iteration_details_stats(iteration_details)
         else:
-            eco.scheduler_stats.iteration_details = iteration_details
+            # Replaces the worker output's (empty) list rather than extending it.
+            eco.scheduler_stats.iteration_records = [iteration_details]
 
     def _attach_weight_version(self, outputs: dict[int, EngineCoreOutputs]) -> None:
         # Weight versions change only while generation is paused.

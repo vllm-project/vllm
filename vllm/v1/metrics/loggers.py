@@ -190,8 +190,6 @@ class LoggingStatLogger(StatLoggerBase):
     ) -> None:
         for record in scheduler_stats.iteration_records:
             self._log_iteration(record, scheduler_stats, engine_idx)
-        if (details := scheduler_stats.iteration_details) is not None:
-            self._log_iteration(details, scheduler_stats, engine_idx)
 
     def _log_iteration(
         self,

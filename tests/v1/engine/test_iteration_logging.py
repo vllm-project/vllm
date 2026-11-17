@@ -13,10 +13,8 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 
 
 class FakeEngineCore:
-    def _make_iteration_details_stats(
-        self, iteration_details: SchedulerIterationDetails
-    ) -> SchedulerStats:
-        return SchedulerStats(iteration_details=iteration_details)
+    scheduler = SimpleNamespace(make_stats=SchedulerStats)
+    _make_iteration_details_stats = EngineCore._make_iteration_details_stats
 
 
 def make_iteration_details() -> SchedulerIterationDetails:
@@ -69,8 +67,12 @@ def test_capture_iteration_details_fills_elapsed_time():
 
 def test_attach_iteration_details_uses_existing_output():
     iteration_details = make_iteration_details()
+    # The scheduler hands the stats the worker output's list, which is shared.
+    worker_records: list[SchedulerIterationDetails] = []
     outputs = {
-        2: EngineCoreOutputs(scheduler_stats=SchedulerStats()),
+        2: EngineCoreOutputs(
+            scheduler_stats=SchedulerStats(iteration_records=worker_records)
+        ),
         1: EngineCoreOutputs(scheduler_stats=SchedulerStats()),
     }
 
@@ -78,9 +80,10 @@ def test_attach_iteration_details_uses_existing_output():
 
     assert 0 not in outputs
     assert outputs[2].scheduler_stats is not None
-    assert outputs[2].scheduler_stats.iteration_details == iteration_details
+    assert outputs[2].scheduler_stats.iteration_records == [iteration_details]
+    assert worker_records == []
     assert outputs[1].scheduler_stats is not None
-    assert outputs[1].scheduler_stats.iteration_details is None
+    assert outputs[1].scheduler_stats.iteration_records == []
 
 
 def test_attach_iteration_details_falls_back_to_client_zero_without_outputs():
@@ -91,7 +94,7 @@ def test_attach_iteration_details_falls_back_to_client_zero_without_outputs():
 
     assert set(outputs) == {0}
     assert outputs[0].scheduler_stats is not None
-    assert outputs[0].scheduler_stats.iteration_details == iteration_details
+    assert outputs[0].scheduler_stats.iteration_records == [iteration_details]
 
 
 def test_capture_iteration_details_defers_to_gpu_timing():
