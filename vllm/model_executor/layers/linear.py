@@ -421,7 +421,7 @@ class ReplicatedLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         if is_tensor := isinstance(x, torch.Tensor):
-            orig_shape, x = x.shape, x.view(-1, x.shape[-1])
+            orig_shape, x = x.shape, x.reshape(-1, x.shape[-1])
         output = self.quant_method.apply(self, x, bias)
         if is_tensor:
             output = output.view(*orig_shape[:-1], -1)
@@ -628,7 +628,7 @@ class ColumnParallelLinear(LinearBase):
 
         # Matrix multiply.
         if is_tensor := isinstance(input_, torch.Tensor):
-            orig_shape, input_ = input_.shape, input_.view(-1, input_.shape[-1])
+            orig_shape, input_ = input_.shape, input_.reshape(-1, input_.shape[-1])
         output_parallel = self.quant_method.apply(self, input_, bias)
         if is_tensor:
             output_parallel = output_parallel.view(*orig_shape[:-1], -1)
@@ -1869,7 +1869,7 @@ class RowParallelLinear(LinearBase):
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if is_tensor := isinstance(input_, torch.Tensor):
-            orig_shape, input_ = input_.shape, input_.view(-1, input_.shape[-1])
+            orig_shape, input_ = input_.shape, input_.reshape(-1, input_.shape[-1])
         if self.input_is_parallel:
             input_parallel = input_
         else:
