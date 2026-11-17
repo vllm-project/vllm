@@ -2270,6 +2270,8 @@ class rocm_aiter_ops:
     _MOE_DISPATCH_POLICY: int | None = None
     # `AITER_BF16_FP8_MOE_BOUND` value for BF16 at every token count.
     _ALWAYS_BF16_BOUND = str(2**31 - 1)
+    _BF16_FP8_MOE_BOUND: str | None = None
+    _BF16_FP8_MOE_EXPLICIT_NULL = False
 
     @classmethod
     def set_bf16_fp8_moe_bound(cls) -> None:
@@ -2286,13 +2288,19 @@ class rocm_aiter_ops:
             kMxfp8Dynamic,
         )
 
+        if os.environ.get("AITER_BF16_FP8_MOE_BOUND") != cls._BF16_FP8_MOE_BOUND:
+            # An external override or removal invalidates our recorded requests.
+            cls._BF16_FP8_MOE_BOUND = None
+            cls._BF16_FP8_MOE_EXPLICIT_NULL = False
+
         requested_activation_key, requested = user_activation_override(
             "moe", get_current_vllm_config_or_none()
         )
+        explicit_null = requested and requested_activation_key is None
         if requested_activation_key == kMxfp8Dynamic:
             # MXFP8 activations for every token count.
             bound = "0"
-        elif requested_activation_key is None and requested:
+        elif explicit_null:
             # `activation: null`: BF16 activations for every token count.
             bound = cls._ALWAYS_BF16_BOUND
         elif envs.VLLM_STRICT_QUANT_SCHEME:
@@ -2301,12 +2309,28 @@ class rocm_aiter_ops:
         else:
             # TODO: This silently overrides the model-requested activation key.
             bound = "0"
-        if (
-            os.environ.get("AITER_BF16_FP8_MOE_BOUND") == cls._ALWAYS_BF16_BOUND
-            and bound != cls._ALWAYS_BF16_BOUND
-        ):
-            # Once a layer requested BF16, later layers do not take that back.
-            return
+        previous = cls._BF16_FP8_MOE_BOUND
+        if previous is not None and previous != bound:
+            if envs.VLLM_STRICT_QUANT_SCHEME:
+                raise ValueError(
+                    "AITER_BF16_FP8_MOE_BOUND is process-wide: conflicting BF16 "
+                    "and MXFP8 activation requests cannot be honored with "
+                    "VLLM_STRICT_QUANT_SCHEME=1. Use the same activation scheme "
+                    "for all interleaved AITER MXFP4 MoE layers."
+                )
+            if explicit_null or cls._BF16_FP8_MOE_EXPLICIT_NULL:
+                bound = cls._ALWAYS_BF16_BOUND
+            logger.warning_once(
+                "AITER_BF16_FP8_MOE_BOUND is process-wide: conflicting BF16 and "
+                "MXFP8 activation requests cannot be honored independently. "
+                "Using %s activations for all interleaved AITER MXFP4 MoE layers%s.",
+                "BF16" if bound == cls._ALWAYS_BF16_BOUND else "MXFP8",
+                " because a layer explicitly requested activation: null"
+                if explicit_null or cls._BF16_FP8_MOE_EXPLICIT_NULL
+                else "",
+            )
+        cls._BF16_FP8_MOE_BOUND = bound
+        cls._BF16_FP8_MOE_EXPLICIT_NULL |= explicit_null
         os.environ["AITER_BF16_FP8_MOE_BOUND"] = bound
 
     @classmethod

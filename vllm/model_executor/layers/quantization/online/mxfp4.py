@@ -191,17 +191,18 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(self.mxfp4_backend)
         )
-        if (
-            self.activation_quant_key != kMxfp4Dynamic
-            and self.activation_quant_key != backend_key
-            and not _serves_requested_activation(
-                self.mxfp4_backend, self.activation_quant_key
+        honours_activation = (
+            _serves_requested_activation(
+                self.mxfp4_backend, self.activation_quant_key, self.moe
             )
-        ):
+            if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            else self.activation_quant_key == backend_key
+        )
+        if self.activation_quant_key != kMxfp4Dynamic and not honours_activation:
             raise NotImplementedError(
                 f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
-                f"activation={self.activation_quant_key}; it computes "
-                f"activation={backend_key}."
+                f"activation={self.activation_quant_key} for this layer's "
+                "activation/layout."
             )
 
     def maybe_roundup_sizes(
@@ -272,6 +273,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                     w2_weight_scale=w2_scale,
                     w13_bias=w13_bias,
                     w2_bias=w2_bias,
+                    activation=self.moe.activation,
                     use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
                 )
             )

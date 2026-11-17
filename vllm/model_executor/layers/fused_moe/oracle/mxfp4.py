@@ -515,23 +515,40 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 
 def _serves_requested_activation(
-    backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
+    backend: Mxfp4MoeBackend,
+    requested_activation_key: QuantKey | None,
+    config: FusedMoEConfig,
 ) -> bool:
-    """Whether `backend`, whose own activation key is BF16, can compute with the
-    requested one: the interleaved AITER_MXFP4_BF16 kernels run MXFP8 activations
-    on gfx950 (AITER picks bf16 or fp8 per token count, see
-    `rocm_aiter_ops.set_bf16_fp8_moe_bound`)."""
-    if (
-        backend != Mxfp4MoeBackend.AITER_MXFP4_BF16
-        or requested_activation_key != kMxfp8Dynamic
-        or not current_platform.is_rocm()
-    ):
+    """Whether AITER's layer-specific layout executes the requested activation."""
+    if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16 or not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx950
 
-    # AITER's BF16/MXFP8 activation switch is gated to gfx950:
+    if config.use_mxfp4_w4a4_dsv4:
+        # The separated DSv4 path explicitly overrides AITER's dtype to MXFP4.
+        return on_gfx950() and requested_activation_key == kMxfp4Dynamic
+    if config.activation == MoEActivation.SITU:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # SiTUv2 selects its dtype before the interleaved activation bound:
+        # https://github.com/ROCm/aiter/blob/a0c4b69c146d94e393984bbe553b704e8c89a5e4/aiter/fused_moe.py#L1109-L1121
+        mode = rocm_aiter_ops.get_fused_moe_situv2_activation()
+        activation_keys = {
+            "a16w4": None,
+            "a8w4": kMxfp8Dynamic,
+            "a4w4": kMxfp4Dynamic,
+        }
+        return (
+            mode in activation_keys
+            and requested_activation_key == activation_keys[mode]
+            and (requested_activation_key is None or on_gfx950())
+        )
+
+    # AITER's interleaved BF16/MXFP8 activation switch is gated to gfx950:
     # https://github.com/ROCm/aiter/blob/a0c4b69c146d94e393984bbe553b704e8c89a5e4/aiter/fused_moe.py#L1128-L1132
-    return on_gfx950()
+    return requested_activation_key is None or (
+        requested_activation_key == kMxfp8Dynamic and on_gfx950()
+    )
 
 
 def _user_moe_activation_override() -> QuantKey | None:
@@ -589,7 +606,9 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
 
 
 def _applies_requested_activation(
-    backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
+    backend: Mxfp4MoeBackend,
+    requested_activation_key: QuantKey | None,
+    config: FusedMoEConfig,
 ) -> bool:
     """Whether `backend` quantizes activations to the requested key itself
     rather than to a key of its own."""
@@ -600,16 +619,18 @@ def _applies_requested_activation(
             backend == Mxfp4MoeBackend.HUMMING
             and requested_activation_key == _user_moe_activation_override()
         )
-        or _serves_requested_activation(backend, requested_activation_key)
+        or _serves_requested_activation(backend, requested_activation_key, config)
     )
 
 
 def _warn_on_bf16_fallback(
-    backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
+    backend: Mxfp4MoeBackend,
+    requested_activation_key: QuantKey | None,
+    config: FusedMoEConfig,
 ) -> None:
     if (
         requested_activation_key is not None
-        and not _applies_requested_activation(backend, requested_activation_key)
+        and not _applies_requested_activation(backend, requested_activation_key, config)
         and _backend_activation_key(backend) is None
     ):
         logger.warning_once(
@@ -660,34 +681,52 @@ def _requested_kernel_cls(
 def _filter_by_activation(
     backends: list[Mxfp4MoeBackend],
     requested_activation_key: QuantKey | None,
+    config: FusedMoEConfig,
 ) -> list[Mxfp4MoeBackend]:
-    """Pick variants matching `requested_activation_key`, followed by BF16
-    variants as a higher-precision fallback unless VLLM_STRICT_QUANT_SCHEME
-    forbids it; without one, prefer BF16 if the list has any, else keep the
-    list as-is so explicit non-BF16 picks (e.g. the `_afp8` aliases) still
-    land."""
-    bf16 = [b for b in backends if _backend_activation_key(b) is None]
+    """Prefer matching activations, then actual BF16 fallbacks unless strict."""
+    bf16 = [
+        b
+        for b in backends
+        if _backend_activation_key(b) is None
+        and (
+            b != Mxfp4MoeBackend.AITER_MXFP4_BF16
+            or _serves_requested_activation(b, None, config)
+        )
+    ]
     if requested_activation_key is not None:
         matching = [
             b
             for b in backends
-            if _backend_activation_key(b) == requested_activation_key
-            or _serves_requested_activation(b, requested_activation_key)
+            if (
+                _serves_requested_activation(b, requested_activation_key, config)
+                if b == Mxfp4MoeBackend.AITER_MXFP4_BF16
+                else _backend_activation_key(b) == requested_activation_key
+            )
             or b == Mxfp4MoeBackend.EMULATION
         ]
         if envs.VLLM_STRICT_QUANT_SCHEME:
             bf16 = [
                 b
                 for b in bf16
-                if _applies_requested_activation(b, requested_activation_key)
+                if _applies_requested_activation(b, requested_activation_key, config)
             ]
         return matching + [b for b in bf16 if b not in matching]
-    return bf16 if bf16 else backends
+    if bf16:
+        return bf16
+    if user_activation_override("moe", get_current_vllm_config_or_none()) == (
+        None,
+        True,
+    ):
+        return []
+    if envs.VLLM_STRICT_QUANT_SCHEME:
+        return [b for b in backends if b != Mxfp4MoeBackend.AITER_MXFP4_BF16]
+    return backends
 
 
 def _get_requested_backends(
     runner_backend: MoEBackend,
     requested_activation_key: QuantKey | None,
+    config: FusedMoEConfig,
 ) -> list[Mxfp4MoeBackend]:
     backends = map_mxfp4_backend(runner_backend)
     if runner_backend == "b12x":
@@ -695,13 +734,13 @@ def _get_requested_backends(
             backends = [Mxfp4MoeBackend.B12X_MXFP4_BF16]
             if requested_activation_key is None:
                 return backends
-            return _filter_by_activation(backends, requested_activation_key)
+            return _filter_by_activation(backends, requested_activation_key, config)
         # W4A8 is the high-throughput b12x path and is preferred when the
         # model does not request an activation format. Keep this as backend
         # policy instead of exposing a separate backend name per precision.
         if requested_activation_key is None:
             return backends
-    return _filter_by_activation(backends, requested_activation_key)
+    return _filter_by_activation(backends, requested_activation_key, config)
 
 
 def select_mxfp4_moe_backend(
@@ -733,7 +772,7 @@ def select_mxfp4_moe_backend(
 
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(
-            runner_backend, requested_activation_key
+            runner_backend, requested_activation_key, config
         )
         if activation_format.is_batched:
             requested_backends = [
@@ -742,7 +781,7 @@ def select_mxfp4_moe_backend(
             ]
         if not requested_backends:
             strict = (
-                " (VLLM_STRICT_QUANT_SCHEME=1 forbids running it with BF16 activations)"
+                " (VLLM_STRICT_QUANT_SCHEME=1 forbids activation fallbacks)"
                 if envs.VLLM_STRICT_QUANT_SCHEME
                 else ""
             )
@@ -767,14 +806,16 @@ def select_mxfp4_moe_backend(
             except ValueError as e:
                 last_error = e
             else:
-                _warn_on_bf16_fallback(requested_backend, requested_activation_key)
+                _warn_on_bf16_fallback(
+                    requested_backend, requested_activation_key, config
+                )
                 return selected
         assert last_error is not None
         raise last_error
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _filter_by_activation(
-        _get_priority_backends_for_gpt_oss(), requested_activation_key
+        _get_priority_backends_for_gpt_oss(), requested_activation_key, config
     )
 
     unsupported_reasons: list[tuple[Mxfp4MoeBackend, str | None]] = []
@@ -789,7 +830,7 @@ def select_mxfp4_moe_backend(
         kernel_cls, rejected = oracle.try_backend(backend, activation_key=act_key)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend))
-            _warn_on_bf16_fallback(backend, requested_activation_key)
+            _warn_on_bf16_fallback(backend, requested_activation_key, config)
             return backend, kernel_cls
         unsupported_reasons.extend((backend, reason) for _, reason in rejected)
 
@@ -830,31 +871,50 @@ def select_deepseek_v4_mxfp4_moe_backend(
         return source
 
     activation_format = config.activation_format
+    requested_activation_key, requested = user_activation_override(
+        "moe", get_current_vllm_config_or_none()
+    )
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         if runner_backend == "b12x":
-            requested_backends = _get_requested_backends(runner_backend, None)
+            requested_backends = _get_requested_backends(
+                runner_backend, requested_activation_key, config
+            )
         else:
             # Try every variant of the alias in priority order. Narrowing to
             # the BF16 variant would drop SM100+ W4A8 variants on devices where
             # the BF16 variant is gated to SM90.
             requested_backends = map_mxfp4_backend(runner_backend)
+        if requested:
+            requested_backends = _filter_by_activation(
+                requested_backends, requested_activation_key, config
+            )
+        if not requested_backends:
+            raise ValueError(
+                f"moe_backend={runner_backend!r} does not support "
+                f"activation={requested_activation_key} for this layer's "
+                "activation/layout"
+            )
         if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
             ]
         last_error: Exception | None = None
-        oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None)
+        oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
         for requested_backend in requested_backends:
             try:
                 return oracle.return_or_raise(
                     requested_backend,
                     kernel_classes=_requested_kernel_cls(requested_backend, config),
-                    activation_key=_backend_activation_key(requested_backend),
+                    activation_key=(
+                        requested_activation_key
+                        if requested_backend == Mxfp4MoeBackend.EMULATION
+                        else _backend_activation_key(requested_backend)
+                    ),
                 )
             except ValueError as e:
                 last_error = e
@@ -874,11 +934,21 @@ def select_deepseek_v4_mxfp4_moe_backend(
     else:
         priority_backends = _get_priority_backends()
 
+    if requested:
+        priority_backends = _filter_by_activation(
+            priority_backends, requested_activation_key, config
+        )
+
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
-    oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None)
+    oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
     for backend in priority_backends:
         kernel_cls, _ = oracle.try_backend(
-            backend, activation_key=_backend_activation_key(backend)
+            backend,
+            activation_key=(
+                requested_activation_key
+                if backend == Mxfp4MoeBackend.EMULATION
+                else _backend_activation_key(backend)
+            ),
         )
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend))
@@ -1883,7 +1953,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        rocm_aiter_ops.set_bf16_fp8_moe_bound()
+        if not use_separated_a4w4:
+            rocm_aiter_ops.set_bf16_fp8_moe_bound()
 
         # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
         # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
