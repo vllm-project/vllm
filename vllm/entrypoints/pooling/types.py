@@ -194,7 +194,9 @@ class OfflineInputsContext:
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=(
-                self.chat_template_content_format or default_template_content_format
+                self.chat_template_content_format
+                if self.chat_template_content_format != "auto"
+                else default_template_content_format
             ),
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,

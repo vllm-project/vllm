@@ -742,7 +742,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -753,19 +753,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.saved_chat_template_kwargs, chat_template_kwargs
             )
 
-        given_format = chat_template_content_format or self.chat_template_content_format
+        given_format = (
+            chat_template_content_format
+            if chat_template_content_format != "auto"
+            else self.chat_template_content_format
+        )
         content_format: ChatTemplateContentFormat = "string"
         if chat_template is not None:
-            content_format = (
-                resolve_chat_template_content_format(
-                    chat_template,
-                    tools=None,
-                    given_format=given_format,
-                    tokenizer=tokenizer,
-                    model_config=model_config,
-                )
-                if given_format == "auto"
-                else given_format
+            content_format = resolve_chat_template_content_format(
+                chat_template,
+                tools=None,
+                given_format=given_format,
+                tokenizer=tokenizer,
+                model_config=model_config,
             )
 
         conversation, mm_data, mm_uuids = parse_score_messages(
@@ -1053,6 +1053,10 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
             extra_kwargs.get("chat_template_kwargs"),
             ctx.chat_template_kwargs,
         )
+        if ctx.add_generation_prompt:
+            merged_chat_template_kwargs["add_generation_prompt"] = True
+        if ctx.continue_final_message:
+            merged_chat_template_kwargs["continue_final_message"] = True
         instruction = (
             merged_chat_template_kwargs.get("instruction")
             if merged_chat_template_kwargs
