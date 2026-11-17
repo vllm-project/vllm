@@ -2243,34 +2243,53 @@ def test_null_head_len():
 class _FakeMambaSpec:
     """Minimal Mamba-shaped spec for capacity-validation tests."""
 
-    def __init__(self, page_size_bytes: int = 1_622_016, blocks_per_req: int = 3):
+    def __init__(self, page_size_bytes: int = 1_622_016):
         self.page_size_bytes = page_size_bytes
-        self._bytes = page_size_bytes * blocks_per_req
 
-    def max_memory_usage_bytes(self, vllm_config) -> int:
-        return self._bytes
+
+class _FakeMambaGroup:
+    """Mamba-shaped group matching the KVCacheGroup surface this code uses."""
+
+    def __init__(self, blocks_per_req: int = 3, page_size_bytes: int = 1_622_016):
+        self._blocks = blocks_per_req
+        self._page = page_size_bytes
+        self.kv_cache_specs = {"mamba_layer": _FakeMambaSpec(page_size_bytes)}
+        self.host_resident = False
+
+    def max_allocated_blocks_per_request(self, vllm_config) -> int:
+        return self._blocks
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self._page
+
+
+class _FakeAttentionGroup:
+    def __init__(self):
+        self.kv_cache_specs = {
+            "attn_layer": SimpleNamespace(
+                page_size_bytes=16, max_memory_usage_bytes=lambda cfg: 2656
+            )
+        }
+        self.host_resident = False
+
+    def max_allocated_blocks_per_request(self, vllm_config) -> int:
+        return 166
+
+    @property
+    def page_size_bytes(self) -> int:
+        return 16
 
 
 def _capacity_validation_setup(num_blocks: int, max_num_seqs: int):
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
         model_config=SimpleNamespace(max_model_len=262144),
+        cache_config=SimpleNamespace(resolved_gpu_memory_utilization=0.9),
     )
     kv_cache_config = SimpleNamespace(
         num_blocks=num_blocks,
-        kv_cache_groups=[
-            SimpleNamespace(
-                host_resident=False,
-                kv_cache_spec=_FakeMambaSpec(),
-            ),
-            SimpleNamespace(
-                host_resident=False,
-                kv_cache_spec=SimpleNamespace(
-                    page_size_bytes=16,
-                    max_memory_usage_bytes=lambda cfg: 2656,
-                ),
-            ),
-        ],
+        kv_cache_groups=[_FakeMambaGroup(), _FakeAttentionGroup()],
     )
     return vllm_config, kv_cache_config
 
@@ -2279,7 +2298,11 @@ def test_mamba_block_capacity_raises_when_max_num_seqs_exceeds_blocks():
     vllm_config, kv_cache_config = _capacity_validation_setup(
         num_blocks=227, max_num_seqs=256
     )
-    with pytest.raises(ValueError, match="max_num_seqs \\(256\\).*227.*--max-num-seqs 227"):
+    with pytest.raises(
+        ValueError,
+        match=r"max_num_seqs \(256\).*227.*--max-num-seqs 227 or lower, "
+        r"increase --gpu-memory-utilization",
+    ):
         kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
 
 
@@ -2294,22 +2317,26 @@ def test_mamba_block_capacity_ignores_non_mamba_and_host_groups():
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=256),
         model_config=SimpleNamespace(max_model_len=4096),
+        cache_config=SimpleNamespace(resolved_gpu_memory_utilization=1.0),
     )
+    host_mamba = _FakeMambaGroup()
+    host_mamba.host_resident = True
     kv_cache_config = SimpleNamespace(
         num_blocks=8,
-        kv_cache_groups=[
-            SimpleNamespace(
-                host_resident=False,
-                kv_cache_spec=SimpleNamespace(
-                    page_size_bytes=16,
-                    max_memory_usage_bytes=lambda cfg: 2656,
-                ),
-            ),
-            SimpleNamespace(
-                host_resident=True,
-                kv_cache_spec=_FakeMambaSpec(),
-            ),
-        ],
+        kv_cache_groups=[_FakeAttentionGroup(), host_mamba],
     )
     # No device-resident mamba groups -> no validation error despite tiny pool.
     kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
+
+
+def test_mamba_block_capacity_omits_utilization_hint_at_full_utilization():
+    vllm_config, kv_cache_config = _capacity_validation_setup(
+        num_blocks=227, max_num_seqs=256
+    )
+    vllm_config.cache_config.resolved_gpu_memory_utilization = 1.0
+    with pytest.raises(
+        ValueError,
+        match=r"max_num_seqs \(256\).*--max-num-seqs 227 or lower, reduce",
+    ) as excinfo:
+        kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
+    assert "increase --gpu-memory-utilization" not in str(excinfo.value)

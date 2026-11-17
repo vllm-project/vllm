@@ -1152,27 +1152,34 @@ def _validate_mamba_block_capacity(
         group
         for group in kv_cache_config.kv_cache_groups
         if not group.host_resident
-        and "Mamba" in type(group.kv_cache_spec).__name__
+        and any(
+            "Mamba" in type(spec).__name__
+            for spec in group.kv_cache_specs.values()
+        )
     ]
     if not mamba_groups or max_num_seqs <= num_blocks:
         return
-    per_req_blocks = 0
-    for group in mamba_groups:
-        spec = group.kv_cache_spec
-        per_req_blocks += cdiv(
-            spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes
-        )
+    per_req_blocks = sum(
+        group.max_allocated_blocks_per_request(vllm_config)
+        for group in mamba_groups
+    )
+    # Only suggest raising --gpu-memory-utilization when it can actually be
+    # raised: with the extensible KV cache (CUDA/ROCm default) an unset
+    # value already resolves to 1.0.
+    suggestions = [f"--max-num-seqs {num_blocks}"]
+    if vllm_config.cache_config.resolved_gpu_memory_utilization < 1.0:
+        suggestions.append("increase --gpu-memory-utilization")
+    suggestions.append("reduce --max-model-len")
+    joined = ", or ".join(suggestions)
     raise ValueError(
         f"max_num_seqs ({max_num_seqs}) exceeds the available Mamba cache "
         f"blocks ({num_blocks}). Each decode sequence requires one Mamba "
         f"cache block; at max_model_len="
         f"{vllm_config.model_config.max_model_len:,} a request costs "
         f"{per_req_blocks} Mamba block(s) across {len(mamba_groups)} "
-        f"group(s) (page size {mamba_groups[0].kv_cache_spec.page_size_bytes:,} "
+        f"group(s) (page size {mamba_groups[0].page_size_bytes:,} "
         "bytes; speculative decoding reserves additional blocks per draft "
-        "token). Start with "
-        f"--max-num-seqs {num_blocks} or lower, or increase "
-        "--gpu-memory-utilization / reduce --max-model-len."
+        f"token). Start with {joined}."
     )
 
 
