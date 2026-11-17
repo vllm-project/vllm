@@ -35,8 +35,3 @@ class MxFp6LinearKernel(LinearKernel[MxFp6LinearLayerConfig]):
     priority order,calling `is_supported` and `can_implement` to find the best
     match for the current hardware.
     """
-
-    def __init__(self, config: MxFp6LinearLayerConfig) -> None:
-        assert self.can_implement(config)[0]
-        assert self.is_supported()[0]
-        self.config = config

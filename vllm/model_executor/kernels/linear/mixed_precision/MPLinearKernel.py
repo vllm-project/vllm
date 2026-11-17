@@ -9,6 +9,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.utils import retire_parameter
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 
 from ..base import LinearKernel
@@ -43,6 +44,10 @@ class MPLinearKernel(LinearKernel[MPLinearLayerConfig]):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        if compute_capability is None:
+            capability = current_platform.get_device_capability()
+            if capability is not None:
+                compute_capability = capability.to_int()
         min_capability = cls.get_min_capability()
         if compute_capability is not None and min_capability > compute_capability:
             return False, (

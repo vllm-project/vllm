@@ -114,44 +114,31 @@ class FP8Params(Params):
 
 
 _ParamsT = TypeVar("_ParamsT", bound=Params)
-_ConfigT = TypeVar("_ConfigT")
+_ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
+_LinearConfigT = TypeVar("_LinearConfigT")
 
 
-class LinearKernel(ABC, Generic[_ConfigT]):
-    """Interface shared by every quantized linear kernel, whatever its family
-    (scaled-mm, block-scaled, mixed-precision, NVFP4, MXFP4/6/8).
+class LinearKernel(ABC, Generic[_LinearConfigT]):
+    """Base class of every quantized linear kernel."""
 
-    Lifecycle:
-        1. Kernel selection: is_supported() and can_implement() check compatibility,
-           executed_activation_key() what the kernel does with the activations
-        2. Initialization: __init__() creates kernel instance with config
-        3. Weight loading: process_weights_after_loading() preprocesses weights
-        4. Inference: apply_weights() executes the quantized matmul
-    """
-
-    config: _ConfigT
+    def __init__(self, config: _LinearConfigT) -> None:
+        assert self.can_implement(config)[0]
+        assert self.is_supported()[0]
+        self.config = config
 
     @classmethod
     @abstractmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        """Check if this kernel is supported on the current hardware.
+        """Whether the kernel runs on this device (the current one if
+        `compute_capability` is None), and if not, why."""
+        raise NotImplementedError
 
-        This method checks hardware-level compatibility (e.g., GPU architecture,
-        compute capability, available instructions). It's called during kernel
-        selection to filter out kernels that cannot run on the current device.
-
-        Args:
-            compute_capability: GPU compute capability (e.g., 80 for A100, 90 for H100).
-                               If None, should check the current device.
-
-        Returns:
-            A tuple of (is_supported, reason):
-                - is_supported: True if the kernel can run on this hardware
-                - reason: If not supported, a string explaining why; otherwise None
-
-        """
+    @classmethod
+    @abstractmethod
+    def can_implement(cls, config: _LinearConfigT) -> tuple[bool, str | None]:
+        """Whether the kernel handles `config`, and if not, why."""
         raise NotImplementedError
 
     @classmethod
@@ -164,62 +151,14 @@ class LinearKernel(ABC, Generic[_ConfigT]):
         the fallback."""
         return activation_quant_key
 
-    @classmethod
-    @abstractmethod
-    def can_implement(cls, config: _ConfigT) -> tuple[bool, str | None]:
-        """Check if this kernel can implement the given configuration.
-
-        This method checks configuration-level compatibility (e.g., quantization
-        scheme, group sizes, static vs dynamic quantization). It's called after
-        is_supported() to determine if this kernel can handle the specific
-        quantization configuration.
-
-        Args:
-            config: The kernel configuration to check
-
-        Returns:
-            A tuple of (can_implement, reason):
-                - can_implement: True if this kernel supports the config
-                - reason: If not supported, a string explaining why; otherwise None
-
-        """
-        raise NotImplementedError
-
     def input_quant_key(self) -> QuantKey | None:
-        """The activation quant key this kernel can consume pre-quantized.
-
-        Manual fusion uses this to decide whether to hoist activation
-        quantization out of apply_weights into an upstream fused kernel.
-        Return None when the kernel needs in-kernel quantization (custom
-        padding or swizzling, dynamic scales, etc.). Kernels that return a
-        key must consume the activation via as_quantized_activation.
-        """
+        """The activation quant key the kernel accepts pre-quantized (via
+        `as_quantized_activation`), or None if it quantizes its own input."""
         return None
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Process and transform weights after loading from checkpoint.
-
-        This method is called once after weights are loaded but before inference.
-        Use it to preprocess weights into the format required by your kernel
-        (e.g., reordering, padding, format conversion).
-
-        Modifications should be done in-place using replace_parameter() to ensure
-        the layer's parameters are properly updated.
-
-        Args:
-            layer: The layer module containing the weights to process
-
-        Example:
-            ```python
-            def process_weights_after_loading(self, layer):
-                params = self._get_layer_params(layer)
-                # Reorder weights for better memory access
-                weight_reordered = reorder_weights(params.weight)
-                replace_parameter(layer, params.WEIGHT, weight_reordered)
-            ```
-
-        """
+        """Convert the loaded weights on `layer` in place to the kernel's format."""
         raise NotImplementedError
 
     @abstractmethod
@@ -229,21 +168,7 @@ class LinearKernel(ABC, Generic[_ConfigT]):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Apply the quantized weights to the input tensor.
-
-        This is the main inference method that performs the quantized matrix
-        multiplication. It should handle input quantization (if needed), call
-        the underlying kernel, and apply bias.
-
-        Args:
-            layer: The layer module containing the quantized weights
-            x: Input tensor of shape [..., in_features]
-            bias: Optional bias tensor of shape [out_features]
-
-        Returns:
-            Output tensor of shape [..., out_features]
-
-        """
+        """Run the quantized GEMM."""
         raise NotImplementedError
 
 
@@ -370,20 +295,4 @@ class MMLinearKernel(LinearKernel[_ConfigT], Generic[_ConfigT, _ParamsT]):
         bias: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """Apply the quantized weights to the input tensor.
-
-        This is the main inference method that performs the quantized matrix
-        multiplication. It should handle input quantization (if needed), call
-        the underlying kernel, and apply bias.
-
-        Args:
-            layer: The layer module containing the quantized weights
-            x: Input tensor of shape [..., in_features]
-            bias: Optional bias tensor of shape [out_features]
-            **kwargs: Additional kernel-specific arguments
-
-        Returns:
-            Output tensor of shape [..., out_features]
-
-        """
         raise NotImplementedError

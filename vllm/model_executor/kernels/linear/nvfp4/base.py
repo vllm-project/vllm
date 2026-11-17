@@ -43,11 +43,6 @@ class NvFp4LinearKernel(LinearKernel[NvFp4LinearLayerConfig]):
     match for the current hardware.
     """
 
-    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
-        assert self.can_implement(config)[0]
-        assert self.is_supported()[0]
-        self.config = config
-
     def prepare_input(
         self,
         layer: torch.nn.Module,

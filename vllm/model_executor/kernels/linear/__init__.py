@@ -671,8 +671,6 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
 }
 
-# TODO make all kernels inherit from MMLinearKernel
-# then bound _KernelT only to MMLinearKernel
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
 _LinearKernelT = TypeVar("_LinearKernelT", bound=LinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
@@ -692,15 +690,10 @@ def _first_usable_kernel(
     kernels: list[type[_LinearKernelT]],
     config: Any,
     activation_quant_key: QuantKey | None,
-    supports_quant_scheme: Callable[[type[_LinearKernelT]], str | None] | None = None,
+    extra_check: Callable[[type[_LinearKernelT]], str | None] | None = None,
 ) -> tuple[type[_LinearKernelT] | None, list[str]]:
-    """The first of `kernels`, in priority order, that is enabled, runs on this
-    device, implements `config` and may run `activation_quant_key`.
-
-    Returns:
-        The kernel, or None, and why each kernel before it was passed over.
-
-    """
+    """The first kernel in priority order that is enabled, supported, implements
+    `config` and may run `activation_quant_key`, plus why earlier ones were skipped."""
     failure_reasons = []
     for kernel_cls in kernels:
         if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
@@ -714,9 +707,7 @@ def _first_usable_kernel(
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
-        if supports_quant_scheme is not None and (
-            reason := supports_quant_scheme(kernel_cls)
-        ):
+        if extra_check is not None and (reason := extra_check(kernel_cls)):
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
@@ -1191,7 +1182,7 @@ def init_mxfp4_linear_kernel(
         quantization="mxfp4",
     )
 
-    def supports_quant_scheme(kernel_cls: type[MxFp4LinearKernel]) -> str | None:
+    def check_quant_scheme(kernel_cls: type[MxFp4LinearKernel]) -> str | None:
         if kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
             return None
         return (
@@ -1199,7 +1190,7 @@ def init_mxfp4_linear_kernel(
         )
 
     kernel_cls, failure_reasons = _first_usable_kernel(
-        possible, config, activation_quant_key, supports_quant_scheme
+        possible, config, activation_quant_key, check_quant_scheme
     )
     if kernel_cls is not None:
         logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)

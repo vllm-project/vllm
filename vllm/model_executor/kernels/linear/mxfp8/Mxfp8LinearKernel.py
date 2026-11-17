@@ -33,11 +33,6 @@ class Mxfp8LinearKernel(LinearKernel[Mxfp8LinearLayerConfig]):
     """True if `process_weights_after_loading` only rewrites parameters, so
     weights exported by the weight cache daemon can be used as-is."""
 
-    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
-        assert self.can_implement(c)[0]
-        assert self.is_supported()[0]
-        self.config = c
-
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         """Whether a row's output is independent of the other rows in the batch."""

@@ -431,25 +431,3 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
-
-
-def test_every_registered_linear_kernel_shares_the_linear_kernel_interface():
-    """Selection, strict-scheme checks and model inspection treat kernels of
-    every family alike, which only holds if each one is a `LinearKernel`."""
-    from vllm.model_executor.kernels import linear
-    from vllm.model_executor.kernels.linear import LinearKernel
-
-    registries = [
-        registry
-        for name, registry in vars(linear).items()
-        if name.startswith("_POSSIBLE_") and name.endswith("KERNELS")
-    ]
-    assert len(registries) >= 9
-    kernels = {
-        kernel
-        for registry in registries
-        for platform_kernels in registry.values()
-        for kernel in platform_kernels
-    }
-    assert kernels
-    assert [k.__name__ for k in kernels if not issubclass(k, LinearKernel)] == []

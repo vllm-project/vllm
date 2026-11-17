@@ -37,11 +37,6 @@ class MxFp4LinearKernel(LinearKernel[MxFp4LinearLayerConfig]):
     `can_implement` to find the best match for the current hardware.
     """
 
-    def __init__(self, config: MxFp4LinearLayerConfig) -> None:
-        assert self.can_implement(config)[0]
-        assert self.is_supported()[0]
-        self.config = config
-
     @classmethod
     def _supports_quant_scheme(
         cls,
