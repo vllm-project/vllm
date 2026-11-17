@@ -6,13 +6,15 @@
 the asm kernarg offsets, the code-object metadata and the host packing, so the
 two sides can't disagree."""
 
-import collections
 import ctypes
 import os
 import struct
 from concurrent.futures import Future, ThreadPoolExecutor
 
 RSRC3 = 0x00020000  # buffer resource dword 3: gfx9 raw dword format
+# launches per kernel whose kernarg memory stays alive (HIP copies the
+# arguments at the launch call, or into the graph node at capture: a margin)
+RING = 256
 
 
 class KArgs:
@@ -142,8 +144,24 @@ class Kernel:
         self._img_future: Future = _builds["pool"].submit(build, src, name)
         self.fn: ctypes.c_void_p | None = None
         _builds["pending"].append(self)
-        # recent launches' kernarg memory (bounded: a server launches forever)
-        self._keep: collections.deque = collections.deque(maxlen=4096)
+        # The last RING launches' kernargs (bounded: a server launches
+        # forever), in slots set up once: the values (8 B each), then the
+        # pointer array HIP reads. A launch then creates no Python objects (a
+        # serving step's eager launches would otherwise fill the collector's
+        # old generation with ctypes cells, and its full collections grow to
+        # hundreds of ms).
+        n = len(ka.args)
+        self._fmt = "<" + "".join("Q" if k == "ptr" else "I4x" for _, k in ka.args)
+        self._slot, self._vals = 16 * max(n, 1), 8 * n
+        self._ring = ctypes.create_string_buffer(self._slot * RING)
+        base = ctypes.addressof(self._ring)
+        ptrs = struct.Struct(f"<{n}Q")
+        for i in range(RING):
+            o = base + i * self._slot
+            ptrs.pack_into(
+                self._ring, i * self._slot + self._vals, *range(o, o + self._vals, 8)
+            )
+        self._next = 0
 
     def _load(self) -> None:
         from vllm.models.deepseek_v41.amd.asm.kernels.build import _check, hip
@@ -171,19 +189,17 @@ class Kernel:
 
         if self.fn is None:
             self._load()
-        cells = []
+        args = []
         for name, kind in self.ka.args:
             v = vals[name]
             if kind == "ptr":
-                cells.append(
-                    ctypes.c_uint64(v.data_ptr() if hasattr(v, "data_ptr") else int(v))
-                )
+                args.append(v.data_ptr() if hasattr(v, "data_ptr") else int(v))
             else:
-                cells.append(ctypes.c_uint32(int(v) & 0xFFFFFFFF))
-        params = (ctypes.c_void_p * len(cells))(
-            *[ctypes.cast(ctypes.pointer(x), ctypes.c_void_p) for x in cells]
-        )
-        self._keep.append((cells, params))
+                args.append(int(v) & 0xFFFFFFFF)
+        o = self._next * self._slot
+        self._next = (self._next + 1) % RING
+        struct.pack_into(self._fmt, self._ring, o, *args)
+        params = ctypes.addressof(self._ring) + o + self._vals
         self._check(
             self.h.hipModuleLaunchKernel(
                 self.fn,
