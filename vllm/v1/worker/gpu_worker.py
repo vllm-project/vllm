@@ -1127,6 +1127,9 @@ class Worker(WorkerBase):
             # nearly all the memory warmup may commit: release them, so the
             # sizing steps run beside only the blocks they address.
             kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
+            # Null stale ids past each row's last block, which the shrink unmapped:
+            # some kernels load whole KV tiles (e.g. AITER on gfx950, ROCm/aiter#8033).
+            self.model_runner.block_tables.clear_input_block_tables()
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )
