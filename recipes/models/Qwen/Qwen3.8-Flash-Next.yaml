@@ -20,7 +20,7 @@ meta:
     gb200: verified
     gb300: verified
     mi355x: verified
-    mi325x: verified
+    mi325x: supported
     rtx_pro_6000_4x: verified
     dgx_station_gb300: verified
 
@@ -374,6 +374,39 @@ guide: |
   | TEP8 | 0.965 | 665 / 1831 |
   | TP2 | 0.967 | 801 / 1384 |
   | TP1 | 0.967 | 751 / 1282 |
+
+  ### BF16 on MI325X
+
+  The BF16 variant sets `VLLM_ROCM_USE_AITER=1` and
+  `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`. With AITER on, Gated DeltaNet
+  prefill uses the AITER FlyDSL kernel (`requested=auto`), and the shared expert
+  runs inside the routed-expert MoE kernel.
+
+  The default strategy on an MI325X node is TEP8
+  (`--tensor-parallel-size 8 --enable-expert-parallel`). That command was not
+  run, so MI325X is marked supported rather than verified. What was measured is
+  the TP strategy: plain TP4 with MTP3 on 4× MI325X.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  vllm serve Qwen/Qwen3.8-Flash-Next \
+    --tensor-parallel-size 4 \
+    --max-num-seqs 256 \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  ```
+
+  The fusion runs used `vllm/vllm-openai-rocm:nightly-f5d93296c8ec82b7e7dabdb308d24d43cb1907bf`
+  (vLLM `0.34.0rc1.dev206+gf5d93296c`, AITER 0.1.29) and set
+  `AITER_CUSTOM_AR_DISABLE_LAMPORT=1` in both arms. The AITER on/off sweep used
+  the earlier nightly, vLLM `0.34.0rc1.dev142+g96710245e`. On TP4 with MTP3,
+  AITER raised output throughput 1.9–7.3% from 1K to 252K input. Shared-expert
+  fusion added 1.3–3.7% at 1K and 8K and 0.9–1.4% at 128K. GSM8K 5-shot stayed
+  within one standard error (0.964–0.969).
 
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
