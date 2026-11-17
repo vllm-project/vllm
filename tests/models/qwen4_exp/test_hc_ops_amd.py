@@ -144,9 +144,10 @@ def aiter_enabled(monkeypatch: pytest.MonkeyPatch):
     rocm_aiter_ops.refresh_env_variables()
 
 
-# 1-8 run the two-stage skinny decode kernels, 9 and 64 the Triton chain.
+# Up to the cutoff (4) the op runs the two-stage skinny decode kernels; 5, 8 and
+# 64 run the Triton chain.
 @pytest.mark.parametrize("norm_size", NORM_SIZES)
-@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 9, 64])
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 5, 8, 64])
 def test_hc_two_stage_combine_and_mix(
     aiter_enabled: None, num_tokens: int, norm_size: int
 ) -> None:
@@ -165,7 +166,7 @@ def test_hc_two_stage_combine_and_mix(
     max_tokens = rocm_aiter_ops.hc_two_stage_max_tokens(
         HYPER_HIDDEN_SIZE, DOWN_N, HC, LORA_RANK
     )
-    assert max_tokens >= 8
+    assert max_tokens == rocm_aiter_ops._HC_TWO_STAGE_MAX_TOKENS
     args = (
         residual,
         block_output,
@@ -201,5 +202,5 @@ def test_hc_two_stage_combine_and_mix(
         atol=3e-2,
         rtol=2e-2,
     )
-    if num_tokens in (2, 9):
+    if num_tokens in (2, 5):
         opcheck(op, args)

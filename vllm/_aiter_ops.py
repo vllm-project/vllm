@@ -2859,13 +2859,18 @@ class rocm_aiter_ops:
 
         return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
 
-    @staticmethod
+    # Decode graphs pad to 1, 2, 4 or 8 tokens. On MI355X and MI325X the
+    # two-stage kernels beat the Triton chain up to 4 tokens and lose to it at 8.
+    _HC_TWO_STAGE_MAX_TOKENS = 4
+
+    @classmethod
     def hc_two_stage_max_tokens(
-        hyper_hidden_size: int, down_rows: int, hc_count: int, hc_lowrank: int
+        cls, hyper_hidden_size: int, down_rows: int, hc_count: int, hc_lowrank: int
     ) -> int:
-        """Largest token count the two-stage skinny decode kernels take for
-        this shape, or 0 when they cannot be built for it. Above it, AITER
-        would switch to a tiled path that pads the token count to 64."""
+        """Largest token count to run the two-stage skinny decode kernels at
+        for this shape, or 0 when they cannot be built for it. AITER takes up
+        to `DECODE_MAX_M` tokens, but above `_HC_TWO_STAGE_MAX_TOKENS` the
+        Triton chain is faster."""
         from aiter.ops.flydsl.kernels.hyper_connection_gated_residual.k1 import (
             DECODE_MAX_M,
             skinny_decode_supported,
@@ -2875,7 +2880,7 @@ class rocm_aiter_ops:
             hyper_hidden_size, down_rows, hc_count, hc_lowrank
         ):
             return 0
-        return DECODE_MAX_M
+        return min(DECODE_MAX_M, cls._HC_TWO_STAGE_MAX_TOKENS)
 
     @staticmethod
     def hc_fold_norm_weight(

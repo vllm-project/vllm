@@ -53,10 +53,6 @@ from .ops.hc import (
 
 logger = init_logger(__name__)
 
-# Decode graphs pad to 1, 2, 4 or 8 tokens. On MI355X and MI325X the two-stage
-# kernels beat the Triton chain up to 4 tokens and lose to it at 8.
-_HC_TWO_STAGE_MAX_TOKENS = 4
-
 
 def _hc_two_stage_combine_and_mix(
     residual: torch.Tensor,
@@ -211,7 +207,8 @@ class GatedResidual(nn.Module):
 
         # The two-stage skinny decode kernels need the norm affine folded into
         # the down+inject weight; process_weights_after_loading fills it.
-        # Dispatching on token count would make outputs depend on batch size.
+        # Under VLLM_BATCH_INVARIANT this stays off, because the token-count
+        # dispatch in the op would make outputs depend on batch size.
         self.hc_two_stage_max_tokens = 0
         if (
             use_combine
@@ -219,11 +216,8 @@ class GatedResidual(nn.Module):
             and rocm_aiter_ops.is_hc_two_stage_enabled()
         ):
             down_rows = self.hc_lowrank + self.hc_count + self.pad_size
-            self.hc_two_stage_max_tokens = min(
-                _HC_TWO_STAGE_MAX_TOKENS,
-                rocm_aiter_ops.hc_two_stage_max_tokens(
-                    self.hyper_hidden_size, down_rows, self.hc_count, self.hc_lowrank
-                ),
+            self.hc_two_stage_max_tokens = rocm_aiter_ops.hc_two_stage_max_tokens(
+                self.hyper_hidden_size, down_rows, self.hc_count, self.hc_lowrank
             )
             if self.hc_two_stage_max_tokens:
                 self.register_buffer(
