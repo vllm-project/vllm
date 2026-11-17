@@ -41,6 +41,7 @@ LOG2E = 1.4426950408889634
 
 __all__ = [
     "flydsl_sparse_mla_fp8ds_fwd",
+    "flydsl_sparse_mla_fp8ds_heads_supported",
     "flydsl_sparse_mla_fp8ds_supported",
     "flydsl_sparse_mla_fp8ds_warmup",
 ]
@@ -58,6 +59,13 @@ MH_HEADS = (96,)
 # workgroups in flight for few rows, a better tail past 256).
 _MH_ROW_WG = (6, 3)
 _MH_SPLIT_WG = (2, 2)
+
+
+def flydsl_sparse_mla_fp8ds_heads_supported(num_heads, has_invalid=False):
+    """Is there a kernel for num_heads (with has_invalid)? H <= 16, or H in
+    MH_HEADS without has_invalid (the many-head kernel does not mask entries
+    < 0)."""
+    return 1 <= num_heads <= MAX_HEADS or (num_heads in MH_HEADS and not has_invalid)
 
 
 @functools.cache
@@ -147,7 +155,9 @@ def flydsl_sparse_mla_fp8ds_supported(
     of any size (rows are addressed in 64 bits; slot ids are int32);
     kv_indptr / kv_indices are 1-D int32 or int64 on q's
     device with T + 1 / < 2^29 entries; out, if given, is bf16 [T, H, >= 512]
-    with stride(2) == 1, even strides and a 4 B aligned base; and none of
+    with stride(2) == 1, even strides and a 4 B aligned base; q and out (or the
+    one this returns) hold < 2^31 elements up to their last row (the kernels
+    address them with 32-bit offsets); and none of
     kv_scale, q_scale, attn_sink, the extra_* segment, the inverse-RoPE / MXFP8
     epilogue, kv_splits or skip_reduce is used, with dot_precision "bf16".
 
@@ -165,8 +175,7 @@ def flydsl_sparse_mla_fp8ds_supported(
         return False
     if d_qk != KV_LORA_RANK + QK_ROPE_HEAD_DIM:
         return False
-    # The many-head kernel does not mask entries < 0.
-    if not (1 <= num_heads <= MAX_HEADS or (num_heads in MH_HEADS and not has_invalid)):
+    if not flydsl_sparse_mla_fp8ds_heads_supported(num_heads, has_invalid):
         return False
     if any(
         a is not None
@@ -195,6 +204,10 @@ def flydsl_sparse_mla_fp8ds_supported(
     if q.stride(2) != 1 or q.stride(0) % 2 or q.stride(1) % 2:
         return False
     if q.data_ptr() % 4:
+        return False
+    # Q and out rows are addressed with 32-bit offsets.
+    out_row = KV_LORA_RANK * num_heads if out is None else out.stride(0)
+    if num_tokens * max(q.stride(0), out_row) >= 2**31:
         return False
     if not torch.is_tensor(kv_buffer) or kv_buffer.device != q.device:
         return False
@@ -340,7 +353,8 @@ def flydsl_sparse_mla_fp8ds_warmup(
     """Compile (and run once on a one-token problem) every listed configuration,
     so no JIT compile lands inside a CUDA-graph capture. A head count in
     MH_HEADS compiles both many-head configs (the row count picks one per call)
-    and skips has_invalid, which that kernel does not serve."""
+    and skips has_invalid, which that kernel does not serve; a head count with
+    no kernel compiles nothing."""
     dev = (
         torch.device("cuda", torch.accelerator.current_device_index())
         if device is None
@@ -350,6 +364,8 @@ def flydsl_sparse_mla_fp8ds_warmup(
     indptr = torch.tensor([0, 1], dtype=torch.int32, device=dev)
     indices = torch.zeros(1, dtype=torch.int32, device=dev)
     for num_heads in heads:
+        if not flydsl_sparse_mla_fp8ds_heads_supported(num_heads):
+            continue  # no kernel: those calls stay on Triton
         q = torch.zeros(
             1,
             num_heads,

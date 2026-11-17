@@ -471,8 +471,7 @@ def test_flydsl_96h_cache_past_4gib(flydsl_ops) -> None:
             line + torch.randperm(num_slots - line, generator=gen)[: n - n // 2],
         ]
     ).to("cuda", torch.int64)
-    # Zero-filled as vLLM allocates the cache: masked tile positions read row 0.
-    big = torch.zeros(num_slots, ROW_BYTES, dtype=torch.uint8, device="cuda")
+    big = torch.empty(num_slots, ROW_BYTES, dtype=torch.uint8, device="cuda")
     big[slots] = small
     indptr, local, _ = _indices("ragged", num_tokens, n, gen)
     indices = slots[local.long()].to(torch.int32)
@@ -491,6 +490,25 @@ def test_flydsl_96h_cache_past_4gib(flydsl_ops) -> None:
     )
     assert len(launches) == 2
     _assert_matches(out, lse, ref_out, ref_lse)
+
+
+@torch.inference_mode()
+def test_flydsl_96h_ignores_other_rows(flydsl_ops) -> None:
+    """Masked tail positions of a tile must not let any other cache row reach
+    the output: NaN bytes (latent, scales, rope) in rows 0 .. 999 here, which
+    CUDA-graph capture can leave in the null block."""
+    ops, launches = flydsl_ops
+    gen = torch.Generator().manual_seed(7)
+    num_tokens = 148
+    small = _fp8_ds_mla_cache(3 * TOPK, gen)
+    indptr, local, _ = _indices("ragged", num_tokens, small.shape[0], gen)
+    assert ((indptr[1:] - indptr[:-1]) % 32 != 0).any()
+    q = _q(num_tokens, MH, gen)
+    big = torch.cat([torch.full_like(small[:1000], 0xFF), small])  # 0xFF: NaN
+    ref = _run(ops, q, small.unsqueeze(1), indptr, local, False, True, 0.04)
+    out = _run(ops, q, big.unsqueeze(1), indptr, local + 1000, False, True, 0.04)
+    assert launches == [(MH, False, True)] * 2
+    assert torch.equal(out[0], ref[0]) and torch.equal(out[1], ref[1])
 
 
 @torch.inference_mode()
@@ -552,12 +570,44 @@ def test_flydsl_96h_routing(flydsl_ops) -> None:
     assert torch.equal(out, ref_out) and torch.equal(lse, ref_lse)
 
 
+@pytest.mark.parametrize("num_heads", [24, 48])
+@torch.inference_mode()
+def test_flydsl_warmup_skips_unserved_heads(flydsl_ops, num_heads: int) -> None:
+    """DCP2 / DCP4 gather 24 / 48 heads, which no FlyDSL kernel serves: warmup
+    must not fail the model load, and the calls stay on Triton."""
+    ops, launches = flydsl_ops
+    ops.flydsl_sparse_mla_warmup(num_heads)
+    gen = torch.Generator().manual_seed(9)
+    cache = _fp8_ds_mla_cache(TOPK, gen)
+    indptr, indices, _ = _indices("ragged", 4, TOPK, gen)
+    q = _q(4, num_heads, gen)
+    _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
+    assert not launches
+
+
+def test_flydsl_warmup_failure_keeps_triton(flydsl_ops, monkeypatch) -> None:
+    """A warmup that raises (e.g. a fallback FlyDSL module without a kernel
+    for the head count) is logged; the configs stay uncompiled."""
+    ops, _ = flydsl_ops
+
+    def boom(**kwargs):
+        raise ValueError("no kernel")
+
+    keys = {(MH, hi, rl) for hi in (False, True) for rl in (False, True)}
+    for key in keys:
+        ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
+    with monkeypatch.context() as m:
+        m.setattr(ops, "_flydsl_sparse_mla_warmup_fn", staticmethod(lambda: boom))
+        ops.flydsl_sparse_mla_warmup(MH)
+    assert not keys & ops._FLYDSL_SPARSE_MLA_COMPILED
+
+
 def test_flydsl_96h_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
     """flydsl_sparse_mla_warmup(96) compiles both many-head configs, so either
     engages inside a graph capture."""
     ops, launches = flydsl_ops
-    keys = {(MH, False, rl) for rl in (False, True)}
-    for key in keys | {(MH, True, rl) for rl in (False, True)}:
+    keys = {(MH, hi, rl) for hi in (False, True) for rl in (False, True)}
+    for key in keys:
         ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
 
     ops._FLYDSL_SPARSE_MLA = False
@@ -567,9 +617,6 @@ def test_flydsl_96h_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
 
     ops.flydsl_sparse_mla_warmup(MH)
     assert keys <= ops._FLYDSL_SPARSE_MLA_COMPILED
-    assert (
-        not {(MH, True, rl) for rl in (False, True)} & ops._FLYDSL_SPARSE_MLA_COMPILED
-    )
     assert not launches
 
     gen = torch.Generator().manual_seed(6)

@@ -3813,21 +3813,14 @@ class rocm_aiter_ops:
         )
         return None
 
-    @staticmethod
-    def _flydsl_sparse_mla_warmup_fn() -> Callable | None:
-        """The FlyDSL sparse MLA warm-up, from the same modules as the ops."""
-        for module in (
-            "vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla",
-            "aiter.ops.flydsl.sparse_mla",
-        ):
-            try:
-                flydsl = importlib.import_module(module)
-            except Exception:
-                continue
-            fn = getattr(flydsl, "flydsl_sparse_mla_fp8ds_warmup", None)
-            if fn is not None:
-                return fn
-        return None
+    @classmethod
+    def _flydsl_sparse_mla_warmup_fn(cls) -> Callable | None:
+        """The FlyDSL sparse MLA warm-up of the module the ops come from."""
+        flydsl_ops = cls._flydsl_sparse_mla_ops()
+        if flydsl_ops is None:
+            return None
+        flydsl = importlib.import_module(flydsl_ops[0].__module__)
+        return getattr(flydsl, "flydsl_sparse_mla_fp8ds_warmup", None)
 
     @classmethod
     def flydsl_sparse_mla_warmup(cls, num_heads: int) -> None:
@@ -3837,25 +3830,32 @@ class rocm_aiter_ops:
         so the JIT (0.2-1.1 s per config on Kimi-K3.1) runs at model load, not
         on the first prefill that reaches the kernel; the warmed configs then
         also engage inside a CUDA-graph capture, which otherwise keeps a config
-        that never ran eagerly on the Triton kernel. Compiles the four
-        (has_invalid, return_lse) variants. A no-op when the flag is off, when
-        FlyDSL is absent, or once the configs are compiled.
+        that never ran eagerly on the Triton kernel. Compiles the
+        (has_invalid, return_lse) variants the module serves for num_heads
+        (none for a head count it has no kernel for: those calls stay on
+        Triton). A no-op when the flag is off, when FlyDSL is absent, or once
+        the configs are compiled; a failed warmup is logged and leaves the
+        calls on Triton rather than failing the model load.
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
             return
-        # The many-head kernel serves no has_invalid; its warmup compiles both
-        # of its row-count configs per key.
-        invalid = (False,) if num_heads > 16 else (False, True)
-        keys = [(num_heads, hi, rl) for hi in invalid for rl in (False, True)]
+        keys = [(num_heads, hi, rl) for hi in (False, True) for rl in (False, True)]
         if all(key in cls._FLYDSL_SPARSE_MLA_COMPILED for key in keys):
-            return
-        if cls._flydsl_sparse_mla_ops() is None:
             return
         warmup = cls._flydsl_sparse_mla_warmup_fn()
         if warmup is None:
             return
         start = time.perf_counter()
-        warmup(heads=(num_heads,), has_invalid=invalid)
+        try:
+            warmup(heads=(num_heads,))
+        except Exception as e:
+            logger.warning(
+                "FlyDSL sparse MLA: warmup for heads=%d failed (%s); those calls "
+                "use the Triton kernel under CUDA-graph capture.",
+                num_heads,
+                e,
+            )
+            return
         cls._FLYDSL_SPARSE_MLA_COMPILED.update(keys)
         logger.info(
             "FlyDSL sparse MLA: compiled heads=%d (%d configs) in %.1f s",

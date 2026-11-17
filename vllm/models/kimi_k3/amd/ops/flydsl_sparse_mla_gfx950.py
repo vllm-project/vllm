@@ -80,8 +80,10 @@ once for all of a row's heads, instead of once per 16 heads:
     each ds_read; the explicit vmcnt wait + barrier at the top of each tile
     orders them.
   * No has_invalid: every index in [indptr[0], indptr[T]) must be a valid
-    slot. Positions past a row's end are masked and read row 0; rows run long
-    first; KV scales are capped at 2^7; same preconditions otherwise.
+    slot. Positions past a row's end are masked and read the row's first key:
+    a real record, so their P' = 0 adds exactly 0 (row 0, the null block, can
+    hold anything: CUDA-graph capture writes into it). Rows run long first; KV
+    scales are capped at 2^7; same preconditions otherwise.
 """
 
 import flydsl.compiler as flyc
@@ -1080,6 +1082,10 @@ def build_sparse_mla_fp8ds_mh_module(num_heads, return_lse, hg, waves_per_eu):
         r_len = r_end - r_beg
         r_len = (r_len < 0).select(fx.Int32(0), r_len)
         idxv = [fx.Int32(idx_t[r_beg + _MH_TILE * t + lane]) for t in range(2)]
+        # Masked tail positions gather the row's first key. An empty row computes
+        # no tile; its tile-0 gather reads row 0, never indices[r_beg], which lies
+        # past the row (possibly past the valid part of the index buffer).
+        pad_ix = (r_len > 0).select(_readfirstlane(idxv[0]), fx.Int32(0))
 
         # ---- DMA jobs of this wave (1 KB each; lane L writes LDS bytes
         # 16L .. 16L + 15 of the job):
@@ -1124,7 +1130,7 @@ def build_sparse_mla_fp8ds_mh_module(num_heads, return_lse, hg, waves_per_eu):
                 ix = fx.Int32(
                     rocdl.ds_bpermute(T.i32, _raw(tok * 4), _raw(fx.Int32(idxv)))
                 )
-                ix = (tb + tok < r_len).select(ix, fx.Int32(0))  # past the end: row 0
+                ix = (tb + tok < r_len).select(ix, pad_ix)
                 addr = kv_base + fx.Int64(ix) * fx.Int64(RECORD_BYTES) + fx.Int64(src)
                 rocdl.global_load_lds(
                     _global_llvm_ptr(addr),
