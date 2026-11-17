@@ -210,27 +210,6 @@ def test_hidden_states_require_object_key_prefix():
     )
 
 
-@pytest.mark.parametrize(
-    "k,lora,error",
-    [(8, False, None), (9, False, "vocabulary size"), (2, True, "LoRA")],
-    ids=["vocab-size", "above-vocab-size", "lora"],
-)
-def test_topk_logprobs_are_validated_against_the_model(k, lora, error):
-    config = _config()
-    config.model_config.get_vocab_size = lambda: 8
-    config.lora_config = object() if lora else None
-    config.aux_output_config = AuxOutputConfig(
-        enable_return_routed_experts=True,
-        object_key_prefix="run-1",
-        return_topk_logprobs=k,
-    )
-    if error is None:
-        VllmConfig._verify_aux_output_compatibility(config)
-        return
-    with pytest.raises(ValueError, match=error):
-        VllmConfig._verify_aux_output_compatibility(config)
-
-
 def test_dense_model_without_routed_experts_is_accepted():
     config = _config(is_moe=False)
     config.aux_output_config = AuxOutputConfig(

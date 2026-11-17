@@ -28,8 +28,7 @@ class AuxOutputConfig:
     """Store the top-k token ids and log-probabilities of the next token at
     every computed position of session requests (`SamplingParams.aux_session`)
     in their objects; 0 disables. Prefix-cache hits keep the rows of the
-    request that computed them. Requires `object_key_prefix`; not supported
-    with LoRA."""
+    request that computed them. Requires `object_key_prefix`."""
 
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or `None` to derive it from the KV cache capacity.

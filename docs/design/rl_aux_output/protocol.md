@@ -33,7 +33,6 @@ The hash then names a computation: these tokens, after this prefix, with these w
 - `max_bytes` is set without routed experts, or together with indexer top-k;
 - routed experts are enabled on a model without MoE layers;
 - indexer top-k is enabled with a pipeline-parallel size above 1;
-- top-k logprobs are enabled with LoRA, or `k` exceeds the vocabulary size;
 - any aux output is enabled with a non-generate runner, without prefix caching, with adaptive speculative verification, or with decode or prefill context parallelism.
 
 With `object_key_prefix` set the engine also refuses to start unless the model has a plain full-attention KV cache group (its block size is the object size), prefix-cache hits end on KV block boundaries, block hashes look ahead at most one token, and no KV cache group uses prefix replay. Disable `CacheConfig.swa_bounded_replay` for models that use it.
