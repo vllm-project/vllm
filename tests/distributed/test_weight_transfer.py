@@ -2475,9 +2475,11 @@ def test_nccl_trainer_resends_metadata_after_a_failed_update():
     engine.source, client.fail = source("w"), True  # partial, refused
     with pytest.raises(RuntimeError, match="refused"):
         engine.send_weights()
+    assert client.last_update_info is not None
     assert client.last_update_info["names"] == ["w"]
     engine.source, client.fail = source("v", "w"), False  # full again
     engine.send_weights()
+    assert client.last_update_info is not None
     assert client.last_update_info["names"] == ["v", "w"]
 
 
