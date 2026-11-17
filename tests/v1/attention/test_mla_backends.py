@@ -22,6 +22,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
+from vllm.config import CUDAGraphMode
 from vllm.config.vllm import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -1583,6 +1584,102 @@ def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
         assert metadata.scheduler_metadata.tile_scheduler_metadata is None
         assert metadata.scheduler_metadata.num_splits is None
         assert fp8_call is None
+
+
+@pytest.mark.skipif(
+    not flash_attn_supports_mla(), reason="FlashAttention MLA is not supported"
+)
+@pytest.mark.parametrize(
+    "cudagraph_mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.PIECEWISE]
+)
+def test_flash_attn_mla_eager_decode_batch_allocates_no_split_accumulator(
+    dist_init, workspace_init, cudagraph_mode
+):
+    """Decode-path batches beyond the captured CUDA graph sizes run eagerly.
+    Left to FA3, their split count sized an fp32 split-KV accumulator for a
+    varlen bound that assumes one request holds every query: 2.5 GiB for these
+    short prefills over a cached prefix, which OOMed an extensible KV cache."""
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashattn_mla import (
+        FlashAttnMLAImpl,
+        FlashAttnMLAMetadataBuilder,
+    )
+
+    num_heads, kv_lora_rank, qk_rope_head_dim = 16, 512, 64
+    qk_nope_head_dim = v_head_dim = 128
+    block_size = 64
+    batch_spec = BatchSpec(seq_lens=[688] * 170, query_lens=[48] * 170)
+    num_tokens = batch_spec.compute_num_tokens()
+    num_blocks = batch_spec.batch_size * cdiv(max(batch_spec.seq_lens), block_size)
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite",
+        max_model_len=2048,
+        num_gpu_blocks=num_blocks,
+        block_size=block_size,
+    )
+    vllm_config.compilation_config.cudagraph_mode = cudagraph_mode
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=kv_lora_rank + qk_rope_head_dim,
+        dtype=dtype,
+        cache_dtype_str="auto",
+    )
+    with set_current_vllm_config(vllm_config):
+        kv_b_proj = ColumnParallelLinear(
+            kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim), bias=False
+        ).to(device=device, dtype=dtype)
+        layer = MLAAttention(
+            num_heads=num_heads,
+            scale=(qk_nope_head_dim + qk_rope_head_dim) ** -0.5,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix="model.layers.0.self_attn.attn",
+            attn_backend=AttentionBackendEnum.FLASH_ATTN_MLA.get_class(),
+        )
+        builder = FlashAttnMLAMetadataBuilder(
+            kv_cache_spec, [layer.layer_name], vllm_config, device
+        )
+    assert builder.max_cudagraph_size is not None
+    assert builder.max_cudagraph_size < num_tokens
+    metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=create_common_attn_metadata(
+            batch_spec, block_size, device, arange_block_indices=True
+        ),
+    )
+    assert metadata.num_decode_tokens == num_tokens
+    impl = layer.impl
+    assert isinstance(impl, FlashAttnMLAImpl)
+
+    kv_cache = torch.randn(
+        num_blocks,
+        block_size,
+        kv_lora_rank + qk_rope_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    q = (
+        torch.randn(num_tokens, num_heads, kv_lora_rank, dtype=dtype, device=device),
+        torch.randn(
+            num_tokens, num_heads, qk_rope_head_dim, dtype=dtype, device=device
+        ),
+    )
+    torch.accelerator.synchronize()
+    torch.accelerator.reset_peak_memory_stats(device)
+    allocated = torch.accelerator.memory_allocated(device)
+    out, _ = impl.forward_mqa(q, kv_cache, metadata, layer)
+    torch.accelerator.synchronize()
+    transient = torch.accelerator.max_memory_allocated(device) - allocated - out.nbytes
+    # One split's fp32 accumulator; FA3 planned ten for this batch.
+    assert transient < num_tokens * num_heads * kv_lora_rank * 4
 
 
 def run_attention_backend(
