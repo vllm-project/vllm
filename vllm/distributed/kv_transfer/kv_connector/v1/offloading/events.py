@@ -231,6 +231,11 @@ class OffloadingEventsTracker:
         if state.resumable or (state.kv_transfer_params or {}).get("_p_side_truncated"):
             return None
         chunk_idx = boundary // group_config.tokens_per_chunk - 1
+        last_hash_idx = (chunk_idx + 1) * group_config.hashes_per_chunk - 1
+        if last_hash_idx >= len(state.block_hashes) or state.block_hashes[
+            last_hash_idx
+        ] != get_offload_block_hash(key):
+            return None
         return self._build_event_metadata(state, group_config, chunk_idx)
 
     def record_store(

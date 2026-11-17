@@ -29,6 +29,7 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -215,8 +216,9 @@ class AuxOutputSchedulerConnector:
 
     def set_weight_version(self, weight_version: str) -> None:
         """Set the weight version of later steps; call while no step runs.
-        Positions of live session requests that are neither computed nor
-        hashed yet are salted with it."""
+        A running session request is named again with it from its computed
+        positions on; a waiting one from its first unhashed position, and from
+        its hit when it is scheduled."""
         if self._key_prefix is not None and not (
             isinstance(weight_version, str) and weight_version
         ):
@@ -226,11 +228,16 @@ class AuxOutputSchedulerConnector:
             )
         self._weight_version = weight_version
         for state in self._session_requests.values():
-            state.request.add_cache_salt_segment(
-                state.request.num_computed_tokens,
-                weight_version,
-                self._hash_block_size,
+            request = state.request
+            computed = request.num_computed_tokens
+            running = request.status == RequestStatus.RUNNING
+            if running:
+                del request.block_hashes[computed // self._hash_block_size :]
+            request.add_cache_salt_segment(
+                computed, weight_version, self._hash_block_size
             )
+            if running:
+                request.update_block_hashes()
 
     def build_connector_meta(
         self,
@@ -346,6 +353,25 @@ class AuxOutputSchedulerConnector:
         # A hit needs rows only from the first returned position on.
         num_hit = max(num_blocks * self._block_size, self._emit_start(request))
         return min(num_hit, request.num_tokens - 1)
+
+    def salt_from_hit(self, request: Request, num_hit: int) -> None:
+        if self._session(request) is None:
+            return
+        segments = request.cache_salt_segments
+        ends = [start for start, _ in segments[1:]]
+        start = next(
+            (
+                max(begin, num_hit)
+                for (begin, salt), end in zip(segments, [*ends, request.num_tokens])
+                if salt != self._weight_version and end > num_hit
+            ),
+            None,
+        )
+        if start is not None:
+            hash_size = self._hash_block_size
+            del request.block_hashes[start // hash_size :]
+            request.add_cache_salt_segment(start, self._weight_version, hash_size)
+            request.update_block_hashes()
 
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int

@@ -402,6 +402,43 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
     assert key not in tracker._pending_event_metadata
 
 
+@pytest.mark.parametrize("renamed", [False, True], ids=["same-hash", "renamed"])
+def test_request_context_store_describes_only_the_hash_of_its_key(renamed):
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[1], group_config.group_idx)
+    context.set_offload_key_position(key, 8)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+    if renamed:
+        request.block_hashes[1] = _hash(9)
+
+    events = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+            )
+        ]
+    )
+    [stored] = events
+    assert isinstance(stored, BlockStored)
+    if renamed:
+        assert stored.block_hashes == [_wire_hash(_hash(1))]
+        assert stored.parent_block_hash is None
+        assert stored.token_ids == []
+        assert stored.block_size == 0
+    else:
+        assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+
+
 def test_mamba_store_uses_request_context():
     block_hashes = [_hash(i) for i in range(4)]
     request = Request(

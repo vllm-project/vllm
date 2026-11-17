@@ -30,15 +30,19 @@ Per-segment cache salts are generic: a request carries `(start, salt)` pairs and
 | The engine, always the current version | A prompt computed before an update would never be hit after it: every turn after an update computes its whole context again. |
 | **The client, from the previous response** | **Chosen.** The engine returns `aux_version_segments` with each response; the client sends them with the next request. The engine keeps no state across requests, and a session can move between replicas. |
 
-The client's statement decides what the request can hit and names the stated positions it computes. Edited segments cost hits: positions after the first divergence miss the cache. An earlier plan to verify the segments against a hash in their closing entry is no longer needed.
+The client's statement decides only what the request can hit. Everything the request computes is named by the engine with the version that computes it (next section). Stale or edited segments are therefore safe: positions after the first divergence miss the cache and take the current version. An earlier plan to verify the segments against a hash in their closing entry is no longer needed.
 
 ## When names are fixed
 
 A block is hashed as soon as its tokens exist, and connectors keep or look up the hashes they see. Hashes are therefore changed only at points where no connector holds them for positions the request is about to compute:
 
 - **Admission.** The client's coverage is rounded down to an object boundary before the prompt's last token, so a covered object is never partly covered. Later positions get the current version.
-- **Update.** A new version applies from the first position that is neither computed nor hashed. Hashed blocks are not touched while a request runs.
-Hashes do not change afterwards. A position computed again, after a preemption, a reset or a lost KV, keeps its name, and so does a running request's position hashed before an update and computed after it. That is the documented limit.
+- **Update.** A running request is cut back to its computed positions and hashed again with the new version; a waiting one gets the new version from its first unhashed position. No step has fully computed the blocks whose hashes are dropped, so no connector has stored under them.
+- **Scheduling from the waiting state.** Just before a waiting request is scheduled (at admission after the prefix-cache lookup, after a preemption, after an asynchronous KV load), every position it will compute is salted with the current version, from the first segment that states another version. Hashes before the hit stay, so everything taken from the lookup remains valid; connectors that derive state from the hashes see the change at their next update.
+
+This rule replaced two narrower ones. Cutting the hashes back at preemption ran before the lookup and did not cover a request whose prefix had been evicted, tiers that were cleared, or KV loaded while the version changed. Salting at the lookup instead covers every case where a waiting request computes a position, with one check per scheduling and a rehash only when a stated version is not current.
+
+Rewriting a running request's hashes at an update is safe for the same reason: the engine is paused with no step in flight, so every dropped hash is that of a block no step has fully computed or stored. What remains is a synchronous KV load that fails inside a step: the step has already written objects from the invalid KV, so it is not supported for session requests (protocol §9).
 
 ## Session scope
 
@@ -83,7 +87,7 @@ The pause is a point every RL loop already has at each weight update. Making it 
 
 ## Weight updates and KV capacity
 
-Recomputing every in-flight context at every update costs about 7% of each update interval at frontier scale ([scenarios §7](scenarios.md#7-recomputing-in-flight-work-at-weight-sync)). Sessions therefore continue across updates on their stored KV. With GPU memory released at each update, that KV must survive in connector tiers, including the blocks that decoding completes. When it does not, the request computes the prefix again under the names it states, and the store keeps the earlier rows for them, the documented limit; the cost is compute. KV capacity is a performance requirement of the deployment.
+Recomputing every in-flight context at every update costs about 7% of each update interval at frontier scale ([scenarios §7](scenarios.md#7-recomputing-in-flight-work-at-weight-sync)). Sessions therefore continue across updates on their stored KV. With GPU memory released at each update, that KV must survive in connector tiers, including the blocks that decoding completes. When it does not, the request computes the prefix again under the current version, and writes new objects for the positions computed again from the object that holds the first one whose stated version is not current: the names stay true, and the cost is compute and pool space. KV capacity is a performance requirement of the deployment.
 
 ## Models with sliding-window layers
 

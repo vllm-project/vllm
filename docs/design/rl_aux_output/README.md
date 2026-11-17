@@ -25,9 +25,9 @@ This folder specifies how vLLM delivers these **aux outputs** for long multi-tur
 3. **Every KV connector keyed by block hashes follows without connector code.** KV stored in any tier or on any replica is found only by a request that states the same tokens and versions.
 4. **An object is named by a block hash.** A full object's key is `<prefix>/<session>/<hash of the block's last hash block>`. The same name means the same tokens at the same versions and, with batch invariance, the same rows. The store keeps the first object written under a name.
 5. **The client carries the versions between turns.** Each response returns `aux_version_segments`. The client sends them with the session's next request; the engine salts the covered prompt positions with them and later positions with the current version.
-6. **Names are fixed when a block is hashed.** Stated positions take the stated versions, later positions the version current at admission, and positions hashed after a weight update the new version. A position computed again keeps its name.
+6. **What a request computes is named by the version that computes it.** When a waiting request is scheduled, every position it will compute, from its prefix-cache hit or its loaded KV on, is salted with the current version. Names of positions it reuses stay as stated.
 7. **The response lists keys, not rows.** A finished request returns the keys of the objects covering all its positions, in order. The trainer reads them from the store and releases the session by key pattern after the engine has completed a pause.
-8. **The remaining limits are documented, not counted.** A position computed again keeps its name, so a few cases name a recomputed position with another version than the computing one, and a failed synchronous KV load reported through `invalid_block_ids` is not supported for session requests ([protocol §9](protocol.md#9-limits)). The engine does not count them; a failed synchronous load raises, asserts or goes unnoticed depending on the case.
+8. **The remaining limits are documented, not counted.** A failed synchronous KV load reported through `invalid_block_ids` is not supported for session requests, and multi-module MTP draft KV carries the target versions ([protocol §9](protocol.md#9-limits)). The engine does not count them; a failed synchronous load raises, asserts or goes unnoticed depending on the case.
 
 ## Requirements
 
@@ -48,8 +48,9 @@ Each layer is one pull request on `main`, in this order:
 | 3 | Block hashes from the first computed block | The scheduler sends a session request's block hashes from its first computed block on, so a request resumed after a prefix-cache reset does not send its whole history again. |
 | 4 | Hidden states and top-k logprobs | `enable_return_hidden_states`: field `hidden_states` of session objects. `return_topk_logprobs = k`: fields `topk_token_ids` and `topk_logprobs` of session objects, computed only for session rows, in bounded chunks. |
 | 5 | Objects without routed experts | `object_key_prefix` with any enabled output, so dense models can deliver hidden states and top-k logprobs. |
+| 7 | Recomputed positions | Just before a waiting request is scheduled, the positions it will compute are salted with the current version. The offloading connector derives its offload keys again from the first chunk whose block hash changed. |
 
-Routed expert capture with pipeline parallelism, which merges the stages' routing at the last stage, comes before layer 2. These documents come after layer 5.
+Routed expert capture with pipeline parallelism, which merges the stages' routing at the last stage, comes before layer 2. These documents come between layers 5 and 7.
 
 Deferred: a vocab-parallel top-k path that avoids gathering full-vocabulary logits.
 

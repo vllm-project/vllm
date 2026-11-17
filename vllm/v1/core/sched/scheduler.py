@@ -1294,6 +1294,10 @@ class Scheduler(SchedulerInterface):
                         skip_request(request_queue)
                         continue
 
+                if self.aux_output_connector is not None:
+                    self.aux_output_connector.salt_from_hit(
+                        request, num_computed_tokens
+                    )
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 duplicate_encoder_inputs = []

@@ -37,7 +37,7 @@ Reuse across turns keeps these numbers per trajectory rather than per turn: a tu
 
 ## 3. KV tier capacity across weight updates
 
-When GPU memory is released at a weight update, the GPU prefix cache is empty afterwards. A session continues on its stored KV only if a KV connector tier holds it, including the blocks that decoding completed. When the tier has lost it, the next turn computes the prefix again with the new weights under the names it states, and the store keeps the earlier rows for them ([protocol §9](protocol.md#9-limits)). The recompute also costs time:
+When GPU memory is released at a weight update, the GPU prefix cache is empty afterwards. A session continues on its stored KV only if a KV connector tier holds it, including the blocks that decoding completed. When the tier has lost it, the next turn computes the prefix again with the new weights and writes it again under new names ([protocol §6](protocol.md#6-hits-kv-tiers-and-weight-updates)). The names stay true, but the recompute costs time and the second copy costs pool space:
 
 ```text
 tier capacity per replica ≥ live session positions per replica × KV bytes per position
@@ -58,7 +58,7 @@ By default the pool is the SSD of the holders, with memory as a cache ([protocol
 | indexer, 12 layers | — | 1.0 TB | 2.2 PB |
 | indexer, 61 layers | — | 5.2 TB | 11.3 PB |
 
-The single-node model has no indexer. Tails add one object per request, about half a block of positions on average. In flight, R3 and top-k fit in host memory at frontier scale, and an uncompressed indexer or hidden states at every position need terabytes per replica; on SSD the bytes written grow with the job's length at the rates of section 5. Enable only the outputs the trainer uses.
+The single-node model has no indexer. Tails add one object per request, about half a block of positions on average. Prefixes computed again after a KV loss across a weight update (section 3) add a copy under new names, from the object that holds the first position computed again whose stated version is not current. In flight, R3 and top-k fit in host memory at frontier scale, and an uncompressed indexer or hidden states at every position need terabytes per replica; on SSD the bytes written grow with the job's length at the rates of section 5. Enable only the outputs the trainer uses.
 
 ## 5. Object counts and write rate (frontier scale)
 
@@ -108,7 +108,7 @@ That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier
 
 - **Versions must travel with the KV, everywhere.** A trajectory spans ~3 updates and may be ~107 versions stale. Its prefix KV survives updates only in connector tiers, on this replica or another, so the version has to be part of what every tier uses as a key: the block hash.
 - **Reuse is mandatory and scoped to the session.** Rewriting the full context every turn writes ~25× more. Sharing across sessions would need reference counts for little gain.
-- **KV tiers are sized for throughput.** Losing a live session's prefix KV costs its recompute (section 3).
+- **KV tiers are sized for throughput.** Losing a live session's prefix KV recomputes it and, after a weight update, writes its objects a second time under new names (section 3).
 - **The pool holds every object it must serve.** Objects stay until release. Size a memory pool with hard pins for the live objects, and an SSD-first pool, which frees no disk on removal, for the bytes written in the job at the rates of section 5 (section 4).
 - **Object rate, not bandwidth, limits R3 and top-k** at small block sizes (section 5).
 

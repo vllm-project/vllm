@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -10,7 +11,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import eagle_proof_margin, is_mamba_align_group
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    eagle_proof_margin,
+    is_mamba_align_group,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     SlidingWindowManager,
@@ -339,6 +344,18 @@ class RequestGroupState:
     lookup_hit_end_chunk_idx: int = 0
 
 
+def _num_current_keys(
+    keys: list[OffloadKey], hashes: list[BlockHash], stride: int, group_idx: int
+) -> int:
+    return bisect_left(
+        range(min(len(keys), len(hashes) // stride)),
+        True,
+        key=lambda index: (
+            keys[index] != make_offload_key(hashes[stride * (index + 1) - 1], group_idx)
+        ),
+    )
+
+
 @dataclass(slots=True)
 class RequestOffloadState:
     config: SchedulerOffloadConfig
@@ -411,7 +428,21 @@ class RequestOffloadState:
             self.config.kv_group_configs, self.group_states
         ):
             stride = group_config.hashes_per_chunk
-            start = stride * (len(group_state.offload_keys) + 1) - 1
+            keys = group_state.offload_keys
+            end = stride * len(keys)
+            if keys and (
+                end > len(self.req.block_hashes)
+                or keys[-1]
+                != make_offload_key(
+                    self.req.block_hashes[end - 1], group_config.group_idx
+                )
+            ):
+                del keys[
+                    _num_current_keys(
+                        keys, self.req.block_hashes, stride, group_config.group_idx
+                    ) :
+                ]
+            start = stride * (len(keys) + 1) - 1
             for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
