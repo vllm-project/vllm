@@ -12,9 +12,9 @@ from vllm.tasks import SupportedTask
 
 from .serving import OpenAIServingDecisions
 from .strategies import (
-    NoStrategyError,
     ReadContext,
     ReadStrategy,
+    has_knowline_marker,
     select_read_strategy,
 )
 
@@ -31,18 +31,19 @@ def init_decisions_state(
     supported_tasks: tuple[SupportedTask, ...],
 ) -> ReadStrategy | None:
     state.openai_serving_decisions = None
+    model_config = engine_client.model_config
     try:
-        strategy_cls = select_read_strategy(engine_client.model_config, supported_tasks)
-    except NoStrategyError as e:
-        # Most models map to no strategy, so the common case stays out of
-        # the default log level: one line per server start is noise.
-        logger.debug("Decisions endpoints disabled: %s", e)
-        return None
+        strategy_cls = select_read_strategy(model_config, supported_tasks)
     except ValueError as e:
-        # A misconfiguration an operator must see: a marker on an
-        # architecture it cannot serve, a task the server does not serve,
-        # or a logprobs mode the reads cannot use.
-        logger.warning("Decisions endpoints disabled: %s", e)
+        # Only a checkpoint that opted in by its marker expects the
+        # endpoints, so only its misconfiguration warns: a marker on an
+        # architecture the format cannot serve, a task the server does not
+        # serve, or a logprobs mode the reads cannot use. A stock model
+        # stays quiet whether it maps to no strategy or runs another task
+        # or logprobs mode (a pooling Qwen3-Embedding, --logprobs-mode
+        # processed_logits): one line per server start is noise.
+        log = logger.warning if has_knowline_marker(model_config) else logger.debug
+        log("Decisions endpoints disabled: %s", e)
         return None
     try:
         strategy = strategy_cls(
