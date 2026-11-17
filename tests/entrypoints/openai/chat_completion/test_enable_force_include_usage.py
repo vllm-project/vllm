@@ -59,7 +59,15 @@ async def test_chat_with_enable_force_include_usage(
             last_completion_tokens == 0
             or chunk.usage.completion_tokens > last_completion_tokens
             or (
-                not chunk.choices
+                # A usage-only chunk, or a chunk that carries only
+                # finish_reason (the Rust frontend sends one, as OpenAI does).
+                (
+                    not chunk.choices
+                    or (
+                        chunk.choices[0].finish_reason is not None
+                        and not chunk.choices[0].delta.content
+                    )
+                )
                 and chunk.usage.completion_tokens == last_completion_tokens
             )
         )
