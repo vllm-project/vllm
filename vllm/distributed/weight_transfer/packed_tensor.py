@@ -30,119 +30,64 @@ def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, 
 
 # ── NCCL packed broadcast ──────────────────────────────────────────────
 
-
-def wire_segments(
-    shape: Sequence[int], dtype: torch.dtype, limit: int
-) -> list[tuple[int, int]] | None:
-    """Dim-0 row ranges a tensor travels as, or `None` to send it whole.
-
-    A tensor over the buffer (e.g. one layer's expert stack) is split along
-    dim 0 into segments that fit it, so no chunk buffer needs its size (a
-    chunk holds at most twice the buffer); the consumer joins the segments
-    into one tensor of the full size. A tensor whose single row exceeds
-    the buffer travels whole.
-    """
-    nbytes = math.prod(shape) * dtype.itemsize
-    if nbytes <= limit or len(shape) == 0 or shape[0] < 2:
-        return None
-    row = nbytes // shape[0]
-    if row > limit:
-        logger.warning_once(
-            "Packed transfer: a %s tensor of shape %s has rows of %d bytes, over "
-            "the %d-byte buffer, so it is sent whole; raise the buffer size to "
-            "split it.",
-            dtype,
-            tuple(shape),
-            row,
-            limit,
-        )
-        return None
-    rows = limit // row
-    return [(r, min(r + rows, shape[0])) for r in range(0, shape[0], rows)]
+# Every tensor starts at a multiple of this in the stream, so a whole
+# tensor in a chunk can be viewed as its dtype.
+ALIGN = 16
 
 
 class Piece(NamedTuple):
-    """One tensor, or one dim-0 segment of it, in a packed chunk."""
+    """Bytes `[start, end)` of the tensor at `position` in the sent
+    sequence, at `offset` in its chunk."""
 
-    position: int  # the tensor's position in the sent sequence
-    rows: tuple[int, int] | None  # dim-0 range of a segment; None: the whole tensor
-    shape: list[int]  # shape of this piece
-    dtype: torch.dtype
-    offset: int  # byte offset in the chunk
+    position: int
+    start: int
+    end: int
+    offset: int
+
+
+def _nbytes(shape: Sequence[int], dtype: torch.dtype) -> int:
+    return math.prod(shape) * dtype.itemsize
+
+
+class Chunk(NamedTuple):
     nbytes: int
+    pieces: list[Piece]
 
 
 def _chunks(
-    specs: Iterable[tuple[Sequence[int], torch.dtype]], limit: int, segments: bool
-) -> Iterator[list[Piece]]:
-    """Each chunk's pieces, lazily: a chunk takes pieces until it holds more
-    than `limit` bytes. Without `segments` every tensor travels whole, back to
-    back."""
-    chunk: list[Piece] = []
-    size = 0
-    for index, (shape, dtype) in enumerate(specs):
-        nbytes = math.prod(shape) * dtype.itemsize
-        segs = wire_segments(shape, dtype, limit) if segments else None
-        split: list[tuple[int, int] | None] = list(segs) if segs else [None]
-        for rows in split:
-            if rows is None:
-                piece = Piece(index, None, list(shape), dtype, size, nbytes)
-            else:
-                n = rows[1] - rows[0]
-                row = nbytes // shape[0]
-                piece = Piece(index, rows, [n, *shape[1:]], dtype, size, n * row)
-            chunk.append(piece)
-            size += piece.nbytes
-            if size > limit:
-                yield chunk
-                chunk, size = [], 0
-    if chunk:
-        yield chunk
-
-
-def chunk_bytes(chunk: list[Piece]) -> int:
-    return chunk[-1].offset + chunk[-1].nbytes
-
-
-def _view(buf: torch.Tensor, piece: Piece) -> torch.Tensor:
-    """`piece` in `buf`: typed, or raw bytes at an offset its dtype cannot
-    view (pieces are packed back to back)."""
-    raw = buf[piece.offset : piece.offset + piece.nbytes]
-    if raw.storage_offset() % piece.dtype.itemsize:
-        return raw
-    return raw.view(piece.dtype).view(piece.shape)
-
-
-def _unpacked(view: torch.Tensor, piece: Piece) -> torch.Tensor:
-    """A received piece as its dtype and shape; one at an offset its dtype
-    cannot view is copied into aligned storage first."""
-    if view.dtype == piece.dtype:
-        return view
-    return view.clone().view(piece.dtype).view(piece.shape)
+    specs: Iterable[tuple[Sequence[int], torch.dtype]], buffer_size: int
+) -> Iterator[Chunk]:
+    """The chunks, lazily. The tensors form one byte stream, each starting
+    `ALIGN`-aligned, cut every `buffer_size` bytes (rounded down to `ALIGN`):
+    every chunk but the last is that size. A tensor that crosses a cut is
+    split there."""
+    limit = buffer_size - buffer_size % ALIGN
+    assert limit > 0, f"packed buffer size must be at least {ALIGN} bytes"
+    pieces: list[Piece] = []
+    used = 0  # bytes of the current chunk taken, padding included
+    for position, (shape, dtype) in enumerate(specs):
+        nbytes, start = _nbytes(shape, dtype), 0
+        used += -used % ALIGN
+        while True:
+            if used == limit:
+                yield Chunk(limit, pieces)
+                pieces, used = [], 0
+            end = min(nbytes, start + limit - used)
+            pieces.append(Piece(position, start, end, used))
+            used += end - start
+            start = end
+            if start == nbytes:
+                break
+    if pieces:
+        yield Chunk(used, pieces)
 
 
 def chunk_layout(
-    specs: Iterable[tuple[Sequence[int], torch.dtype]],
-    limit: int,
-    segments: bool = False,
-) -> list[list[Piece]]:
-    """The chunks `specs` travel as, each chunk's pieces. The producer and
-    every consumer derive it from the metadata alone, so they always agree.
-    `segments` (both sides must agree; see
-    `NCCLWeightTransferInitInfo.packed_wire_segments`) splits tensors over
-    the buffer along dim 0."""
-    return list(_chunks(specs, limit, segments))
-
-
-def _source(piece: Piece, tensor: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
-    """What a piece copies from `tensor` into its `view`."""
-    rows = piece.rows
-    part = tensor if rows is None else tensor[rows[0] : rows[1]]
-    return (
-        part
-        if view.dtype == part.dtype
-        else part.contiguous().view(-1).view(view.dtype)
-    )
+    specs: Iterable[tuple[Sequence[int], torch.dtype]], buffer_size: int
+) -> list[Chunk]:
+    """The chunks `specs` travel as. The producer and every consumer derive
+    it from the metadata alone, so they always agree."""
+    return list(_chunks(specs, buffer_size))
 
 
 def packed_nccl_broadcast_producer(
@@ -152,12 +97,11 @@ def packed_nccl_broadcast_producer(
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
-    segments: bool = False,
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
-    Each chunk is one `_foreach_copy_` of its tensors into a buffer, then one
-    broadcast.
+    Each chunk (`chunk_layout`) is one `_foreach_copy_` of its pieces into a
+    buffer, then one broadcast.
 
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
@@ -169,30 +113,28 @@ def packed_nccl_broadcast_producer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
-        segments: split tensors over the buffer along dim 0. Both sides
-            must agree (`chunk_layout`).
 
     """
-    tensors: dict[int, torch.Tensor] = {}  # the ones the next chunk may read
+    flat: dict[int, torch.Tensor] = {}  # each tensor's bytes, until all are sent
 
     def specs() -> Iterator[tuple[Sequence[int], torch.dtype]]:
         for i, item in enumerate(iterator):
-            t = tensors[i] = post_iter_func(item)
+            t = post_iter_func(item)
+            flat[i] = t.contiguous().view(-1).view(torch.uint8)
             yield t.shape, t.dtype
 
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
     held: list[Any] = [None] * num_buffers  # alive until their broadcast ends
-    for k, pieces in enumerate(_chunks(specs(), buffer_size_bytes, segments)):
-        device = tensors[pieces[0].position].device
-        buf = torch.empty(chunk_bytes(pieces), dtype=torch.uint8, device=device)
-        views = [_view(buf, p) for p in pieces]
-        srcs = [_source(p, tensors[p.position], v) for p, v in zip(pieces, views)]
-        last = pieces[-1]
-        continues = last.rows is not None and last.rows[1] < len(tensors[last.position])
-        for i in range(pieces[0].position, last.position + (not continues)):
-            del tensors[i]
+    for k, (nbytes, pieces) in enumerate(_chunks(specs(), buffer_size_bytes)):
+        device = flat[pieces[0].position].device
+        buf = torch.empty(nbytes, dtype=torch.uint8, device=device)
+        views = [buf[p.offset : p.offset + p.end - p.start] for p in pieces]
+        srcs = [flat[p.position][p.start : p.end] for p in pieces]
+        for p in pieces:
+            if p.end == flat[p.position].numel():
+                del flat[p.position]
         slot = k % num_buffers
         prev = done[slot]
         if prev is not None:
@@ -217,9 +159,12 @@ def packed_nccl_broadcast_consumer(
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     device: torch.device | str = "cuda",
-    segments: bool = False,
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
+
+    A tensor inside one chunk is handed out as a view of the received buffer;
+    one split across chunks is copied into a tensor of its own, handed out
+    once its last bytes arrive.
 
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
@@ -233,9 +178,6 @@ def packed_nccl_broadcast_consumer(
                     Both producer and consumer must use the same value.
         device: Device for the receive buffers. Must match the device the NCCL
                 communicator was created on (the worker's assigned device).
-        segments: tensors over the buffer arrive as dim-0 segments
-                 (`chunk_layout`); each is joined into one tensor of its
-                 full size before `post_unpack_func` sees it.
 
     """
     names, specs = [], []
@@ -250,7 +192,7 @@ def packed_nccl_broadcast_consumer(
     slot_done: list[torch.Event | None] = [None] * num_buffers
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
-    for k, pieces in enumerate(_chunks(specs, buffer_size_bytes, segments)):
+    for k, (chunk_nbytes, pieces) in enumerate(_chunks(specs, buffer_size_bytes)):
         slot = k % num_buffers
         # Wait for this slot's previous pack. Not streams[slot].synchronize():
         # on ROCm, streams can share a hardware queue, and synchronizing one
@@ -259,11 +201,11 @@ def packed_nccl_broadcast_consumer(
         if done is not None:
             done.synchronize()
         with torch.cuda.stream(streams[slot]):
-            packed = torch.empty(chunk_bytes(pieces), dtype=torch.uint8, device=device)
+            packed = torch.empty(chunk_nbytes, dtype=torch.uint8, device=device)
             group.broadcast(packed, src=src)
             # post_unpack_func may keep the unpacked tensors and read them
             # from a later chunk's callback, on another slot stream, and a
-            # split tensor's earlier rows are copied on another slot. Waiting
+            # split tensor's earlier bytes are copied on another slot. Waiting
             # for the previous chunk's unpack (its receive and copies) orders
             # every later unpack and callback after them, and record_stream
             # keeps the allocator from reissuing this buffer once it is freed
@@ -273,32 +215,27 @@ def packed_nccl_broadcast_consumer(
             for stream in (*streams, caller_stream):
                 packed.record_stream(stream)
             out = []
-            for piece in pieces:
-                view = _view(packed, piece)
-                index, rows, dtype = piece.position, piece.rows, piece.dtype
-                if rows is not None:
-                    # one tensor of the full size, written segment by segment
-                    whole = joined.get(index)
-                    if whole is None:
-                        whole = joined[index] = torch.empty(
-                            specs[index][0], dtype=dtype, device=device
-                        )
-                    # raw bytes into raw bytes: a misaligned segment needs no copy
-                    dst = whole[rows[0] : rows[1]]
-                    if view.dtype != dtype:
-                        dst = dst.view(-1).view(torch.uint8)
-                    dst.copy_(view)
-                    if rows[1] < specs[index][0][0]:
-                        continue
-                    view = joined.pop(index)
+            for p in pieces:
+                shape, dtype = specs[p.position]
+                nbytes = _nbytes(shape, dtype)
+                raw = packed[p.offset : p.offset + p.end - p.start]
+                if p.start == 0 and p.end == nbytes:
+                    tensor = raw.view(dtype).view(shape)
                 else:
-                    view = _unpacked(view, piece)
-                if view.untyped_storage().data_ptr() != packed.data_ptr():
-                    # a copy, read like the packed buffer: keep it alive on
-                    # every stream that may still read it once it is freed
+                    if p.position not in joined:
+                        joined[p.position] = torch.empty(
+                            shape, dtype=dtype, device=device
+                        )
+                    whole = joined[p.position]
+                    whole.view(-1).view(torch.uint8)[p.start : p.end].copy_(raw)
+                    if p.end < nbytes:
+                        continue
+                    tensor = joined.pop(p.position)
+                    # read like the packed buffer: keep it alive on every
+                    # stream that may still read it once it is freed
                     for stream in (*streams, caller_stream):
-                        view.record_stream(stream)
-                out.append((names[index], view))
+                        tensor.record_stream(stream)
+                out.append((names[p.position], tensor))
             prev_unpacked = torch.Event()
             prev_unpacked.record(streams[slot])
             if out:

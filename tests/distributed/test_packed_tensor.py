@@ -688,23 +688,26 @@ class TestPackedIpcRoundtrip:
             )
 
 
-# --- Chunk layout and wire segments ---
+# --- Chunk layout ---
 
 from unittest.mock import patch  # noqa: E402
 
 from vllm.distributed.weight_transfer import packed_tensor as pt  # noqa: E402
 
 
-def _layout_bytes(
-    layout: list[list[pt.Piece]], tensors: list[torch.Tensor]
-) -> list[bytes]:
+def _flat(t: torch.Tensor) -> torch.Tensor:
+    return t.contiguous().view(-1).view(torch.uint8)
+
+
+def _layout_bytes(layout: list[pt.Chunk], tensors: list[torch.Tensor]) -> list[bytes]:
     """Each chunk's bytes when `tensors` are packed with `layout` (CPU)."""
     out = []
-    for pieces in layout:
-        buf = torch.zeros(pt.chunk_bytes(pieces), dtype=torch.uint8)
-        for piece in pieces:
-            view = pt._view(buf, piece)
-            view.copy_(pt._source(piece, tensors[piece.position], view))
+    for nbytes, pieces in layout:
+        buf = torch.zeros(nbytes, dtype=torch.uint8)
+        for p in pieces:
+            buf[p.offset : p.offset + p.end - p.start] = _flat(tensors[p.position])[
+                p.start : p.end
+            ]
         out.append(buf.numpy().tobytes())
     return out
 
@@ -712,9 +715,11 @@ def _layout_bytes(
 def _mixed_tensors(seed: int = 0) -> list[torch.Tensor]:
     g = torch.Generator().manual_seed(seed)
     return [
-        torch.randint(0, 255, (3,), dtype=torch.uint8, generator=g),  # misaligns
+        torch.randint(0, 255, (3,), dtype=torch.uint8, generator=g),  # odd size
         torch.randn(40, 8, generator=g),
         torch.randn(7, generator=g).to(torch.bfloat16),
+        torch.tensor(1.5),  # 0-dim
+        torch.empty(0, 4),  # no bytes
         torch.randn(64, 32, generator=g),
         torch.randint(-5, 5, (9,), dtype=torch.int64, generator=g),
         torch.randn(5, 3, generator=g, dtype=torch.float64),
@@ -723,80 +728,36 @@ def _mixed_tensors(seed: int = 0) -> list[torch.Tensor]:
 
 class TestChunkLayout:
     @pytest.mark.parametrize("limit", [16, 100, 1000, 4096, 1 << 20])
-    def test_without_segments_matches_packing_before_segments(self, limit):
-        """With segments off the wire bytes are what earlier versions packed
-        (tensors back to back, a chunk takes tensors until it holds more than
-        the buffer), so a peer that predates segments interoperates."""
+    def test_layout_is_the_aligned_stream_cut_into_buffer_sized_chunks(self, limit):
+        """The wire bytes are every tensor back to back, each starting
+        `ALIGN`-aligned, cut into chunks of the buffer size (rounded down to
+        `ALIGN`); only the last chunk is shorter."""
         tensors = _mixed_tensors()
         layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), limit)
-        expected, cur = [], []
+        stream = b""
         for t in tensors:
-            cur.append(t.contiguous().view(-1).view(torch.uint8))
-            if sum(c.numel() for c in cur) > limit:
-                expected.append(torch.cat(cur).numpy().tobytes())
-                cur = []
-        if cur:
-            expected.append(torch.cat(cur).numpy().tobytes())
+            stream += b"\0" * (-len(stream) % pt.ALIGN) + _flat(t).numpy().tobytes()
+        size = limit - limit % pt.ALIGN
+        expected = [stream[i : i + size] for i in range(0, len(stream), size)]
         assert _layout_bytes(layout, tensors) == expected
-        assert all(p.rows is None for chunk in layout for p in chunk)
+        # a tensor inside one chunk starts aligned, so it views as its dtype
+        for _, pieces in layout:
+            assert all(p.offset % pt.ALIGN == 0 for p in pieces)
 
-    def test_segments_split_only_over_the_buffer(self):
-        limit = 1000
-        big = torch.randn(10, 100)  # 4000 B, rows of 400 B
-        mid = torch.randn(15, 25)  # 1500 B, rows of 100 B
-        small = torch.randn(10, 25)  # 1000 B: fits, whole
-        layout = pt.chunk_layout(
-            [(t.shape, t.dtype) for t in (big, mid, small)], limit, segments=True
-        )
-
-        def rows(i):
-            return [p.rows for chunk in layout for p in chunk if p.position == i]
-
-        assert rows(0) == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
-        assert rows(1) == [(0, 10), (10, 15)]
-        assert rows(2) == [None]
-        # no piece is larger than the buffer, so no chunk exceeds twice it
-        assert all(p.nbytes <= limit for chunk in layout for p in chunk)
-        assert max(map(pt.chunk_bytes, layout)) <= 2 * limit
-        off = pt.chunk_layout([(big.shape, big.dtype)], limit)
-        assert [p.rows for chunk in off for p in chunk] == [None]
-
-    def test_views_alias_the_buffer_and_misaligned_is_raw(self):
-        layout = pt.chunk_layout(
-            [((3,), torch.uint8), ((2, 2), torch.float32), ((4,), torch.uint8)], 1024
-        )
-        buf = torch.zeros(pt.chunk_bytes(layout[0]), dtype=torch.uint8)
-        tag, w, tail = (pt._view(buf, p) for p in layout[0])
-        assert tag.data_ptr() == buf.data_ptr() and tag.dtype == torch.uint8
-        assert w.dtype == torch.uint8 and w.numel() == 16  # offset 3: raw bytes
-        assert tail.data_ptr() == buf.data_ptr() + 19
-        piece = layout[0][1]
-        w.copy_(torch.arange(4.0).view(-1).view(torch.uint8))
-        got = pt._unpacked(w, piece)
-        assert got.dtype == torch.float32 and got.shape == (2, 2)
-        assert torch.equal(got.view(-1), torch.arange(4.0))
-        assert got.untyped_storage().data_ptr() != buf.untyped_storage().data_ptr()
-
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-    def test_scalar_round_trips(self, dtype):
-        tensors = [torch.randn(2, 3, dtype=dtype), torch.tensor(1.5, dtype=dtype)]
-        layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), 1024)
-        [raw] = _layout_bytes(layout, tensors)
-        buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-        for piece in layout[0]:
-            got = pt._unpacked(pt._view(buf, piece), piece)
-            assert got.shape == tensors[piece.position].shape
-            torch.testing.assert_close(got, tensors[piece.position], rtol=0, atol=0)
-
-    def test_row_over_the_buffer_travels_whole_and_warns(self):
-        with patch.object(pt.logger, "warning_once") as warn:
-            assert pt.wire_segments([3, 1000], torch.float32, 1000) is None
-        warn.assert_called_once()
+    def test_tensor_over_the_buffer_is_split_at_chunk_boundaries(self):
+        layout = pt.chunk_layout([((10, 100), torch.float32)], 1000)  # 4000 B
+        assert [(p.start, p.end, p.offset) for _, ps in layout for p in ps] == [
+            (0, 992, 0),
+            (992, 1984, 0),
+            (1984, 2976, 0),
+            (2976, 3968, 0),
+            (3968, 4000, 0),
+        ]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-class TestSegmentedRoundtrip:
-    def _roundtrip(self, tensors, limit, segments, num_buffers=2):
+class TestChunkedRoundtrip:
+    def _roundtrip(self, tensors, limit, num_buffers=2):
         producer_group = MockCommunicationGroup()
         pairs = [(f"t{i}", t) for i, t in enumerate(tensors)]
         packed_nccl_broadcast_producer(
@@ -806,7 +767,6 @@ class TestSegmentedRoundtrip:
             post_iter_func=lambda x: x[1],
             buffer_size_bytes=limit,
             num_buffers=num_buffers,
-            segments=segments,
         )
         consumer_group = MockConsumerCommunicationGroup(
             producer_group.broadcasted_tensors
@@ -824,7 +784,6 @@ class TestSegmentedRoundtrip:
             post_unpack_func=post_unpack_func,
             buffer_size_bytes=limit,
             num_buffers=num_buffers,
-            segments=segments,
         )
         torch.accelerator.synchronize()
         for name, t in pairs:
@@ -832,56 +791,53 @@ class TestSegmentedRoundtrip:
             assert torch.equal(got[name], t), name
         return producer_group
 
-    @pytest.mark.parametrize("segments", [False, True])
-    def test_roundtrip_with_segments_and_misaligned_entries(self, segments):
+    def test_roundtrip_with_split_and_odd_sized_tensors(self):
         tensors = [t.cuda() for t in _mixed_tensors(1)]
         tensors.insert(2, torch.randn(50, 16, device="cuda"))  # 3200 B
         tensors.insert(3, torch.randint(0, 9, (5,), dtype=torch.uint8).cuda())
-        tensors.append(torch.randn(30, 6, device="cuda", dtype=torch.float64))
-        group = self._roundtrip(tensors, limit=512, segments=segments)
-        if segments:  # no chunk exceeds twice the buffer
-            assert max(t.numel() for t in group.broadcasted_tensors) <= 2 * 512
+        tensors.append(torch.randn(30, 6, device="cuda", dtype=torch.float64).t())
+        group = self._roundtrip(tensors, limit=512)
+        assert max(t.numel() for t in group.broadcasted_tensors) <= 512
 
-    def test_split_tensor_waits_for_rows_copied_on_another_slot(self):
+    def test_split_tensor_waits_for_bytes_copied_on_another_slot(self):
         """A tensor split across chunks on two slots: the callback that gets
-        it (second slot) runs after the first slot's row copies, even when
-        those are slow."""
-        big = torch.randn(8, 64, device="cuda")  # rows of 256 B
+        it (second slot) runs after the first slot's copies, even when those
+        are slow."""
+        big = torch.randn(8, 64, device="cuda")  # 2048 B: chunks of 1000, 1000, 48
         producer_group = MockCommunicationGroup()
         packed_nccl_broadcast_producer(
             iterator=iter([("big", big)]),
             group=producer_group,
             src=0,
             post_iter_func=lambda x: x[1],
-            buffer_size_bytes=1000,  # chunks: rows 0-6 | rows 6-8
-            segments=True,
+            buffer_size_bytes=1000,
         )
-        assert len(producer_group.broadcasted_tensors) == 2
         group = MockConsumerCommunicationGroup(producer_group.broadcasted_tensors)
         got: list[torch.Tensor] = []
-        view, calls = pt._view, []
+        first_slot = pt._get_streams(torch.accelerator.current_device_index(), 2)[0]
+        nbytes, slept = pt._nbytes, list[bool]()
 
-        def slow_first_chunk(buf, piece):
-            calls.append(piece)
-            if len(calls) == 1:  # queued on the first slot, before its copies
+        def slow_first_slot(shape, dtype):
+            # queued on the first slot after its receive, before its copies
+            if not slept and torch.cuda.current_stream() == first_slot:
+                slept.append(True)
                 torch.cuda._sleep(SLEEP_CYCLES)
-            return view(buf, piece)
+            return nbytes(shape, dtype)
 
-        with patch.object(pt, "_view", slow_first_chunk):
+        with patch.object(pt, "_nbytes", slow_first_slot):
             packed_nccl_broadcast_consumer(
                 iterator=iter([("big", ([8, 64], torch.float32))]),
                 group=group,
                 src=0,
                 post_unpack_func=lambda items: got.extend(t.clone() for _, t in items),
                 buffer_size_bytes=1000,
-                segments=True,
             )
         torch.accelerator.synchronize()
-        assert len(got) == 1 and torch.equal(got[0], big)
+        assert slept and len(got) == 1 and torch.equal(got[0], big)
 
     def test_split_tensor_is_joined_without_a_second_copy(self):
-        """The consumer writes segments into one tensor of the full size:
-        peak growth is about one tensor plus the receive buffers, not two."""
+        """The consumer writes a split tensor's bytes into one tensor of its
+        full size: peak growth is about one tensor plus the receive buffers."""
         mib = 1 << 20
         big = torch.randn(64, 256 * 1024, device="cuda")  # 64 MiB
         limit = 2 * mib
@@ -892,7 +848,6 @@ class TestSegmentedRoundtrip:
             src=0,
             post_iter_func=lambda x: x[1],
             buffer_size_bytes=limit,
-            segments=True,
         )
         group = MockConsumerCommunicationGroup(producer_group.broadcasted_tensors)
         torch.accelerator.synchronize()
@@ -907,7 +862,6 @@ class TestSegmentedRoundtrip:
                 t.sum().item() for _, t in items
             ),
             buffer_size_bytes=limit,
-            segments=True,
         )
         torch.accelerator.synchronize()
         assert seen == [pytest.approx(big.sum().item(), rel=1e-4)]
@@ -929,8 +883,8 @@ class _ChunkGroup:
         self.calls += 1
 
 
-def _packed_chunks(tensors, limit, segments=True):
-    layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), limit, segments)
+def _packed_chunks(tensors, limit):
+    layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), limit)
     cpu = [t.cpu() for t in tensors]
     return [
         torch.frombuffer(bytearray(b), dtype=torch.uint8).cuda()
@@ -945,7 +899,7 @@ class TestConsumerStreamOrdering:
         runs before the loads, so it can't erase them."""
         weight = torch.randn(1024, device="cuda")
         param = torch.empty(1024, device="cuda")
-        group = _ChunkGroup(_packed_chunks([weight], 1 << 16, segments=False))
+        group = _ChunkGroup(_packed_chunks([weight], 1 << 16))
         torch.accelerator.synchronize()
 
         def post_unpack_func(items):

@@ -37,7 +37,6 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
-    chunk_bytes,
     chunk_layout,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
@@ -84,10 +83,6 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     packed: bool = True
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
-    packed_wire_segments: bool = True
-    """Send tensors over the packed buffer as dim-0 segments, so no packed
-    buffer on either side needs their size. The workers are told at init; a worker
-    that predates segments must run with `False`."""
     use_load_plan: bool = False
     """Have the workers write received tensors of the target model through a
     load plan instead of `load_weights` where the plan allows (off by default).
@@ -201,7 +196,6 @@ class NCCLWeightTransferEngine(
         self.packed = False
         self.packed_buffer_size_bytes = DEFAULT_PACKED_BUFFER_SIZE_BYTES
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
-        self.packed_wire_segments = False
         # Metadata of the last update per (model, src), reused by empty update info.
         self._last_update_info: dict[
             tuple[torch.nn.Module, int], NCCLWeightTransferUpdateInfo
@@ -234,7 +228,6 @@ class NCCLWeightTransferEngine(
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
-        self.packed_wire_segments = init_info.packed_wire_segments
         self._last_update_info.clear()
         self._plan = self._plan_metadata = self._plan_manifest = None
         self.model_update_group = worker_init_process_group(
@@ -366,7 +359,6 @@ class NCCLWeightTransferEngine(
                 buffer_size_bytes=self.packed_buffer_size_bytes,
                 num_buffers=self.packed_num_buffers,
                 device=self.device,
-                segments=self.packed_wire_segments,
             )
         else:
             # Use simple one-by-one broadcasting
@@ -413,13 +405,11 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         packed: bool = True,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
-        packed_wire_segments: bool = True,
     ) -> None:
         super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.packed_num_buffers = packed_num_buffers
-        self.packed_wire_segments = packed_wire_segments
         self.model_update_group: PyNcclCommunicator | None = None
         # This rank's rank in the transfer group, set by trainer_init.
         self._group_rank = 0
@@ -442,7 +432,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
-            packed_wire_segments=init_info.packed and init_info.packed_wire_segments,
             use_load_plan=init_info.use_load_plan,
             metadata=None if metadata is None else _metadata_payload(metadata),
         )
@@ -519,7 +508,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
-            packed_wire_segments=init_info.packed_wire_segments,
         )
         plan_meta = source.metadata if init_info.use_load_plan else None
         if plan_meta is not None:
@@ -644,7 +632,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=self.packed_buffer_size_bytes,
                 num_buffers=self.packed_num_buffers,
-                segments=self.packed_wire_segments,
             )
         else:
             stream = torch.cuda.current_stream()
@@ -666,9 +653,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             layout = chunk_layout(
                 ((m.shape, m.dtype) for m in meta),
                 self.packed_buffer_size_bytes,
-                self.packed_wire_segments,
             )
-            sizes = [chunk_bytes(chunk) for chunk in layout]
+            sizes = [chunk.nbytes for chunk in layout]
             buf = torch.empty(max(sizes, default=0), dtype=torch.uint8, device=device)
             for n in sizes:  # on the current stream
                 self.model_update_group.broadcast(buf[:n], src=src)
