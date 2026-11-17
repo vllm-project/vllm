@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only NVIDIA Canary (FastConformer encoder + Transformer decoder).
 
-Targets the native Transformers checkpoint layout (e.g. ``nvidia/canary-1b-v2``)
-whose ``config.json`` has ``model_type == "canary"``.
+Targets the native Transformers checkpoint layout (e.g. `nvidia/canary-1b-v2`)
+whose `config.json` has `model_type == "canary"`.
 """
 
 import math
@@ -88,8 +88,8 @@ CANARY_SUPPORTED_LANGS = {
 
 # ----- Decoder -----
 class CanaryPositionalEmbedding(nn.Module):
-    """Fixed sinusoidal table laid out as ``[sin | cos]`` and scaled by
-    ``1 / sqrt(hidden_size)``; matches ``CanaryPositionalEmbedding`` in
+    """Fixed sinusoidal table laid out as `[sin | cos]` and scaled by
+    `1 / sqrt(hidden_size)`; matches `CanaryPositionalEmbedding` in
     Transformers."""
 
     def __init__(self, max_positions: int, hidden_size: int) -> None:
@@ -255,7 +255,7 @@ class CanaryModel(nn.Module):
 
 # ----- Multi-modal processing -----
 def _subsampled_length(num_frames: int, encoder_config) -> int:
-    """Mirror of ``ParakeetEncoder._get_subsampling_output_length``."""
+    """Mirror of `ParakeetEncoder._get_subsampling_output_length`."""
     kernel_size = encoder_config.subsampling_conv_kernel_size
     stride = encoder_config.subsampling_conv_stride
     add_pad = (kernel_size - 1) // 2 * 2 - kernel_size
@@ -471,7 +471,7 @@ class CanaryForConditionalGeneration(
     def get_decoder_prompt_tokens(
         cls, source_language: str, target_language: str, punctuation: bool = True
     ) -> list[str]:
-        """Same token sequence as the checkpoint's ``chat_template.jinja``."""
+        """Same token sequence as the checkpoint's `chat_template.jinja`."""
         return [
             "<|startofcontext|>",
             "<|startoftranscript|>",

@@ -500,6 +500,10 @@ def _process_single_sublayer(
         input_schema=current_input_schema,
         param_dtype=param_dtype,
         allow_fallback=allow_input_schema_fallback,
+        # Humming's MoE grouped GEMM has no working FP8 path on SM100-SM119
+        # (the tuner can emit an invalid two-CTA UMMA config); keep the BF16
+        # fallback there until it is fixed.
+        allow_fp8_sm100=False,
     )
     config = _prepare_and_transform_sublayer(
         layer=layer,
@@ -527,8 +531,8 @@ def stage_moe_weights_for_humming(
 ) -> str:
     """Install canonical weights and scales for Humming's layer-based converter.
 
-    Returns the scale parameter name used, ``weight_scale`` or
-    ``weight_scale_inv``.
+    Returns the scale parameter name used, `weight_scale` or
+    `weight_scale_inv`.
     """
     scale_name = (
         "weight_scale_inv" if hasattr(layer, "w13_weight_scale_inv") else "weight_scale"

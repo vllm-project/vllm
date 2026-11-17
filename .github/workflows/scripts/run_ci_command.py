@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
@@ -56,7 +56,7 @@ AMD_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
-        *ROCM_CACHE_COMMANDS,  # they start AMD CI builds
+        *ROCM_CACHE_COMMANDS,  # searched in AMD CI too; the cache build runs in CI
     }
 )
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
@@ -92,8 +92,20 @@ ROCM_CACHE_DONE = (
 )
 # build.sh promote copies only images built with main's versions of these.
 ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
-# build.sh base mode records the stack images it built under these keys.
-ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack-wheels", "rocm-rocm-stack")
+# build.sh base mode records the images it pushed itself under these keys, not
+# ones it reused from a tag another PR's CI could have pushed, and a runtime or
+# test-deps only with the parent it was built on ("none" otherwise). Only a build
+# that pushed the stack is a source; build.sh promote copies the rest over it.
+ROCM_STACK_BUILT_KEY = "rocm-rocm-stack-built"
+ROCM_BUILT_KEYS = (
+    ROCM_STACK_BUILT_KEY,
+    "rocm-rocm-runtime-built",
+    "rocm-rocm-test-deps-built",
+)
+# The one step a cache build runs (.buildkite/image_build/amd_rocm_cache.yaml).
+ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
+BUILDS_PER_PAGE = 100
+MAX_BUILD_PAGES = 100
 
 
 class ApiError(RuntimeError):
@@ -434,12 +446,18 @@ class BuildkiteClient:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: Sequence[str] = (),
+        page: int = 1,
+        created_from: str | None = None,
     ) -> list[dict[str, Any]]:
         query = [
             ("exclude_jobs", "true"),
             ("exclude_pipeline", "true"),
-            ("per_page", "100"),
+            ("per_page", str(BUILDS_PER_PAGE)),
         ]
+        if page > 1:
+            query.append(("page", str(page)))
+        if created_from:
+            query.append(("created_from", created_from))
         if commit:
             query.append(("commit", commit))
         if branch:
@@ -584,8 +602,10 @@ def authorize(
     if actor.casefold() != pr["user"]["login"].casefold():
         return (
             False,
-            "Only reviewers with write access can use CI commands before CI is "
-            "delegated to the PR author.",
+            (
+                "Only reviewers with write access can use CI commands before CI is "
+                "delegated to the PR author."
+            ),
         )
     if pr["draft"]:
         return False, "PR authors cannot run CI while the PR is a draft."
@@ -595,8 +615,10 @@ def authorize(
         return True, "approval from a trusted reviewer"
     return (
         False,
-        f"A reviewer with write access must run `{run_command}`, approve the PR, "
-        "or add the `ready` label first.",
+        (
+            f"A reviewer with write access must run `{run_command}`, approve the PR, "
+            "or add the `ready` label first."
+        ),
     )
 
 
@@ -624,6 +646,20 @@ def has_trusted_approval(
         if is_trusted_permission(github.get_permission(login)):
             return True
     return False
+
+
+def iter_builds(
+    buildkite: Any, *, branch: str, created_from: str | None = None
+) -> Iterator[dict[str, Any]]:
+    """Yield a branch's builds across every page."""
+    for page in range(1, MAX_BUILD_PAGES + 1):
+        builds = buildkite.list_builds(
+            None, branch=branch, page=page, created_from=created_from
+        )
+        yield from builds
+        if len(builds) < BUILDS_PER_PAGE:
+            return
+    raise ApiError(None, "Buildkite API pagination exceeded 10,000 builds.")
 
 
 def is_build_for_pr(build: Mapping[str, Any], pr_number: int) -> bool:
@@ -1234,32 +1270,62 @@ def handle_rocm_cache(
             f"@{actor} chose not to cache the ROCm base image. Main will build it "
             f"after the merge. {ROCM_CACHE_DONE}"
         )
-    sha = pr["head"]["sha"]
-    if any(
-        github.get_file_sha(p, "main") != github.get_file_sha(p, sha)
-        for p in ROCM_RECIPE
-    ):
-        raise CiPreparationError(
-            "Can't cache: this PR's `build.sh` or `docker-bake-rocm.hcl` differs "
-            f"from main's. If main changed them, run `{COMMAND_RUN_CI}` to merge "
-            f"main, then retry. If this PR changes them, use `{COMMAND_ROCM_NOCACHE}`."
-        )
-    # The images this PR's own CI built, by the digests it recorded: copied as
-    # built, whatever happens to their tags afterwards.
+    # The images this PR's own CI pushed, by the digests it recorded: copied as
+    # built, whatever happens to their tags afterwards. Its pull request is
+    # checked, not is_build_for_pr's github-pr-number fallback, which is
+    # metadata that any job can write. Builds are created under the head label
+    # (owner:branch); older ones under the bare ref, unless that is the base
+    # branch, whose builds are not this PR's.
+    branches = dict.fromkeys(
+        branch
+        for branch in (pr["head"].get("label"), pr["head"]["ref"])
+        if branch and branch != pr["base"]["ref"]
+    )
     sources = [
         build
         for client in (buildkite, ci_buildkite)
-        for build in client.list_builds(sha)
-        if is_build_for_pr(build, pr["number"])
-        and all((build.get("meta_data") or {}).get(k) for k in ROCM_STACK_IMAGE_KEYS)
+        for branch in branches
+        for build in iter_builds(
+            client, branch=branch, created_from=pr.get("created_at")
+        )
+        if str((build.get("pull_request") or {}).get("id")) == str(pr["number"])
+        and (build.get("meta_data") or {}).get(ROCM_STACK_BUILT_KEY)
     ]
     source = max(sources, key=lambda build: build.get("created_at", ""), default=None)
     if source is None:
         raise CiPreparationError(
-            f"Can't cache yet: CI hasn't built the ROCm base image for `{sha[:12]}`. "
-            f"Run `{COMMAND_RUN_CI}`, then `{COMMAND_ROCM_CACHE}` once it passes."
+            "Can't cache: no CI build of this PR built the ROCm base image itself. "
+            f"Run `{COMMAND_RUN_CI}`, then `{COMMAND_ROCM_CACHE}` once it passes. "
+            f"If CI reuses an existing image, use `{COMMAND_ROCM_NOCACHE}`."
         )
-    build = buildkite.create_build(
+    sha = source["commit"]
+    head_sha = pr["head"]["sha"]
+    if any(
+        github.get_file_sha(p, sha) != github.get_file_sha(p, head_sha)
+        for p in ROCM_STACK_INPUTS
+    ):
+        raise CiPreparationError(
+            "Can't cache yet: CI hasn't built the ROCm base image for this PR's "
+            f"latest changes to it. Run `{COMMAND_RUN_CI}`, then "
+            f"`{COMMAND_ROCM_CACHE}` once it passes. If CI reuses an existing "
+            f"image, use `{COMMAND_ROCM_NOCACHE}`."
+        )
+    # The stack was built with the source commit's recipe and main keeps the PR
+    # head's after the merge, so both must match main's. Merging main does not
+    # help when main changed them: the merge reuses the stack, so no build of
+    # this PR pushes one with main's recipe.
+    if any(
+        github.get_file_sha(p, "main") != github.get_file_sha(p, ref)
+        for p in ROCM_RECIPE
+        for ref in (sha, head_sha)
+    ):
+        raise CiPreparationError(
+            "Can't cache: this PR changes `build.sh` or `docker-bake-rocm.hcl`, or "
+            "its CI built the ROCm base image before main changed them. Use "
+            f"`{COMMAND_ROCM_NOCACHE}`."
+        )
+    meta_data = source["meta_data"]
+    build = ci_buildkite.create_build(
         {
             "commit": "HEAD",
             "branch": "main",
@@ -1268,15 +1334,18 @@ def handle_rocm_cache(
                 "ROCM_PROMOTE_PR": str(pr["number"]),
                 "ROCM_PROMOTE_SHA": sha,
                 "ROCM_PROMOTE_IMAGES": " ".join(
-                    source["meta_data"][key] for key in ROCM_STACK_IMAGE_KEYS
+                    meta_data[key]
+                    for key in ROCM_BUILT_KEYS
+                    if meta_data.get(key, "none") != "none"
                 ),
+                "VLLM_CI_ONLY_STEP_KEYS": json.dumps([ROCM_CACHE_STEP_KEY]),
             },
         }
     )
     return (
-        f"Caching the ROCm base image for main: [AMD CI #{build['number']}]"
-        f"({build['web_url']}) copies the image [this PR's CI]({source['web_url']}) "
-        f"built. {ROCM_CACHE_DONE}"
+        f"Caching the ROCm base image for main: [CI #{build['number']}]"
+        f"({build['web_url']}) copies the images [this PR's CI]({source['web_url']}) "
+        f"built at `{sha[:12]}`. {ROCM_CACHE_DONE}"
     )
 
 

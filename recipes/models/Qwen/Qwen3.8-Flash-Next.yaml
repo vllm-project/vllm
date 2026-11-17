@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
   date_added: 2026-08-26
-  date_updated: 2026-10-27
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -26,15 +26,6 @@ model:
   model_id: "Qwen/Qwen3.8-Flash-Next"
   min_vllm_version: "0.30.0"
   default_frontend: rust
-  docker_image:
-    nvidia: "vllm/vllm-openai:nightly"
-    amd: "vllm/vllm-openai-rocm:nightly"
-  nightly_required: true
-  install:
-    pip:
-      note: "Nightly wheels are recommended and verified by this recipe; stable vLLM ≥0.30.0 also runs the model."
-    docker:
-      note: "Use the vLLM nightly image."
   architecture: moe
   parameter_count: "176B"
   active_parameters: "6B"
@@ -42,8 +33,6 @@ model:
   base_args:
     - "--max-num-seqs"
     - "256"
-    - "--gpu-memory-utilization"
-    - "0.90"
     - "--enable-prefix-caching"
   base_env: {}
 
@@ -101,8 +90,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "32"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -116,8 +103,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "16"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -133,8 +118,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "32"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -148,8 +131,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "16"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -195,8 +176,6 @@ hardware_overrides:
     extra_args:
       - "--moe-backend"
       - "triton"
-      - "--gpu-memory-utilization"
-      - "0.85"
       - "--kv-cache-dtype"
       - "fp8"
       - "--attention-config.indexer_kv_dtype"
@@ -258,9 +237,9 @@ guide: |
 
   ## Prerequisites
 
-  - **Runtime:** use the nightly image, `vllm/vllm-openai:nightly` on NVIDIA or
-    `vllm/vllm-openai-rocm:nightly` on AMD, or the nightly PyPI wheels. Stable
-    ≥0.30.0 runs the model, but this recipe is tuned and verified on nightly.
+  - **Runtime:** vLLM 0.30.0 or newer runs the model. This recipe was tuned and
+    verified on nightly builds that have since shipped, so use the latest release
+    (`vllm/vllm-openai:latest` on NVIDIA, `vllm/vllm-openai-rocm:latest` on AMD).
   - **Hardware:** NVIDIA CUDA and AMD ROCm instructions are provided below.
   - **FP8 memory:** the checkpoint is 172.78 GiB; it fits on a single GB300 GPU
     (288 GB HBM3e).
@@ -271,7 +250,7 @@ guide: |
   - **Host memory for N-gram Embedding offload:** at least 51 GB plus
     runtime headroom.
 
-  The Install block above generates the nightly-wheel and Docker launch flows.
+  The Install block above generates the pip and Docker launch flows.
 
   ## Serving
 
@@ -285,7 +264,6 @@ guide: |
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.90 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
@@ -319,7 +297,6 @@ guide: |
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --moe-backend triton \
-    --gpu-memory-utilization 0.85 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
@@ -345,7 +322,6 @@ guide: |
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --moe-backend triton \
-    --gpu-memory-utilization 0.85 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
@@ -399,8 +375,7 @@ guide: |
 
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
   --tensor-parallel-size 4 \
-  --max-model-len auto \
-  --gpu-memory-utilization 0.9
+  --max-model-len auto
   ```
 
   MTP is opt-in on MI355X; to turn it on, add the option from the MTP
@@ -474,7 +449,11 @@ guide: |
   - **FP8 on eight GPUs:** use TEP8; plain TP8 is incompatible with this
     checkpoint. TP4 is also supported if GPU memory capacity allows.
   - **Mamba-cache capacity error at startup:** keep `--max-num-seqs 256`.
-  - **Runtime OOM on large multimodal batches:** keep `--gpu-memory-utilization 0.90`.
+  - **Runtime OOM on large multimodal batches:** lower `--max-num-batched-tokens`
+    or `--limit-mm-per-prompt`. On CUDA and ROCm, vLLM sizes the KV cache from
+    memory measured after warmup, so leave `--gpu-memory-utilization` unset
+    unless the GPU is shared
+    ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
   - **Out of memory while loading:** enable N-gram Embedding CPU offload, increase
     TP size, or reduce `--max-model-len` to reserve less KV cache. On 4x H100
     80GB, plain TP4 OOMs at engine startup without PLE CPU offload — keep the
