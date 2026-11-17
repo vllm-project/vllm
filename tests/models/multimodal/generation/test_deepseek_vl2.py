@@ -34,3 +34,38 @@ def test_deepseek_vl2_encoder_cache_cropping(
             # with finish_reason="error" due to mismatched embedding counts.
             assert output.finish_reason == "length"
             assert len(output.token_ids) == 1
+
+
+@pytest.mark.core_model
+def test_deepseek_vl2_request_processor_kwargs(vllm_runner):
+    """Generate with a request override and verify the processed image span."""
+    from PIL import Image
+
+    from vllm import SamplingParams
+
+    model_id = "deepseek-ai/deepseek-vl2-tiny"
+    with vllm_runner(
+        model_id,
+        enforce_eager=True,
+        max_model_len=4096,
+        max_num_batched_tokens=4096,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=1 << 29,
+        attention_config={"backend": "TRITON_ATTN"},
+        mm_encoder_attn_backend="TORCH_SDPA",
+        limit_mm_per_prompt={"image": 1},
+    ) as runner:
+        result = runner.llm.generate(
+            {
+                "prompt": "<image>\nDescribe.",
+                "multi_modal_data": {"image": Image.new("RGB", (1600, 1200))},
+                "mm_processor_kwargs": {"candidate_resolutions": ((384, 384),)},
+            },
+            SamplingParams(temperature=0, max_tokens=1, ignore_eos=True),
+        )[0]
+        assert result.outputs[0].finish_reason == "length"
+        assert len(result.outputs[0].token_ids) == 1
+        expected_tokens = 421
+        image_token_id = runner.llm.get_tokenizer().convert_tokens_to_ids("<image>")
+        assert result.prompt_token_ids.count(image_token_id) == expected_tokens
