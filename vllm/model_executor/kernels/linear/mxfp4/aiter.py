@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
@@ -10,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
@@ -48,27 +48,37 @@ if is_aiter_found_and_supported():
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
+        hadamard_rotate: bool = False,
     ) -> torch.Tensor:
+        """With `hadamard_rotate`, the HIP quant of the ASM path rotates each
+        32-element block of `x` by the orthonormal Sylvester Hadamard matrix
+        (`block_hadamard_rotate`); `weight` must be rotated the same way."""
+        assert not (hadamard_rotate and x_scales is not None), (
+            "hadamard_rotate needs an unquantized x"
+        )
+        # Only AITER releases with the fused rotation take the argument.
+        quant_kwargs = {"hadamard_rotate": True} if hadamard_rotate else {}
         from aiter.ops.triton.gemm_afp4wfp4 import (
             gemm_afp4wfp4,
             gemm_afp4wfp4_preshuffle,
         )
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-        if rocm_use_aiter_fp4_asm_gemm:
-            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
-
         M = x.shape[0]
         N = weight.shape[0]
         K = weight.shape[1]
         if rocm_use_aiter_fp4_asm_gemm:
-            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
+            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+            # The preshuffle kernel's tuned configs split K in some M buckets.
+            if (
+                M <= 64
+                and not envs.VLLM_BATCH_INVARIANT
+                and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+            ):
                 if x_scales is None:
                     # use hip quant kernel for performance
-                    if M >= 32:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                    else:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=M >= 32, **quant_kwargs)
                 else:
                     x_q = x
                     x_s = x_scales
@@ -92,7 +102,7 @@ if is_aiter_found_and_supported():
             else:
                 if x_scales is None:
                     # use hip quant kernel for performance
-                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True, **quant_kwargs)
                 else:
                     x_q = x
                     x_s = x_scales
@@ -107,6 +117,7 @@ if is_aiter_found_and_supported():
                 )
             return y[:M]
         else:
+            assert not hadamard_rotate, "hadamard_rotate needs the ASM GEMM path"
             if x_scales is None:
                 x_q, x_s = dynamic_mxfp4_quant(x)
             else:
@@ -116,16 +127,26 @@ if is_aiter_found_and_supported():
                 x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
             )
 
-            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
+            config = None
+            if envs.VLLM_BATCH_INVARIANT:
+                # The configs split K in some M buckets (up to M <= 256 for
+                # tuned shapes). Keep the tile, drop the split.
+                from aiter.ops.triton.gemm_afp4wfp4 import _get_config
+
+                config, _ = _get_config(M, N, K)
+                config = dict(config, NUM_KSPLIT=1)
+
+            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y, config)
             return y
 
     def gemm_with_dynamic_quant_fake(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
+        hadamard_rotate: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
@@ -145,7 +166,9 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
-        self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+        self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
+        self.use_asm_gemm = False
+        self.is_hadamard_fused = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -185,6 +208,13 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Use preshuffled ASM (P) and Triton (D) GEMM when tuned in aiter
+        if self.asm_gemm_supported:
+            n, k_bytes = layer.weight.shape
+            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
+                n, k_bytes
+            ) and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+
         if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
             layer.weight_scale.data
         ):
@@ -206,16 +236,20 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             weight_scale = weight_scale.view(sm // 32, 2, 16, sn // 8, 2, 4, 1)
             weight_scale = weight_scale.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
             weight_scale = weight_scale.view(sm, sn)
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            replace_parameter(layer, "weight_scale", weight_scale)
 
-            layer.weight = Parameter(
-                shuffle_weight(layer.weight.data, layout=(16, 16)),
-                requires_grad=False,
+            replace_parameter(
+                layer, "weight", shuffle_weight(layer.weight.data, layout=(16, 16))
             )
         else:
-            layer.weight_scale = Parameter(
-                layer.weight_scale.data.T.contiguous(), requires_grad=False
+            replace_parameter(
+                layer, "weight_scale", layer.weight_scale.data.T.contiguous()
             )
+
+    def fuse_input_hadamard(self, size: int) -> bool:
+        # Only the HIP activation quant of the ASM path rotates, in 32-blocks.
+        self.is_hadamard_fused = self.use_asm_gemm and size == 32
+        return self.is_hadamard_fused
 
     def apply_weights(
         self,
@@ -229,6 +263,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             layer.weight_scale,
             self.use_asm_gemm,
             self.out_dtype,
+            hadamard_rotate=self.is_hadamard_fused,
         )
         if bias is not None:
             y = y + bias

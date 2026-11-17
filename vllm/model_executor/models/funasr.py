@@ -14,7 +14,7 @@ from transformers import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType
@@ -394,11 +394,11 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         xs_pad = self.embed(xs_pad)
 
-        for layer_idx, encoder_layer in enumerate(self.encoders0):
+        for encoder_layer in self.encoders0:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
-        for layer_idx, encoder_layer in enumerate(self.encoders):
+        for encoder_layer in self.encoders:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
@@ -406,7 +406,7 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         olens = masks.squeeze(1).sum(1).int()
 
-        for layer_idx, encoder_layer in enumerate(self.tp_encoders):
+        for encoder_layer in self.tp_encoders:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
@@ -595,7 +595,7 @@ class Transformer(nn.Module):
         olens = (ilens - 1) // self.k + 1
 
         if self.blocks is not None:
-            for layer, block in enumerate(self.blocks):
+            for block in self.blocks:
                 hidden_states = block(hidden_states)
         return hidden_states, olens
 
@@ -734,22 +734,18 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
         }
 
@@ -874,6 +870,10 @@ class FunASRForConditionalGeneration(
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'FunASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
@@ -885,9 +885,7 @@ class FunASRForConditionalGeneration(
             )
 
         if hotwords is not None:
-            funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n热词列表：[{}]\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n".format(  # noqa: E501
-                hotwords
-            )
+            funasr_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n热词列表：[{hotwords}]\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
         else:
             funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 

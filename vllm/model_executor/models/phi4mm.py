@@ -10,14 +10,14 @@ import torch
 import torch.nn as nn
 from transformers import (
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
     SequenceFeatureExtractor,
     SiglipVisionConfig,
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -123,7 +123,7 @@ class Phi4MMImageEncoder(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
         model_dir: str = "",
@@ -839,28 +839,21 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         mm_data = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "audio": self._get_dummy_audios(
                 length=_AUDIO_MAX_SOUNDFILE_SIZE,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
         }
 
@@ -892,14 +885,14 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if not hf_data:
+        if not mm_data:
             return processed_data
 
-        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
                 image_width=img_size[0],
@@ -910,13 +903,13 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         ]
         processed_data["num_img_tokens"] = num_img_tokens
 
-        audios = hf_data.get("audios", [])
+        audios = mm_data.get("audios", [])
         assert isinstance(audios, list)
         audio_features = processed_data.get("input_audio_embeds")
         if audio_features is None:
             return processed_data
 
-        sr = self.info.get_feature_extractor(**hf_kwargs).sampling_rate
+        sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
         feature_sizes = [
             self.info.get_audio_num_frames(len(audio), sr) for audio, _ in audios
         ]
@@ -1304,7 +1297,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

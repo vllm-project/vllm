@@ -14,9 +14,10 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -112,10 +113,6 @@ class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
 
 LlavaOnevisionImageInputs: TypeAlias = (
     LlavaOnevisionImagePixelInputs | LlavaOnevisionImageEmbeddingInputs
-)
-
-LlavaOnevisionMultiInputs: TypeAlias = (
-    LlavaOnevisionImageInputs | LlavaOnevisionVideoPixelInputs
 )
 
 
@@ -236,13 +233,11 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
-
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+            max_total_frames // max(num_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
         return max(max_frames_per_video, 1)
@@ -257,7 +252,9 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts.get("video", 0)
+            ),
         )
 
 
@@ -278,33 +275,26 @@ class LlavaOnevisionDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
-
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -473,6 +463,8 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    supports_mm_device_do_normalize = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -503,6 +495,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.input_norm = build_mm_input_norm(
+                vllm_config.model_config, layout="bchw"
+            )
             # Initialize the vision tower only up to the required feature layer
             self.vision_tower = init_vision_tower_for_llava(
                 config,
@@ -610,7 +605,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         return vision_tower(
-            pixel_values,
+            self.input_norm(pixel_values, vision_tower.dtype),
             feature_select_strategy=self.config.vision_feature_select_strategy,
         )
 
@@ -790,7 +785,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         video_features = vision_tower(
-            pixel_values,
+            self.input_norm(pixel_values, vision_tower.dtype),
             feature_select_strategy=self.config.vision_feature_select_strategy,
         )
         video_features = self.multi_modal_projector(video_features)
@@ -824,15 +819,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             self.vision_tower, video_pixels_flat
         )
 
-        image_newline = self.image_newline[None, None, :]
+        image_newline = self.image_newline[None, :]
 
         return [
             torch.cat(
                 (
-                    embeds.reshape(1, num_frame * embeddings_flat.shape[1], -1),
+                    embeds.reshape(num_frame * embeddings_flat.shape[1], -1),
                     image_newline,
                 ),
-                dim=1,
+                dim=0,
             )
             for num_frame, embeds in zip(
                 frames_per_video,

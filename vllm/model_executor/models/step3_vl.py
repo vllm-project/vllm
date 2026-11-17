@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -139,19 +139,16 @@ class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -906,8 +903,8 @@ class Step3VLForConditionalGeneration(
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
-        ``outputs['global']`` contains global-image features and ``outputs['local']``
-        contains local-patch features (or ``None`` when there are no patches).
+        `outputs['global']` contains global-image features and `outputs['local']`
+        contains local-patch features (or `None` when there are no patches).
         """
         output = outputs["global"]
         local_output = outputs.get("local")
@@ -938,7 +935,11 @@ class Step3VLForConditionalGeneration(
                 parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
                 cur_patch += np
             parts.append(global_part[i].reshape(-1, hidden))
-            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+            if len(parts) > 1:
+                merged[idx] = torch.cat(parts, dim=0)
+            else:
+                # A view of the graph output, which later replays overwrite.
+                merged[idx] = parts[0].clone() if clone else parts[0]
 
         out = [merged[i] for i in indices]
         for i, idx in enumerate(indices):

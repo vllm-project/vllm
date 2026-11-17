@@ -11,7 +11,7 @@ from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
@@ -694,13 +694,10 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -710,8 +707,8 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -1104,27 +1101,18 @@ class GlmAsrForConditionalGeneration(
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'GLM-ASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         model_config = stt_params.model_config
-        task_type = stt_params.task_type
-        to_language = stt_params.to_language
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_token = cls._get_audio_token(model_config)
 
-        if task_type == "translate":
-            full_lang_name_to = (
-                cls.supported_languages.get(to_language, to_language)
-                if to_language is not None
-                else ""
-            )
-            user_content = f"{audio_token}translate the speech to {full_lang_name_to}"
-        elif task_type == "transcribe":
-            user_content = (
-                f"{audio_token}can you transcribe the speech into a written format?"
-            )
-        else:
-            raise ValueError(f"Unsupported task type {task_type}")
-
+        user_content = (
+            f"{audio_token}can you transcribe the speech into a written format?"
+        )
         messages = [{"role": "user", "content": user_content}]
         prompt = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True

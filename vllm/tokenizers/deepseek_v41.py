@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Iterator
 from typing import Any
 
 from transformers import TokenizersBackend
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
@@ -17,31 +18,65 @@ from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
 
+def _reject_image_placeholder(text: Any) -> None:
+    if isinstance(text, str) and IMAGE_PLACEHOLDER in text:
+        raise ValueError(
+            f"Message text contains image special token {IMAGE_PLACEHOLDER!r}; "
+            "provide images as image content parts."
+        )
+
+
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
 ) -> list[dict[str, Any]]:
-    result = [dict(message) for message in copy.deepcopy(messages)]
+    # vLLM additions to the reference: Responses API part types, image_pil,
+    # tool_reference, and ValueError (400) instead of the reference's asserts.
+    result: list[dict[str, Any]] = []
+    for original_message in messages:
+        content = original_message.get("content")
+        if isinstance(content, Iterator):
+            original_message["content"] = list(content)
+        result.append(dict(copy.deepcopy(original_message)))
+    image_idx = 0
     for message in result:
+        image_indices = message["_image_indices"] = []
         role = message.get("role")
         if role not in ("system", "developer", "user", "assistant", "tool"):
             raise ValueError(f"Invalid role: {role}")
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
+        _reject_image_placeholder(message.get("reasoning_content"))
         content = message.get("content")
-        if isinstance(content, list):
+        if isinstance(content, str):
+            _reject_image_placeholder(content)
+        elif isinstance(content, list):
             parts = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
+                    _reject_image_placeholder(block.get("text"))
                     parts.append(block.get("text", ""))
-                elif part_type in ("image_url", "input_image", "image_pil"):
+                elif part_type in (
+                    "image_url",
+                    "input_image",
+                    "image_pil",
+                    "image_embeds",
+                ):
                     parts.append(IMAGE_PLACEHOLDER)
+                    image_indices.append(image_idx)
+                    image_idx += 1
+                elif part_type == "tool_reference":
+                    # The system prompt already lists every tool, deferred
+                    # ones included, so the name is all the model needs.
+                    _reject_image_placeholder(block.get("name"))
+                    parts.append(block.get("name", ""))
                 else:
                     raise ValueError(
                         "DeepSeek V4.1 supports text and image content only; "
                         f"got {part_type!r}"
                     )
             message["content"] = "\n\n".join(parts)
+
     return result
 
 
@@ -55,6 +90,7 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             self,
             messages: list[ChatCompletionMessageParam],
             tools: list[dict[str, Any]] | None = None,
+            image_order: list[int] | None = None,
             **kwargs,
         ) -> str | list[int]:
             # The generic renderer's conversation has already flattened text
@@ -90,6 +126,9 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 thinking_mode="thinking" if thinking else "chat",
                 drop_thinking=kwargs.get("drop_thinking", True),
                 reasoning_effort=effort,
+                image_order=image_order,
+                add_generation_prompt=kwargs.get("add_generation_prompt", True),
+                continue_final_message=kwargs.get("continue_final_message", False),
             )
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {
@@ -116,6 +155,6 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
 class DeepseekV41Tokenizer(TokenizerLike):
     @classmethod
-    def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
+    def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:  # type: ignore[override]
         tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
         return get_cached_tokenizer(get_deepseek_v41_tokenizer(tokenizer))

@@ -3,12 +3,12 @@
 """Triton kernels for MiniMax M3 block-sparse GQA attention.
 
 The main heads attend only to the blocks selected by the lightning indexer (see
-``index_topk``). Adapted to vLLM's paged KV cache: the KV page size is forced to
+`index_topk`). Adapted to vLLM's paged KV cache: the KV page size is forced to
 equal the sparse block size (128), so one selected block maps to exactly one
 page.
 
 Main K/V cache layout (vLLM):
-  ``(num_blocks, num_kv_heads, 128, 2 * head_dim)``
+  `(num_blocks, num_kv_heads, 128, 2 * head_dim)`
   K=[..., :head_dim] V=[..., head_dim:]
 
 Only the paths MiniMax M3 uses are implemented: no attention sink, base-2
@@ -44,8 +44,9 @@ _FP8_DTYPES = (
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
-        * triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_QH": lambda args: (
+            args["BLOCK_SIZE_Q"] * triton.next_power_of_2(args["gqa_group_size"])
+        ),
     }
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
@@ -110,7 +111,9 @@ def _gqa_sparse_fwd_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
+    off_h = tl.arange(0, BLOCK_SIZE_H)
     d_mask = off_d < head_dim
+    h_mask = off_h < gqa_group_size
     for j in range(real_q_loop):
         pid_q_j = pid_q * num_q_loop + j
         t_ptr_j = t_ptr + (q_block_start + pid_q_j) * stride_tn + pid_kh * stride_th
@@ -118,15 +121,20 @@ def _gqa_sparse_fwd_kernel(
         q_abs = prefix_len + pid_q_j * BLOCK_SIZE_Q
         valid_blocks = (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K
         real_topk = tl.minimum(max_topk, valid_blocks)
-        q_ptrs = tl.make_block_ptr(
-            base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_qn, stride_qh, stride_qd),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+        off_qi = pid_q_j * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+        qo_mask = (
+            (off_qi < q_len)[:, None, None]
+            & h_mask[None, :, None]
+            & d_mask[None, None, :]
         )
-        q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+        q = tl.load(
+            q_ptr
+            + (q_start + off_qi)[:, None, None] * stride_qn
+            + (pid_h + off_h)[None, :, None] * stride_qh
+            + off_d[None, None, :] * stride_qd,
+            mask=qo_mask,
+            other=0.0,
+        )
         off_q = (
             tl.arange(0, BLOCK_SIZE_Q)[:, None]
             + pid_q_j * BLOCK_SIZE_Q
@@ -203,15 +211,14 @@ def _gqa_sparse_fwd_kernel(
             lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
-        o_ptrs = tl.make_block_ptr(
-            base=o_ptr + q_start * stride_on + pid_h * stride_oh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_on, stride_oh, stride_od),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+        tl.store(
+            o_ptr
+            + (q_start + off_qi)[:, None, None] * stride_on
+            + (pid_h + off_h)[None, :, None] * stride_oh
+            + off_d[None, None, :] * stride_od,
+            acc_o.to(o_ptr.dtype.element_ty),
+            mask=qo_mask,
         )
-        tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +248,9 @@ def _gqa_sparse_decode_kernel(
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
+    query_start_loc_ptr,  # [num_reqs + 1] int32; read only when VARLEN
+    token_to_req_ptr,  # [total_q] int32; read only when VARLEN
+    num_reqs,
     total_q,
     gqa_group_size,
     head_dim,
@@ -276,14 +286,24 @@ def _gqa_sparse_decode_kernel(
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
     KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
     USE_PDL: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
     # split-K over the topk dimension: pid(0) folds (query-token, chunk).
     pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
     pid_b = pid_bc % total_q
     pid_c = pid_bc // total_q
-    req_id = pid_b // decode_query_len
-    q_offset = pid_b - req_id * decode_query_len
+    if VARLEN:
+        req_id = tl.load(token_to_req_ptr + pid_b)
+        q_start = tl.load(query_start_loc_ptr + req_id)
+        q_len = tl.load(query_start_loc_ptr + req_id + 1) - q_start
+        valid_token = pid_b < tl.load(query_start_loc_ptr + num_reqs)
+    else:
+        req_id = pid_b // decode_query_len
+        q_start = req_id * decode_query_len
+        q_len = decode_query_len
+        valid_token = True
+    q_offset = pid_b - q_start
     pid_h = pid_kh * gqa_group_size
     chunk_size_topk = (max_topk + NUM_TOPK_CHUNKS - 1) // NUM_TOPK_CHUNKS
     chunk_start_topk = pid_c * chunk_size_topk
@@ -293,12 +313,12 @@ def _gqa_sparse_decode_kernel(
         tl.extra.cuda.gdc_wait()
 
     seq_len = tl.load(seq_lens + req_id)
-    query_pos = seq_len - decode_query_len + q_offset
+    query_pos = seq_len - q_len + q_offset
     # Full-CG padding uses zero-length request rows. Clamp to an empty
     # attention range instead of letting padded rows produce negative lengths.
-    kv_len = tl.maximum(query_pos + 1, 0)
+    kv_len = tl.where(valid_token, tl.maximum(query_pos + 1, 0), 0)
 
-    # Valid block count from seq_len (no sentinel): min(topk, cdiv(kv_len, blk)).
+    # Upper bound on top-k entries from causal length; entries may be sentinels.
     idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
     num_blocks = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
     real_topk = tl.minimum(max_topk, num_blocks)
@@ -306,30 +326,37 @@ def _gqa_sparse_decode_kernel(
 
     off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
+    off_h = tl.arange(0, BLOCK_SIZE_H)
     d_mask = off_d < head_dim
+    h_mask = off_h < gqa_group_size
+    hd_mask = h_mask[:, None] & d_mask[None, :]
     bt_row = block_table_ptr + req_id * stride_bt_b
 
     m_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
     lse_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
     acc_o = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_D), dtype=tl.float32)
-    q_ptrs = tl.make_block_ptr(
-        base=q_ptr + pid_b * stride_qn + pid_h * stride_qh,
-        shape=(gqa_group_size, head_dim),
-        strides=(stride_qh, stride_qd),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(1, 0),
+    q = tl.load(
+        q_ptr
+        + pid_b * stride_qn
+        + (pid_h + off_h)[:, None] * stride_qh
+        + off_d[None, :] * stride_qd,
+        mask=hd_mask,
+        other=0.0,
     )
-    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
 
     cur_idx_ptr = idx_base + chunk_start_topk * stride_tk
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
         blk = tl.load(cur_idx_ptr).to(tl.int32)
         cur_idx_ptr = cur_idx_ptr + stride_tk
-        c = blk * BLOCK_SIZE_K
-        page = tl.load(bt_row + blk).to(tl.int64)
+        # topk_idx uses -1 for unused entries. Select a safe logical block
+        # before dereferencing the block table; invalid and future blocks then
+        # contribute a neutral online-softmax update without control flow.
+        valid_blk = (blk >= 0) & (blk < num_blocks)
+        safe_blk = tl.where(valid_blk, blk, 0)
+        c = safe_blk * BLOCK_SIZE_K
+        page = tl.load(bt_row + safe_blk).to(tl.int64)
         pos = c + off_n
-        pos_mask = pos < kv_len
+        pos_mask = (pos < kv_len) & valid_blk
         k = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
@@ -356,9 +383,11 @@ def _gqa_sparse_decode_kernel(
         qk += tl.where(pos_mask[None, :], 0, float("-inf"))
         qk += tl.dot(q, k) * sm_scale_log2e
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        p = tl.exp2(qk - m_ij[:, None])
+        m_safe = tl.where(valid_blk, m_ij, 0.0)
+        p = tl.where(pos_mask[None, :], tl.exp2(qk - m_safe[:, None]), 0.0)
         l_ij = tl.sum(p, axis=1)
-        acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+        alpha = tl.where(valid_blk, tl.exp2(m_i - m_safe), 1.0)
+        acc_o = acc_o * alpha[:, None]
         v = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
@@ -382,8 +411,9 @@ def _gqa_sparse_decode_kernel(
                 )
                 v = (v * v_scale[:, None]).to(q.dtype)
         acc_o += tl.dot(p.to(v.dtype), v)
-        m_i = m_ij
-        lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+        lse_ij = m_safe + tl.log2(tl.exp2(lse_i - m_safe) + l_ij)
+        m_i = tl.where(valid_blk, m_safe, m_i)
+        lse_i = tl.where(valid_blk, lse_ij, lse_i)
 
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
@@ -392,24 +422,23 @@ def _gqa_sparse_decode_kernel(
     # can hit 0 * NaN. All-empty padded rows may still produce NaNs in merge.
     scale = tl.where(lse_i > float("-inf"), tl.exp2(m_i - lse_i), tl.zeros_like(lse_i))
     acc_o = acc_o * scale[:, None]
-    o_ptrs = tl.make_block_ptr(
-        base=o_ptr + pid_c * stride_o_c + pid_b * stride_o_b + pid_h * stride_o_h,
-        shape=(gqa_group_size, head_dim),
-        strides=(stride_o_h, stride_o_d),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(1, 0),
+    tl.store(
+        o_ptr
+        + pid_c * stride_o_c
+        + pid_b * stride_o_b
+        + (pid_h + off_h)[:, None] * stride_o_h
+        + off_d[None, :] * stride_o_d,
+        acc_o.to(o_ptr.dtype.element_ty),
+        mask=hd_mask,
     )
-    tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1))
-    lse_ptrs = tl.make_block_ptr(
-        base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
-        shape=(gqa_group_size,),
-        strides=(stride_l_h,),
-        offsets=(0,),
-        block_shape=(BLOCK_SIZE_H,),
-        order=(0,),
+    tl.store(
+        lse_ptr
+        + pid_c * stride_l_c
+        + pid_b * stride_l_b
+        + (pid_h + off_h) * stride_l_h,
+        lse_i.to(lse_ptr.dtype.element_ty),
+        mask=h_mask,
     )
-    tl.store(lse_ptrs, lse_i.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.heuristics(
@@ -444,16 +473,16 @@ def _merge_topk_attn_out_kernel(
 
     off_c = tl.arange(0, NUM_TOPK_CHUNKS)
     off_d = tl.arange(0, BLOCK_SIZE_D)
-    o_ptrs = tl.make_block_ptr(
-        base=o_ptr + pid_b * stride_o_b + pid_h * stride_o_h,
-        shape=(NUM_TOPK_CHUNKS, head_dim),
-        strides=(stride_o_c, stride_o_d),
-        offsets=(0, 0),
-        block_shape=(NUM_TOPK_CHUNKS, BLOCK_SIZE_D),
-        order=(1, 0),
+    d_mask = off_d < head_dim
+    o_ptrs = (
+        o_ptr
+        + pid_b * stride_o_b
+        + pid_h * stride_o_h
+        + off_c[:, None] * stride_o_c
+        + off_d[None, :] * stride_o_d
     )
     lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
-    o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
+    o = tl.load(o_ptrs, mask=d_mask[None, :], other=0.0)
     lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
     lse_max = tl.max(lse, axis=0)
     weights = tl.exp2(lse - lse_max)
@@ -462,7 +491,7 @@ def _merge_topk_attn_out_kernel(
     out_ptrs = (
         out_ptr + pid_b * stride_out_n + pid_h * stride_out_h + off_d * stride_out_d
     )
-    tl.store(out_ptrs, o_merged.to(out_ptr.dtype.element_ty), mask=off_d < head_dim)
+    tl.store(out_ptrs, o_merged.to(out_ptr.dtype.element_ty), mask=d_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -610,10 +639,22 @@ def minimax_m3_sparse_attn_decode(
     decode_query_len: int,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    token_to_req_indices: torch.Tensor | None = None,
 ) -> None:
-    """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
+    """GQA block-sparse attention for uniform or ragged decode batches."""
     total_q, num_heads, head_dim = q.shape
-    assert total_q == seq_lens.shape[0] * decode_query_len
+    varlen = query_start_loc is not None
+    if query_start_loc is not None:
+        assert token_to_req_indices is not None
+        assert query_start_loc.shape[0] == seq_lens.shape[0] + 1
+        assert token_to_req_indices.shape[0] >= total_q
+    else:
+        assert total_q == seq_lens.shape[0] * decode_query_len
+    # Triton requires pointer arguments even when the constexpr branch
+    # does not read them.
+    qsl_arg = query_start_loc if query_start_loc is not None else seq_lens
+    t2r_arg = token_to_req_indices if token_to_req_indices is not None else seq_lens
     max_topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
     use_fp8 = kv_cache.dtype in _FP8_DTYPES
@@ -665,6 +706,9 @@ def minimax_m3_sparse_attn_decode(
         lse_partial,
         block_table,
         seq_lens,
+        qsl_arg,
+        t2r_arg,
+        seq_lens.shape[0],
         total_q,
         gqa_group_size,
         head_dim,
@@ -698,6 +742,7 @@ def minimax_m3_sparse_attn_decode(
         USE_FP8=use_fp8,
         KV_SCALE_MODE=kv_scale_mode,
         USE_PDL=use_pdl,
+        VARLEN=varlen,
         **pdl_launch,
     )
     merge_grid = (total_q, num_heads)

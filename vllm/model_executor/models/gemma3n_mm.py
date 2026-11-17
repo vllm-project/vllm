@@ -15,10 +15,10 @@ from transformers.models.gemma3n import (
     Gemma3nTextConfig,
     Gemma3nVisionConfig,
 )
-from transformers.models.siglip import SiglipImageProcessorFast
+from transformers.models.siglip import SiglipImageProcessor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
@@ -116,7 +116,7 @@ def batch_audio_features(
     """
     if isinstance(input_features, torch.Tensor):
         assert isinstance(input_features_mask, torch.Tensor)
-        return input_features.squeeze(1), input_features_mask.squeeze(1)
+        return input_features, input_features_mask
 
     assert isinstance(input_features_mask, list)
     max_len = max(features.shape[0] for features in input_features)
@@ -232,34 +232,28 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_audios = mm_counts.get("audio", 0)
         processor = self.info.get_hf_processor()
         audio_feature_extractor: Gemma3nAudioFeatureExtractor = (
             processor.feature_extractor
         )
         audio_len = audio_feature_extractor.fft_length
-        image_processor: SiglipImageProcessorFast = processor.image_processor
+        image_processor: SiglipImageProcessor = processor.image_processor
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
-
-        image_overrides = mm_options.get("image")
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=img_width,
                 height=img_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
         }
 
@@ -799,6 +793,15 @@ class Gemma3nForConditionalGeneration(
                 multimodal_embeddings.extend(audio_embeddings)
         return multimodal_embeddings
 
+    def _per_layer_embeddings_on(self, device: torch.device) -> torch.Tensor:
+        # A plain attribute, not a buffer, so the IPC weight cache never shares
+        # this per-step scratch; reallocate if the model was moved after init.
+        if self.per_layer_embeddings.device != device:
+            self.per_layer_embeddings = torch.zeros_like(
+                self.per_layer_embeddings, device=device
+            )
+        return self.per_layer_embeddings
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -817,9 +820,9 @@ class Gemma3nForConditionalGeneration(
                 self.config.text_config.num_hidden_layers,
                 self.config.text_config.hidden_size_per_layer_input,
             )
-            self.per_layer_embeddings[: per_layer_inputs.shape[0]].copy_(
-                per_layer_inputs
-            )
+            self._per_layer_embeddings_on(per_layer_inputs.device)[
+                : per_layer_inputs.shape[0]
+            ].copy_(per_layer_inputs)
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -848,12 +851,14 @@ class Gemma3nForConditionalGeneration(
         # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
         if inputs_embeds is not None:
-            num_tokens = inputs_embeds.shape[0]
+            hidden_states = inputs_embeds
         elif intermediate_tensors is not None:
-            num_tokens = intermediate_tensors["hidden_states"].shape[0]
+            hidden_states = intermediate_tensors["hidden_states"]
         else:
             raise ValueError("inputs_embeds is required on the first PP rank")
-        per_layer_inputs = self.per_layer_embeddings[:num_tokens]
+        per_layer_inputs = self._per_layer_embeddings_on(hidden_states.device)[
+            : hidden_states.shape[0]
+        ]
 
         hidden_states = self.language_model.model(
             input_ids,

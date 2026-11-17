@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MXFP8 MoE backend selection for the AITER FlyDSL kernel (gfx950).
 
-GPU-free: mocks the platform (gfx950) and the ``flydsl`` package check, then
+GPU-free: mocks the platform (gfx950) and the aiter fused-MoE enable flag, then
 exercises the oracle so the FlyDSL backend is auto-picked when usable (including
 under expert parallelism, since apply() forwards the expert_map as aiter's
-expert_mask) and skipped (native fallback) when the device/package is missing.
+expert_mask) and skipped (native fallback) when the device is unsupported or the
+aiter runtime is disabled.
 """
 
 import dataclasses
@@ -48,6 +49,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa:
     kMxfp8Static,
 )
 
+from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402  # isort: skip
+
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
 
@@ -82,8 +85,8 @@ def _gfx950():
     )
 
 
-def _flydsl_installed(present: bool):
-    return patch(f"{_AITER_MOD}.is_aiter_mxfp8_moe_available", return_value=present)
+def _aiter_moe_enabled(present: bool):
+    return patch.object(rocm_aiter_ops, "is_fused_moe_enabled", return_value=present)
 
 
 def test_aiter_mxfp8_registered():
@@ -109,13 +112,18 @@ def test_ep_supported(ep_size):
 @pytest.mark.parametrize(
     "present,ep_size,supported,reason_substr",
     [
-        (True, 1, True, None),  # gfx950 + flydsl + TP -> selectable
-        (True, 2, True, None),  # gfx950 + flydsl + EP -> selectable (expert_mask)
-        (False, 1, False, "flydsl package"),  # package missing -> clear reason
+        (True, 1, True, None),  # gfx950 + aiter MoE + TP -> selectable
+        (True, 2, True, None),  # gfx950 + aiter MoE + EP -> selectable (expert_mask)
+        (
+            False,
+            1,
+            False,
+            "does not support current device",
+        ),  # disabled -> not selected
     ],
 )
 def test_is_supported_config(present, ep_size, supported, reason_substr):
-    with _gfx950(), _flydsl_installed(present):
+    with _gfx950(), _aiter_moe_enabled(present):
         ok, reason = AiterMxfp8Experts.is_supported_config(
             AiterMxfp8Experts,
             _config(ep_size),
@@ -130,8 +138,8 @@ def test_is_supported_config(present, ep_size, supported, reason_substr):
 
 def test_explicit_moe_backend_aiter():
     """--moe-backend aiter: returns FlyDSL when usable (TP or EP), else a clear
-    ValueError when the flydsl package is missing."""
-    with _gfx950(), _flydsl_installed(True):
+    ValueError when the aiter MoE runtime is disabled."""
+    with _gfx950(), _aiter_moe_enabled(True):
         assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
             is AiterMxfp8Experts
@@ -142,18 +150,17 @@ def test_explicit_moe_backend_aiter():
         )
     with (
         _gfx950(),
-        _flydsl_installed(False),
-        pytest.raises(ValueError, match="flydsl package"),
+        _aiter_moe_enabled(False),
+        pytest.raises(ValueError, match="does not support current device"),
     ):
         _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
 
 
 def test_gfx950_picks_aiter():
-    """Auto-select on real ROCm hardware with flydsl usable -> FlyDSL wins."""
-    # NOTE: Fp8MoeBackend.AITER_MXFP8 does not require VLLM_ROCM_USE_AITER=1
+    """Auto-select on real ROCm hardware with aiter MoE enabled -> FlyDSL wins."""
     with (
         patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=True),
-        _flydsl_installed(True),
+        _aiter_moe_enabled(True),
     ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.AITER_MXFP8

@@ -9,7 +9,10 @@ import pytest
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
-from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
+from vllm.parser.engine.registered_adapters import (
+    GraniteParserToolAdapter,
+    Qwen3ParserReasoningAdapter,
+)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -103,6 +106,42 @@ def make_parser(tokenizer, reasoning=False, tool=False, **kwargs):
         tool_parser_cls = Hermes2ProToolParser if tool else None
 
     return TestParser(tokenizer, **kwargs)
+
+
+@pytest.mark.parametrize("parser_cls", [Hermes2ProToolParser, GraniteParserToolAdapter])
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_required_stream_owns_history(
+    tokenizer, request_obj, monkeypatch, parser_cls, reasoning
+):
+    monkeypatch.setattr(parser_cls, "supports_required_and_named", True)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = parser_cls
+        reasoning_parser_cls = Qwen3ParserReasoningAdapter if reasoning else None
+
+    parser = TestParser(tokenizer)
+    request = request_obj.model_copy(update={"tool_choice": "required"})
+    parameters = [{"city": 'Beijing " north', "days": [1, 2]}, {"city": "Dallas"}]
+    text = json.dumps(
+        [{"name": "get_weather", "parameters": args} for args in parameters]
+    )
+    if reasoning:
+        text = "<think>let me think about this</think>" + text
+    results = stream_text(parser, tokenizer, text, request, prompt_token_ids=[])
+    thinking, content, calls = collect_fields(results)
+    assert thinking == ("let me think about this" if reasoning else "")
+    assert content == ""
+    assert [
+        (call.index, call.function.name) for call in calls if call.id is not None
+    ] == [(0, "get_weather"), (1, "get_weather")]
+    for index, args in enumerate(parameters):
+        arguments = [
+            call.function.arguments or "" for call in calls if call.index == index
+        ]
+        assert json.loads("".join(arguments)) == args
+    if parser._engine_based:
+        assert parser._stream_state.previous_text == ""
+        assert parser._stream_state.previous_token_ids == []
 
 
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
@@ -353,7 +392,7 @@ def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
     remainder = ',"unit":"celsius"}'
     prompt_ids: list[int] | None = []
     results: list[DeltaMessage | None] = []
-    for i, tid in enumerate(token_ids):
+    for tid in token_ids:
         prev = results[-1] if results else None
         prev_had_args = (
             prev
@@ -496,6 +535,8 @@ def test_engine_reasoning_hermes_tool_token_by_token(tokenizer, request_obj):
     when tokens arrive one at a time (no deferred content)."""
     parser = Qwen3ReasoningHermesToolParser(tokenizer)
 
+    assert parser._reasoning_parser is not None
+    assert parser._tool_parser is not None
     assert parser._reasoning_parser.engine_based_streaming is True
     assert parser._tool_parser.engine_based_streaming is False
     assert parser._engine_based is False
@@ -522,6 +563,7 @@ def test_engine_reasoning_hermes_tool_boundary(tokenizer, request_obj):
     text and token IDs, the engine processes both terminals and returns
     the <tool_call> text as content."""
     parser = Qwen3ReasoningHermesToolParser(tokenizer)
+    assert isinstance(parser._reasoning_parser, Qwen3ParserReasoningAdapter)
     end_token_id = parser._reasoning_parser._parser_engine._reasoning_end_token_id
     chunks = _boundary_chunks(tokenizer, parser, end_token_id=end_token_id)
     results = stream_chunks(parser, tokenizer, chunks, request_obj)
@@ -638,12 +680,13 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     The three mixed-parser tests above all pair the engine reasoning
     parser with Hermes; none exercise the engine-reasoning-only path
     through the hoisted finish_streaming() transition (where
-    ``_engine_based`` is True and there is no tool parser).  A single
-    batched delta carries ``</think>`` plus the following content
-    (as happens with stream_interval > 1).  The post-``</think>`` text
+    `_engine_based` is True and there is no tool parser).  A single
+    batched delta carries `</think>` plus the following content
+    (as happens with stream_interval > 1).  The post-`</think>` text
     must be emitted as content -- not dropped, not reclassified as
-    reasoning -- and the ``</think>`` marker must not leak either way."""
+    reasoning -- and the `</think>` marker must not leak either way."""
     parser = Qwen3ReasoningNoToolParser(tokenizer)
+    assert isinstance(parser._reasoning_parser, Qwen3ParserReasoningAdapter)
     assert parser._reasoning_parser.engine_based_streaming is True
     assert parser._tool_parser is None
 
@@ -663,14 +706,86 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     assert len(tool_calls) == 0
 
 
-def _decode_stream_deltas(tokenizer, groups):
-    """Decode token-ID groups into ``(delta_text, group)`` pairs via the real
-    incremental ``DecodeStream``.
+@pytest.mark.parametrize(
+    "text_chunks",
+    [
+        # A trailing "<" that the engine holds back (it may start a tag).
+        ["<think>let me think</think>a <", "x> b"],
+        # Whitespace after "</think>" in the same delta as the marker.
+        ["<think>let me think</think>\n\n", "<b>bold</b> done"],
+        # The delta that ends reasoning carries only held-back text.
+        ["<think>let me think", "</think><", "b>bold</b> done"],
+    ],
+)
+def test_engine_reasoning_no_tool_batched_holdback_not_dropped(
+    tokenizer, request_obj, text_chunks
+):
+    """Text the engine buffers when reasoning ends inside a batched delta is
+    returned by finish_streaming(); with no tool parser it must still be
+    emitted as content, not dropped."""
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    chunks = [tokenizer.encode(t, add_special_tokens=False) for t in text_chunks]
 
-    This mirrors how vLLM's detokenizer feeds ``parse_delta`` in
+    results = stream_chunks(parser, tokenizer, chunks, request_obj)
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == "let me think"
+    assert content == "".join(text_chunks).split("</think>", 1)[1]
+    assert len(tool_calls) == 0
+
+
+@pytest.mark.parametrize(
+    ("text_chunks", "include_reasoning", "expected_content"),
+    [
+        # The delta that ends reasoning is also the last one: the held-back
+        # "<" must be emitted exactly once (the end-of-stream flush skips the
+        # reasoning parser once reasoning has ended).
+        (["<think>let me think</think>a <"], True, "a <"),
+        # Whitespace-only content after the marker at the end of the stream.
+        (["<think>let me think</think>\n\n"], True, "\n\n"),
+        # Hiding reasoning must not hide the flushed content.
+        (["<think>let me think</think>\n\n", "<b>bold</b>"], False, "\n\n<b>bold</b>"),
+    ],
+)
+def test_engine_reasoning_no_tool_holdback_finished_and_hidden_reasoning(
+    tokenizer, text_chunks, include_reasoning, expected_content
+):
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        include_reasoning=include_reasoning,
+    )
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    chunks = [tokenizer.encode(t, add_special_tokens=False) for t in text_chunks]
+
+    results: list[DeltaMessage | None] = []
+    prompt_token_ids: list[int] | None = []
+    for i, chunk in enumerate(chunks):
+        results.append(
+            parser.parse_delta(
+                tokenizer.decode(chunk),
+                chunk,
+                request,
+                prompt_token_ids=prompt_token_ids,
+                finished=i == len(chunks) - 1,
+            )
+        )
+        prompt_token_ids = None
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == ("let me think" if include_reasoning else "")
+    assert content == expected_content
+    assert len(tool_calls) == 0
+
+
+def _decode_stream_deltas(tokenizer, groups):
+    """Decode token-ID groups into `(delta_text, group)` pairs via the real
+    incremental `DecodeStream`.
+
+    This mirrors how vLLM's detokenizer feeds `parse_delta` in
     production: byte-level UTF-8 hold-back means a character whose bytes
     span multiple tokens is only surfaced once complete (a naive
-    per-token ``decode`` would instead emit U+FFFD replacement chars)."""
+    per-token `decode` would instead emit U+FFFD replacement chars)."""
     from tokenizers.decoders import DecodeStream
 
     stream = DecodeStream(skip_special_tokens=False)
@@ -692,14 +807,14 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
     Extends the ASCII '<' hold-back guard with bbrowning's multi-token
     *character* concern.  Two things must both hold:
 
-    1. The batched ``</think><`` delta relies on the hoisted
+    1. The batched `</think><` delta relies on the hoisted
        finish_streaming() to recover the engine-buffered '<'.  Without
-       the fix the Hermes parser never sees ``<tool_call>`` and emits no
+       the fix the Hermes parser never sees `<tool_call>` and emits no
        tool call at all.
-    2. The tool-call arguments carry ``東京🧑\u200d🚀``; the astronaut
+    2. The tool-call arguments carry `東京🧑\u200d🚀`; the astronaut
        ZWJ sequence's bytes span multiple Qwen3 tokens, so the rest of
        the stream is fed one token at a time through the real
-       ``DecodeStream``.  Its UTF-8 hold-back yields the correct
+       `DecodeStream`.  Its UTF-8 hold-back yields the correct
        character round-trip (a naive per-token decode would corrupt it),
        verifying the boundary stays byte-safe for multi-token
        characters."""

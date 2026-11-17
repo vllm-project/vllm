@@ -165,6 +165,46 @@ inline void silu_and_mul_stub(
 }
 
 template <typename scalar_t, typename input_t>
+inline void gelu_and_mul_stub(
+    scalar_t* __restrict__ out, const input_t* __restrict__ input, const input_t* __restrict__ input2, int64_t size) {
+  static_assert(
+      std::is_same_v<input_t, float> || std::is_same_v<input_t, scalar_t>,
+      "gelu_and_mul_stub only supports input_t == float or input_t == scalar_t");
+  using bVec = at::vec::Vectorized<scalar_t>;
+
+  // no remainder
+#pragma GCC unroll 4
+  for (int64_t d = 0; d < size; d += bVec::size()) {
+    auto [x0, x1] = load_float_vec2(input + d);
+    auto [y0, y1] = load_float_vec2(input2 + d);
+    x0 = fast_gelu(x0) * y0;
+    x1 = fast_gelu(x1) * y1;
+    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+    out_vec.store(out + d);
+  }
+}
+
+template <typename scalar_t, typename input_t>
+inline void gelu_tanh_and_mul_stub(
+    scalar_t* __restrict__ out, const input_t* __restrict__ input, const input_t* __restrict__ input2, int64_t size) {
+  static_assert(
+      std::is_same_v<input_t, float> || std::is_same_v<input_t, scalar_t>,
+      "gelu_tanh_and_mul_stub only supports input_t == float or input_t == scalar_t");
+  using bVec = at::vec::Vectorized<scalar_t>;
+
+  // no remainder
+#pragma GCC unroll 4
+  for (int64_t d = 0; d < size; d += bVec::size()) {
+    auto [x0, x1] = load_float_vec2(input + d);
+    auto [y0, y1] = load_float_vec2(input2 + d);
+    x0 = fast_gelu_tanh(x0) * y0;
+    x1 = fast_gelu_tanh(x1) * y1;
+    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+    out_vec.store(out + d);
+  }
+}
+
+template <typename scalar_t, typename input_t>
 inline void clamp_sigmoid_and_mul_stub(
     scalar_t* __restrict__ out, const input_t* __restrict__ input, int64_t size, const float alpha, const float limit) {
   static_assert(

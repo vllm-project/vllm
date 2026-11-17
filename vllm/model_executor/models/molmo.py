@@ -16,12 +16,12 @@ from einops import rearrange
 from transformers import (
     BaseImageProcessor,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -111,7 +111,7 @@ class MolmoImageInputs(TensorSchema):
     num_crops: Annotated[torch.Tensor, TensorShape("bn")]
 
 
-@dataclass
+@dataclass(slots=True)
 class VisionBackboneConfig:
     image_default_input_size: tuple[int, int] = (336, 336)
     image_patch_size: int = 14
@@ -405,7 +405,7 @@ class MolmoAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -515,7 +515,7 @@ class LanguageModelMLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         input_dim: int | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -557,7 +557,7 @@ class ImageProjectorMLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         input_dim: int | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -598,7 +598,7 @@ class ImageProjectorMLP(nn.Module):
 class MolmoDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -681,7 +681,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vision_config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -1104,19 +1104,16 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -1157,14 +1154,14 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if not hf_data:
+        if not mm_data:
             return processed_data
 
-        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = hf_processor.tokenizer
         image_patch_id = tokenizer.vocab[IMAGE_PATCH_TOKEN]
 
@@ -1172,7 +1169,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         processed_data.pop("input_ids")
 
-        if (images := hf_data.get("images")) is not None:
+        if (images := mm_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [

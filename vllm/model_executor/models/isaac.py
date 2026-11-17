@@ -13,7 +13,7 @@ from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -386,19 +386,16 @@ class IsaacDummyInputsBuilder(BaseDummyInputsBuilder[IsaacProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
@@ -847,17 +844,15 @@ class IsaacForConditionalGeneration(
             else config
         )
 
-        rope_scaling = getattr(target_cfg, "rope_scaling", None)
-        if rope_scaling is None and target_cfg is config:
-            rope_scaling = getattr(config, "_rope_scaling", None)
+        rp = getattr(target_cfg, "rope_parameters", None)
+        if rp is None and target_cfg is config:
+            rp = getattr(config, "_rope_scaling", None)
 
         patch_rope_parameters(target_cfg)
         rope_parameters = target_cfg.rope_parameters
         rope_parameters["mrope_section"] = calculated_mrope_section
-        if rope_scaling is not None and "mrope_interleaved" in rope_scaling:
-            rope_parameters.setdefault(
-                "mrope_interleaved", rope_scaling["mrope_interleaved"]
-            )
+        if rp is not None and "mrope_interleaved" in rp:
+            rope_parameters.setdefault("mrope_interleaved", rp["mrope_interleaved"])
         target_cfg.rope_parameters = rope_parameters
 
         with self._mark_language_model(vllm_config):

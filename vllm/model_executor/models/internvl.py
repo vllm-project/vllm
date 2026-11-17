@@ -14,10 +14,10 @@ from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -48,9 +48,9 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
-    InternVLVideoProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
+    InternVLChatVideoProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -134,7 +134,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -145,7 +145,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: InternVLProcessor,
+        processor: InternVLChatProcessor,
     ) -> int:
         return processor.get_num_image_tokens(
             image_width=image_width,
@@ -203,19 +203,16 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -264,7 +261,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_prompt_repl_image(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor: InternVLProcessor,
+        hf_processor: InternVLChatProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
         tokenizer = self.info.get_tokenizer()
@@ -336,16 +333,16 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
     def get_video_processor(self, **kwargs):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        kwargs.setdefault("image_size", vision_config.image_size)
-
-        return InternVLVideoProcessor(**kwargs)
+        return InternVLChatVideoProcessor(
+            image_size=kwargs.get("image_size", vision_config.image_size)
+        )
 
     @cached_property
     def ctx_video_token(self):
@@ -366,7 +363,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
         return ctx_video_token
 
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         config = self.get_hf_config()
         vision_config = config.vision_config
 
@@ -381,7 +378,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             self.get_video_processor(**kwargs) if ctx_video_token else None
         )
 
-        return InternVLProcessor(
+        return InternVLChatProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             video_processor=video_processor,
@@ -396,17 +393,13 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
         processor = self.get_hf_processor()
         num_image_token = processor.image_seq_length
 
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
+        max_total_frames = seq_len // num_image_token
+        max_frames_per_video = max_total_frames // max(num_videos, 1)
 
         return max(max_frames_per_video, 1)
 
@@ -425,20 +418,17 @@ class InternVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len, mm_counts, mm_options)
         if self.info.ctx_video_token:
             config = self.info.get_hf_config()
             image_size: int = config.vision_config.image_size
-            target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
-            )
             num_videos = mm_counts.get("video", 0)
-            video_overrides = mm_options.get("video")
-            assert video_overrides is None or isinstance(
-                video_overrides, VideoDummyOptions
+            target_num_frames = self.info.get_num_frames_with_most_features(
+                seq_len, num_videos
             )
+            video_overrides = mm_options.get("video")
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=image_size,
@@ -504,7 +494,7 @@ class InternVLMultiModalProcessor(
     def _get_prompt_repl_video(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor: InternVLProcessor,
+        hf_processor: InternVLChatProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
         tokenizer = self.info.get_tokenizer()
@@ -635,7 +625,7 @@ class InternVLChatModel(
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -649,7 +639,7 @@ class InternVLChatModel(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -669,7 +659,7 @@ class InternVLChatModel(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
 

@@ -73,7 +73,7 @@ fn build_request(
 ) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id,
-        prompt_token_ids: Some(prompt_token_ids),
+        prompt_token_ids: Some(prompt_token_ids.into()),
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             logprobs: Some(logprobs),
@@ -87,8 +87,9 @@ fn build_request(
 }
 
 async fn wait_for_final_output(
-    mut stream: vllm_engine_core_client::EngineCoreOutputStream,
+    stream: vllm_engine_core_client::EngineCoreOutputStream,
 ) -> Result<EngineCoreStreamOutput> {
+    let mut stream = stream.into_outputs();
     while let Some(output) = stream.next().await {
         let output = output.context("failed to receive engine-core output")?;
         if output.finished() {
@@ -110,7 +111,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
@@ -118,6 +121,7 @@ async fn main() -> Result<()> {
         coordinator_mode: None,
         model_name: args.model.clone(),
         client_index: args.client_index,
+        engine_stats_enabled: true,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

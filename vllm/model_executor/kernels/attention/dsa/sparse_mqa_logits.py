@@ -3,19 +3,22 @@
 """DeepGEMM sparse MQA-logits path for the DeepSeek V4.1 two-level indexer.
 
 The candidate-source indexer publishes the top candidate blocks (in units of
-``candidate_block_size`` compressed positions). Instead of scoring every KV
+`candidate_block_size` compressed positions). Instead of scoring every KV
 position and masking the dense logits down to those blocks, this path scores
 only the candidate tokens with DeepGEMM's sparse MQA logits kernels
-(``fp8_fp4_(paged_)sparse_mqa_logits``, DeepGEMM >= 2.8, SM100 only), runs
+(`fp8_fp4_(paged_)sparse_mqa_logits`, DeepGEMM >= 2.8, SM100 only), runs
 DeepSelect's top-k directly on the bf16 logits they produce, and remaps the
 selected columns back to request-local positions.
 
-Only the MXFP4 indexer cache is supported: the kernels require UE8M0-packed
-(granularity-32) Q/KV scales, which is exactly the MXFP4 cache layout. The
-FP8 indexer cache stores one fp32 scale per quant block instead.
+The kernels take UE8M0-packed (granularity-32) Q/KV scales, which both
+indexer caches provide on SM100: MXFP4 stores them natively, and the FP8 cache
+stores each token's power-of-two scale as four equal UE8M0 bytes (MXFP8 with
+one shared scale). FP8 Q carries its per-(token, head) scale in the weights,
+so it is passed with unit UE8M0 scales, as on the dense path. The Q dtype
+(MXFP4 viewed as int8, or FP8 e4m3) selects the kernel variant.
 
-The functions here take caller-owned output buffers (``sparse_indices``,
-``end``, ``col_indices``) so the hot path allocates nothing; the indexer
+The functions here take caller-owned output buffers (`sparse_indices`,
+`end`, `col_indices`) so the hot path allocates nothing; the indexer
 metadata builder owns them.
 """
 
@@ -52,8 +55,8 @@ def has_deep_select() -> bool:
 def check_deep_select_layout(num_sparse_cols: int, topk_tokens: int) -> None:
     """Raise unless DeepSelect accepts the sparse logits layout.
 
-    The sparse kernels return contiguous bf16 ``[rows, num_sparse_cols]``
-    logits and the top-k writes int32 ``[rows, topk_tokens]`` indices;
+    The sparse kernels return contiguous bf16 `[rows, num_sparse_cols]`
+    logits and the top-k writes int32 `[rows, topk_tokens]` indices;
     DeepSelect needs both row strides aligned (1024B / 32B on SM100).
     """
     in_align, out_align = get_deep_select_stride_requirement()
@@ -73,7 +76,7 @@ def check_deep_select_layout(num_sparse_cols: int, topk_tokens: int) -> None:
 _INT32_BIG = tl.constexpr(2**31 - 1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["end_ptr"])
 def _expand_candidates_kernel(
     cand_ptr,
     cand_stride,
@@ -95,7 +98,7 @@ def _expand_candidates_kernel(
     Each row's valid sparse blocks come out sorted ascending (no dedup pass:
     production candidates are unique, and the kernel tolerates repeats),
     padded by repeating the last valid block — DeepGEMM's padding convention.
-    ``end`` counts valid sparse-token columns; valid columns form a prefix
+    `end` counts valid sparse-token columns; valid columns form a prefix
     because block ids are sorted.
     """
     row = tl.program_id(0)
@@ -146,19 +149,21 @@ def _sparse_topk_remap_kernel(
     out_ptr,
     out_stride,
     k,
+    width,
     SBK: tl.constexpr,
     K_POW2: tl.constexpr,
 ):
     """Remap sparse top-k columns to request-local positions.
 
-    Column ``j * SBK + o`` scores the token at
-    ``(si[row, j] - ks // SBK) * SBK + o``; -1 columns stay -1.
+    Column `j * SBK + o` scores the token at
+    `(si[row, j] - ks // SBK) * SBK + o`; columns outside `[0, width)`
+    (including DeepSelect's sentinel for NaN rows) become -1.
     """
     row = tl.program_id(0)
     ks_base = tl.load(ks_ptr + row * ks_stride) // SBK
     cols = tl.arange(0, K_POW2)
     c = tl.load(col_ptr + row * col_stride + cols, mask=cols < k, other=-1)
-    valid = c >= 0
+    valid = (c >= 0) & (c < width)
     cc = tl.where(valid, c, 0)
     blocks = tl.load(si_ptr + row * si_stride + cc // SBK)
     pos = (blocks - ks_base) * SBK + cc % SBK
@@ -188,16 +193,16 @@ def candidate_blocks_to_sparse_indices(
 
     Args:
         candidate_blocks: [rows, K] int32 request-local candidate block ids
-            (-1 padded), in units of ``candidate_block_size`` positions. K
+            (-1 padded), in units of `candidate_block_size` positions. K
             must be a power of two (the in-kernel sort); rows may be strided.
         row_ks: [rows] int32 per-row K range start; bounds are in the same
             (packed-workspace) coordinates the sparse kernel iterates over.
             Pass zeros for the paged path, whose blocks are context-relative.
         row_ke: [rows] int32 per-row K range end, in the same coordinates as
-            ``row_ks``.
+            `row_ks`.
         candidate_block_size: Positions per candidate block.
         sparse_block_kv: Positions per sparse block (8 or 16).
-        out: Optional ``(sparse_indices, end)`` buffers to write into,
+        out: Optional `(sparse_indices, end)` buffers to write into,
             shaped [rows, K * ratio] and [rows], both int32.
 
     Returns:
@@ -205,8 +210,8 @@ def candidate_blocks_to_sparse_indices(
             sorted ascending per row with the valid prefix first (unique in
             production, where candidates are unique) and the remaining slots
             repeating the last valid block (the kernel's padding convention).
-            With the unaligned-ks variant, block ``i`` starts at
-            ``i * sparse_block_kv + ks % sparse_block_kv``.
+            With the unaligned-ks variant, block `i` starts at
+            `i * sparse_block_kv + ks % sparse_block_kv`.
         end: [rows] int32 count of valid sparse-token columns; valid columns
             always form a prefix because the block ids are sorted.
 
@@ -264,19 +269,19 @@ def sparse_topk_remap(
 ) -> None:
     """Row top-k over sparse logits, remapped to request-local positions.
 
-    Column ``j * sparse_block_kv + o`` of ``logits`` scores the token at
+    Column `j * sparse_block_kv + o` of `logits` scores the token at
     request-local position
-    ``(sparse_indices[row, j] - ks // sparse_block_kv) * sparse_block_kv + o``.
+    `(sparse_indices[row, j] - ks // sparse_block_kv) * sparse_block_kv + o`.
 
     DeepSelect consumes the bf16 logits as they come out of the sparse
     kernels; the valid columns form a prefix (block ids are sorted), so the
-    per-row ``end`` bounds drive it directly. Slots beyond a row's valid
+    per-row `end` bounds drive it directly. Slots beyond a row's valid
     count come back as -1.
 
     Args:
         logits: [rows, width] bf16 sparse logits, as produced by the sparse
             kernels.
-        sparse_indices: [rows, S] int32 sparse block ids backing ``logits``.
+        sparse_indices: [rows, S] int32 sparse block ids backing `logits`.
         end: [rows] int32 per-row count of valid logit columns.
         row_ks: [rows] int32 per-row K range start.
         sparse_block_kv: Positions per sparse block (8 or 16).
@@ -301,6 +306,7 @@ def sparse_topk_remap(
         topk_indices,
         topk_indices.stride(0),
         topk_tokens,
+        width,
         SBK=sparse_block_kv,
         K_POW2=triton.next_power_of_2(topk_tokens),
     )
@@ -328,9 +334,9 @@ def sparse_mqa_logits_prefill_chunk(
     """Sparse-MQA logits + top-k for one prefill chunk (packed KV workspace).
 
     Args:
-        q: [rows, H, D] packed Q values (MXFP4 viewed as int8).
+        q: [rows, H, D] Q values (MXFP4 viewed as int8, or FP8 e4m3).
         q_scale: [rows, H] int32 packed UE8M0 Q scales.
-        k_quant: [total_kv, D] packed K workspace (MXFP4 viewed as int8).
+        k_quant: [total_kv, D] K workspace, same dtype as `q`.
         k_scale: [total_kv] int32 packed UE8M0 K scales.
         weights: [rows, H] bf16 per-head weights; the sparse kernels take
             bf16 and do not fold the Q scale in.
@@ -350,7 +356,7 @@ def sparse_mqa_logits_prefill_chunk(
         kernel_metadata: DeepGEMM schedule from a previous call with the same
             candidates and bounds (i.e. another indexer layer in the same
             step). When given, the candidate expansion is skipped and
-            ``sparse_indices``/``end`` are assumed to be up to date.
+            `sparse_indices`/`end` are assumed to be up to date.
 
     Returns:
         The DeepGEMM schedule metadata used, for reuse by later layers.
@@ -418,16 +424,16 @@ def sparse_mqa_logits_paged_decode(
     """Sparse-MQA logits + top-k for paged decode rows.
 
     Every query is one row (spec-decode rows are flattened by the metadata
-    builder), so ``block_table`` is already per row.
+    builder), so `block_table` is already per row.
 
     Args:
-        q: [rows, 1, H, D] packed Q values (MXFP4 viewed as int8).
+        q: [rows, 1, H, D] Q values (MXFP4 viewed as int8, or FP8 e4m3).
         q_scale: [rows, 1, H] int32 packed UE8M0 Q scales.
         kv_cache: 4D [num_pages, page_kv, 1, head_bytes] uint8 fused cache
-            view; the page stride must be 512B-aligned.
+            view; the page stride must be 256B-aligned.
         weights: [rows, H] bf16 per-head weights.
         context_lens: [rows] int32 per-row (compressed) context lengths.
-        block_table: [rows, P] int32 per-row page table, ``stride(-1) == 1``.
+        block_table: [rows, P] int32 per-row page table, `stride(-1) == 1`.
         row_indices: [rows] int32 row -> request map (pairing only affects
             scheduling).
         candidate_blocks: [rows, K] int32 candidate block ids.
@@ -448,8 +454,8 @@ def sparse_mqa_logits_paged_decode(
     rows = q.shape[0]
     page_kv = kv_cache.shape[1]
     assert weights.dtype == torch.bfloat16, weights.dtype
-    assert kv_cache.stride(0) % 512 == 0, (
-        "paged cache page stride must be 512B-aligned: "
+    assert kv_cache.stride(0) % 256 == 0, (
+        "paged cache page stride must be 256B-aligned: "
         f"shape={tuple(kv_cache.shape)} stride={kv_cache.stride()}"
     )
     assert page_kv % sparse_block_kv == 0, (page_kv, sparse_block_kv)

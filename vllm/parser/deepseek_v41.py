@@ -5,33 +5,28 @@
 import functools
 from dataclasses import replace
 
-import regex as re
-
 from vllm.parser.deepseek_v4 import (
     DeepSeekV4Parser,
     _dsml_arg_converter,
+    _dsml_arg_value_extender,
+    _param_patterns,
     deepseek_v4_config,
 )
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig
 
 DSML_TOOL_START = "<｜DSML｜ calls>"
+# V4's ``tool_calls`` wrapper name with V4.1's spacing (#62051).
+DSML_TOOL_START_VARIANTS: tuple[str, ...] = ("<｜DSML｜ tool_calls>",)
 DSML_TOOL_END = "</｜DSML｜ calls>"
 DSML_INVOKE_PREFIX = '<｜DSML｜ invoke name="'
 DSML_INVOKE_END = "</｜DSML｜ invoke>"
 DSML_PARAM_START = "<｜DSML｜ parameter"
 DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
+# Turn markers, so a prompt-closed reasoning block is only honored in the
+# current turn (continue_final_message, or a template that skips thinking).
+DEEPSEEK_TURN_BOUNDARY_TOKENS = frozenset({"<｜User｜>", "<｜Assistant｜>"})
 
-_PARAM_RE = re.compile(
-    r'<｜DSML｜ parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    r"(.*?)"
-    r"(?:</｜DSML｜ parameter>|(?=<｜DSML｜ parameter\s+name=))",
-    re.DOTALL,
-)
-_PARTIAL_PARAM_RE = re.compile(
-    r'<｜DSML｜ parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    r"(.*)$",
-    re.DOTALL,
-)
+_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
 
 
 @functools.cache
@@ -48,7 +43,14 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
     return replace(
         config,
         name="deepseek_v41",
-        terminals={**config.terminals, **terminal_overrides},
+        turn_boundary_tokens=DEEPSEEK_TURN_BOUNDARY_TOKENS,
+        terminals={
+            **config.terminals,
+            **terminal_overrides,
+            # terminal_overrides keeps a single TOOL_START spelling because
+            # token_id_terminals below reuses it; add the variants only here.
+            "TOOL_START": (DSML_TOOL_START, *DSML_TOOL_START_VARIANTS),
+        },
         token_id_terminals={
             key: terminal_overrides.get(key, value)
             for key, value in config.token_id_terminals.items()
@@ -57,6 +59,14 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
             _dsml_arg_converter,
             param_re=_PARAM_RE,
             partial_param_re=_PARTIAL_PARAM_RE,
+            param_start=DSML_PARAM_START,
+        ),
+        arg_value_extender=functools.partial(
+            _dsml_arg_value_extender,
+            param_re=_PARAM_RE,
+            partial_param_re=_PARTIAL_PARAM_RE,
+            param_start=DSML_PARAM_START,
+            param_close=DSML_PARAM_CLOSE,
         ),
     )
 

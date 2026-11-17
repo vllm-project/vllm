@@ -16,7 +16,7 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -114,6 +114,12 @@ UltravoxAudioInputs: TypeAlias = (
 )
 
 
+class UltravoxMultiModalDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "audio": {"audio_embeds": "values", "audio_num_tokens": "metadata"},
+    }
+
+
 class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         config = self.ctx.model_config.hf_config
@@ -145,10 +151,11 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
 
-        return MultiModalDataParser(
+        return UltravoxMultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.get_target_channels(),
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_target_channels(self) -> int:
@@ -169,7 +176,7 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -177,15 +184,12 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         audio_len = (
             feature_extractor.chunk_length * sampling_rate * _MAX_ENCODER_BATCH_SIZE
         )
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -250,6 +254,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             # num_chunks can convert audio_chunked to audio batch dimension
             audio_num_chunks=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
+            audio_num_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -276,9 +281,15 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         )
 
         def get_replacement_ultravox(item_idx: int):
+            if "audio_num_tokens" in out_mm_data:
+                audio_num_tokens = out_mm_data["audio_num_tokens"]
+                assert isinstance(audio_num_tokens, torch.Tensor)
+                return [replacement_id] * int(audio_num_tokens[item_idx])
             start = chunks_start_idx[item_idx]
             end = chunks_start_idx[item_idx + 1]
-            audio_token_len = out_mm_data["audio_token_len"][start:end].sum()
+            audio_token_lens = out_mm_data["audio_token_len"]
+            assert isinstance(audio_token_lens, torch.Tensor)
+            audio_token_len = audio_token_lens[start:end].sum()
             return [replacement_id] * int(audio_token_len)  # type: ignore
 
         return [
@@ -559,7 +570,8 @@ class UltravoxWhisperEncoder(WhisperEncoder):
     ) -> torch.Tensor:
         return (input_lengths - 1) // 2 + 1
 
-    def forward(
+    # Ultravox requires chunk lengths in addition to Whisper's input features.
+    def forward(  # type: ignore[override]
         self,
         input_features: torch.Tensor,
         audio_lens: torch.Tensor,
@@ -953,12 +965,12 @@ def pad_and_concat_to_dim3(
 
         return features
 
-    features = [pad_and_concat_to_dim3(f) for f in features]
+    tensors = [pad_and_concat_to_dim3(f) for f in features]
 
-    max_len = max(f.shape[-1] for f in features)
+    max_len = max(f.shape[-1] for f in tensors)
     # Ensure all features have dim=3
-    features = [f.view(-1, *f.shape[-2:]) for f in features]
+    tensors = [f.view(-1, *f.shape[-2:]) for f in tensors]
     # Pad and concatenate:
     # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
-    features = [F.pad(f, (0, max_len - f.shape[-1])) for f in features]
-    return torch.cat(features)
+    tensors = [F.pad(f, (0, max_len - f.shape[-1])) for f in tensors]
+    return torch.cat(tensors)

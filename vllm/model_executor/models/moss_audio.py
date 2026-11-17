@@ -13,13 +13,13 @@ import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig, Qwen3Config
+from transformers import BatchFeature, PreTrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypedDict
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -219,7 +219,7 @@ def _merge_moss_audio_processor_configs(
     return merged
 
 
-@dataclass
+@dataclass(slots=True)
 class MossAudioEncoderConfig:
     d_model: int = 1280
     output_dim: int = 1280
@@ -263,7 +263,7 @@ class MossAudioEncoderConfig:
         return cls(**values)
 
 
-class MossAudioConfig(PretrainedConfig):
+class MossAudioConfig(PreTrainedConfig):
     model_type = "moss_audio"
     is_composition = True
 
@@ -504,9 +504,11 @@ class MossAudioEncoder(nn.Module):
             padding=(1, 1),
         )
 
-        conv_freq = self._compute_downsampled_length(
-            torch.tensor(config.num_mel_bins)
-        ).item()
+        # Use integer arithmetic because meta tensors do not support .item().
+
+        # Three convolutions with kernel=3, stride=2, padding=1 each yield
+        # ceil(n / 2); together they yield ceil(n / 8) = (n + 7) // 8.
+        conv_freq = (config.num_mel_bins + 7) // 8
         self.stem_proj = ReplicatedLinear(
             config.downsample_hidden_size * int(conv_freq),
             config.d_model,
@@ -1341,16 +1343,14 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
+        mel_sr = self.info.get_hf_processor().mel_config["mel_sr"]
         return {
             "audio": self._get_dummy_audios(
-                length=16000,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=int(mel_sr * DEFAULT_MAX_AUDIO_SECONDS),
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 

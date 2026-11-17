@@ -425,9 +425,7 @@ def _build_attention_metadata(
 
     # Build slot mapping
     slot_mapping_list = []
-    for i, (q_len, kv_len, num_blocks) in enumerate(
-        zip(q_lens, kv_lens, num_blocks_per_req)
-    ):
+    for i, (q_len, kv_len, _) in enumerate(zip(q_lens, kv_lens, num_blocks_per_req)):
         context_len = kv_len - q_len
         for j in range(q_len):
             token_kv_idx = context_len + j
@@ -653,9 +651,9 @@ def _create_backend_impl(
         impl.dcp_rank = 0
 
     # Create KV cache spec for MockLayer
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
         num_kv_heads=1,  # MLA uses 1 KV head
         head_size=576,  # MLA head dim

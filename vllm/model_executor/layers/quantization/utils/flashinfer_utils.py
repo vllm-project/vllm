@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
@@ -26,6 +28,14 @@ def has_flashinfer_situ_activation() -> bool:
     return hasattr(ActivationType, "Situ")
 
 
+def has_flashinfer_swiglustep_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "SwigluStep")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
 
@@ -34,6 +44,12 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         if situ is None:
             raise ValueError("The installed FlashInfer does not support SITU")
         return situ
+
+    if activation == MoEActivation.SWIGLUSTEP:
+        step = getattr(ActivationType, "SwigluStep", None)
+        if step is None:
+            raise ValueError("The installed FlashInfer does not support SWIGLUSTEP")
+        return step
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
@@ -48,6 +64,20 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
+
+
+def quantize_nvfp4_per_token_input(
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize NVFP4 activations with one FP32 decode scale per token."""
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    return nvfp4_quantize(
+        hidden_states,
+        NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
@@ -95,12 +125,13 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
             shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
         )
 
-    # Stack weights for all experts
-    gemm1_weights.data = torch.stack(gemm1_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    # Stack weights for all experts, in place: they may be the layer's
+    # parameters, whose addresses captured CUDA graphs keep across reloads
+    gemm1_weights.copy_(
+        torch.stack(gemm1_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
-    gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    gemm2_weights.copy_(
+        torch.stack(gemm2_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
 
 
@@ -264,7 +295,21 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
-def align_trtllm_fp4_moe_hidden_dim_for_fi(
+def trtllm_nvfp4_hidden_alignment(
+    per_token_activation: bool, is_act_and_mul: bool
+) -> int:
+    """Hidden-dim alignment for the TRTLLM-Gen NVFP4 MoE cubins.
+
+    The per-token (dynamic activation scale) non-gated variant has far fewer
+    tile configs for 256-aligned K and its heuristic default tactic fails with
+    "No valid config found" (e.g. Nemotron's 2688 -> 2816), so pad to 512.
+    """
+    if per_token_activation and not is_act_and_mul:
+        return 512
+    return 256
+
+
+def align_fp4_moe_hidden_dim_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w2: torch.Tensor,
@@ -279,7 +324,7 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         return w13, w13_scale, w2, w2_scale, hidden_size
 
     logger.warning_once(
-        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
+        "Padding hidden size from %d to %d for FlashInfer NVFP4 MoE weights. "
         "This requires activation slicing at runtime and may cause "
         "performance degradation.",
         hidden_size,
@@ -349,6 +394,79 @@ def align_moe_weights_for_fi(
     return padded_w13, padded_w2, padded_intermediate
 
 
+def align_mxfp8_moe_weights_for_fi_trtllm(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    is_act_and_mul: bool,
+    min_alignment: int,
+    hidden_alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    """align_moe_weights_for_fi for MXFP8 weights and their UE8M0 block scales
+    for the FlashInfer TRT-LLM MoE kernel, which also pads the hidden size to a
+    multiple of hidden_alignment.
+
+    Padded weights are zero and padded scales are 127 (UE8M0 for 1.0), so the
+    padded rows and columns contribute nothing. Scales may be 3D
+    [E, rows, cols] or flattened [E, rows * cols]; their layout is kept.
+    Returns the padded intermediate and hidden sizes.
+    """
+    num_experts, hidden_size, intermediate = w2.shape
+    padded_hidden = round_up(hidden_size, hidden_alignment)
+    w13, w2, padded_intermediate = align_moe_weights_for_fi(
+        w13, w2, is_act_and_mul, min_alignment
+    )
+    if padded_intermediate == intermediate and padded_hidden == hidden_size:
+        return w13, w2, w13_scale, w2_scale, intermediate, hidden_size
+
+    if padded_hidden != hidden_size:
+        logger.info_once(
+            "Padding hidden size from %d to %d for MXFP8 TRTLLM MoE kernel.",
+            hidden_size,
+            padded_hidden,
+        )
+        padded_w13 = w13.new_zeros((num_experts, w13.shape[1], padded_hidden))
+        padded_w13[:, :, :hidden_size] = w13
+        padded_w2 = w2.new_zeros((num_experts, padded_hidden, w2.shape[2]))
+        padded_w2[:, :hidden_size] = w2
+        w13, w2 = padded_w13, padded_w2
+
+    up_mult = 2 if is_act_and_mul else 1
+    w13_scale_3d = w13_scale.reshape(num_experts, up_mult * intermediate, -1)
+    w2_scale_3d = w2_scale.reshape(num_experts, hidden_size, -1)
+    block = hidden_size // w13_scale_3d.shape[2]
+    assert padded_hidden % block == 0 and padded_intermediate % block == 0
+
+    # Pad each of the gate and up halves (or the single non-gated block) on its
+    # own, like the weights.
+    padded_w13_scale = w13_scale_3d.new_full(
+        (num_experts, up_mult * padded_intermediate, padded_hidden // block), 127
+    )
+    for i in range(up_mult):
+        dst = i * padded_intermediate
+        padded_w13_scale[:, dst : dst + intermediate, : w13_scale_3d.shape[2]] = (
+            w13_scale_3d[:, i * intermediate : (i + 1) * intermediate]
+        )
+    padded_w2_scale = w2_scale_3d.new_full(
+        (num_experts, padded_hidden, padded_intermediate // block), 127
+    )
+    padded_w2_scale[:, :hidden_size, : w2_scale_3d.shape[2]] = w2_scale_3d
+
+    if w13_scale.ndim == 2:
+        padded_w13_scale = padded_w13_scale.reshape(num_experts, -1)
+    if w2_scale.ndim == 2:
+        padded_w2_scale = padded_w2_scale.reshape(num_experts, -1)
+    return (
+        w13,
+        w2,
+        padded_w13_scale,
+        padded_w2_scale,
+        padded_intermediate,
+        padded_hidden,
+    )
+
+
 def _shuffle_deepseek_fp8_moe_weights(
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -391,12 +509,12 @@ def _shuffle_mxfp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Preprocess MXFP8 weights and scales for the FlashInfer TRT-LLM kernel.
 
-    All three transforms (gate/up row reorder, ``shuffle_matrix_a`` weight
-    shuffle, ``shuffle_matrix_sf_a`` scale shuffle) are fixed row/index
+    All three transforms (gate/up row reorder, `shuffle_matrix_a` weight
+    shuffle, `shuffle_matrix_sf_a` scale shuffle) are fixed row/index
     permutations that depend only on the per-expert matrix shape, so the
     permutation is computed once and applied to every expert in a single
-    gather instead of once per expert. ``block_scale_interleave`` accepts a
-    batched ``(E, M, K)`` scale tensor directly. Output is bit-identical to
+    gather instead of once per expert. `block_scale_interleave` accepts a
+    batched `(E, M, K)` scale tensor directly. Output is bit-identical to
     the per-expert loop but ~20x faster (a 288-expert MoE otherwise costs
     seconds per layer at load).
     """
@@ -456,8 +574,9 @@ def prepare_fp8_moe_layer_for_fi(
     Note that for trtllm we update the model state dict
     with the scale format needed for these kernels.
 
-    Note that for per-tensor, we update the layer's
-    intermediate size if the weights needed padding.
+    Note that for per-tensor and for MXFP8 TRT-LLM, we update the layer's
+    intermediate size (and for MXFP8 TRT-LLM its hidden size) if the weights
+    needed padding.
     """
     assert hasattr(layer.moe_config, "is_act_and_mul")
     block_quant = (
@@ -469,6 +588,21 @@ def prepare_fp8_moe_layer_for_fi(
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:
+        # The kernel needs intermediate % 128 == 0 and hidden % 256 == 0. The
+        # MoE runner pads the activations to the padded hidden size.
+        w13, w2, w13_scale, w2_scale, new_intermediate, new_hidden = (
+            align_mxfp8_moe_weights_for_fi_trtllm(
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                layer.moe_config.is_act_and_mul,
+                min_alignment=128,
+                hidden_alignment=256,
+            )
+        )
+        layer.moe_config.intermediate_size_per_partition = new_intermediate
+        layer.moe_config.hidden_dim = new_hidden
         # FlashInfer TRT-LLM SwiGLU expects [up; gate] but vLLM stores
         # [gate; up].  Swap both weights and scales before interleaving.
         if layer.moe_config.is_act_and_mul:
