@@ -23,6 +23,8 @@ steps:
           limit: 1
         - exit_status: -10  # Agent was lost
           limit: 1
+        - exit_status: 128  # git fetch failed (e.g. GitHub DNS)
+          limit: 1
 
   - label: ":docker: Build ROCm test image"
     key: image-build-amd

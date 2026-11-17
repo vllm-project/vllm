@@ -285,7 +285,7 @@ class TestTurboQuantKVCacheSpec:
         from vllm.v1.attention.backends.turboquant_attn import (
             TurboQuantAttentionBackend,
         )
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
         layer = SimpleNamespace(
             attn_type="decoder",
@@ -301,8 +301,10 @@ class TestTurboQuantKVCacheSpec:
 
         # The layer builds an unpacked spec; the worker's spec-collection
         # loop applies TQ slot packing via the backend's customize_spec hook.
-        spec = Attention.get_kv_cache_spec(layer, vllm_config)
-        assert isinstance(spec, FullAttentionSpec)
+        layer_config = Attention.get_kv_cache_config(layer, vllm_config)
+        assert layer_config is not None
+        spec = layer_config.spec
+        assert isinstance(spec, AttentionSpec)
         assert spec.kv_quant_mode.is_turboquant
         assert spec.state_content_bytes is None
 
@@ -344,9 +346,9 @@ class TestTurboQuantWorkspaceReservation:
 
     @staticmethod
     def _fake_kv_cache_spec():
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
-        return FullAttentionSpec(
+        return AttentionSpec(
             block_size=32,
             num_kv_heads=4,
             head_size=128,
@@ -680,25 +682,14 @@ def test_fp8_draft_fits_turboquant_hybrid_pages(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     def cache_layout(worker):
-        from vllm.v1.kv_cache_interface import (
-            AttentionSpec,
-            KVQuantMode,
-            UniformTypeKVCacheSpecs,
-        )
+        from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
         layout = []
         for group in worker.model_runner.kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            specs = (
-                spec.kv_cache_specs.values()
-                if isinstance(spec, UniformTypeKVCacheSpecs)
-                else [spec]
-            )
-            for layer_spec in specs:
+            for layer_spec in group.kv_cache_specs.values():
                 layout.append(
                     {
-                        # Merged specs do not retain is_draft. In this model
-                        # pair only the drafter uses per-tensor FP8 storage.
+                        # Only the drafter in this pair uses per-tensor FP8 storage.
                         "draft": isinstance(layer_spec, AttentionSpec)
                         and layer_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR,
                         "attention": isinstance(layer_spec, AttentionSpec),
@@ -890,7 +881,7 @@ def test_continuation_uses_device_lengths(
     from vllm.v1.attention.ops.triton_turboquant_store import (
         triton_turboquant_store,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     # Only the model configuration is needed; no weights or network access.
     GPT2Config(
@@ -921,7 +912,7 @@ def test_continuation_uses_device_lengths(
         ),
     )
     device = torch.device("cuda")
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=128,

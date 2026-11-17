@@ -55,7 +55,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         dtype="bfloat16",
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -168,15 +167,12 @@ def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
-    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
-
     model_name = "deepseek-ai/DeepSeek-OCR"
 
     engine_args = EngineArgs(
         model=model_name,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
-        logits_processors=[NGramPerReqLogitsProcessor],
     )
 
     placeholder = "<image>\n" * len(image_urls)
@@ -184,18 +180,11 @@ def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the custom logits processor and avoid skipping
-    # special tokens for this model for the optimal OCR performance.
+    # (IMPORTANT) Avoid skipping special tokens for this model for the
+    # optimal OCR performance.
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=8192,
-        # ngram logit processor args
-        extra_args=dict(
-            ngram_size=30,
-            window_size=90,
-            # whitelist: <td>, </td>
-            whitelist_token_ids={128821, 128822},
-        ),
         skip_special_tokens=False,
     )
 
@@ -676,32 +665,6 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def load_openpangu_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=2,
-        enforce_eager=True,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = "[unused18][unused19][unused20]" * len(image_urls)
-    prompt = (
-        f"<s>[unused9]系统：[unused10][unused9]用户：{question}{placeholders}"
-        "[unused10][unused9]助手："
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 # Ovis
 def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
@@ -1072,7 +1035,6 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
-        gpu_memory_utilization=0.85,
         tensor_parallel_size=8,
         limit_mm_per_prompt={"image": len(image_urls)},
         reasoning_parser="step3",
@@ -1305,7 +1267,6 @@ model_example_map = {
     "mistral3": load_mistral3,
     "molmo2": load_molmo2,
     "NVLM_D": load_nvlm_d,
-    "openpangu_vl": load_openpangu_vl,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
     "paddleocr_vl": load_paddleocr_vl,
