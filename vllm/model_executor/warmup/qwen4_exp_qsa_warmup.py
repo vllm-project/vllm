@@ -80,7 +80,6 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
             decode_width=decode_width,
             max_decode_rows=runner.max_num_reqs * runner.decode_query_len,
             prefill_width=prefill_width,
-            max_prefill_tokens=runner.max_num_tokens,
         )
         logger.info(
             "Warmed up Qwen4Exp QSA gvr_2 top-k (k=%d, decode width %d, "

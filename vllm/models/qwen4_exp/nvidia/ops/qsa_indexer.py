@@ -514,12 +514,10 @@ def warmup_gvr2_topk(
     decode_width: int,
     max_decode_rows: int,
     prefill_width: int,
-    max_prefill_tokens: int,
 ) -> None:
-    """Pre-compile gvr_2 for every serving geometry and size the zero
-    row_starts buffer. Decode compiles per exact width, prefill per pow2
-    width bucket, so prefill_width covers every narrower chunk."""
-    global _gvr2_prefill_zero_starts
+    """Pre-compile gvr_2 for every serving geometry. Decode compiles per
+    exact width, prefill per pow2 width bucket, so prefill_width covers
+    every narrower chunk."""
     from flashinfer.topk_varlen.kernels.gvr2_topk_host import (
         warmup_prefill,
         warmup_varlen,
@@ -533,15 +531,23 @@ def warmup_gvr2_topk(
             row_stride=decode_width,
         )
     if use_gvr2_topk(topk_backend, block_topk, prefill_width):
-        _gvr2_prefill_zero_starts = torch.zeros(
-            max_prefill_tokens, dtype=torch.int32, device="cuda"
-        )
         warmup_prefill(top_k=block_topk, max_cols=prefill_width)
 
 
 # Zero row_starts for the prefill kernel (QSA windows start at column 0).
-# Sized by warmup; serving only slices it.
+# Allocated at model init so serving only slices it.
 _gvr2_prefill_zero_starts: torch.Tensor | None = None
+
+
+def init_gvr2_prefill_zero_starts(max_num_tokens: int) -> None:
+    global _gvr2_prefill_zero_starts
+    if (
+        _gvr2_prefill_zero_starts is None
+        or _gvr2_prefill_zero_starts.numel() < max_num_tokens
+    ):
+        _gvr2_prefill_zero_starts = torch.zeros(
+            max_num_tokens, dtype=torch.int32, device="cuda"
+        )
 
 
 def _gvr2_topk(
@@ -559,15 +565,11 @@ def _gvr2_topk(
     if prefill:
         # The windowed kernel compiles per pow2 width bucket, not per exact
         # width, which suits varying chunk widths.
-        global _gvr2_prefill_zero_starts
         num_tokens = logits.shape[0]
-        if (
-            _gvr2_prefill_zero_starts is None
-            or _gvr2_prefill_zero_starts.numel() < num_tokens
-        ):  # warmup skipped
-            _gvr2_prefill_zero_starts = torch.zeros(
-                num_tokens, dtype=torch.int32, device=logits.device
-            )
+        assert (
+            _gvr2_prefill_zero_starts is not None
+            and _gvr2_prefill_zero_starts.numel() >= num_tokens
+        ), "call init_gvr2_prefill_zero_starts(max_num_batched_tokens) first"
         row_starts = _gvr2_prefill_zero_starts[:num_tokens]
     # -1-fills tokens shorter than block_topk itself.
     run_varlen(

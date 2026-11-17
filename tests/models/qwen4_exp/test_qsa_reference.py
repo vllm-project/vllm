@@ -898,6 +898,7 @@ def test_qsa_prefill_selection_correctness(
     actual = torch.empty(
         (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
     )
+    qsa_indexer_ops.init_gvr2_prefill_zero_starts(rows)
     qsa_indexer_ops.qsa_select_paged_prefill(
         q,
         cache,
@@ -1315,6 +1316,7 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
         block_indices[decode_slice],
     )
     prefill_slice = slice(num_decode_tokens, rows)
+    qsa_indexer_ops.init_gvr2_prefill_zero_starts(rows)
     qsa_indexer_ops.qsa_select_paged_prefill(
         q[prefill_slice],
         cache,
@@ -1373,6 +1375,7 @@ def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> 
     visible_blocks = torch.zeros(2, device="cuda", dtype=torch.int32)
 
     block_indices = torch.empty((2, 512), device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.init_gvr2_prefill_zero_starts(2)
     qsa_indexer_ops.qsa_select_paged_prefill(
         q,
         cache,
