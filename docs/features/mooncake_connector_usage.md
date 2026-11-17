@@ -75,7 +75,7 @@ At the start of each step, P can send complete cached-prefix blocks, including b
 - Use fixed `kv_producer` and `kv_consumer` roles.
 - P supports eager or PIECEWISE execution; D also supports FULL decode graphs. Computation/transfer overlap requires per-layer save hooks after KV writes.
 - Cache layers must be individually addressable, with stable storage and distinguishable writers. Opaque packed rows, sleep/wake, and replacing registered KV storage are unsupported.
-- Set DCP to 1. PCP requires complete cache replicas and `"pcp_cache_mode": "replicated"` in `kv_connector_extra_config`.
+- Set DCP to 1. PCP requires complete cache replicas.
 - Match P/D logical and kernel block sizes, dtype, cache layouts, and cache semantics. Recurrent/ring states also require equal TP sizes. Chunked-local attention is unsupported.
 
 For multimodal Encode-Prefill-Decode with encoder embeddings, see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
