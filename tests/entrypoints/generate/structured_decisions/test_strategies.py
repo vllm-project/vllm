@@ -2096,7 +2096,7 @@ def test_knowline_disabled_endpoints_log_the_reason(caplog, monkeypatch):
     )
 
 
-def test_an_unmapped_model_logs_quieter_than_a_misconfiguration(caplog, monkeypatch):
+def test_only_an_opted_in_model_warns_when_decisions_are_off(caplog, monkeypatch):
     logger_name = "vllm.entrypoints.openai.decisions.state"
     monkeypatch.setattr(logging.getLogger(logger_name), "propagate", True)
     state = State()
@@ -2105,7 +2105,7 @@ def test_an_unmapped_model_logs_quieter_than_a_misconfiguration(caplog, monkeypa
     )
     args = Namespace(chat_template_content_format="auto")
 
-    def init(model_config):
+    def init(model_config, tasks=("generate",)):
         return init_decisions_state(
             SimpleNamespace(model_config=model_config),
             state,
@@ -2113,7 +2113,7 @@ def test_an_unmapped_model_logs_quieter_than_a_misconfiguration(caplog, monkeypa
             None,
             None,
             {},
-            ("generate",),
+            tasks,
         )
 
     def logged():
@@ -2146,6 +2146,40 @@ def test_an_unmapped_model_logs_quieter_than_a_misconfiguration(caplog, monkeypa
     # misconfiguration: it warns.
     assert len(logged()) == 1 and logged()[0].levelno == logging.WARNING
     assert "serves only" in logged()[0].getMessage()
+
+    # A stock model that maps to a strategy but never opted in stays at
+    # debug when the server runs another task (Qwen3-Embedding on the
+    # pooling runner) or a logits logprobs mode, like on main.
+    stock = SimpleNamespace(
+        architecture="Qwen3ForCausalLM", logprobs_mode="raw_logprobs", hf_config=None
+    )
+    stock_logits = SimpleNamespace(
+        architecture="Qwen3_5ForConditionalGeneration",
+        logprobs_mode="processed_logits",
+        hf_config=SimpleNamespace(),
+    )
+    for model_config, tasks, reason in (
+        (stock, ("embed",), "need the generate task"),
+        (stock_logits, ("generate",), "not processed_logits"),
+    ):
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger=logger_name):
+            assert init(model_config, tasks) is None
+        assert len(logged()) == 1 and logged()[0].levelno == logging.DEBUG
+        assert reason in logged()[0].getMessage()
+
+    # The same logprobs mode on a checkpoint with the marker warns: the
+    # operator asked for the endpoints.
+    caplog.clear()
+    marked_logits = SimpleNamespace(
+        architecture="Qwen3_5MoeForConditionalGeneration",
+        logprobs_mode="processed_logits",
+        hf_config=SimpleNamespace(knowline_config={}),
+    )
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        assert init(marked_logits) is None
+    assert len(logged()) == 1 and logged()[0].levelno == logging.WARNING
+    assert "not processed_logits" in logged()[0].getMessage()
 
 
 def test_knowline_answers_match_the_checkpoint():

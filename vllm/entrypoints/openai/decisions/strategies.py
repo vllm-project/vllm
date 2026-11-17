@@ -1857,13 +1857,18 @@ class NoStrategyError(ValueError):
     same selection."""
 
 
+def has_knowline_marker(model_config: ModelConfig) -> bool:
+    """Whether the checkpoint opted in to the KnowLine format by its marker."""
+    hf_config = getattr(model_config, "hf_config", None)
+    return getattr(hf_config, "knowline_config", None) is not None
+
+
 def select_read_strategy(
     model_config: ModelConfig, supported_tasks: Sequence[SupportedTask]
 ) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
-    hf_config = getattr(model_config, "hf_config", None)
     strategy: type[ReadStrategy] | None
-    if getattr(hf_config, "knowline_config", None) is not None:
+    if has_knowline_marker(model_config):
         # A KnowLine checkpoint opts in by its marker: the architecture is
         # the stock model's, so the stock mapping stays for base models.
         if model_config.architecture not in KNOWLINE_ARCHITECTURES:
