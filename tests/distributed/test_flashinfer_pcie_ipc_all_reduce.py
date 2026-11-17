@@ -185,6 +185,7 @@ def test_workspace_is_profiled_before_kv_cache_sizing(
 
     monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "1")
     monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "0")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     with vllm_runner(
         "Qwen/Qwen3-0.6B",
         dtype="bfloat16",
