@@ -367,6 +367,8 @@ def make_request(
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
     num_hash_lookahead_tokens: int = 0,
+    prompt_is_token_ids: list[bool] | None = None,
+    num_prompt_embeds_hash_threads: int = 1,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -392,9 +394,13 @@ def make_request(
         lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(
-            block_size, hash_fn, num_hash_lookahead_tokens
+            block_size,
+            hash_fn,
+            num_hash_lookahead_tokens,
+            num_prompt_embeds_hash_threads,
         ),
         prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=prompt_is_token_ids,
     )
 
 
@@ -2112,6 +2118,47 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         )
     )
     assert block_hashes[1] == expected_hash2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, xxhash, xxhash_cbor])
+@pytest.mark.parametrize("mixed_prompt", [False, True])
+@pytest.mark.parametrize("num_lookahead", [0, 1])
+def test_parallel_prompt_embeds_hashing_matches_sequential(
+    hash_fn: Callable[[Any], bytes], mixed_prompt: bool, num_lookahead: int
+):
+    """Hashing prompt embeds on the thread pool must not change any block hash,
+    including blocks hashed later as the request grows."""
+    block_size = 16
+    num_prompt_tokens = 64 * block_size + 5
+    prompt_embeds = torch.randn(num_prompt_tokens, 2048, dtype=torch.float16)
+    block_nbytes = block_size * prompt_embeds[:1].nbytes
+    assert block_nbytes >= kv_cache_utils.PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES
+    assert prompt_embeds.nbytes >= kv_cache_utils.PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES
+    prompt_token_ids = prompt_is_token_ids = None
+    if mixed_prompt:
+        prompt_token_ids = list(range(num_prompt_tokens))
+        prompt_is_token_ids = [i % 3 == 0 for i in range(num_prompt_tokens)]
+
+    sequential, parallel = (
+        make_request(
+            request_id=str(num_threads),
+            prompt_token_ids=prompt_token_ids,
+            block_size=block_size,
+            hash_fn=hash_fn,
+            prompt_embeds=prompt_embeds,
+            num_hash_lookahead_tokens=num_lookahead,
+            prompt_is_token_ids=prompt_is_token_ids,
+            num_prompt_embeds_hash_threads=num_threads,
+        )
+        for num_threads in (1, 4)
+    )
+    assert len(parallel.block_hashes) == 64
+    assert parallel.block_hashes == sequential.block_hashes
+
+    for request in (sequential, parallel):
+        request.append_output_token_ids(list(range(2 * block_size)))
+    assert len(parallel.block_hashes) == 66
+    assert parallel.block_hashes == sequential.block_hashes
 
 
 def test_unpadded_page_size_includes_per_token_head_scales():
