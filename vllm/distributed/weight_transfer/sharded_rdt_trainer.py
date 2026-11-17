@@ -204,6 +204,8 @@ class _RDTProducerServer:
         self._unit_gen: dict[int, int] = {}
         self._gens = itertools.count(1)
         self._sources: dict[tuple[int, int], _Sources] = {}
+        # per unit, the trainer's event its published tensors are ready at
+        self._ready: dict[int, torch.cuda.Event | None] = {}
         # Packs run one at a time: the GIL serializes their Python anyway, and
         # concurrent packs only convoy on it, which multiplies the cost of
         # every tensor op. The device sync after a pack is outside it.
@@ -269,14 +271,23 @@ class _RDTProducerServer:
 
     def publish_unit(self, unit: int, entries: tuple) -> None:
         """Rebuild one gathered unit's CUDA-IPC tensors into the cache; never
-        blocks. `entries` is `(storages, views)`: one export per storage, and
-        per name `(sid, dtype_name, shape, stride, storage_offset)`.
+        blocks. `entries` is `(storages, views, event)`: one export per
+        storage, per name `(sid, dtype_name, shape, stride, storage_offset)`,
+        and the IPC handle of the event the unit's tensors are ready at (or
+        None), which this unit's packs wait for on the device.
 
         Raises:
             ValueError: a tensor does not match its metadata.
 
         """
-        storages, views = entries
+        storages, views, event = entries
+        self._ready[unit] = (
+            torch.cuda.Event.from_ipc_handle(
+                torch.device("cuda", self._device_index), event
+            )
+            if event is not None
+            else None
+        )
         signature = (tuple(storages.items()), views)
         published = self._published.get(unit)
         if published is not None and published[0] == signature:
@@ -448,12 +459,15 @@ class _RDTProducerServer:
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
             gen = self._unit_gen[spec.unit]
+            ready = self._ready.get(spec.unit)
             sources = self._sources.get((consumer_id, seq))
             if sources is None or sources.gen != gen:
                 # the unit stays cached until this bucket is freed
                 tensors = [self._cache[name] for name, _ in spec.pieces]
             self._progress()
         with self._pack_lock:
+            if ready is not None:
+                torch.cuda.current_stream(self._device_index).wait_event(ready)
             if sources is None or sources.gen != gen:
                 sources = self._sources[consumer_id, seq] = _sources(
                     gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
@@ -565,6 +579,7 @@ class _RDTProducerServer:
             self._cache.clear()
             self._unit_names.clear()
             self._sources.clear()
+            self._ready.clear()
             self._published.clear()
             self._unit_tensors.clear()
         if self._arena is not None and self._arena.is_cuda:
@@ -608,9 +623,10 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._name_owner_class: list[int] = []
         self._owned_names: set[str] = set()
         self._owned_units: list[int] = []
-        # Gathered tensors shared with the server, by unit: a CUDA-IPC
-        # export must outlive its import, so they stay until released.
-        self._inflight: dict[int, dict[str, torch.Tensor]] = {}
+        # Gathered tensors shared with the server, by unit, and the event
+        # that orders the server's reads after them: a CUDA-IPC export must
+        # outlive its import, so they stay until released.
+        self._inflight: dict[int, tuple[dict[str, torch.Tensor], Any]] = {}
         # Reusable export slots for small tensors, one per resident unit; kept
         # across syncs, since reallocating them each sync fragments the
         # caching allocator.
@@ -909,11 +925,11 @@ class ShardedRDTTrainerWeightTransferEngine(
                 t1 = time.perf_counter()
                 names, tensors = next(units)
                 t2 = time.perf_counter()
-                entries, refs = self._export(
+                entries, refs, ready = self._export(
                     unit, names, tensors, handle_cache, pending
                 )
                 del tensors
-                self._inflight[unit] = refs
+                self._inflight[unit] = (refs, ready)
                 pending.append(self._publish_async(unit, entries))
                 while len(pending) >= 2:
                     self._await_publish(pending.pop(0))
@@ -952,9 +968,11 @@ class ShardedRDTTrainerWeightTransferEngine(
         tensors: list[torch.Tensor],
         handle_cache: dict[int, tuple],
         pending: list,
-    ) -> tuple[tuple, dict[str, torch.Tensor]]:
+    ) -> tuple[tuple, dict[str, torch.Tensor], Any]:
         """Share one unit's tensors over CUDA IPC: each large storage once,
-        the small ones packed into an export slot."""
+        the small ones packed into an export slot. Returns the entries for
+        `publish_unit`, the tensors to keep alive, and the event that marks
+        them written."""
         storages: dict[int, tuple] = {}
         views: dict[str, tuple] = {}
         refs: dict[str, torch.Tensor] = {}
@@ -1000,7 +1018,16 @@ class ShardedRDTTrainerWeightTransferEngine(
             storages.update(st)
             views.update(vw)
             refs.update(rf)
-        return (storages, views), refs
+        # The server reads these from another process, which nothing orders
+        # after the gather's and the packing's kernels: an interprocess event
+        # it waits for on its own stream, instead of a device sync here.
+        ready = handle = None
+        device = next((t.device for t in refs.values() if t.is_cuda), None)
+        if device is not None:
+            ready = torch.cuda.Event(interprocess=True)
+            ready.record(torch.cuda.current_stream(device))
+            handle = ready.ipc_handle()
+        return (storages, views, handle), refs, ready
 
     @staticmethod
     def _contig_stride(shape) -> tuple:
@@ -1041,9 +1068,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         for (name, t), off in zip(held, offsets):
             shape, esz = tuple(t.shape), t.element_size()
             stride = self._contig_stride(shape)
-            dst = torch.as_strided(slot.view(t.dtype), shape, stride, off // esz)
-            dst.copy_(t)
-            refs[name] = dst
+            refs[name] = torch.as_strided(slot.view(t.dtype), shape, stride, off // esz)
             views[name] = (
                 sid,
                 _dtype_name(t.dtype),
@@ -1051,10 +1076,8 @@ class ShardedRDTTrainerWeightTransferEngine(
                 list(stride),
                 off // esz,
             )
-        # The server reads the slot from another process, which nothing
-        # orders after these copies.
-        if slot.is_cuda:
-            torch.accelerator.current_stream(slot.device).synchronize()
+        # ordered before the server's reads by the unit's event (`_export`)
+        torch._foreach_copy_(list(refs.values()), [t for _, t in held])
         return {sid: reduce_args}, views, refs
 
     def _publish_async(self, unit: int, entries):
