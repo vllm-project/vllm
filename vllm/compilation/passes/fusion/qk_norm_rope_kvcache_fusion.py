@@ -681,8 +681,6 @@ class QkNormMRopeKvCachePattern(QkNormRopeKvCachePattern):
         self.rotary_dim = rotary_dim
         self.mrope_section = mrope_section
         self.is_interleaved = is_interleaved
-        # The MRoPE kernel has no fp8 Q output; Q stays separately quantized.
-        self.fold_query_quant = False
         self.rope_matcher = MatcherMRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
