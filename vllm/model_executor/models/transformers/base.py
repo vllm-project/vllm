@@ -223,7 +223,7 @@ class Base(
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Prepare intermediate hidden states buffer for pipeline parallelism if needed
-        self._inject_hidden_states = False
+        self._should_inject_intermediate_hidden_states = False
         if not self.pp_group.is_first_rank and (layers := self._decoder_layers):
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             hidden_size = self.text_config.hidden_size
@@ -528,7 +528,7 @@ class Base(
 
         The decoder still runs its pre-layer code for masks and rotary embeddings, but
         anything it does to the hidden states was already done on the first rank."""
-        if not self._inject_hidden_states:
+        if not self._should_inject_intermediate_hidden_states:
             return None
         hidden_states = args[0] if args else kwargs["hidden_states"]
         # Sliced here so the token count stays dynamic under torch.compile
@@ -914,7 +914,7 @@ class Base(
             # Copied so that decoders which modify their input in place can't alter it
             buffer = self._intermediate_hidden_states_buffer
             buffer[:, : inputs_embeds.shape[1]].copy_(inputs_embeds)
-            self._inject_hidden_states = True
+            self._should_inject_intermediate_hidden_states = True
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -945,7 +945,7 @@ class Base(
             **kwargs,
         )
         # Unset so modules which call the layers directly (e.g. MTP) skip the hook
-        self._inject_hidden_states = False
+        self._should_inject_intermediate_hidden_states = False
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
