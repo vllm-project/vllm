@@ -310,7 +310,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # build stage doesn't need the rust toolchain or the rust source.
 # This stage reuses the Python environment from base and runs in parallel with
 # csrc-build/extensions-build.
-FROM base AS rust-build-cache
+FROM base AS rust-build
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 
@@ -340,8 +340,8 @@ ENV CARGO_BUILD_JOBS=4
 # separate local sccache daemon while sharing the same remote cache backend.
 ENV SCCACHE_SERVER_PORT=4227
 
-# Build with a stable version so this target snapshot is keyed only by Rust
-# inputs. The child stage below relinks the crates that embed the exact version.
+# setuptools-scm needs a version without .git; vllm-rs reads the real package
+# version at run time, so this stage is keyed only by Rust inputs.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
@@ -354,14 +354,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     && if [ "$USE_SCCACHE" = "1" ]; then \
         sccache --show-stats; \
     fi
-
-# Relink with the exact Git-derived package version.
-FROM rust-build-cache AS rust-build
-
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################

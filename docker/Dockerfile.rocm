@@ -434,9 +434,8 @@ FROM scratch AS version
 COPY --from=version-calc /vllm-version.txt /
 
 # Compiles the `vllm-rs` frontend once per change to the rust sources, so the wheel build does not
-# need the rust toolchain. The crates, their downloads and target/ stay in this stage's layers (no
-# cache mounts), so rust-build always continues from the target/ of these exact sources.
-FROM rust-toolchain AS rust-deps
+# need the rust toolchain. vllm-rs reads the vLLM version at run time, so nothing here is per commit.
+FROM rust-toolchain AS rust-build
 # Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
@@ -451,15 +450,7 @@ COPY rust/proto rust/proto
 COPY rust/src rust/src
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.sh tools/
-RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 bash tools/build_rust.sh
-
-# Per commit: vllm-rs embeds the vLLM version, so cargo recompiles only the crates that read it and
-# relinks (~30 s). Those few rustc processes stay far from the open-file limit, and the job count
-# also caps the thin-LTO threads, so lift the cap.
-FROM rust-deps AS rust-build
-COPY --from=version /vllm-version.txt /tmp/vllm-version.txt
-RUN CARGO_BUILD_JOBS="$(nproc)" SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)" \
-    bash tools/build_rust.sh \
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 bash tools/build_rust.sh \
     && test -x vllm/vllm-rs
 
 # What setup.py reads of pyproject.toml and vllm/envs.py: the project and setuptools tables, and the
@@ -676,4 +667,4 @@ FROM scratch AS vllm-wheel
 COPY --link --from=wheel /dist/ /
 FROM scratch AS compile
 COPY --link --from=csrc /dist /csrc
-COPY --link --from=rust-deps /app/vllm/rust/Cargo.lock /rust/
+COPY --link --from=rust-build /app/vllm/rust/Cargo.lock /rust/

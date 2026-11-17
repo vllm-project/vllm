@@ -113,7 +113,7 @@ target "test-smoke" {
   output   = ["type=cacheonly"]
   cache-to = []
 }
-target "compile-cache" {   # csrc + rust-deps on their own: a fresh builder (or a new PR) reuses them
+target "compile-cache" {   # csrc + rust-build on their own: a fresh builder (or a new PR) reuses them
   inherits = ["_app"]
   target   = "compile"
   args     = { ARCH = CI_ARCH }
