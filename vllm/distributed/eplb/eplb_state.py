@@ -406,19 +406,6 @@ class EplbState:
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
 
-    def get_rank_node_ids(self) -> tuple[int, ...]:
-        """Return node ordinals in the current EP group's rank order.
-
-        The first call for each EP CPU process group is collective. Every rank
-        must call in the same order during setup or group reconfiguration.
-        Later calls with the same process-group object only read the cache.
-        """
-        group = get_ep_group().cpu_group
-        if self._rank_node_group is not group:
-            self._rank_node_ids = _rank_node_ids_with_rank_mapping(group)
-            self._rank_node_group = group
-        return self._rank_node_ids
-
     @staticmethod
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
@@ -1343,6 +1330,19 @@ class EplbState:
         model_state.expert_load_window = torch.nn.functional.pad(
             model_state.expert_load_window, (0, pad_size)
         )
+
+    def get_rank_node_ids(self) -> tuple[int, ...]:
+        """Return node ordinals in the current EP group's rank order.
+
+        The first call for each EP CPU process group is collective. Every rank
+        must call in the same order during setup or group reconfiguration.
+        Later calls with the same process-group object only read the cache.
+        """
+        group = get_ep_group().cpu_group
+        if self._rank_node_group is not group:
+            self._rank_node_ids = _rank_node_ids_with_rank_mapping(group)
+            self._rank_node_group = group
+        return self._rank_node_ids
 
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
