@@ -651,7 +651,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 # NCCL sends `numel` elements straight from `data_ptr()`, so a
                 # non-contiguous view would ship whatever follows its base
                 # pointer. Keep the copy referenced until the broadcast is
-                # enqueued. (The packed path linearizes in `pack_tensors`.)
+                # enqueued. (The packed path copies into its chunk buffer.)
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
                 self.model_update_group.broadcast(send, src=src, stream=stream)
 

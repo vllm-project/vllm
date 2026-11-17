@@ -10,12 +10,10 @@ import pytest
 import torch
 
 from vllm.distributed.weight_transfer.packed_tensor import (
-    pack_tensors,
     packed_ipc_consumer,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
-    unpack_tensor,
 )
 
 
@@ -347,151 +345,6 @@ class TestPackedBroadcastDeferredConsumer:
         )
 
 
-# --- Unit Tests: unpack_tensor ---
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-class TestUnpackTensor:
-    """Test the shared unpack_tensor function."""
-
-    def test_unpack_returns_views(self):
-        """Unpacked tensors alias the packed buffer; callers that need
-        independent storage must clone."""
-        packed = torch.randn(10, dtype=torch.float32).cuda().view(torch.uint8)
-
-        result = unpack_tensor(
-            packed,
-            names=["w"],
-            shapes=[[10]],
-            dtypes=[torch.float32],
-            tensor_sizes=[packed.numel()],
-        )
-
-        assert result[0][1].data_ptr() == packed.data_ptr()
-        packed.zero_()
-        assert torch.count_nonzero(result[0][1]) == 0
-
-
-# --- Unit Tests: pack_tensors ---
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-class TestPackTensors:
-    """Test the shared pack_tensors function."""
-
-    def test_pack_basic(self):
-        """Test packing a few tensors into one buffer."""
-        params = [
-            ("w1", torch.randn(10, 20, dtype=torch.float32).cuda()),
-            ("w2", torch.randn(5, dtype=torch.float16).cuda()),
-        ]
-
-        chunk = pack_tensors(
-            iterator=iter(params),
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=10_000_000,
-        )
-
-        assert chunk is not None
-        assert len(chunk.names) == 2
-        assert chunk.names == ["w1", "w2"]
-        assert chunk.shapes == [[10, 20], [5]]
-        assert chunk.dtypes == [torch.float32, torch.float16]
-        assert chunk.packed_tensor.dtype == torch.uint8
-
-    def test_pack_respects_buffer_limit(self):
-        """Test that packing stops when buffer_size_bytes is exceeded."""
-        params = [
-            (f"w{i}", torch.randn(100, 100, dtype=torch.float32).cuda())
-            for i in range(10)
-        ]
-
-        chunk = pack_tensors(
-            iterator=iter(params),
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=50_000,
-        )
-
-        assert chunk is not None
-        assert len(chunk.names) < 10
-
-    def test_pack_empty_iterator(self):
-        """Test that an empty iterator returns None."""
-        chunk = pack_tensors(
-            iterator=iter([]),
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=1000,
-        )
-        assert chunk is None
-
-    def test_pack_single_tensor_larger_than_buffer_warns(self):
-        """Test that a tensor exceeding buffer_size_bytes emits a warning."""
-        big = torch.randn(1000, 1000, dtype=torch.float32).cuda()
-        params = [("big", big)]
-
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            chunk = pack_tensors(
-                iterator=iter(params),
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=100,
-            )
-        assert chunk is not None
-        assert len(chunk.names) == 1
-        assert any("exceeds buffer_size_bytes" in str(wi.message) for wi in w)
-
-    def test_pack_unpack_roundtrip(self):
-        """Test pack then unpack produces identical tensors."""
-        params = [
-            ("a", torch.randn(8, 16, dtype=torch.float32).cuda()),
-            ("b", torch.randn(4, dtype=torch.float16).cuda()),
-            ("c", torch.randn(3, 5, 7, dtype=torch.bfloat16).cuda()),
-        ]
-
-        chunk = pack_tensors(
-            iterator=iter(params),
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=10_000_000,
-        )
-
-        assert chunk is not None
-        result = unpack_tensor(
-            chunk.packed_tensor,
-            chunk.names,
-            chunk.shapes,
-            chunk.dtypes,
-            chunk.tensor_sizes,
-        )
-
-        assert len(result) == len(params)
-        for (orig_name, orig_tensor), (res_name, res_tensor) in zip(params, result):
-            assert orig_name == res_name
-            assert res_tensor.shape == orig_tensor.shape
-            assert res_tensor.dtype == orig_tensor.dtype
-            assert torch.allclose(res_tensor, orig_tensor, rtol=1e-4, atol=1e-6)
-
-    def test_pack_multiple_chunks(self):
-        """Test consuming an iterator across multiple pack_tensors calls."""
-        params = [
-            (f"w{i}", torch.randn(50, 50, dtype=torch.float32).cuda()) for i in range(6)
-        ]
-        it = iter(params)
-
-        all_names = []
-        chunks = []
-        while True:
-            chunk = pack_tensors(it, lambda x: x[1], buffer_size_bytes=12_000)
-            if chunk is None:
-                break
-            chunks.append(chunk)
-            all_names.extend(chunk.names)
-
-        assert len(chunks) > 1
-        assert all_names == [f"w{i}" for i in range(6)]
-
-
 # --- Unit Tests: packed_ipc_producer ---
 
 
@@ -561,6 +414,47 @@ class TestPackedIpcProducer:
         )
         assert len(chunks) == 0
 
+    @pytest.mark.parametrize("limit", [16, 100, 1000, 4096])
+    def test_chunks_match_ipc_packing(self, limit):
+        """Chunks hold tensors back to back and flush before overflowing the
+        fixed buffer, so the metadata (and the bytes at those offsets) are
+        what earlier versions sent."""
+        tensors = [t.cuda() for t in _mixed_tensors()]
+        tensors = [t for t in tensors if t.nbytes <= limit]
+        expected, cur, size = [], [], 0
+        for i, t in enumerate(tensors):  # the IPC rule, spelled out
+            if size and size + t.nbytes > limit:
+                expected.append(cur)
+                cur, size = [], 0
+            cur.append(i)
+            size += t.nbytes
+        if cur:
+            expected.append(cur)
+        chunks = list(
+            packed_ipc_producer(
+                iterator=iter([(str(i), t) for i, t in enumerate(tensors)]),
+                gpu_uuid="uuid",
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=limit,
+            )
+        )
+        assert [[int(n) for n in c.names] for c in chunks] == expected
+        for c in chunks:
+            ts = [tensors[int(n)] for n in c.names]
+            assert c.tensor_sizes == [t.nbytes for t in ts]
+            assert c.shapes == [list(t.shape) for t in ts]
+
+    def test_tensor_over_the_buffer_raises(self):
+        with pytest.raises(ValueError, match="exceeds buffer_size_bytes"):
+            list(
+                packed_ipc_producer(
+                    iterator=iter([("big", torch.randn(100).cuda())]),
+                    gpu_uuid="uuid",
+                    post_iter_func=lambda x: x[1],
+                    buffer_size_bytes=100,
+                )
+            )
+
 
 # --- Integration Tests: IPC Producer-Consumer Roundtrip ---
 
@@ -588,6 +482,10 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
                 tensor_sizes=cd["tensor_sizes"],
                 device_index=device_index,
             )
+            for name, tensor in result:
+                # independent storage: the producer reuses its IPC buffer
+                own = tensor.untyped_storage().nbytes() == tensor.nbytes
+                assert own, f"{name} aliases the IPC buffer"
             # .cpu() forces a GPU→CPU copy off the shared IPC buffer, so
             # the producer is free to overwrite it once we ack.
             all_results.extend([(name, tensor.cpu()) for name, tensor in result])
@@ -777,6 +675,32 @@ class TestPackedIpcRoundtrip:
             assert res_tensor.dtype == orig_tensor.dtype
             assert torch.allclose(res_tensor, orig_tensor.cpu(), rtol=1e-4, atol=1e-6)
 
+    def test_roundtrip_misaligned_entries(self):
+        """A 3-byte entry shifts every later entry off its dtype's alignment;
+        the consumer copies those instead of failing to view them."""
+        params = [
+            ("tag", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
+            ("w", torch.randn(4, 8, dtype=torch.float32).cuda()),
+            ("b", torch.randn(5, dtype=torch.bfloat16).cuda()),
+            ("i", torch.arange(3, dtype=torch.int64).cuda()),
+        ]
+        num_chunks, result = self._run_roundtrip(
+            packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid=self._get_gpu_uuid(),
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=10_000_000,
+            ),
+            torch.cuda.current_device(),
+        )
+        assert num_chunks == 1
+        for (orig_name, orig_tensor), (res_name, res_tensor) in zip(
+            params, result, strict=True
+        ):
+            assert orig_name == res_name
+            assert res_tensor.dtype == orig_tensor.dtype
+            assert torch.equal(res_tensor, orig_tensor.cpu())
+
     def test_consumer_wrong_uuid_raises(self):
         """Test that consumer raises ValueError for unknown GPU UUID."""
         params = [("w", torch.randn(10, dtype=torch.float32).cuda())]
@@ -803,32 +727,6 @@ class TestPackedIpcRoundtrip:
                 tensor_sizes=c.tensor_sizes,
                 device_index=torch.cuda.current_device(),
             )
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_pack_unpack_scalar(dtype):
-    """Preserve scalar shape, dtype and value alongside a matrix on CPU."""
-    params = [
-        ("weight", torch.randn(2, 3, dtype=dtype)),
-        ("scale", torch.tensor(1.5, dtype=dtype)),
-    ]
-
-    chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
-    assert chunk is not None
-
-    result = unpack_tensor(
-        chunk.packed_tensor,
-        chunk.names,
-        chunk.shapes,
-        chunk.dtypes,
-        chunk.tensor_sizes,
-    )
-
-    for (expected_name, expected), (name, actual) in zip(params, result, strict=True):
-        assert name == expected_name
-        assert actual.shape == expected.shape
-        assert actual.dtype == expected.dtype
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 # --- Chunk layout and wire segments ---
@@ -863,15 +761,20 @@ def _mixed_tensors(seed: int = 0) -> list[torch.Tensor]:
 
 class TestChunkLayout:
     @pytest.mark.parametrize("limit", [16, 100, 1000, 4096, 1 << 20])
-    def test_without_segments_matches_pack_tensors(self, limit):
-        """With segments off the wire bytes are `pack_tensors`'s, so a peer
-        that predates segments interoperates."""
+    def test_without_segments_matches_packing_before_segments(self, limit):
+        """With segments off the wire bytes are what earlier versions packed
+        (tensors back to back, a chunk takes tensors until it holds more than
+        the buffer), so a peer that predates segments interoperates."""
         tensors = _mixed_tensors()
         layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), limit)
-        it = iter([(str(i), t) for i, t in enumerate(tensors)])
-        expected = []
-        while (chunk := pt.pack_tensors(it, lambda x: x[1], limit)) is not None:
-            expected.append(chunk.packed_tensor.numpy().tobytes())
+        expected, cur = [], []
+        for t in tensors:
+            cur.append(t.contiguous().view(-1).view(torch.uint8))
+            if sum(c.numel() for c in cur) > limit:
+                expected.append(torch.cat(cur).numpy().tobytes())
+                cur = []
+        if cur:
+            expected.append(torch.cat(cur).numpy().tobytes())
         assert _layout_bytes(layout, tensors) == expected
         assert all(p.rows is None for chunk in layout.chunks for p in chunk)
 
@@ -895,6 +798,40 @@ class TestChunkLayout:
         assert max(layout.sizes) < 2 * limit
         off = pt.chunk_layout([(big.shape, big.dtype)], limit)
         assert [p.rows for chunk in off.chunks for p in chunk] == [None]
+
+    def test_views_alias_the_buffer_and_misaligned_is_raw(self):
+        layout = pt.chunk_layout(
+            [((3,), torch.uint8), ((2, 2), torch.float32), ((4,), torch.uint8)], 1024
+        )
+        buf = torch.zeros(layout.sizes[0], dtype=torch.uint8)
+        tag, w, tail = layout.views(0, buf)
+        assert tag.data_ptr() == buf.data_ptr() and tag.dtype == torch.uint8
+        assert w.dtype == torch.uint8 and w.numel() == 16  # offset 3: raw bytes
+        assert tail.data_ptr() == buf.data_ptr() + 19
+        piece = layout.chunks[0][1]
+        w.copy_(torch.arange(4.0).view(-1).view(torch.uint8))
+        got = pt._unpacked(w, piece)
+        assert got.dtype == torch.float32 and got.shape == (2, 2)
+        assert torch.equal(got.view(-1), torch.arange(4.0))
+        assert got.untyped_storage().data_ptr() != buf.untyped_storage().data_ptr()
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_scalar_round_trips(self, dtype):
+        tensors = [torch.randn(2, 3, dtype=dtype), torch.tensor(1.5, dtype=dtype)]
+        layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), 1024)
+        [raw] = _layout_bytes(layout, tensors)
+        buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+        for piece, view in zip(layout.chunks[0], layout.views(0, buf)):
+            got = pt._unpacked(view, piece)
+            assert got.shape == tensors[piece.index].shape
+            torch.testing.assert_close(got, tensors[piece.index], rtol=0, atol=0)
+
+    def test_chunks_keep_order_across_several(self):
+        tensors = [torch.randn(50, 50) for _ in range(6)]  # 10 kB each
+        layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), 12_000)
+        assert len(layout.chunks) > 1
+        assert [p.index for chunk in layout.chunks for p in chunk] == list(range(6))
+        assert all(size > 12_000 for size in layout.sizes[:-1])
 
     def test_row_over_the_buffer_travels_whole_and_warns(self):
         with patch.object(pt.logger, "warning_once") as warn:

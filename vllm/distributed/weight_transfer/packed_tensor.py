@@ -28,122 +28,6 @@ def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, 
     return tuple(torch.cuda.Stream(device=device_idx) for _ in range(num_buffers))
 
 
-def unpack_tensor(
-    packed_tensor: torch.Tensor,
-    names: list[str],
-    shapes: list[list[int]],
-    dtypes: list[torch.dtype],
-    tensor_sizes: list[int],
-) -> list[tuple[str, torch.Tensor]]:
-    """Unpack a packed uint8 tensor into a list of named tensors.
-
-    The returned tensors are **views** of `packed_tensor` (the
-    `.contiguous()` call is a no-op on already-contiguous row-slices).
-    If `packed_tensor` lives in storage that may be reused — e.g. a
-    reused CUDA IPC buffer — callers must clone the results before the
-    underlying storage is overwritten.
-
-    Args:
-        packed_tensor: The packed torch.uint8 tensor to unpack
-        names: List of tensor names
-        shapes: List of tensor shapes
-        dtypes: List of tensor dtypes
-        tensor_sizes: List of tensor sizes in bytes
-
-    """
-    unpacked_tensors = packed_tensor.split(tensor_sizes)
-
-    return [
-        (name, tensor.contiguous().view(dtype).view(shape))
-        for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
-    ]
-
-
-@dataclass(slots=True)
-class PackedChunk:
-    """Result of packing tensors into a single contiguous uint8 buffer."""
-
-    packed_tensor: torch.Tensor
-    names: list[str]
-    shapes: list[list[int]]
-    dtypes: list[torch.dtype]
-    tensor_sizes: list[int]
-
-
-def pack_tensors(
-    iterator: Iterator[tuple[str, torch.Tensor]],
-    post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
-    buffer_size_bytes: int,
-    tensor_list: list[torch.Tensor] | None = None,
-    current_size: int = 0,
-) -> PackedChunk | None:
-    """Pack tensors from an iterator into a single contiguous uint8 buffer.
-
-    Consumes from the iterator until the accumulated size exceeds
-    buffer_size_bytes or the iterator is exhausted, then returns a
-    PackedChunk. Returns None if no tensors were consumed.
-
-    Args:
-        iterator: Iterator of (name, tensor) pairs
-        post_iter_func: Applied to each item before linearizing to uint8
-        buffer_size_bytes: Max bytes before flushing
-        tensor_list: Pre-existing tensor list to append to (for NCCL
-                    multi-buffer reuse). If None, a fresh list is created.
-        current_size: Byte count already accumulated in tensor_list
-
-    """
-    if tensor_list is None:
-        tensor_list = []
-
-    names: list[str] = []
-    shapes: list[list[int]] = []
-    dtypes: list[torch.dtype] = []
-    tensor_sizes: list[int] = []
-    total_bytes = current_size
-
-    while True:
-        try:
-            item = next(iterator)
-        except StopIteration:
-            break
-
-        name, orig_tensor = item
-        # Apply post processing and convert to linearized uint8 tensor
-        tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
-
-        if tensor.numel() > buffer_size_bytes:
-            import warnings
-
-            warnings.warn(
-                f"Tensor '{name}' has size {tensor.numel()} bytes, which "
-                f"exceeds buffer_size_bytes={buffer_size_bytes}.",
-                stacklevel=2,
-            )
-
-        tensor_list.append(tensor)
-        names.append(name)
-        shapes.append(list(orig_tensor.shape))
-        dtypes.append(orig_tensor.dtype)
-        tensor_sizes.append(tensor.numel())
-        total_bytes += tensor.numel()
-
-        if total_bytes > buffer_size_bytes:
-            break
-
-    if not tensor_list:
-        return None
-
-    packed = torch.cat(tensor_list, dim=0)
-    del tensor_list
-    return PackedChunk(
-        packed_tensor=packed,
-        names=names,
-        shapes=shapes,
-        dtypes=dtypes,
-        tensor_sizes=tensor_sizes,
-    )
-
-
 # ── NCCL packed broadcast ──────────────────────────────────────────────
 
 
@@ -191,9 +75,8 @@ def _pieces(
     specs: Iterable[tuple[Sequence[int], torch.dtype]], limit: int, segments: bool
 ) -> Iterator[tuple[bool, Piece]]:
     """Each piece in order, and whether it closes its chunk: a chunk takes
-    pieces until it holds more than `limit` bytes (`pack_tensors`'s rule).
-    Without `segments` every tensor travels whole, exactly as `pack_tensors`
-    packs it."""
+    pieces until it holds more than `limit` bytes. Without `segments` every
+    tensor travels whole, back to back."""
     size = 0
     for index, (shape, dtype) in enumerate(specs):
         nbytes = math.prod(shape) * dtype.itemsize
@@ -225,14 +108,25 @@ class ChunkLayout:
     def views(self, k: int, buf: torch.Tensor) -> list[torch.Tensor]:
         """Chunk k's pieces in `buf`: typed, or raw bytes for a piece at an
         offset its dtype cannot view (pieces are packed back to back)."""
-        out = []
-        for p in self.chunks[k]:
-            raw = buf[p.offset : p.offset + p.nbytes]
-            try:
-                out.append(raw.view(p.dtype).view(p.shape))
-            except RuntimeError:
-                out.append(raw)
-        return out
+        return [_view(buf, p) for p in self.chunks[k]]
+
+
+def _view(buf: torch.Tensor, piece: Piece) -> torch.Tensor:
+    """`piece` in `buf`: typed, or raw bytes at an offset its dtype cannot
+    view."""
+    raw = buf[piece.offset : piece.offset + piece.nbytes]
+    try:
+        return raw.view(piece.dtype).view(piece.shape)
+    except RuntimeError:
+        return raw
+
+
+def _unpacked(view: torch.Tensor, piece: Piece) -> torch.Tensor:
+    """A received piece as its dtype and shape; one at an offset its dtype
+    cannot view is copied into aligned storage first."""
+    if view.dtype == piece.dtype:
+        return view
+    return view.clone().view(piece.dtype).view(piece.shape)
 
 
 def chunk_layout(
@@ -242,7 +136,8 @@ def chunk_layout(
 ) -> ChunkLayout:
     """The chunks `specs` travel as. `segments` (both sides must agree; see
     `NCCLWeightTransferInitInfo.packed_wire_segments`) splits tensors over
-    the buffer along dim 0; without it the layout is `pack_tensors`'s."""
+    the buffer along dim 0; without it every tensor travels whole, back to
+    back, and a chunk takes tensors until it holds more than `limit` bytes."""
     full = [(tuple(shape), dtype) for shape, dtype in specs]
     chunks: list[list[Piece]] = [[]]
     sizes: list[int] = []
@@ -420,12 +315,7 @@ def packed_nccl_broadcast_consumer(
                 packed.record_stream(stream)
             out = []
             for piece, view in zip(pieces, layout.views(k, packed)):
-                index, rows, shape, dtype = (
-                    piece.index,
-                    piece.rows,
-                    piece.shape,
-                    piece.dtype,
-                )
+                index, rows, dtype = piece.index, piece.rows, piece.dtype
                 if rows is not None:
                     # one tensor of the full size, written segment by segment
                     whole = joined.get(index)
@@ -441,8 +331,8 @@ def packed_nccl_broadcast_consumer(
                     if rows[1] < specs[index][0][0]:
                         continue
                     view = joined.pop(index)
-                elif view.dtype != dtype:  # at an offset its dtype cannot view
-                    view = view.clone().view(dtype).view(shape)
+                else:
+                    view = _unpacked(view, piece)
                 if view.untyped_storage().data_ptr() != packed.data_ptr():
                     # a copy, read like the packed buffer: keep it alive on
                     # every stream that may still read it once it is freed
@@ -500,58 +390,60 @@ def packed_ipc_producer(
             `ValueError` is raised if any single tensor exceeds it.
 
     """
-    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    device = torch.device(accelerator.type, torch.accelerator.current_device_index())
+    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device=device)
     _, ipc_args = reduce_tensor(ipc_buffer)
 
+    pieces: list[Piece] = []
     names: list[str] = []
-    shapes: list[list[int]] = []
-    dtypes: list[torch.dtype] = []
-    tensor_sizes: list[int] = []
     total_bytes = 0
+
+    def chunk() -> PackedIpcChunk:
+        # Drain queued copies so the consumer sees a fully-written buffer.
+        torch.accelerator.current_stream().synchronize()
+        return PackedIpcChunk(
+            names=names,
+            shapes=[p.shape for p in pieces],
+            dtype_names=[str(p.dtype).split(".")[-1] for p in pieces],
+            tensor_sizes=[p.nbytes for p in pieces],
+            ipc_handle={gpu_uuid: ipc_args},
+        )
 
     for name, orig_tensor in iterator:
         flat = (
             post_iter_func((name, orig_tensor)).contiguous().view(-1).view(torch.uint8)
         )
-
-        if flat.numel() > buffer_size_bytes:
+        nbytes = flat.numel()
+        if nbytes > buffer_size_bytes:
             raise ValueError(
-                f"Tensor '{name}' has size {flat.numel()} bytes, "
+                f"Tensor '{name}' has size {nbytes} bytes, "
                 f"which exceeds buffer_size_bytes={buffer_size_bytes}. "
-                f"Increase buffer_size_bytes to at least {flat.numel()}."
+                f"Increase buffer_size_bytes to at least {nbytes}."
             )
-
-        if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
-            # Drain queued copies so the consumer sees a fully-written buffer.
-            torch.accelerator.current_stream().synchronize()
-            yield PackedIpcChunk(
-                names=names,
-                shapes=shapes,
-                dtype_names=[str(d).split(".")[-1] for d in dtypes],
-                tensor_sizes=tensor_sizes,
-                ipc_handle={gpu_uuid: ipc_args},
-            )
-            # Rebind to fresh lists so the yielded chunk's metadata is
-            # not mutated while the consumer is still reading.
-            names, shapes, dtypes, tensor_sizes = [], [], [], []
-            total_bytes = 0
-
-        ipc_buffer[total_bytes : total_bytes + flat.numel()].copy_(flat)
+        # A chunk must fit the fixed IPC buffer: flush before overflowing it.
+        if total_bytes and total_bytes + nbytes > buffer_size_bytes:
+            yield chunk()
+            # Fresh lists, so the yielded chunk's metadata is not mutated
+            # while the consumer is still reading it.
+            pieces, names, total_bytes = [], [], 0
+        # Shape and dtype as sent (the original tensor's), bytes back to back.
+        piece = Piece(
+            len(pieces),
+            None,
+            list(orig_tensor.shape),
+            orig_tensor.dtype,
+            total_bytes,
+            nbytes,
+        )
+        ipc_buffer[total_bytes : total_bytes + nbytes].copy_(flat)
+        pieces.append(piece)
         names.append(name)
-        shapes.append(list(orig_tensor.shape))
-        dtypes.append(orig_tensor.dtype)
-        tensor_sizes.append(flat.numel())
-        total_bytes += flat.numel()
+        total_bytes += nbytes
 
     if total_bytes:
-        torch.accelerator.current_stream().synchronize()
-        yield PackedIpcChunk(
-            names=names,
-            shapes=shapes,
-            dtype_names=[str(d).split(".")[-1] for d in dtypes],
-            tensor_sizes=tensor_sizes,
-            ipc_handle={gpu_uuid: ipc_args},
-        )
+        yield chunk()
 
 
 class PackedBufferImporter:
@@ -645,11 +537,22 @@ def packed_ipc_consumer(
         importer = PackedBufferImporter()
     packed = importer.rebuild(list_args)
 
-    content_size = sum(tensor_sizes)
-    packed = packed[:content_size]
-
-    dtypes = [getattr(torch, dn) for dn in dtype_names]
-    return [
-        (name, t.clone())
-        for name, t in unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)
-    ]
+    # The chunk's tensors, back to back as the producer packed them.
+    pieces, offset = [], 0
+    for i, (shape, dtype_name, nbytes) in enumerate(
+        zip(shapes, dtype_names, tensor_sizes, strict=True)
+    ):
+        dtype = getattr(torch, dtype_name)
+        pieces.append(Piece(i, None, list(shape), dtype, offset, nbytes))
+        offset += nbytes
+    layout = ChunkLayout([pieces], [offset])
+    # Every tensor gets its own storage (see above). One at an offset its
+    # dtype cannot view (#64936) is copied into aligned storage, its own.
+    out = []
+    buffer_ptr = packed.untyped_storage().data_ptr()
+    for name, piece, view in zip(names, pieces, layout.views(0, packed)):
+        t = _unpacked(view, piece)
+        if t.untyped_storage().data_ptr() == buffer_ptr:
+            t = t.clone()
+        out.append((name, t))
+    return out
