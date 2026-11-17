@@ -26,7 +26,10 @@ from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
 )
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
     kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -51,10 +54,7 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.worker.workspace import (
-    current_workspace_manager,
-    is_workspace_manager_initialized,
-)
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
@@ -434,22 +434,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
-        self._triton_checkpoint_spec: tuple[tuple[int, ...], torch.dtype] | None = None
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
         if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
             )
         if self.kda_prefill_backend == "triton":
-            max_seqs = vllm_config.scheduler_config.max_num_seqs
-            self._triton_checkpoint_spec = (
-                (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
                 self.get_state_dtype()[1],
             )
-            if is_workspace_manager_initialized():
-                current_workspace_manager().get_simultaneous(
-                    self._triton_checkpoint_spec
-                )
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -930,14 +927,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 )
             else:
                 checkpoint = attn_metadata_narrowed.checkpoint
-                checkpoint_state = checkpoint_offsets = None
-                if checkpoint is not None:
-                    assert self._triton_checkpoint_spec is not None
-                    (checkpoint_state,) = current_workspace_manager().get_simultaneous(
-                        self._triton_checkpoint_spec
-                    )
-                    checkpoint_state = checkpoint_state[: initial_state.shape[0]]
-                    checkpoint_offsets = checkpoint.checkpoint_offsets
+                checkpoint_state, checkpoint_offsets = get_triton_kda_checkpoint_buffer(
+                    checkpoint,
+                    self._triton_checkpoint_spec,
+                    initial_state.shape[0],
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
