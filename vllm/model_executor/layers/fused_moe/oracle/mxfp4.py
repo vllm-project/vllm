@@ -530,6 +530,8 @@ def _serves_requested_activation(
         return False
     from vllm.platforms.rocm import on_gfx950
 
+    # AITER's BF16/MXFP8 activation switch is gated to gfx950:
+    # https://github.com/ROCm/aiter/blob/a0c4b69c146d94e393984bbe553b704e8c89a5e4/aiter/fused_moe.py#L1128-L1132
     return on_gfx950()
 
 

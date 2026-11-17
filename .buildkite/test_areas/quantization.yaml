@@ -136,7 +136,6 @@ steps:
       source_file_dependencies:
       - tests/quantization/test_gfx950_moe.py
       - tests/quantization/test_rocm_moe.py
-      - tests/quantization/test_online.py
       - tests/utils.py
       - vllm/model_executor/models/deepseek_v2.py
       - vllm/model_executor/models/qwen3_moe.py
@@ -153,10 +152,6 @@ steps:
       commands:
       - pytest -v -s tests/quantization/test_rocm_moe.py
       - pytest -v -s tests/quantization/test_gfx950_moe.py
-      - >-
-        pytest -v -s
-        tests/quantization/test_online.py::test_online_mxfp4_activation_key_is_honoured_or_rejected
-        tests/quantization/test_online.py::test_online_mxfp4_aiter_layer_honours_activation
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb

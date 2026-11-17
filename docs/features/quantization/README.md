@@ -69,19 +69,9 @@ MarlinExperts runs QuantKey(...) activations as unquantized. Set VLLM_STRICT_QUA
 
 Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks are forbidden the same way.
 
-Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel, with one exception.
+Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel, except for:
 
-The interleaved AITER MXFP4 MoE kernels (`AITER_MXFP4_BF16`, ROCm gfx950) run either MXFP8 or BF16 activations, depending on the requested MoE activation:
-
-| `quantization_config.moe.activation` | Activations | Strict mode (`VLLM_STRICT_QUANT_SCHEME=1`) |
-| --- | --- | --- |
-| `mxfp8` | MXFP8 for any token count | selected on gfx950 only; elsewhere it is a BF16 fallback and is skipped |
-| `null` | BF16 for any token count | BF16 as requested |
-| not set (for example a checkpoint's own scheme) | MXFP8 for any token count | BF16, instead of adding MXFP8 activations to a weight-only request |
-
-For online MXFP4 MoE weights, request MXFP8 activations with `--quantization-config.moe.weight mxfp4 --quantization-config.moe.activation mxfp8`, or BF16 activations with `--quantization-config.moe.weight mxfp4 --quantization-config.moe.activation null`. Per-layer `targets` specifications are honored too.
-
-AITER reads the activation choice from the process-wide `AITER_BF16_FP8_MOE_BOUND` environment variable. Once a layer requests BF16, it takes precedence over subsequent MXFP8 requests, including in strict mode and in later engines in the same process. Mixed activation requests cannot be enforced independently; backend selection also overwrites a user-exported bound.
+- `AITER_MXFP4_BF16` MOE backend: `VLLM_STRICT_QUANT_SCHEME=1` enforces BF16 activations, while by default the backend defaults to MXFP8 activation due to `AITER_BF16_FP8_MOE_BOUND=0` environment set in vLLM oracle.
 
 ## Supported Hardware
 
