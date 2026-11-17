@@ -43,9 +43,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 _PARTITION_SIZE_ROCM = 256
-# AITER names the varlen module it builds after whether `min_seqlen_q` is
-# zero, so the warmup must pass the same value as the real calls.
-_MIN_SEQLEN_Q = 0
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
@@ -547,7 +544,9 @@ class AiterFlashAttentionExtendKernel(
             cu_seqlens_k=lens(key_len),
             max_seqlen_q=self.QUERY_LEN,
             max_seqlen_k=key_len,
-            min_seqlen_q=_MIN_SEQLEN_Q,
+            # Must match the serving calls: AITER names the module after a zero
+            # min_seqlen_q, so a nonzero value here builds a module serving never uses.
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=compile_key.head_dim**-0.5,
             causal=compile_key.causal,
@@ -1198,7 +1197,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=swa_cu_seqlens,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=swa_max_seqlens,
-            min_seqlen_q=_MIN_SEQLEN_Q,
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
@@ -1248,7 +1247,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_q,
-            min_seqlen_q=_MIN_SEQLEN_Q,
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
@@ -1296,7 +1295,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlens[chunk_idx],
-                min_seqlen_q=_MIN_SEQLEN_Q,
+                min_seqlen_q=0,
                 dropout_p=0.0,
                 softmax_scale=self.scale,
                 causal=False,
@@ -1450,7 +1449,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                 max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                min_seqlen_q=_MIN_SEQLEN_Q,
+                min_seqlen_q=0,
                 dropout_p=0.0,
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,

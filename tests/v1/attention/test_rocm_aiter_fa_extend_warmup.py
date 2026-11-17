@@ -61,7 +61,7 @@ def test_compile_runs_the_calls_extend_forward_makes(monkeypatch):
     for call, is_causal in ((causal, True), (context, False)):
         assert call["causal"] is is_causal
         assert call["return_lse"]
-        assert call["min_seqlen_q"] == rocm_aiter_fa._MIN_SEQLEN_Q
+        assert call["min_seqlen_q"] == 0
         assert call["window_size"] == NO_WINDOW
         assert call["alibi_slopes"] is not None
         # AITER treats a one-token query as decode and drops `causal`.
