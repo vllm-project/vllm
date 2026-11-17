@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import bisect
 import copy
 import hashlib
 import math
@@ -9,6 +10,7 @@ import os
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from operator import itemgetter
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -624,18 +626,54 @@ def _gen_prompt_embeds_extra_hash_keys(
     return [("prompt_embeds", embeds_hash)]
 
 
+_segment_start = itemgetter(0)
+
+
+def _gen_cache_salt_segment_keys(
+    request: Request, start_token_idx: int, end_token_idx: int
+) -> list[tuple[str, int, bytes]]:
+    """Generate the keys of the cache salt segments that overlap the tokens
+    `[start_token_idx, end_token_idx)`, each with its start relative to
+    `start_token_idx` (0 if it starts before)."""
+    segments = request.cache_salt_segments
+    if not segments:
+        return []
+    last_start, last_salt = segments[-1]
+    if last_start <= start_token_idx:
+        return [("cache_salt_segment", 0, last_salt.encode())]
+    index = bisect.bisect_right(segments, start_token_idx, key=_segment_start)
+    index = max(index - 1, 0)
+    start, salt = segments[index]
+    if start <= start_token_idx and segments[index + 1][0] >= end_token_idx:
+        return [("cache_salt_segment", 0, salt.encode())]
+    keys = []
+    while index < len(segments) and segments[index][0] < end_token_idx:
+        start, salt = segments[index]
+        keys.append(
+            ("cache_salt_segment", max(start - start_token_idx, 0), salt.encode())
+        )
+        index += 1
+    return keys
+
+
 def generate_block_hash_extra_keys(
-    request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
+    request: Request,
+    start_token_idx: int,
+    end_token_idx: int,
+    start_mm_idx: int,
+    salt_end_token_idx: int | None = None,
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
-    the multi-modal inputs, request specific metadata (e.g., LoRA names), and
-    hashed data from prompt embeddings.
+    the multi-modal inputs, request specific metadata (e.g., LoRA names), the
+    cache salt segments, and hashed data from prompt embeddings.
 
     Args:
         request: The request object.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
+        salt_end_token_idx: The end of the tokens whose cache salt segments
+            key the block, `end_token_idx` if None.
 
     Returns:
         A tuple of extra keys and the next multi-modal index.
@@ -651,12 +689,21 @@ def generate_block_hash_extra_keys(
         if (start_token_idx == 0 and request.cache_salt)
         else []
     )
+    segment_keys = _gen_cache_salt_segment_keys(
+        request,
+        start_token_idx,
+        end_token_idx if salt_end_token_idx is None else salt_end_token_idx,
+    )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys
+        + mm_extra_keys
+        + cache_salt_keys
+        + segment_keys
+        + prompt_embeds_keys
     )
 
     if not extra_keys:
@@ -674,6 +721,7 @@ def to_event_extra_keys(
     External KV event consumers parse the pre-tagging shapes: bare LoRA names
     and cache salts, `(mm_identifier, offset)` pairs and bare prompt-embeds
     digests. Events keep that format until consumers handle the tagged keys.
+    Cache salt segments, which have no untagged shape, stay tagged.
 
     Args:
         extra_keys: One entry per block, each as returned by
@@ -688,7 +736,14 @@ def to_event_extra_keys(
     event_keys = [
         None
         if keys is None
-        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        else tuple(
+            key
+            if key[0] == "cache_salt_segment"
+            else key[1:]
+            if key[0] == "mm"
+            else key[1]
+            for key in keys
+        )
         for keys in extra_keys
     ]
     return event_keys or None
@@ -1020,7 +1075,7 @@ def frontend_block_hashes(
     """Return the frontend's prompt block hashes, unless their count doesn't
     match the prompt, in which case the engine hashes the prompt itself."""
     block_hashes = request.block_hashes
-    if block_hashes is None:
+    if block_hashes is None or request.cache_salt_segments:
         return None
     prompt_ids = request.prompt_token_ids
     prompt_len = len(prompt_ids) if prompt_ids is not None else 0
@@ -1049,7 +1104,7 @@ def generate_lookahead_block_hash_extra_keys(
     Rewind the MM index to retain inputs overlapping the next block.
     """
     extra_keys, mm_idx = generate_block_hash_extra_keys(
-        request, start_token_idx, hash_end_token_idx, start_mm_idx
+        request, start_token_idx, hash_end_token_idx, start_mm_idx, end_token_idx
     )
     while mm_idx > 0:
         mm_position = request.mm_features[mm_idx - 1].mm_position

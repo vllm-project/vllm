@@ -35,6 +35,7 @@ from vllm.config import (
 from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -367,6 +368,8 @@ def make_request(
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
     num_hash_lookahead_tokens: int = 0,
+    cache_salt_segments: list[tuple[int, str]] | None = None,
+    resumable: bool = False,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -391,10 +394,12 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
+        cache_salt_segments=cache_salt_segments,
         block_hasher=get_request_block_hasher(
             block_size, hash_fn, num_hash_lookahead_tokens
         ),
         prompt_embeds=prompt_embeds,
+        resumable=resumable,
     )
 
 
@@ -1111,6 +1116,224 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     assert to_event_extra_keys([extra_keys, None]) == [event_keys, None]
     assert to_event_extra_keys([]) is None
     assert to_event_extra_keys(None) is None
+
+
+@pytest.mark.parametrize(
+    "segments,start,end,expected",
+    [
+        ([], 0, 4, None),
+        ([(0, "a")], 4, 8, (("cache_salt_segment", 0, b"a"),)),
+        (
+            [(0, "a"), (6, "b")],
+            4,
+            8,
+            (("cache_salt_segment", 0, b"a"), ("cache_salt_segment", 2, b"b")),
+        ),
+        ([(0, "a"), (6, "b")], 8, 12, (("cache_salt_segment", 0, b"b"),)),
+        ([(0, "a"), (4, "b")], 0, 4, (("cache_salt_segment", 0, b"a"),)),
+        ([(4, "b")], 0, 4, None),
+    ],
+    ids=[
+        "no-segments",
+        "inside-one-segment",
+        "mid-block-boundary",
+        "after-the-boundary",
+        "next-segment-at-block-end",
+        "before-the-first-segment",
+    ],
+)
+def test_generate_block_hash_extra_keys_cache_salt_segments(
+    segments, start, end, expected
+):
+    request = make_request("0", list(range(12)), cache_salt_segments=segments)
+    assert generate_block_hash_extra_keys(request, start, end, 0)[0] == expected
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.parametrize(
+    "segments,num_equal",
+    [
+        ([], 4),
+        ([(0, "a")], 0),
+        ([(8, "b")], 2),
+        ([(6, "b")], 1),
+        ([(15, "b")], 3),
+    ],
+    ids=["none", "from-the-start", "on-a-boundary", "mid-block", "last-token"],
+)
+def test_cache_salt_segments_change_the_blocks_they_overlap(
+    hash_fn, segments, num_equal
+):
+    plain = make_request("plain", list(range(16)), 4, hash_fn)
+    salted = make_request(
+        "salted", list(range(16)), 4, hash_fn, cache_salt_segments=segments
+    )
+    assert [a == b for a, b in zip(plain.block_hashes, salted.block_hashes)] == [
+        i < num_equal for i in range(4)
+    ]
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lookahead_block_hash_takes_the_segments_of_its_own_tokens(hash_fn):
+    request = make_request(
+        "0",
+        list(range(9)),
+        4,
+        hash_fn,
+        num_hash_lookahead_tokens=1,
+        cache_salt_segments=[(0, "a"), (4, "b")],
+    )
+    first_hash = hash_fn(
+        (
+            kv_cache_utils.NONE_HASH,
+            (0, 1, 2, 3),
+            ((("cache_salt_segment", 0, b"a"),), 4),
+        )
+    )
+    second_hash = hash_fn(
+        (first_hash, (4, 5, 6, 7), ((("cache_salt_segment", 0, b"b"),), 8))
+    )
+    assert request.block_hashes == [first_hash, second_hash]
+
+
+def test_to_event_extra_keys_keeps_cache_salt_segments_tagged():
+    request = make_request(
+        "0", list(range(8)), cache_salt="salt", cache_salt_segments=[(0, "a"), (2, "b")]
+    )
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 4, 0)
+    assert to_event_extra_keys([extra_keys]) == [
+        ("salt", ("cache_salt_segment", 0, b"a"), ("cache_salt_segment", 2, b"b"))
+    ]
+
+
+@pytest.mark.parametrize(
+    "segments,resumable",
+    [
+        ([(4, "b"), (0, "a")], False),
+        ([(0, "a"), (0, "b")], False),
+        ([(-1, "a")], False),
+        ([(0, "")], False),
+        ([(0.5, "a")], False),
+        ([(0, "a")], True),
+    ],
+    ids=[
+        "unsorted",
+        "duplicate-start",
+        "negative-start",
+        "empty-salt",
+        "non-integer-start",
+        "streaming",
+    ],
+)
+def test_cache_salt_segments_rejected(segments, resumable):
+    with pytest.raises(VLLMValidationError, match="cache_salt_segments"):
+        make_request(
+            "0", list(range(8)), cache_salt_segments=segments, resumable=resumable
+        )
+
+
+def test_cache_salt_segments_are_copied_per_request():
+    segments = [(0, "a")]
+    first = make_request("0", list(range(8)), cache_salt_segments=segments)
+    second = make_request("1", list(range(8)), cache_salt_segments=segments)
+    first.cache_salt_segments.append((6, "b"))
+    assert second.cache_salt_segments == [(0, "a")]
+    assert segments == [(0, "a")]
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_equal_cache_salt_segments_hash_equally(hash_fn):
+    salt = "weight-version-long"
+    copy_of_salt = salt.encode().decode()
+    assert copy_of_salt is not salt
+    first = make_request(
+        "0",
+        list(range(4)),
+        4,
+        hash_fn,
+        cache_salt=salt,
+        cache_salt_segments=[(0, salt)],
+    )
+    second = make_request(
+        "1",
+        list(range(4)),
+        4,
+        hash_fn,
+        cache_salt=copy_of_salt,
+        cache_salt_segments=[(0, salt)],
+    )
+    assert first.block_hashes == second.block_hashes
+
+    first.cache_salt_segments += [(5, salt), (6, "other"), (7, copy_of_salt)]
+    first.append_output_token_ids([4, 5, 6, 7])
+    rebuilt = make_request(
+        "2",
+        list(range(8)),
+        4,
+        hash_fn,
+        cache_salt=salt,
+        cache_salt_segments=[(0, salt), (5, salt), (6, "other"), (7, salt)],
+    )
+    assert first.block_hashes == rebuilt.block_hashes
+
+
+@pytest.mark.parametrize(
+    "start,salt,expected",
+    [
+        (3, "b", [(0, "a"), (4, "b")]),
+        (6, "b", [(0, "a"), (6, "b")]),
+        (6, "a", [(0, "a")]),
+        (5, "c", [(0, "a"), (5, "c")]),
+    ],
+    ids=["below-hashed-frontier", "after-frontier", "same-salt", "replaces-later"],
+)
+def test_add_cache_salt_segment(start, salt, expected):
+    request = make_request(
+        "0", list(range(3)), 4, sha256, cache_salt_segments=[(0, "a")]
+    )
+    request.append_output_token_ids([3])
+    first_hash = request.block_hashes[0]
+    if start == 5:
+        request.add_cache_salt_segment(6, "b", 4)
+    request.add_cache_salt_segment(start, salt, 4)
+    assert request.cache_salt_segments == expected
+    request.append_output_token_ids([4, 5, 6, 7])
+    assert request.block_hashes[0] == first_hash
+    rebuilt = make_request("1", list(range(8)), 4, sha256, cache_salt_segments=expected)
+    assert request.block_hashes == rebuilt.block_hashes
+
+
+def test_engine_core_request_cache_salt_segments_key_its_blocks():
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = EngineCoreRequest(
+        request_id="0",
+        prompt_token_ids=np.arange(6, dtype=np.int32),
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        block_hashes=[bytes([i]) * 32 for i in range(2)],
+        cache_salt_segments=[(0, "a")],
+    )
+    request = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(request))
+    assert request.cache_salt_segments == [(0, "a")]
+    config = PrefixHashConfig(
+        hash_algo="sha256", hash_block_size=3, none_hash=kv_cache_utils.NONE_HASH
+    )
+    assert kv_cache_utils.frontend_block_hashes(request, config) is None
+    engine_request = Request.from_engine_core_request(
+        request, get_request_block_hasher(3, sha256)
+    )
+    assert engine_request.block_hashes[0] == sha256(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("cache_salt_segment", 0, b"a"),))
+    )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
