@@ -793,17 +793,18 @@ def test_qk_norm_rope_kvcache_fusion(
     )
 
 
-# Per-TP-rank heads from the HF configs: Qwen3-30B-A3B 32Q/4KV, full rotary;
-# GLM-4.7 96Q/8KV, partial_rotary_factor=0.5. KV heads replicate below 1/rank.
+# Per-TP-rank heads from the HF configs, one per Q-scale fold: Qwen3-30B-A3B TP1
+# is per-tensor; GLM-4.7 TP8 (partial rotary) has one local KV head.
 _MODEL_CONFIGS = [
     pytest.param(32, 4, 128, 128, 1e-6, id="qwen3_30b_a3b-tp1"),
-    pytest.param(16, 2, 128, 128, 1e-6, id="qwen3_30b_a3b-tp2"),
-    pytest.param(8, 1, 128, 128, 1e-6, id="qwen3_30b_a3b-tp4"),
-    pytest.param(4, 1, 128, 128, 1e-6, id="qwen3_30b_a3b-tp8"),
-    pytest.param(96, 8, 128, 64, 1e-5, id="glm_4.7-tp1"),
-    pytest.param(48, 4, 128, 64, 1e-5, id="glm_4.7-tp2"),
-    pytest.param(24, 2, 128, 64, 1e-5, id="glm_4.7-tp4"),
     pytest.param(12, 1, 128, 64, 1e-5, id="glm_4.7-tp8"),
+]
+
+# test_qk_norm_rope_kvcache_fusion sweeps layouts and block sizes on an fp8 cache.
+_ONE_LAYOUT_PER_BACKEND = [
+    p
+    for p in _BACKEND_LAYOUTS
+    if p.id in ("rocm_attn", "unified-head_major", "fa-head_major")
 ]
 
 
@@ -813,10 +814,8 @@ _MODEL_CONFIGS = [
     "num_heads, num_kv_heads, head_size, rotary_dim, rms_norm_eps", _MODEL_CONFIGS
 )
 @pytest.mark.parametrize(
-    "attn_backend, use_shuffle_kv_layout, kv_layout", _BACKEND_LAYOUTS
+    "attn_backend, use_shuffle_kv_layout, kv_layout", _ONE_LAYOUT_PER_BACKEND
 )
-@pytest.mark.parametrize("block_size", [16, 32, 64])
-@pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not IS_AITER_FOUND,
@@ -831,8 +830,6 @@ def test_qk_norm_rope_kvcache_fusion_k_out_unquantized_and_q_out_fp8(
     attn_backend: AttentionBackendEnum,
     use_shuffle_kv_layout: str,
     kv_layout: KVCacheLayout,
-    block_size: int,
-    is_neox: bool,
     dtype: torch.dtype,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -844,8 +841,8 @@ def test_qk_norm_rope_kvcache_fusion_k_out_unquantized_and_q_out_fp8(
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         rotary_dim=rotary_dim,
-        block_size=block_size,
-        is_neox=is_neox,
+        block_size=16,
+        is_neox=True,
         use_shuffle_kv_layout=use_shuffle_kv_layout,
         kv_layout=kv_layout,
         dtype=dtype,
