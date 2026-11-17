@@ -38,6 +38,8 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+        if self.activation_config.clamp_limit is not None:
+            raise ValueError("HPCExperts does not support SwiGLU clamp")
 
         assert quant_config.weight_quant_dtype in (torch.float8_e4m3fn,), (
             "Only fp8 quantization is currently supported."
@@ -60,8 +62,18 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: mk.FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.swiglu_limit is not None:
+            return False, "kernel does not support SwiGLU clamp"
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:

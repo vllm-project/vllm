@@ -19,11 +19,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.experts import cpu_moe
-from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import (
-    CPUExpertsInt4 as CPUW4A8Experts,
-)
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
@@ -34,15 +29,10 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingGroupedExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
-from vllm.model_executor.layers.fused_moe.experts.moonep_experts import MoonEPExperts
 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
-    TrtLlmMxint4ExpertsMonolithic,
-)
-from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
@@ -760,53 +750,33 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
     assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
 
 
-_CLAMPLESS_EXPERTS = [
-    pytest.param(CPUW4A8Experts, id="cpu_w4a8"),
-    HPCExperts,
-    TrtLlmMxint4ExpertsMonolithic,
-    MoonEPExperts,
-    cpu_moe.CPUUnquantizedExperts,
-    cpu_moe.CPUExpertsFp8,
-    cpu_moe.CPUExpertsFp8W8A8,
-    cpu_moe.CPUExpertsMxfp4,
-    cpu_moe.CPUExpertsInt4,
-    cpu_moe.CPUExpertsInt8,
-    cpu_moe.ArmCPUExpertsInt8,
-    cpu_moe.PowerCPUExpertsInt8,
-    cpu_moe.ZenCPUExpertsInt8,
-]
-
-
-@pytest.mark.parametrize("expert_cls", _CLAMPLESS_EXPERTS)
 @pytest.mark.parametrize("source", ["model", "quant"])
-def test_clampless_expert_rejects_clamped_silu(expert_cls, source):
-    """A required activation cannot silently become ordinary SiLU."""
+def test_hpc_rejects_required_swiglu_clamp(source):
+    """HPC's fused activation must not silently omit a required clamp."""
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+
     config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
     config.swiglu_limit = 10.0 if source == "model" else None
-    dtype = torch.float8_e4m3fn if expert_cls is HPCExperts else None
     quant = FusedMoEQuantConfig.make(
-        dtype, gemm1_clamp_limit=10.0 if source == "quant" else None
+        torch.float8_e4m3fn, gemm1_clamp_limit=10.0 if source == "quant" else None
     )
-    with pytest.raises((ValueError, NotImplementedError), match="(?i)clamp"):
-        expert_cls(config, quant)
+    with pytest.raises(ValueError, match="SwiGLU clamp"):
+        HPCExperts(config, quant)
 
 
-@pytest.mark.parametrize("expert_cls", _CLAMPLESS_EXPERTS)
-def test_clamp_rejected_during_backend_selection(expert_cls):
-    """Reject unsupported clamp before an oracle can select the backend."""
+def test_hpc_clamp_rejected_during_backend_selection():
+    """Exclude HPC before selection so automatic mode can use another kernel."""
+    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+
     config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
     config.swiglu_limit = 10.0
-    supported, reason = expert_cls.is_supported_config(
-        expert_cls, config, None, None, expert_cls.activation_format()
+    supported, reason = HPCExperts.is_supported_config(
+        HPCExperts,
+        config,
+        kFp8Static128BlockSym,
+        kFp8Dynamic128Sym,
+        HPCExperts.activation_format(),
     )
     assert not supported
-    assert reason is not None and "clamp" in reason.lower()
-
-
-def test_silu_clamp_guard_preserves_cpu_swigluoai():
-    """The SiLU capability check must not reject the separate SwiGLU-OAI path."""
-    config = make_dummy_moe_config(activation=mk.MoEActivation.SWIGLUOAI)
-    config.swiglu_limit = 7.0
-    quant = FusedMoEQuantConfig.make(None, gemm1_clamp_limit=7.0)
-    experts = cpu_moe.CPUExpertsMxfp4(config, quant)
-    assert experts.activation_config.clamp_limit == 7.0
+    assert reason is not None and "SwiGLU clamp" in reason

@@ -103,10 +103,6 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda()
 

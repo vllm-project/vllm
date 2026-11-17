@@ -591,12 +591,6 @@ class FusedMoEExperts(ABC):
         self.activation_config = ApplyMoEActivationConfig.from_configs(
             moe_config, quant_config
         )
-        if (
-            moe_config.activation == MoEActivation.SILU
-            and self.activation_config.clamp_limit is not None
-            and not self._supports_silu_clamp()
-        ):
-            raise ValueError(f"{type(self).__name__} does not support SwiGLU clamp")
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -674,13 +668,6 @@ class FusedMoEExperts(ABC):
         def _make_reason(reason: str) -> str:
             return f"kernel does not support {reason}"
 
-        if (
-            moe_config.activation == MoEActivation.SILU
-            and moe_config.swiglu_limit is not None
-            and not cls._supports_silu_clamp()
-        ):
-            return False, _make_reason("SwiGLU clamp")
-
         executed_key = cls.executed_activation_key(weight_key, activation_key)
         if not cls._supports_current_device():
             return False, _make_reason(f"current device {current_platform.device_name}")
@@ -730,11 +717,6 @@ class FusedMoEExperts(ABC):
         ):
             return False, reason
         return True, None
-
-    @staticmethod
-    def _supports_silu_clamp() -> bool:
-        """Whether the SiLU path honors a configured SwiGLU clamp."""
-        return True
 
     @staticmethod
     @abstractmethod

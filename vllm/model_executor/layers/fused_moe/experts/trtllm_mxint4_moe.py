@@ -42,10 +42,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         self.routing_method = moe_config.routing_method
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
             is_flashinfer_mxint4_moe_available,

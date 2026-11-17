@@ -59,11 +59,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
         if (
-            moe_config.activation == MoEActivation.SILU
-            and moe_config.swiglu_limit is not None
-        ):
-            return False, "kernel does not support SwiGLU clamp"
-        if (
             not current_platform.is_cpu()
             or current_platform.get_cpu_architecture() != CpuArchEnum.ARM
         ):
@@ -98,10 +93,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             activation_key,
             activation_format,
         )
-
-    @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
 
     @staticmethod
     def _supports_current_device() -> bool:

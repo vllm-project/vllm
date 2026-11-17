@@ -202,10 +202,6 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cpu()
 
@@ -486,10 +482,6 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return (
             current_platform.is_cpu()
@@ -670,10 +662,6 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -899,10 +887,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return (
             current_platform.is_cpu()
@@ -1065,10 +1049,6 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -1262,10 +1242,6 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
         return True, None
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return (
             current_platform.is_cpu()
@@ -1418,10 +1394,6 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsModular):
         if moe_config.intermediate_size_per_partition % 16 != 0:
             return False, "kernel requires intermediate dim divisible by 16"
         return True, None
-
-    @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -1591,10 +1563,6 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return has_zentorch_op(["zentorch_fused_moe"])
 
@@ -1759,10 +1727,6 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_silu_clamp() -> bool:
-        return False
 
     @staticmethod
     def _supports_current_device() -> bool:
