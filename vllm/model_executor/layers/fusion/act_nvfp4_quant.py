@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
 
 
-def _relu_squared_nvfp4_max_rows(k: int) -> int:
+def _act_nvfp4_max_rows(k: int) -> int:
     # Keep groups and padded scale size <= 2^30 so every pid * 128 group and
     # pid * 512 padding offset stays within signed int32.
     groups_per_row = k // 16
@@ -56,7 +56,7 @@ def _e4m3_satfinite(x):
 
 
 @triton.jit(do_not_specialize=["M", "NUM_GROUPS", "PADDED_SCALE_SIZE"])
-def _relu_squared_nvfp4_quant_kernel(
+def _act_nvfp4_quant_kernel(
     x_ptr,
     global_scale_ptr,
     output_ptr,
@@ -67,6 +67,7 @@ def _relu_squared_nvfp4_quant_kernel(
     PADDED_SCALE_COLS: tl.constexpr,
     PADDED_SCALE_SIZE,
     GROUPS_PER_CTA: tl.constexpr,
+    ACT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     groups = pid * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
@@ -86,14 +87,23 @@ def _relu_squared_nvfp4_quant_kernel(
         )
         lo, hi = tl.split(tl.reshape(values, (GROUPS_PER_CTA, 8, 2)))
         lo, hi = lo.to(tl.float32), hi.to(tl.float32)
-        # ReLU propagates NaN; tl.maximum otherwise defaults to maxnum semantics.
-        lo = tl.maximum(lo, 0.0, propagate_nan=tl.PropagateNan.ALL)
-        hi = tl.maximum(hi, 0.0, propagate_nan=tl.PropagateNan.ALL)
-        # Preserve the materialized BF16 ReLU2 boundary before computing amax.
-        lo = (lo * lo).to(tl.bfloat16).to(tl.float32)
-        hi = (hi * hi).to(tl.bfloat16).to(tl.float32)
-        # Match __hmax2 / __hmax in the CUDA quantizer: ignore individual NaNs.
-        amax = tl.reduce(_max_ignore_nan(lo, hi), 1, _max_ignore_nan)
+        if ACT == "gelu":
+            # Exact (erf) GELU, as F.gelu(approximate="none").
+            lo = 0.5 * lo * (1.0 + tldevice.erf(lo * 0.7071067811865476))
+            hi = 0.5 * hi * (1.0 + tldevice.erf(hi * 0.7071067811865476))
+        else:
+            tl.static_assert(ACT == "relu2")
+            # ReLU propagates NaN; tl.maximum otherwise defaults to maxnum semantics.
+            lo = tl.maximum(lo, 0.0, propagate_nan=tl.PropagateNan.ALL)
+            hi = tl.maximum(hi, 0.0, propagate_nan=tl.PropagateNan.ALL)
+            lo = lo * lo
+            hi = hi * hi
+        # Preserve the materialized 16-bit activation boundary before computing amax.
+        lo = lo.to(x_ptr.dtype.element_ty).to(tl.float32)
+        hi = hi.to(x_ptr.dtype.element_ty).to(tl.float32)
+        # Match __habs2 + __hmax2 / __hmax in the CUDA quantizer: GELU can be
+        # negative, and individual NaNs are ignored.
+        amax = tl.reduce(_max_ignore_nan(tl.abs(lo), tl.abs(hi)), 1, _max_ignore_nan)
         global_scale = tl.load(global_scale_ptr)
         scale = _e4m3_satfinite(global_scale * (amax * _rcp_ftz(6.0)))
         scale_f32 = scale.to(tl.float32)
@@ -134,8 +144,8 @@ def _relu_squared_nvfp4_quant_kernel(
         tl.store(scale_ptr + offsets, 0.0, is_padding)
 
 
-def _relu_squared_nvfp4_quant_fake(
-    x: torch.Tensor, global_scale: torch.Tensor
+def _act_nvfp4_quant_fake(
+    x: torch.Tensor, global_scale: torch.Tensor, act: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     m, k = x.shape
     output = torch.empty((m, k // 2), dtype=torch.uint8, device=x.device)
@@ -147,20 +157,20 @@ def _relu_squared_nvfp4_quant_fake(
     return output, block_scale
 
 
-def _relu_squared_nvfp4_quant(
-    x: torch.Tensor, global_scale: torch.Tensor
+def _act_nvfp4_quant(
+    x: torch.Tensor, global_scale: torch.Tensor, act: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     m, k = x.shape
     # vLLM can reuse compiled graphs without checking Dynamo's shape guards.
-    assert m <= _relu_squared_nvfp4_max_rows(k), "NVFP4 row limit exceeded"
-    output, block_scale = _relu_squared_nvfp4_quant_fake(x, global_scale)
+    assert m <= _act_nvfp4_max_rows(k), "NVFP4 row limit exceeded"
+    output, block_scale = _act_nvfp4_quant_fake(x, global_scale, act)
     if m == 0:
         return output, block_scale
     scale_cols, scale_size = block_scale.shape[1], block_scale.numel()
     groups = m * (k // 16)
     # Each CTA zeroes at most one 128x4 scale tile, so no constexpr depends on M.
     grid = (max(triton.cdiv(groups, 128), scale_size // 512),)
-    _relu_squared_nvfp4_quant_kernel[grid](
+    _act_nvfp4_quant_kernel[grid](
         x,
         global_scale,
         output,
@@ -171,6 +181,7 @@ def _relu_squared_nvfp4_quant(
         PADDED_SCALE_COLS=scale_cols,
         PADDED_SCALE_SIZE=scale_size,
         GROUPS_PER_CTA=128,
+        ACT=act,
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -179,21 +190,22 @@ def _relu_squared_nvfp4_quant(
 
 # Keep the M-dependent launch geometry outside Dynamo: vLLM drops shape guards.
 direct_register_custom_op(
-    op_name="relu_squared_nvfp4_quant",
-    op_func=_relu_squared_nvfp4_quant,
-    fake_impl=_relu_squared_nvfp4_quant_fake,
+    op_name="act_nvfp4_quant",
+    op_func=_act_nvfp4_quant,
+    fake_impl=_act_nvfp4_quant_fake,
 )
 
 
-def relu_squared_nvfp4_quant(
-    x: torch.Tensor, linear: LinearBase
+def act_nvfp4_quant(
+    x: torch.Tensor, linear: LinearBase, act: str
 ) -> QuantizedActivation:
-    """Fuse BF16 ReLU2 and block16 NVFP4 with 128x4 swizzled scales."""
+    """Fuse ReLU2 or exact GELU, selected by act ("relu2" or "gelu"), and block16
+    NVFP4 with 128x4 swizzled scales."""
     from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
     from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 
-    output, block_scale = torch.ops.vllm.relu_squared_nvfp4_quant(
-        x, linear.input_global_scale_inv
+    output, block_scale = torch.ops.vllm.act_nvfp4_quant(
+        x, linear.input_global_scale_inv, act
     )
     return QuantizedActivation(
         data=output,
