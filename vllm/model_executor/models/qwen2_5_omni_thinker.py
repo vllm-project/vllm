@@ -1140,24 +1140,26 @@ class Qwen2_5OmniConditionalGenerationMixin:
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # audio_feature_lengths is keep_on_cpu: take the split sizes from the
+        # host copy, and move it for the audio tower, which derives device
+        # placement from feature_lens.
+        audio_feature_lengths_cpu = audio_input["audio_feature_lengths"]
         audio_feat_lengths, audio_output_lengths = (
-            self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
+            self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths_cpu)
         )
+        audio_feature_lengths = async_tensor_h2d(
+            audio_feature_lengths_cpu, input_features.device
+        )
+        audio_feat_lengths = async_tensor_h2d(audio_feat_lengths, input_features.device)
 
+        # The transformers audio encoder reads its lengths back internally.
         with gpu_sync_allowed():
             audio_outputs = self.audio_tower(
                 input_features.to(self.audio_tower.dtype),
                 feature_lens=audio_feature_lengths,
                 aftercnn_lens=audio_feat_lengths,
             )
-            split_sizes = audio_output_lengths.tolist()
-        return audio_outputs.last_hidden_state.split(split_sizes)
+        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
