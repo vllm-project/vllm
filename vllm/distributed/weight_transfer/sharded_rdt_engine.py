@@ -235,6 +235,8 @@ class ShardedRDTWeightTransferEngine(
         # dropped.
         self._arena: torch.Tensor | None = None
         self._slot_bytes = 0
+        # (slot, bucket) -> the source views of its copy-out, built once
+        self._views: dict[tuple[int, int], tuple] = {}
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Check the configuration and bind the producers. Touches no model
@@ -472,8 +474,6 @@ class ShardedRDTWeightTransferEngine(
                 if bucket is None:
                     return
                 slot = free.pop()
-                if copied[slot] is not None:
-                    copied[slot].synchronize()  # before NIXL overwrites it
                 target = (
                     self._target(slot, bucket)
                     if bucket.nbytes <= self._slot_bytes
@@ -485,11 +485,17 @@ class ShardedRDTWeightTransferEngine(
         spent = [0.0, 0.0, 0.0]
 
         def land(ready: list[Any]) -> None:
-            # Returning drops the handles, which frees the producers' arena
-            # blocks before the next pulls are issued.
+            # NIXL writes a slot during `get`, so the copy-out that last read
+            # it must be done by then; issuing a pull into it may go ahead.
+            for handle in ready:
+                slot = inflight[handle][1]
+                if copied[slot] is not None:
+                    copied[slot].synchronize()
+                    copied[slot] = None
             t0 = time.perf_counter()
             fetched = hooks.get(ready)
             t1 = time.perf_counter()
+            landed = []
             for handle, tensors in zip(ready, fetched, strict=True):
                 bucket, slot, target = inflight.pop(handle)
                 if target is None:
@@ -501,13 +507,20 @@ class ShardedRDTWeightTransferEngine(
                         f"Sharded RDT: bucket {bucket.seq} of producer "
                         f"{bucket.producer} did not land in its receive slot"
                     )
-                self._apply(bucket, target)
+                landed.append((bucket, slot, target))
+                free.append(slot)
+            # Issue the next pulls before copying out, so `num_buffers` stay
+            # in flight meanwhile. Returning drops the handles, which frees
+            # the producers' arena blocks.
+            refill()
+            t2 = time.perf_counter()
+            for bucket, slot, target in landed:
+                self._apply(bucket, target, slot)
                 if self.device.type == "cuda":
                     copied[slot] = torch.cuda.Event()
                     copied[slot].record()
-                free.append(slot)
             spent[1] += t1 - t0
-            spent[2] += time.perf_counter() - t1
+            spent[2] += time.perf_counter() - t2
 
         t_start = time.perf_counter()
         refill()
@@ -533,27 +546,37 @@ class ShardedRDTWeightTransferEngine(
         start = slot * self._slot_bytes
         return self._arena[start : start + bucket.nbytes]
 
-    def _apply(self, bucket: _Bucket, flat: torch.Tensor) -> None:
+    def _apply(self, bucket: _Bucket, flat: torch.Tensor, slot: int) -> None:
         """Copy a landed bucket into its destinations, the contiguous ones
         with one fused byte copy, and load its fallbacks."""
+        if bucket.nbytes <= self._slot_bytes:
+            # in its receive slot: the source views are the same every sync
+            key = (slot, id(bucket))
+            views = self._views.get(key)
+            if views is None:
+                views = self._views[key] = self._source_views(bucket, flat)
+        else:
+            views = self._source_views(bucket, flat)
+        byte_srcs, typed_srcs, fallback_srcs = views
+        if byte_srcs:
+            torch._foreach_copy_(bucket.byte_dsts, byte_srcs)
+        if typed_srcs:
+            torch._foreach_copy_([dest for _, dest in bucket.typed], typed_srcs)
+        if fallback_srcs:
+            self.model.load_weights(fallback_srcs)
+
+    @staticmethod
+    def _source_views(bucket: _Bucket, flat: torch.Tensor) -> tuple:
+        """Where each copy of `bucket` reads in `flat`."""
         layout = bucket.layout
-        if bucket.byte_dsts:
-            torch._foreach_copy_(
-                bucket.byte_dsts,
-                [flat[offset : offset + nbytes] for offset, nbytes in bucket.byte_srcs],
-            )
-        if bucket.typed:
-            torch._foreach_copy_(
-                [dest for _, dest in bucket.typed],
-                [
-                    flat_view(flat, layout[i]).reshape(dest.shape)
-                    for i, dest in bucket.typed
-                ],
-            )
-        if bucket.fallbacks:
-            self.model.load_weights(
-                [(name, flat_view(flat, layout[i])) for i, name in bucket.fallbacks]
-            )
+        return (
+            [flat[offset : offset + nbytes] for offset, nbytes in bucket.byte_srcs],
+            [
+                flat_view(flat, layout[i]).reshape(dest.shape)
+                for i, dest in bucket.typed
+            ],
+            [(name, flat_view(flat, layout[i])) for i, name in bucket.fallbacks],
+        )
 
     def finish_weight_update(self) -> None:
         """Rerun post-load processing on the received weights."""
@@ -601,6 +624,7 @@ class ShardedRDTWeightTransferEngine(
     def _drop_plan(self) -> None:
         self._plan = None
         self._buckets = []
+        self._views = {}
         if self._arena is not None:
             assert self._hooks is not None
             self._hooks.unpin(self._arena)
