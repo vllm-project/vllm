@@ -7,6 +7,12 @@ from vllm.parser.engine.registered_adapters import MuseParserReasoningAdapter
 
 
 class MuseEngineReasoningParser(MuseParserReasoningAdapter):  # type: ignore[valid-type, misc]
+    @property
+    def opens_reasoning_in_content(self) -> bool:
+        # More messages follow the answer, so without a tool parser the engine
+        # keeps parsing after reasoning ends.
+        return True
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:

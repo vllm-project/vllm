@@ -2,7 +2,7 @@ meta:
   title: "Muse Glimmer 30B"
   slug: "muse-glimmer-30b"
   provider: "Muse (Meta)"
-  description: "Dense 29.6B vision-language model with a ViT-G/14 perception encoder and 128K context, distilled from Muse Spark for local agentic use. Emits channel-scoped reasoning and XML-style ATEM tool calls rather than JSON, so it needs the dedicated `muse_glimmer` tool-call and reasoning parsers."
+  description: "Dense 29.6B vision-language model with a ViT-G/14 perception encoder and 128K context, distilled from Muse Spark for local agentic use. Emits channel-scoped reasoning and XML-style ATEM tool calls rather than JSON, so it needs the dedicated `muse` tool-call and reasoning parsers."
   date_added: 2026-08-09
   date_updated: 2026-09-09
   tasks:
@@ -59,12 +59,12 @@ features:
     args:
       - "--enable-auto-tool-choice"
       - "--tool-call-parser"
-      - "muse_glimmer"
+      - "muse"
   reasoning:
     description: "Channel-scoped chain-of-thought. Surfaces as `message.reasoning` (non-streaming) and `delta.reasoning` (streaming). Effort is controlled by a `Reasoning strength: <low|medium|high|xhigh>` line in the system prompt."
     args:
       - "--reasoning-parser"
-      - "muse_glimmer"
+      - "muse"
   spec_decoding:
     # The 5.11 GB draft head does not fit beside the 25.42 GB nvfp4 weights on a
     # single 32 GB RTX 5090: vLLM OOMs during init with ~400 MiB free. Verified,
@@ -151,10 +151,14 @@ guide: |
   <|start|>assistant to=user<|message|>...final answer...<|eot|>
   ```
 
-  Both `--tool-call-parser muse_glimmer` and `--reasoning-parser muse_glimmer` key off that
+  Both `--tool-call-parser muse` and `--reasoning-parser muse` key off that
   framing, so run them together. The reasoning parser also forces
   `skip_special_tokens=False` — without it the markers are stripped before
   parsing and both channels collapse into content.
+
+  With a JSON `response_format` (`json_schema` or `json_object`), the grammar
+  constrains only the `to=user` answer, so reasoning stays free and a turn that
+  ends in a tool call is not forced into the schema.
 
   ## Prerequisites
 
@@ -187,8 +191,8 @@ guide: |
     --gpu-memory-utilization 0.92 \
     --max-model-len 131072 \
     --max-num-seqs 64 \
-    --enable-auto-tool-choice --tool-call-parser muse_glimmer \
-    --reasoning-parser muse_glimmer \
+    --enable-auto-tool-choice --tool-call-parser muse \
+    --reasoning-parser muse \
     --generation-config auto
   ```
 
@@ -206,8 +210,8 @@ guide: |
   vllm serve /model \
     --served-model-name muse-glimmer \
     --tensor-parallel-size 1 \
-    --enable-auto-tool-choice --tool-call-parser muse_glimmer \
-    --reasoning-parser muse_glimmer \
+    --enable-auto-tool-choice --tool-call-parser muse \
+    --reasoning-parser muse \
     --generation-config auto
   ```
 
@@ -228,8 +232,8 @@ guide: |
     --tensor-parallel-size 4 \
     --max-model-len 131072 \
     --enable-auto-tool-choice \
-    --tool-call-parser muse_glimmer \
-    --reasoning-parser muse_glimmer \
+    --tool-call-parser muse \
+    --reasoning-parser muse \
     --generation-config auto \
     --attention-backend ROCM_AITER_FA
   ```
@@ -265,7 +269,7 @@ guide: |
   ```bash
   vllm serve meta-models/Muse-Glimmer-30B \
     --tensor-parallel-size 4 \
-    --reasoning-parser muse_glimmer \
+    --reasoning-parser muse \
     --enforce-eager
   ```
 
