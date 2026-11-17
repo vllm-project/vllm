@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from tests.utils import core_dumped_bytes
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
@@ -813,6 +814,27 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
         for region in regions:
             region.cleanup()
     assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
+@pytest.mark.parametrize("num_segments", [1, 3])
+def test_region_is_left_out_of_core_dumps(iid, monkeypatch, num_segments):
+    """Every mapping of the region, segment files included, is skipped by
+    core dumps."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=5,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=num_segments,
+    )
+    try:
+        assert len(region._segments) == num_segments
+        start = region.base_tensor.data_ptr()
+        assert core_dumped_bytes(start, start + region.total_size_bytes) == 0
+    finally:
+        region.cleanup()
 
 
 @pytest.mark.parametrize("num_segments", [1, 3])
