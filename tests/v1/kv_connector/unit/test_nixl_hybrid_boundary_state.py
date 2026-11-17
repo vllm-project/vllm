@@ -13,6 +13,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -45,12 +46,14 @@ def _make_scheduler(
     ssm_boundary_state_xfer: bool = True,
     mtp: bool = False,
     eagle_block_drop: bool = True,
+    kv_load_failure_policy: str = "fail",
 ):
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE,
         max_num_batched_tokens=256,
         kv_role=kv_role,
         kv_connector_extra_config={"ssm_boundary_state_xfer": ssm_boundary_state_xfer},
+        kv_load_failure_policy=kv_load_failure_policy,
     )
     if mtp:
         set_mtp_config(vllm_config, disable_lookahead_block_hashes=True)
@@ -170,6 +173,15 @@ def _turn1_prompt(num_tokens: int) -> list[int]:
     return [7 + i for i in range(num_tokens)]
 
 
+def _add_decode_request(decoder, prompt: list[int], params: dict, request_id: str):
+    request = _make_request(request_id, prompt, max_tokens=3)
+    request.kv_transfer_params = dict(
+        params, do_remote_prefill=True, do_remote_decode=False
+    )
+    decoder.add_request(request)
+    return request
+
+
 def test_decode_pod_hits_prompt_boundary_after_nixl_receive():
     """58-token prompt, block 16: P computes 57 tokens and also sends its state
     at 48, so the decode pod resumes the next turn from 48."""
@@ -219,6 +231,120 @@ def test_prompt_ending_on_boundary_sends_running_state_only():
 
     _, output_tokens = _run_decode(decoder, prompt, params, num_output=2)
     assert _decode_pod_hit(decoder, prompt, output_tokens) == 48
+
+
+def test_decoder_boundary_slot_stays_owned_while_receive_is_in_flight():
+    """The boundary destination cannot be evicted or allocated to another
+    request between scheduling the read and finishing it."""
+    prefiller = _make_scheduler("kv_producer", mtp=True)
+    decoder = _make_scheduler("kv_consumer", mtp=True)
+    prompt = _turn1_prompt(58)
+    _, params = _run_prefill(prefiller, prompt)
+    request = _add_decode_request(decoder, prompt, params, "d-in-flight")
+
+    scheduler_output = decoder.schedule()
+    recv = scheduler_output.kv_connector_metadata.reqs_to_recv[request.request_id]
+    boundary_id, running_id = recv.local_block_ids[MAMBA_GROUP]
+    pool = decoder.kv_cache_manager.block_pool
+    boundary = pool.blocks[boundary_id]
+    assert boundary.ref_cnt > 0
+    assert boundary.block_hash is None
+
+    competing = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert {boundary_id, running_id}.isdisjoint(b.block_id for b in competing)
+    pool.free_blocks(competing)
+
+    decoder.update_from_output(
+        scheduler_output,
+        create_model_runner_output([], finished_recving={request.request_id}),
+    )
+    decoder.schedule()
+    assert boundary.block_hash is not None
+    assert boundary.block_hash_num_tokens == 32
+
+
+def test_decoder_retries_exact_boundary_after_allocation_failure():
+    prefiller = _make_scheduler("kv_producer", mtp=True)
+    decoder = _make_scheduler("kv_consumer", mtp=True)
+    prompt = _turn1_prompt(58)
+    _, params = _run_prefill(prefiller, prompt)
+    request = _add_decode_request(decoder, prompt, params, "d-retry")
+
+    allocate_slots = decoder.kv_cache_manager.allocate_slots
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else allocate_slots(*args, **kwargs)
+
+    decoder.kv_cache_manager.allocate_slots = fail_once
+    scheduler_output = decoder.schedule()
+    assert request.request_id not in scheduler_output.kv_connector_metadata.reqs_to_recv
+    mamba = decoder.kv_cache_manager.coordinator.single_type_managers[MAMBA_GROUP]
+    assert not mamba.req_to_blocks.get(request.request_id)
+
+    scheduler_output = decoder.schedule()
+    recv = scheduler_output.kv_connector_metadata.reqs_to_recv[request.request_id]
+    boundary = decoder.kv_cache_manager.block_pool.blocks[
+        recv.local_block_ids[MAMBA_GROUP][0]
+    ]
+    decoder.update_from_output(
+        scheduler_output,
+        create_model_runner_output([], finished_recving={request.request_id}),
+    )
+    decoder.schedule()
+    assert boundary.block_hash_num_tokens == 32
+
+
+def test_failed_boundary_receive_recomputes_without_caching_boundary():
+    prefiller = _make_scheduler("kv_producer", mtp=True)
+    decoder = _make_scheduler(
+        "kv_consumer", mtp=True, kv_load_failure_policy="recompute"
+    )
+    prompt = _turn1_prompt(58)
+    _, params = _run_prefill(prefiller, prompt)
+    request = _add_decode_request(decoder, prompt, params, "d-failed")
+
+    scheduler_output = decoder.schedule()
+    recv = scheduler_output.kv_connector_metadata.reqs_to_recv[request.request_id]
+    boundary = decoder.kv_cache_manager.block_pool.blocks[
+        recv.local_block_ids[MAMBA_GROUP][0]
+    ]
+    decoder.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [],
+            finished_recving={request.request_id},
+            failed_recving={request.request_id},
+        ),
+    )
+    assert request.num_computed_tokens == 0
+    assert boundary.block_hash is None
+    scheduler_output = decoder.schedule()
+
+    assert request.request_id not in scheduler_output.kv_connector_metadata.reqs_to_recv
+    (new_req,) = scheduler_output.scheduled_new_reqs
+    assert new_req.req_id == request.request_id
+    assert new_req.num_computed_tokens == 0
+
+
+def test_missing_boundary_slot_receives_running_state_only(monkeypatch):
+    """If D cannot reserve the boundary slot, it must not put the older
+    boundary state into the running-state slot or cache it as a prefix hit."""
+    prefiller = _make_scheduler("kv_producer", mtp=True)
+    decoder = _make_scheduler("kv_consumer", mtp=True)
+    prompt = _turn1_prompt(58)
+    _, params = _run_prefill(prefiller, prompt)
+    monkeypatch.setattr(
+        MambaManager, "reserve_external_boundary_block", lambda *args: None
+    )
+
+    local_ssm_block_ids, output_tokens = _run_decode(
+        decoder, prompt, params, num_output=3
+    )
+    assert len(local_ssm_block_ids) == 1
+    assert _decode_pod_hit(decoder, prompt, output_tokens) == 0
 
 
 def test_prefiller_holds_boundary_state_until_sent():
