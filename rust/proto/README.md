@@ -16,7 +16,7 @@ the schemas on pull requests, including on forks.
 
 ```toml
 [dependencies]
-vllm-proto = "0.7"
+vllm-proto = "0.8"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient`,
@@ -27,6 +27,11 @@ compilation using `protox` and `tonic-prost-build`. Consumers do not need Buf
 credentials, the vLLM checkout, or a separately installed `protoc`.
 
 ### Versioning and releases
+
+`PreprocessedMediaFeatures.kwargs_shm` accepts immutable local kwargs inputs
+when `--grpc-shm-directory` is configured. See
+[Rust gRPC shared-memory inputs](../../docs/serving/online_serving/grpc_shm.md)
+for the wire format, limits, and producer cleanup contract.
 
 The crate has its own version in `Cargo.toml`, independent of the vLLM release
 number and the other Rust workspace crates. Release it when changes to the

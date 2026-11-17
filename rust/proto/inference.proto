@@ -304,11 +304,25 @@ message MediaItem {
 // Engine-ready multimodal features produced by a version-compatible frontend.
 // `kwargs` is the MessagePack wire representation of one MmKwargsItem.
 message PreprocessedMediaFeatures {
-  // Required inline payload. Cache-only references are not accepted.
+  // Exactly one of kwargs and kwargs_shm is required. Cache-only references
+  // are not accepted.
   optional bytes kwargs = 1;
   string identifier = 2;
   uint64 offset = 3;
   uint64 length = 4;
   optional string mm_hash = 5;
   repeated bool is_embed = 6;
+  // Same MessagePack encoding as kwargs, stored in a local shared-memory file.
+  SharedMemoryInput kwargs_shm = 7;
+}
+
+// Immutable input in the server's --grpc-shm-directory. Not a Python MM-cache
+// handle. The server copies and validates the range before engine submission.
+message SharedMemoryInput {
+  // One filename component, using only ASCII letters, digits, '_' and '-'.
+  string name = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+  // SHA-256 of exactly the selected range; required, 32 raw bytes.
+  bytes sha256 = 4;
 }

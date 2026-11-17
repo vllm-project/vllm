@@ -9,6 +9,7 @@ mod health;
 mod inference;
 mod media;
 mod render;
+mod shm;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
 pub use vllm_proto as pb;

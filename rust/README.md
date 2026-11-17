@@ -64,6 +64,9 @@ SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
 `vllm.Inference`, `vllm.Control`, and `vllm.Render` services alongside HTTP. These are different
 gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
+For local multimodal payloads outside protobuf, see
+[Rust gRPC shared-memory inputs](../docs/serving/online_serving/grpc_shm.md).
+
 ### gRPC health checks
 
 The gRPC listener also serves `grpc.health.v1.Health`. Kubernetes probes should
