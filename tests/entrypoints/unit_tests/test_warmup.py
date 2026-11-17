@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from vllm.entrypoints.launchers.launcher import validate_api_server_args
+from vllm.entrypoints.common.cli_args import validate_api_server_args
 from vllm.entrypoints.warmup import (
     WarmupConfig,
     WarmupPrompt,

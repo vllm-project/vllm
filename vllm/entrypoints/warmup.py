@@ -40,11 +40,11 @@ class WarmupPrompt:
 
     Supports multiple input styles to mirror different OpenAI endpoints:
 
-    - ``prompt`` for ``/v1/completions``
-    - ``messages`` for ``/v1/chat/completions``
-    - ``input`` for ``/v1/embeddings``
+    - `prompt` for `/v1/completions`
+    - `messages` for `/v1/chat/completions`
+    - `input` for `/v1/embeddings`
 
-    Exactly one of ``prompt``, ``messages``, or ``input`` must be provided.
+    Exactly one of `prompt`, `messages`, or `input` must be provided.
     """
 
     prompt: str | None = None
@@ -59,9 +59,9 @@ class WarmupConfig:
 
     Args:
         prompts: List of warmup requests.
-        task: Which engine task to exercise. ``"generate"`` exercises
-            ``/v1/completions`` and ``/v1/chat/completions``.
-            ``"embed"`` exercises ``/v1/embeddings``.
+        task: Which engine task to exercise. `"generate"` exercises
+            `/v1/completions` and `/v1/chat/completions`.
+            `"embed"` exercises `/v1/embeddings`.
         concurrency: Concurrency levels to sweep.
         request_params: Extra SamplingParams or PoolingParams kwargs
             merged into every warmup request.
@@ -210,8 +210,8 @@ async def warmup_engine(
 ) -> None:
     """Run every configured warmup item at each concurrency level.
 
-    At each level, ``max(concurrency, num_items)`` requests are issued with at
-    most ``concurrency`` in flight, so all items run and the level is fully
+    At each level, `max(concurrency, num_items)` requests are issued with at
+    most `concurrency` in flight, so all items run and the level is fully
     exercised even when there are fewer items than the concurrency.
     """
     items: list[WarmupPrompt | str]
