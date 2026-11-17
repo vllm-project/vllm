@@ -9,7 +9,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from tests.kernels.utils import opcheck
 from vllm.model_executor.kernels.mhc.torch import (
     mhc_post_torch,
     mhc_pre_delayed_torch,
@@ -36,73 +35,46 @@ def test_seam_supported():
     assert amd_mhc.supports_mhc_seam(HIDDEN, HC)
 
 
-def _inputs(num_tokens, strided):
-    shape = (num_tokens, HC, HIDDEN)
-    if strided:
-        residual = torch.empty(
-            num_tokens, HC, HIDDEN + 8, dtype=torch.bfloat16, device=DEVICE
-        )[..., :HIDDEN]
-        residual.copy_(torch.randn(shape, dtype=torch.bfloat16, device=DEVICE))
-        assert not residual.is_contiguous()
-    else:
-        residual = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+def _seam_args(num_tokens):
+    """A seam as the decoder sends it: contiguous residual, carried pre gate."""
+    residual = torch.randn(num_tokens, HC, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
     mix_hc = 2 * HC + HC * HC
     fn = torch.randn(mix_hc, HC * HIDDEN, dtype=torch.float32, device=DEVICE) * 1e-4
     scale = torch.randn(3, dtype=torch.float32, device=DEVICE) * 0.1
     base = torch.randn(mix_hc, dtype=torch.float32, device=DEVICE) * 0.1
-    return residual, fn, scale, base
-
-
-def _seam_args(num_tokens, strided, carried):
-    residual, fn, scale, base = _inputs(num_tokens, strided)
     x = torch.randn(num_tokens, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
     post = torch.rand(num_tokens, HC, 1, dtype=torch.float32, device=DEVICE) + 0.5
     comb = torch.rand(num_tokens, HC, HC, dtype=torch.float32, device=DEVICE) + 0.2
-    pre_mix = (
-        torch.rand(num_tokens, HC, dtype=torch.float32, device=DEVICE) + 0.5
-        if carried
-        else None
-    )
+    pre_mix = torch.rand(num_tokens, HC, dtype=torch.float32, device=DEVICE) + 0.5
     return residual, fn, scale, base, x, post, comb, pre_mix
 
 
-@requires_cdna3
-@pytest.mark.parametrize("carried", [False, True])
-def test_seam_op(carried):
-    """The registered op and its fake agree, with a strided residual."""
-    set_random_seed(0)
-    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(64, True, carried)
-    opcheck(
-        torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter.default,
-        (residual, fn, scale, base, 1e-2, 1e-3, 1e-4, 2.0, 20, pre_mix, x, post, comb),
-    )
+def _seam_spy(monkeypatch):
+    """Count the calls `mhc_pre_delayed_seam` makes to AITER's seam."""
+    from aiter.ops.mhc import mhc_fused_post_pre_delayed as fused
 
-
-@requires_cdna3
-@pytest.mark.parametrize("num_tokens,strided", [(63, False), (64, False), (64, True)])
-@pytest.mark.parametrize("carried", [False, True])
-def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkeypatch):
-    """The seam runs from 64 tokens and matches post then pre.
-
-    63 stays on `MHCPreDelayedOp`. A strided residual is the case AITER
-    copies contiguous before the kernel. The three eps values differ, so a
-    swapped argument fails.
-    """
-    set_random_seed(0)
-    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(
-        num_tokens, strided, carried
-    )
-    pre_args = (fn, scale, base, 1e-2, 1e-3, 1e-4, 2.0, 20)
-    fused = torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter
     calls = []
 
     def spy(*args, **kwargs):
         calls.append(1)
         return fused(*args, **kwargs)
 
-    monkeypatch.setattr(
-        torch.ops.vllm, "deepseek_v41_mhc_fused_post_pre_delayed_aiter", spy
-    )
+    monkeypatch.setattr("aiter.ops.mhc.mhc_fused_post_pre_delayed", spy)
+    return fused, calls
+
+
+@requires_cdna3
+@pytest.mark.parametrize("num_tokens", [63, 64])
+def test_seam_dispatch(num_tokens, default_vllm_config, monkeypatch):
+    """The seam runs from 64 tokens and matches post then pre.
+
+    63 stays on `MHCPreDelayedOp`. The three eps values differ, so a swapped
+    argument fails.
+    """
+    set_random_seed(0)
+    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(num_tokens)
+    pre_args = (fn, scale, base, 1e-2, 1e-3, 1e-4, 2.0, 20)
+    _, calls = _seam_spy(monkeypatch)
     actual = amd_mhc.mhc_pre_delayed_seam(
         MHCPreDelayedOp(),
         residual,
@@ -114,8 +86,6 @@ def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkey
     )
 
     assert len(calls) == (num_tokens >= amd_mhc.MHC_SEAM_MIN_TOKENS)
-    if strided:
-        assert actual[0].is_contiguous()
     next_residual = mhc_post_torch(x, residual, post, comb)
     torch.testing.assert_close(actual[0], next_residual, atol=2e-2, rtol=8e-3)
     # The pre reference runs on the kernel's own bf16 residual: a one-ulp
@@ -133,19 +103,8 @@ def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
 
     set_random_seed(0)
     num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
-    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(
-        num_tokens, False, True
-    )
-    fused = torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter
-    calls = []
-
-    def spy(*args, **kwargs):
-        calls.append(1)
-        return fused(*args, **kwargs)
-
-    monkeypatch.setattr(
-        torch.ops.vllm, "deepseek_v41_mhc_fused_post_pre_delayed_aiter", spy
-    )
+    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(num_tokens)
+    fused, calls = _seam_spy(monkeypatch)
     written: dict[str, torch.Tensor] = {}
     attn_norm = nn.Identity()
     attn_norm.variance_epsilon = 1e-6
@@ -184,7 +143,7 @@ def test_seam_graph_replay(default_vllm_config):
     new inputs matches the eager call."""
     set_random_seed(0)
     num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
-    static = _seam_args(num_tokens, False, True)
+    static = _seam_args(num_tokens)
     residual, fn, scale, base, x, post, comb, pre_mix = static
     pre_delayed = MHCPreDelayedOp()
     amd_mhc.warmup_mhc_seam(HIDDEN, HC, residual.device)
@@ -213,7 +172,7 @@ def test_seam_graph_replay(default_vllm_config):
     with torch.cuda.graph(graph):
         captured = seam()
 
-    for buf, new in zip(static, _seam_args(num_tokens, False, True), strict=True):
+    for buf, new in zip(static, _seam_args(num_tokens), strict=True):
         buf.copy_(new)
     graph.replay()
     torch.accelerator.synchronize()
@@ -221,58 +180,34 @@ def test_seam_graph_replay(default_vllm_config):
         torch.testing.assert_close(got, want, atol=0, rtol=0)
 
 
-def _pre_delayed_spy(monkeypatch):
+@pytest.mark.parametrize("seam", ["no_post", "packed_fn"])
+def test_seam_keeps_pre_delayed(seam, monkeypatch):
+    """A seam without a post block (Engram) or with a packed `fn` (Mega-MHC)
+    never calls the AITER seam, whatever the token count, and `pre_delayed`
+    gets its arguments."""
+
     def no_seam(*args, **kwargs):
         raise AssertionError("AITER seam called")
 
-    monkeypatch.setattr(
-        torch.ops.vllm, "deepseek_v41_mhc_fused_post_pre_delayed_aiter", no_seam
-    )
+    monkeypatch.setattr("aiter.ops.mhc.mhc_fused_post_pre_delayed", no_seam)
     seen = {}
 
     def pre_delayed(*args, **kwargs):
         seen.update(kwargs)
         return "pre_delayed"
 
-    return pre_delayed, seen
-
-
-def test_no_post_seam_keeps_pre_delayed(monkeypatch):
-    """A seam without a post block (Engram) never calls the AITER seam,
-    whatever the token count."""
-    pre_delayed, seen = _pre_delayed_spy(monkeypatch)
     n = 4 * amd_mhc.MHC_SEAM_MIN_TOKENS
     residual = torch.empty(n, HC, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
     t = torch.empty(1, device=DEVICE)
+    kwargs = (
+        {}
+        if seam == "no_post"
+        else dict(sublayer_out=t, post_layer_mix=t, comb_res_mix=t, fn_packed=t)
+    )
     out = amd_mhc.mhc_pre_delayed_seam(
-        pre_delayed, residual, t, t, t, 1e-6, 1e-6, 1e-6, 2.0, 20, pre_mix=t
+        pre_delayed, residual, t, t, t, 1e-6, 1e-6, 1e-6, 2.0, 20, pre_mix=t, **kwargs
     )
     assert out == "pre_delayed"
-    assert seen["pre_mix"] is t and seen["sublayer_out"] is None
-
-
-def test_packed_fn_keeps_pre_delayed(monkeypatch):
-    """A seam with a packed `fn` (Mega-MHC) keeps `pre_delayed` and gets it."""
-    pre_delayed, seen = _pre_delayed_spy(monkeypatch)
-    n = 4 * amd_mhc.MHC_SEAM_MIN_TOKENS
-    residual = torch.empty(n, HC, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
-    t = torch.empty(1, device=DEVICE)
-    out = amd_mhc.mhc_pre_delayed_seam(
-        pre_delayed,
-        residual,
-        t,
-        t,
-        t,
-        1e-6,
-        1e-6,
-        1e-6,
-        2.0,
-        20,
-        pre_mix=t,
-        sublayer_out=t,
-        post_layer_mix=t,
-        comb_res_mix=t,
-        fn_packed=t,
-    )
-    assert out == "pre_delayed"
-    assert seen["fn_packed"] is t
+    assert seen["pre_mix"] is t
+    for name in ("sublayer_out", "post_layer_mix", "comb_res_mix", "fn_packed"):
+        assert seen[name] is kwargs.get(name)
