@@ -59,13 +59,15 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
                 8, torch.float32, torch.device("cpu")
             )
             addresses = {key: tensor.data_ptr() for key, tensor in buffers.items()}
-            for step, num_tokens in enumerate((5, 2)):
+            for step, (num_tokens, padded_tokens) in enumerate(
+                ((5, 8), (1, 8), (2, 2))
+            ):
                 expected = {}
                 for index, key in enumerate(
                     ("hidden_states", "residual", "downstream.route_state")
                 ):
                     sharded = key in sharded_fields or key == "downstream.route_state"
-                    rows = (num_tokens + 1) // 2 if sharded else num_tokens
+                    rows = (padded_tokens + 1) // 2 if sharded else num_tokens
                     lane_offset = lane * 100 if sharded else 0
                     expected[key] = (
                         torch.arange(rows * 4, dtype=torch.float32).reshape(rows, 4)
@@ -74,7 +76,17 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
                         + lane_offset
                     )
                 if pp_group.is_first_rank:
-                    output = IntermediateTensors(expected)
+                    output = IntermediateTensors(
+                        {
+                            key: value
+                            if key in sharded_fields or key == "downstream.route_state"
+                            else torch.nn.functional.pad(
+                                value, (0, 0, 0, padded_tokens - num_tokens), value=-1
+                            )
+                            for key, value in expected.items()
+                        }
+                    )
+                    output = transport.prepare_outputs(output, num_tokens)
                     handles = pp_group.isend_tensor_dict(
                         output.tensors,
                         all_gather_group=tp_group,
@@ -104,10 +116,15 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
                     for callback in postprocess:
                         callback()
                     inputs = transport.prepare_inputs(
-                        buffers, num_tokens, IntermediateTensors(tensors)
+                        buffers,
+                        padded_tokens,
+                        IntermediateTensors(tensors),
+                        num_received_tokens=num_tokens,
                     )
                     for key, value in expected.items():
-                        torch.testing.assert_close(inputs[key], value, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            inputs[key][: value.shape[0]], value, rtol=0, atol=0
+                        )
                         assert inputs[key].data_ptr() == addresses[key]
     finally:
         tp_group.destroy()
@@ -256,7 +273,9 @@ def test_downstream_descriptor_drives_all_buffer_views(compiled):
             "hidden_states": torch.full((num_tokens, 4), 3.0),
             "downstream.route_state": torch.full((local_rows, 2), 7, dtype=torch.int32),
         }
-        output = forward(*expected.values(), num_tokens)
+        output = forward(
+            expected["hidden_states"], expected["downstream.route_state"], num_tokens
+        )
         captured = copy_intermediate_tensors(buffers, output)
         torch.testing.assert_close(captured.tensors, expected, rtol=0, atol=0)
         assert {key: value.data_ptr() for key, value in captured.items()} == addresses
@@ -271,6 +290,33 @@ def test_registration_is_model_local():
         transport.register_tensor("downstream.route_state", PPTransportTensorSpec((3,)))
     with pytest.raises(ValueError, match="nonempty strings"):
         transport.register_tensor("", PPTransportTensorSpec((3,)))
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_send_padding_uses_outgoing_layout(tp_size):
+    transport = PPTransportSchema(tp_size=tp_size)
+    transport.register_tensor("hidden_states", PPTransportTensorSpec((4,)), send=False)
+    transport.register_tensor(
+        "hidden_states",
+        PPTransportTensorSpec((4,), sequence_parallel=True),
+        receive=False,
+    )
+    transport.register_tensor(
+        "residual", PPTransportTensorSpec((4,), sequence_parallel=True), send=False
+    )
+    transport.register_tensor("residual", PPTransportTensorSpec((4,)), receive=False)
+    output = IntermediateTensors(
+        {
+            "hidden_states": torch.arange(32 // tp_size).reshape(8 // tp_size, 4),
+            "residual": torch.arange(32).reshape(8, 4),
+            "pp_positions": torch.arange(8).reshape(8, 1),
+        }
+    )
+    sent = transport.prepare_outputs(output, 1)
+    for key, tensor in output.items():
+        rows = 4 if key == "hidden_states" and tp_size == 2 else 1
+        torch.testing.assert_close(sent[key], tensor[:rows], rtol=0, atol=0)
+        assert sent[key].data_ptr() == tensor.data_ptr()
 
 
 @dataclass(frozen=True)

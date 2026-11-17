@@ -109,6 +109,19 @@ class PPTransportSchema:
             }
         )
 
+    def prepare_outputs(
+        self, tensors: IntermediateTensors, num_tokens: int
+    ) -> IntermediateTensors:
+        """Trim full fields while retaining the padded rows of SP fields."""
+        views = {}
+        for key, tensor in tensors.items():
+            spec = self._send_specs.get(key, PPTransportTensorSpec())
+            if spec.sequence_parallel and self.tp_size > 1:
+                views[key] = tensor
+            else:
+                views[key] = tensor[: spec.num_rows(num_tokens, self.tp_size)]
+        return IntermediateTensors(views)
+
     def prepare_inputs(
         self,
         buffers: IntermediateTensors,
