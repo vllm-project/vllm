@@ -15,6 +15,7 @@ logger = init_logger(__name__)
 # declaration for static analyzers
 NixlWrapper: Any
 nixl_agent_config: Any
+nixlRemoteDisconnectError: Any
 nixlXferTelemetry: Any
 
 
@@ -43,7 +44,7 @@ def _get_nixl_package_name() -> str:
 
 def _get_nixl_module_name(name: str) -> str:
     package_name = _get_nixl_package_name()
-    if name == "nixlXferTelemetry":
+    if name in ("nixlXferTelemetry", "nixlRemoteDisconnectError"):
         return f"{package_name}._bindings"
     return f"{package_name}._api"
 
@@ -52,6 +53,7 @@ def _load_nixl_attr(name: str) -> Any:
     attr_name = {
         "NixlWrapper": "nixl_agent",
         "nixl_agent_config": "nixl_agent_config",
+        "nixlRemoteDisconnectError": "nixlRemoteDisconnectError",
         "nixlXferTelemetry": "nixlXferTelemetry",
     }[name]
 
@@ -129,6 +131,7 @@ def alias_nixl_for_ray() -> None:
 __all__ = [
     "NixlWrapper",
     "nixl_agent_config",
+    "nixlRemoteDisconnectError",
     "nixlXferTelemetry",
     "is_nixl_available",
     "check_nixl_version",
