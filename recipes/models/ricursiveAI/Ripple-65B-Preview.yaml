@@ -5,7 +5,7 @@ meta:
   provider: "Ricursive Intelligence"
   description: "Ricursive's Ripple-65B Preview, a dense 65B model for reasoning and agentic coding with hybrid sliding-window and NoPE full attention, tool calling, and a DFlash2 speculative drafter."
   date_added: 2026-11-04
-  date_updated: 2026-11-11
+  date_updated: 2026-11-17
   tasks:
     - text
   related_recipes: []
@@ -19,11 +19,7 @@ meta:
 
 model:
   model_id: "ricursiveAI/Ripple-65B-Preview"
-  min_vllm_version: "0.33.0"
-  nightly_required: true
-  docker_image:
-    nvidia: "vllm/vllm-openai:nightly"
-    amd: "vllm/vllm-openai-rocm:nightly"
+  min_vllm_version: "0.34.0"
   architecture: dense
   parameter_count: "65B"
   active_parameters: "65B"
@@ -111,7 +107,7 @@ guide: |
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -e VLLM_ROCM_USE_AITER=1 \
     -p 8000:8000 \
-    vllm/vllm-openai-rocm:nightly \
+    vllm/vllm-openai-rocm:v0.34.0 \
     ricursiveAI/Ripple-65B-Preview \
     --tensor-parallel-size 1 \
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
