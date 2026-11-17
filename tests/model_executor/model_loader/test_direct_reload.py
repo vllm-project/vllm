@@ -333,17 +333,17 @@ class TestUnsent:
         _reload(model, _checkpoint())  # a new full update repairs it
         _assert_same(_state(model), before)
 
-    def test_first_update_after_dummy_start_requires_every_parameter(self):
+    def test_first_update_after_dummy_start_sets_what_is_required(self):
         with _DEVICE:
             model = _ToyModel()
         track_loaded_params(model)  # a dummy cold start loads nothing
         process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        _reload(model, _checkpoint())  # the first update sets the record
+        _assert_same(_state(model), _state(_cold_start(_checkpoint())))
         begin_direct_reload(model)
         model.load_weights(list(_checkpoint().items())[1:])
         with pytest.raises(RuntimeError, match="attn.kv_b.weight"):
             finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
-        _reload(model, _checkpoint())  # a full update passes
-        _assert_same(_state(model), _state(_cold_start(_checkpoint())))
 
     def test_tensor_without_post_processing_keeps_its_bytes(self):
         # a frozen table the trainer does not send (Engram, an n-gram

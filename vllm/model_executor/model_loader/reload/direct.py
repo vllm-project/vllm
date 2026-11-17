@@ -10,10 +10,11 @@ Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract: an update loads every parameter cold start loaded (as
-`model.load_weights` reports it; every parameter after a dummy start), except
-those level 2 sleep preserves (`--sleep-preserve-parameter-names`: the update
-does not rewrite them). `finish` checks it before rerunning PWAL, which would
-otherwise reprocess the kept runtime bytes of a parameter the update left out.
+`model.load_weights` reports it; after a dummy start, the first update sets
+the record and is not checked itself), except those level 2 sleep preserves
+(`--sleep-preserve-parameter-names`: the update does not rewrite them).
+`finish` checks it before rerunning PWAL, which would otherwise reprocess the
+kept runtime bytes of a parameter the update left out.
 A `padding_fill_params()` parameter must also be delivered whole: `begin`
 zero-fills it.
 """
@@ -133,6 +134,9 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
     required = model.__dict__.get("_required_params")
     if loaded is None or required is None:  # the model does not report loads
         return
+    if not required:  # dummy start: the first update sets what is required
+        model._required_params = loaded
+        return
     preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
     params = dict(model.named_parameters(remove_duplicate=False))
     delivered = {params.get(n, n) for n in loaded}
@@ -188,13 +192,8 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
         return  # pre-processed weights are already in runtime layout
     _check_supported_modules(model)
     # what cold start loaded, every update must load again; after a dummy
-    # start (nothing loaded) every parameter holds random values until sent
-    loaded = model.__dict__.pop("_loaded_params", None)
-    model._required_params = (
-        loaded
-        if loaded or loaded is None
-        else {n for n, _ in model.named_parameters(remove_duplicate=False)}
-    )
+    # start (nothing loaded) the first update sets it
+    model._required_params = model.__dict__.pop("_loaded_params", None)
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
