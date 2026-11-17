@@ -65,9 +65,6 @@ from vllm.model_executor.models.transformers.fusers.attention import (
     VLLM_ATTN_IMPL,
     VLLM_MLA_ATTN_IMPL,
 )
-from vllm.model_executor.models.transformers.position_embeddings import (
-    find_position_embedding,
-)
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
@@ -107,7 +104,11 @@ attention module. `"attn"` is chosen deliberately to match the mappings generate
 `maybe_remap_kv_scale_name`."""
 
 
-class _MissingPositionEmbedding(PPMissingLayer):
+class PPMissingEmbedding(PPMissingLayer):
+    """Stands in for a lookup (e.g. learned positions) that the decoder applies before
+    its layers. Its input is not hidden states, so `PPMissingLayer` would return the
+    wrong shape. The value is discarded by `Base._restore_stage_input`."""
+
     def __init__(self):
         super().__init__()
         self.register_buffer("zero", torch.zeros(()), persistent=False)
@@ -220,6 +221,16 @@ class Base(
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
+        self._restore_stage_input_enabled = False
+        if not self.pp_group.is_first_rank and (layers := self._decoder_layers):
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            hidden_size = self.text_config.hidden_size
+            buffer = torch.zeros(1, max_tokens, hidden_size)
+            # CUDA graphs replay their capture-time input addresses
+            self.register_buffer("pp_hidden_states", buffer, persistent=False)
+            layers[self.start_layer].register_forward_pre_hook(
+                self._restore_stage_input, with_kwargs=True
+            )
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
 
@@ -439,30 +450,29 @@ class Base(
         if (layers := self._decoder_layers) is None:
             raise ValueError(f"Could not identify the decoder layers of {type(module)}")
         # attrgetter in case the module is nested (e.g. "text_model.layers")
-        layer_name = next(name for name in names if attrgetter(name)(module) is layers)
-        parent, _, _ = layer_name.rpartition(".")
-        decoder = module.get_submodule(parent)
-        position_name = find_position_embedding(
-            decoder, self.model.get_input_embeddings(), layers
+        module_list_idx = next(
+            i for i, name in enumerate(names) if attrgetter(name)(module) is layers
         )
-        if position_name is not None:
-            position_name = maybe_prefix(parent, position_name)
-            if not self.pp_group.is_first_rank:
-                # Incoming hidden states already include the learned positions.
-                attrsetter(position_name)(module, _MissingPositionEmbedding())
-            names = [name for name in names if name != position_name]
 
         # Layers before module list
-        module_list_idx = names.index(layer_name)
+        input_embeddings = set(self.model.get_input_embeddings().modules())
+        keep_input_embeddings = (
+            self._get_tie_word_embeddings() and self.pp_group.is_last_rank
+        ) or spec_decode_needs_target_embed(self.vllm_config)
         for name in names[:module_list_idx]:
-            if (
-                self.pp_group.is_first_rank
-                or (self._get_tie_word_embeddings() and self.pp_group.is_last_rank)
-                or spec_decode_needs_target_embed(self.vllm_config)
-            ):
+            if self.pp_group.is_first_rank:
+                break
+            child = attrgetter(name)(module)
+            is_input_embedding = not input_embeddings.isdisjoint(child.modules())
+            if is_input_embedding and keep_input_embeddings:
                 continue
+            missing = (
+                PPMissingEmbedding()
+                if isinstance(child, nn.Embedding) and not is_input_embedding
+                else PPMissingLayer()
+            )
             # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
-            attrsetter(name)(module, PPMissingLayer())
+            attrsetter(name)(module, missing)
 
         # Module list
         start_layer, end_layer = self._pp_indices()
@@ -901,6 +911,12 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
+        buffer = getattr(self, "pp_hidden_states", None)
+        if buffer is not None and inputs_embeds is not None:
+            # Only set here, so modules which call the layers directly (i.e. MTP)
+            # skip the hook
+            self._restore_stage_input_enabled = True
+            buffer[:, : inputs_embeds.shape[1]].copy_(inputs_embeds)
         self._aux_hidden_states.clear()
         outputs = self.model(
             input_ids=input_ids,
@@ -958,6 +974,20 @@ class Base(
                 )
             else:
                 module.register_forward_hook(self._record_layer_output)
+
+    def _restore_stage_input(self, module, args, kwargs):
+        """Feed the received hidden states to this rank's first layer unchanged.
+
+        Later ranks still run the decoder before its layers, for masks and rotary
+        embeddings, but anything it does to the hidden states (scaling, learned
+        positions, ...) was already done on the first rank."""
+        if not self._restore_stage_input_enabled:
+            return None
+        hidden_states = args[0] if args else kwargs["hidden_states"]
+        received = self.pp_hidden_states[:, : hidden_states.shape[1]]
+        if args:
+            return (received, *args[1:]), kwargs
+        return args, kwargs | {"hidden_states": received}
 
     def _record_layer_input(self, module, args, kwargs) -> None:
         hidden_states = args[0] if args else kwargs["hidden_states"]

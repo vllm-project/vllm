@@ -14,7 +14,6 @@ import pytest
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
-from torch import add as add_tensors
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -37,9 +36,6 @@ from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
-from vllm.model_executor.models.transformers.position_embeddings import (
-    find_position_embedding,
-)
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
 
@@ -462,158 +458,6 @@ PER_LAYER_VOCAB_SIZE = 32
 NUM_POSITIONS = 16
 HIDDEN_SIZE = 8
 EMBED_SCALE = 3.0
-
-
-class PositionTableDecoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.tokens = nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
-        self.steps = nn.Embedding(NUM_POSITIONS, HIDDEN_SIZE)
-        self.wpe = nn.Embedding(NUM_POSITIONS, HIDDEN_SIZE)
-        self.layers = nn.ModuleList([nn.Identity()])
-
-
-class RenamedPositionTable(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        # Both tables use position_ids, but only steps contributes to the sum.
-        auxiliary = self.wpe(position_ids)
-        hidden = inputs_embeds + self.steps(position_ids)
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden, auxiliary
-
-
-class TokenLookupAndPositions(PositionTableDecoder):
-    def forward(self, input_ids, position_ids):
-        hidden = self.steps(position_ids).add(self.tokens(input=input_ids))
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden
-
-
-class FunctionAddPositions(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        hidden = torch.add(inputs_embeds, self.steps(position_ids))
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden
-
-
-class AliasedFunctionAddPositions(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        hidden = add_tensors(input=inputs_embeds, other=self.steps(position_ids))
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden
-
-
-class ScaledInputAdd(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        hidden = torch.add(self.steps(position_ids), inputs_embeds, alpha=0.5)
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden
-
-
-class ReplacedBlockInput(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        hidden = inputs_embeds + self.steps(position_ids)
-        auxiliary = hidden.clone()
-        alias = hidden.view_as(hidden)
-        alias.copy_(inputs_embeds)
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden, auxiliary
-
-
-class WrongPositionIndices(PositionTableDecoder):
-    def forward(self, inputs_embeds, input_ids, position_ids):
-        hidden = inputs_embeds + self.wpe(input_ids)
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden
-
-
-class OptionalPositionLookup(PositionTableDecoder):
-    class Table(nn.Embedding):
-        def forward(self, ids, position_ids=None, use_positions=None):
-            if use_positions is None:
-                return super().forward(ids)
-            return super().forward(position_ids)
-
-    def __init__(self):
-        super().__init__()
-        self.steps = self.Table(NUM_POSITIONS, HIDDEN_SIZE)
-
-    def forward(self, inputs_embeds, input_ids, position_ids):
-        hidden = inputs_embeds + self.steps(input_ids, position_ids=position_ids)
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden
-
-
-class AuxiliaryPositionSum(PositionTableDecoder):
-    def __init__(self):
-        super().__init__()
-        self.auxiliary = nn.ModuleList([nn.Identity()])
-
-    def forward(self, inputs_embeds, position_ids):
-        auxiliary = inputs_embeds + self.wpe(position_ids)
-        for layer in self.auxiliary:
-            auxiliary = layer(auxiliary)
-        for layer in self.layers:
-            inputs_embeds = layer(inputs_embeds)
-        return inputs_embeds, auxiliary
-
-
-class PerLayerPositions(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        hidden = inputs_embeds
-        for layer in self.layers:
-            hidden = layer(hidden + self.steps(position_ids))
-        return hidden
-
-
-class ReusedPositionOutput(PositionTableDecoder):
-    def forward(self, inputs_embeds, position_ids):
-        positions = self.steps(position_ids)
-        hidden = inputs_embeds + positions
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden * positions
-
-
-class ReusedPositionTable(PositionTableDecoder):
-    def auxiliary(self, ids):
-        return self.steps(ids)
-
-    def forward(self, inputs_embeds, position_ids, token_type_ids):
-        hidden = inputs_embeds + self.steps(position_ids)
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return hidden, self.auxiliary(token_type_ids)
-
-
-@pytest.mark.parametrize(
-    ("decoder_cls", "expected"),
-    [
-        (RenamedPositionTable, "steps"),
-        (TokenLookupAndPositions, "steps"),
-        (FunctionAddPositions, "steps"),
-        (AliasedFunctionAddPositions, "steps"),
-        (ScaledInputAdd, None),
-        (ReplacedBlockInput, None),
-        (WrongPositionIndices, None),
-        (OptionalPositionLookup, None),
-        (AuxiliaryPositionSum, None),
-        (PerLayerPositions, None),
-        (ReusedPositionOutput, None),
-        (ReusedPositionTable, None),
-    ],
-)
-def test_find_position_embedding(decoder_cls, expected):
-    decoder = decoder_cls()
-    assert find_position_embedding(decoder, decoder.tokens, decoder.layers) == expected
 
 
 class ScaledWordEmbedding(nn.Embedding):

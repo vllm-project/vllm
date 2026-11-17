@@ -284,10 +284,8 @@ def test_pp_equivalence_small_subset(vllm_runner, arch: str):
     _check_equivalent(vllm_runner, arch, 2)
 
 
-@pytest.mark.timeout(CASE_TIMEOUT_S)
-@multi_gpu_test(num_gpus=2)
-def test_transformers_pp_additive_position_embeddings(vllm_runner, tmp_path):
-    """OPT adds embed_positions(mask, past_length, position_ids=...) to its inputs."""
+def _opt():
+    """Adds `embed_positions(mask, past_length, position_ids=...)` to its inputs."""
     from transformers import OPTConfig, OPTForCausalLM
 
     config = OPTConfig(
@@ -299,9 +297,34 @@ def test_transformers_pp_additive_position_embeddings(vllm_runner, tmp_path):
         max_position_embeddings=64,
         do_layer_norm_before=False,
     )
+    return OPTForCausalLM(config)
+
+
+def _granite():
+    """Scales its inputs by `embedding_multiplier`, which is not a module."""
+    from transformers import GraniteConfig, GraniteForCausalLM
+
+    config = GraniteConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        embedding_multiplier=12.0,
+    )
+    return GraniteForCausalLM(config)
+
+
+@pytest.mark.timeout(CASE_TIMEOUT_S)
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("make_model", [_opt, _granite])
+def test_transformers_pp_decoder_preamble(vllm_runner, tmp_path, make_model):
+    """Later stages must not reapply what the decoder does before its layers."""
     with torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(0)
-        OPTForCausalLM(config).save_pretrained(tmp_path)
+        make_model().save_pretrained(tmp_path)
 
     params = SamplingParams(
         temperature=0,
