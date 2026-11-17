@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -261,10 +261,12 @@ class GenerateRequest(BaseModel):
             raise ValueError("content_parts and features are mutually exclusive")
         return self
 
+    _metadata_only_requires_ec: ClassVar[bool] = True
+
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None:
+        if features is None or not self._metadata_only_requires_ec:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
@@ -472,9 +474,7 @@ class RenderedGenerateRequest(GenerateRequest):
     still validates the request it receives as a `GenerateRequest`.
     """
 
-    @model_validator(mode="after")
-    def _require_ec_for_metadata_only(self) -> "RenderedGenerateRequest":
-        return self
+    _metadata_only_requires_ec: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):

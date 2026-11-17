@@ -1213,6 +1213,20 @@ _VIDEO_PART = {
     "type": "video_url",
     "video_url": {"url": encode_video_url(np.zeros((8, 224, 224, 3), dtype=np.uint8))},
 }
+QWEN2_VL_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
+LLAVA_OV_MODEL = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+
+
+@pytest.fixture(scope="module")
+def qwen2_vl_server():
+    with RemoteLaunchRenderServer(QWEN2_VL_MODEL, []) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def llava_ov_server():
+    with RemoteLaunchRenderServer(LLAVA_OV_MODEL, []) as remote_server:
+        yield remote_server
 
 
 def _render_mm_payloads(
@@ -1235,10 +1249,8 @@ def _render_mm_payloads(
 
 
 @pytest.mark.parametrize("content", [[_IMAGE_PART], [_IMAGE_PART, _VIDEO_PART]])
-def test_chat_render_metadata_payload_omits_tensors_only(content):
-    model = "Qwen/Qwen2-VL-2B-Instruct"
-    with RemoteLaunchRenderServer(model, []) as remote_server:
-        responses = _render_mm_payloads(remote_server, model, content)
+def test_chat_render_metadata_payload_omits_tensors_only(qwen2_vl_server, content):
+    responses = _render_mm_payloads(qwen2_vl_server, QWEN2_VL_MODEL, content)
 
     assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
     tensors = responses["tensors"].json()
@@ -1251,18 +1263,33 @@ def test_chat_render_metadata_payload_omits_tensors_only(content):
     assert responses["none"].json()["features"]["mm_metadata"] is None
 
 
-def test_chat_render_modality_without_metadata_nulls_mm_metadata():
+def test_chat_render_metadata_payload_rejects_modality_without_metadata(
+    llava_ov_server,
+):
     """LLaVA-OneVision has `keep_on_cpu` image fields but none for video."""
-    model = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
-    with RemoteLaunchRenderServer(model, []) as remote_server:
-        responses = _render_mm_payloads(
-            remote_server, model, [_IMAGE_PART, _VIDEO_PART]
-        )
+    responses = _render_mm_payloads(
+        llava_ov_server, LLAVA_OV_MODEL, [_IMAGE_PART, _VIDEO_PART]
+    )
 
-    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    assert responses["metadata"].status_code == HTTPStatus.BAD_REQUEST
+    assert "requires metadata for every modality" in responses["metadata"].text
+    for mm_payload in ("tensors", "none"):
+        assert responses[mm_payload].status_code == HTTPStatus.OK
+        assert responses[mm_payload].json()["features"]["mm_metadata"] is None
     assert set(responses["tensors"].json()["features"]["kwargs_data"]) == {
         "image",
         "video",
     }
-    for response in responses.values():
-        assert response.json()["features"]["mm_metadata"] is None
+
+
+def test_chat_render_metadata_payload_keeps_complete_metadata(llava_ov_server):
+    responses = _render_mm_payloads(llava_ov_server, LLAVA_OV_MODEL, [_IMAGE_PART])
+
+    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    metadata = responses["metadata"].json()["features"]
+    assert metadata["kwargs_data"] is None
+    assert metadata["mm_metadata"] is not None
+    assert (
+        metadata["mm_metadata"]
+        == responses["tensors"].json()["features"]["mm_metadata"]
+    )

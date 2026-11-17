@@ -244,9 +244,14 @@ def test_metadata_payload_requires_ec_on_generate_not_render():
     )
 
 
+def test_metadata_payload_rejects_modality_without_metadata():
+    with pytest.raises(ValueError, match="requires metadata for every modality"):
+        extract_mm_features(_mixed_engine_input(), mm_payload="metadata")
+
+
 @pytest.mark.parametrize(
     ("mm_payload", "has_kwargs"),
-    [("tensors", True), ("metadata", False), ("none", False)],
+    [("tensors", True), ("none", False)],
 )
 def test_modality_without_metadata_nulls_mm_metadata(mm_payload, has_kwargs):
     """Metadata is complete or absent, so partial modalities still render."""

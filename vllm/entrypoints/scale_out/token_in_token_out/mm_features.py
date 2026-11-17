@@ -162,6 +162,11 @@ def extract_mm_features(
             raw_mm_kwargs,
             metadata_fields_for=metadata_fields_for,
         )
+        if mm_payload == "metadata" and mm_metadata is None:
+            raise ValueError(
+                "mm_payload='metadata' requires metadata for every modality "
+                "in the request. Render with mm_payload='tensors' instead."
+            )
         if mm_payload == "tensors":
             kwargs_data = {
                 modality: [

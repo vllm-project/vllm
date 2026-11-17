@@ -173,7 +173,7 @@ should split those fields:
 | `mm_payload` | `mm_hashes`, `mm_placeholders` | `mm_metadata` | `kwargs_data` | Use it when |
 | --- | --- | --- | --- | --- |
 | `"tensors"` (default) | Yes | When available | Yes | The processed tensors should go to a worker. |
-| `"metadata"` | Yes | When available | Null | The encode worker gets the media another way, and prefill loads embeddings through the EC connector. |
+| `"metadata"` | Yes | Yes | Null | The encode worker gets the media another way, and prefill loads embeddings through the EC connector. |
 | `"none"` | Yes | Null | Null | Only the token layout and item hashes are needed, such as in a cache-aware router. |
 
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
@@ -250,7 +250,8 @@ sequenceDiagram
     P-->>Client: generated output
 ```
 
-`/inference/v1/generate` rejects this response without `ec_transfer_params`.
+`mm_metadata` is always set in this response, so `/inference/v1/generate`
+rejects it without `ec_transfer_params`.
 
 #### `"none"`
 
@@ -282,9 +283,12 @@ Do not forward this response to `/inference/v1/generate`, which reads a null
 #### Null `mm_metadata`
 
 `mm_metadata` is null if any modality in the request has no metadata fields,
-for example an image and a video on a model that declares them only for video.
-Do not use the prefill form for such a request. With `"metadata"`, both
-fields are then null, so send the media or render with `"tensors"` instead.
+for example an image and a video on LLaVA-OneVision, which has them only for
+images. Do not use the prefill form for such a request.
+
+With `"metadata"`, the response would then have both fields null, which
+`/inference/v1/generate` reads as every item being cached. Render returns a
+400 error instead, so render that request with `"tensors"`.
 
 ## Example
 
