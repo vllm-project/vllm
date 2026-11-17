@@ -199,6 +199,15 @@ Some attention backends also materialize derived state, such as scheduler metada
 
 For draft models that advance positions, the fused path is enabled only when every draft attention group declares `supports_draft_decode_metadata_update`. Otherwise, MRV2 falls back to rebuilding attention metadata between draft steps. Draft models that keep positions fixed do not require this update. Before enabling a backend, developers must audit all derived metadata, including state inherited from parent builders or owned by auxiliary attention backends.
 
+## 10. Multimodal Encoder Cache
+
+Encoder outputs are cached per multimodal hash, but multiple outputs can share
+one tensor allocation. MRV2 compacts partially retained allocations when the
+reclaimed bytes cover the copies. Compaction temporarily needs both allocations;
+an allocation failure preserves the original entries, so physical storage can
+still exceed the logical cache budget. EC connectors choose storage at insertion
+and disable later relocation to keep registered addresses stable.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.
