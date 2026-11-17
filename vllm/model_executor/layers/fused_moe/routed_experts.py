@@ -830,6 +830,10 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight,
                     hidden_dim=0,
                 )
+                # w2 is row-parallel: its bias is added before the TP
+                # all-reduce, so only one rank may hold it.
+                if self.moe_config.tp_rank != 0:
+                    loaded_weight = torch.zeros_like(loaded_weight)
                 copy_weight_(expert_data, loaded_weight)
             else:
                 self._load_w13(
@@ -1452,6 +1456,7 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
@@ -1464,12 +1469,15 @@ class RoutedExperts(PluggableLayer):
             x: Input tensor after any transforms
             router_logits: Router logits (for monolithic kernels)
             input_ids: input ids for DeepSeek V4
+            x_scale: Scales of `x` when the caller already quantized it (needs
+                `quant_method.accepts_quantized_input`)
 
         Returns:
             Finalized routed states or a deferred-finalize output.
 
         """
         assert self.quant_method.is_monolithic
+        extra = {} if x_scale is None else {"x_scale": x_scale}
 
         # Monolithic kernels handle routing internally
         return self.quant_method.apply_monolithic(
@@ -1477,6 +1485,34 @@ class RoutedExperts(PluggableLayer):
             x=x,
             router_logits=router_logits,
             input_ids=input_ids,
+            **extra,
+        )
+
+    @property
+    def supports_precomputed_routing(self) -> bool:
+        """Whether a monolithic kernel can take vLLM's routing instead."""
+        moe_kernel = getattr(self.quant_method, "moe_kernel", None)
+        return moe_kernel is not None and moe_kernel.supports_precomputed_routing()
+
+    def forward_monolithic_routed(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Run a monolithic kernel on vLLM's routing, where padding rows are -1
+        and activate no expert, which the kernel's own routing cannot do."""
+        moe_kernel = self.quant_method.moe_kernel
+        assert moe_kernel is not None and moe_kernel.supports_precomputed_routing()
+        return moe_kernel.apply_monolithic_routed(
+            x,
+            self.w13_weight,
+            self.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=self.activation,
+            global_num_experts=self.global_num_experts,
+            routing_sink=self.routing_sink,
         )
 
     def forward(

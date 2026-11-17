@@ -145,7 +145,7 @@ Tokyo
     assert!(output.normal_text().is_empty());
     assert_eq!(output.calls().len(), 1);
     assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
-    assert_eq!(output.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
+    assert_eq!(output.calls()[0].arguments, r#"{"location": "Tokyo"}"#);
 }
 
 #[test]
