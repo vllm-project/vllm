@@ -338,7 +338,7 @@ def test_init_engine_refuses_an_unsupported_model(monkeypatch):
     )
     worker = _make_worker(engine)
     model = nn.Module()
-    model.__dict__["_direct_reload_refusals"] = ["LoRA"]  # as cold start records
+    model._direct_reload_refusals = ["LoRA"]  # as cold start records
     monkeypatch.setattr(worker.model_runner, "get_model", lambda: model)
     with pytest.raises(RuntimeError, match="LoRA"):
         Worker.init_weight_transfer_engine(worker, {})

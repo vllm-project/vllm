@@ -78,7 +78,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+from vllm.model_executor.model_loader.reload.direct import (
+    check_direct_reload,
+    direct_reload_enabled,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -1697,10 +1700,6 @@ class Worker(WorkerBase):
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
-        from vllm.model_executor.model_loader.reload.direct import (
-            check_direct_reload,
-        )
-
         # refuse a model direct reload cannot update before a trainer sends
         check_direct_reload(self.model_runner.get_model())
         # Parse dict into backend-specific typed dataclass

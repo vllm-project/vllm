@@ -52,11 +52,9 @@ from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 @pytest.fixture(autouse=True)
 def _layerwise_reload_mode(monkeypatch):
-    # These tests cover the online quantization methods and their layerwise
-    # processing. Direct reload (the default) replaces supported schemes with
-    # quantize-on-load checkpoint methods, covered by test_online_loading.py,
-    # test_direct_reload.py and test_reload.py. An explicit VLLM_RELOAD_MODE
-    # is kept, so the end-to-end tests here can also run in direct mode.
+    # these cover the online methods, which direct reload (the default)
+    # replaces with quantize-on-load (test_online_loading.py); an explicit
+    # VLLM_RELOAD_MODE is kept
     if "VLLM_RELOAD_MODE" not in os.environ:
         monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
 

@@ -19,15 +19,11 @@ of every `padding_fill_params()` parameter, which `begin` zero-fills whole.
 """
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
@@ -95,7 +91,7 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
             yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
-def _config_refusals(vllm_config: "VllmConfig") -> list[str]:
+def _config_refusals(vllm_config: VllmConfig) -> list[str]:
     """Reasons a configuration cannot reload directly."""
     reasons = []
     offload = vllm_config.offload_config
@@ -159,16 +155,14 @@ def _module_refusals(model: torch.nn.Module) -> list[str]:
     return reasons
 
 
-def log_direct_reload_support(
-    model: torch.nn.Module, vllm_config: "VllmConfig"
-) -> None:
+def log_direct_reload_support(model: torch.nn.Module, vllm_config: VllmConfig) -> None:
     """At cold start: record why direct reload cannot update `model` (checked
     by `check_direct_reload`; neither the configuration nor the modules change
     later) and say so once."""
     if not direct_reload_enabled():
         return
     reasons = [*_config_refusals(vllm_config), *_module_refusals(model)]
-    model.__dict__["_direct_reload_refusals"] = reasons
+    model._direct_reload_refusals = reasons
     if reasons:
         logger.info(
             "Direct reload is not supported for this model (%s); weight "
@@ -185,7 +179,7 @@ def check_direct_reload(model: torch.nn.Module) -> None:
     layerwise mode."""
     if not direct_reload_enabled():
         return
-    reasons = model.__dict__.get("_direct_reload_refusals")
+    reasons = getattr(model, "_direct_reload_refusals", None)
     if reasons is None:  # not loaded by a model loader: no config to check
         reasons = _module_refusals(model)
     if reasons:
