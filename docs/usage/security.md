@@ -224,6 +224,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
+- `/ready` - Readiness check, including endpoint plugin readiness and drain state
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics
@@ -397,6 +398,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 3. **Treat plugin routes like any other unauthenticated by default surface.** `--api-key` only protects the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes (see [API Key Authentication Limitations](#api-key-authentication-limitations)). A plugin route outside those prefixes is unauthenticated unless the plugin implements its own authentication. Deploy behind a reverse proxy that allowlists only the plugin routes you intend to expose externally.
 4. **Remember the `vllm.general_plugins` pairing.** A plugin that also needs new engine side behavior ships that half separately via `vllm.general_plugins` which loads in every worker process under the default (load all unless restricted) posture. Allowlisting the endpoint plugin does not by itself restrict its paired engine side plugin. Need to review both.
 5. **Authenticate plugin routes that request shutdown.** `--api-key` does not cover plugin routes such as `/plugins/<plugin-name>/...`. `state.request_shutdown()` requests process-local shutdown, so a plugin that calls it from a route handler must authenticate that route; otherwise any client that reaches the port can stop the server.
+6. **Expect `/ready` to reveal plugin readiness.** `/ready`, like `/health`, is not authenticated. Its status reflects each loaded plugin's `ready` result, so anyone who can reach the port can observe whether a plugin reports itself ready.
 
 ## gRPC Interface
 

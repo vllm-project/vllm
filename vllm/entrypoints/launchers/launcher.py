@@ -303,8 +303,11 @@ async def serve_http(
             else getattr(app.state, "vllm_config", None)
         )
         timeout = vllm_config.shutdown_timeout if vllm_config is not None else 0
-        deadline = time.monotonic() + timeout
-        drain = loop.create_task(drain_endpoint_plugins(app.state, deadline))
+        start = time.monotonic()
+        deadline = start + timeout
+        # Plugin drains get the first half; engine shutdown gets the rest.
+        drain_deadline = start + timeout / 2
+        drain = loop.create_task(drain_endpoint_plugins(app.state, drain_deadline))
         cancelled = False
         # Like a TaskGroup, defer repeated cancellation until the drain settles.
         while not drain.done():

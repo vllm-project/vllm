@@ -52,6 +52,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# A `ready` call longer than asyncio's default `slow_callback_duration` is logged.
+_SLOW_READY_MS = 100
+
 
 @runtime_checkable
 class EndpointPlugin(Protocol):
@@ -137,7 +140,11 @@ class SupportsReady(Protocol):
     """Optional synchronous endpoint plugin readiness capability."""
 
     def ready(self, state: State) -> bool:
-        """Return whether this process can accept new plugin work owners."""
+        """Return whether this process can accept new plugin work owners.
+
+        Called on the event loop for every `/ready` probe, so it must return a
+        `bool` quickly, without blocking or I/O.
+        """
         ...
 
 
@@ -234,7 +241,7 @@ async def init_endpoint_plugins_state(
 
 
 def validate_endpoint_plugin_hooks(plugin: EndpointPlugin) -> None:
-    for name in ("start", "stop"):
+    for name in ("start", "stop", "drain"):
         hook = getattr(plugin, name, None)
         if hook is not None and not inspect.iscoroutinefunction(hook):
             raise TypeError(
@@ -242,6 +249,19 @@ def validate_endpoint_plugin_hooks(plugin: EndpointPlugin) -> None:
                 f"coroutine function; any other `{name}` is not supported. "
                 "Rename the attribute if it is not a lifecycle hook."
             )
+    ready = getattr(plugin, "ready", None)
+    if ready is None:
+        return
+    if inspect.iscoroutinefunction(ready):
+        problem = "an async `ready` is not supported"
+    elif not callable(ready):
+        problem = "`ready` is not callable"
+    else:
+        return
+    raise TypeError(
+        f"Endpoint plugin {plugin.name}: {problem}; define `ready` with `def`, "
+        "or rename the attribute."
+    )
 
 
 def cancel_endpoint_plugin_startup(state: State) -> None:
@@ -277,14 +297,39 @@ def endpoint_plugins_ready(state: State) -> bool:
     """Check every loaded readiness provider; a missing predicate is ready."""
     plugins: list[EndpointPlugin] = getattr(state, "endpoint_plugins", [])
     for plugin in plugins:
-        if isinstance(plugin, SupportsReady):
-            try:
-                if not plugin.ready(state):
-                    return False
-            except Exception:
-                logger.exception("Endpoint plugin %s readiness failed", plugin.name)
-                return False
+        if isinstance(plugin, SupportsReady) and not _endpoint_plugin_ready(
+            plugin, plugin.name, state
+        ):
+            return False
     return True
+
+
+def _endpoint_plugin_ready(plugin: SupportsReady, name: str, state: State) -> bool:
+    start = time.perf_counter()
+    try:
+        result = plugin.ready(state)
+    except Exception:
+        logger.exception("Endpoint plugin %s readiness failed", name)
+        return False
+    if time.perf_counter() - start > _SLOW_READY_MS / 1000:
+        logger.warning_once(
+            "Endpoint plugin %s: a `ready` call took over %d ms; `ready` runs "
+            "on the event loop for every /ready probe and must return quickly",
+            name,
+            _SLOW_READY_MS,
+            scope="process",
+        )
+    if isinstance(result, bool):
+        return result
+    if inspect.iscoroutine(result):
+        result.close()
+    logger.error_once(
+        "Endpoint plugin %s: `ready` must return a bool; treating the plugin "
+        "as not ready",
+        name,
+        scope="process",
+    )
+    return False
 
 
 async def drain_endpoint_plugins(state: State, deadline: float) -> None:
@@ -300,16 +345,37 @@ async def drain_endpoint_plugins(state: State, deadline: float) -> None:
         except Exception:
             logger.exception("Endpoint plugin %s failed to drain", name)
 
+    plugins: list[EndpointPlugin] = getattr(state, "started_endpoint_plugins", [])
+    tasks = {
+        asyncio.create_task(drain(plugin, plugin.name)): plugin.name
+        for plugin in plugins
+        if isinstance(plugin, SupportsDrain)
+    }
+    if not tasks:
+        return
+    cancelled = False
     try:
-        async with asyncio.timeout(remaining), asyncio.TaskGroup() as group:
-            plugins: list[EndpointPlugin] = getattr(
-                state, "started_endpoint_plugins", []
-            )
-            for plugin in plugins:
-                if isinstance(plugin, SupportsDrain):
-                    group.create_task(drain(plugin, plugin.name))
-    except TimeoutError:
-        logger.warning("Endpoint plugin drain deadline expired")
+        await asyncio.wait(tasks, timeout=remaining)
+    except asyncio.CancelledError:
+        cancelled = True
+    pending = [task for task in tasks if not task.done()]
+    if pending and not cancelled:
+        logger.warning(
+            "Endpoint plugin drain deadline expired; cancelling drains still "
+            "running: %s",
+            ", ".join(tasks[task] for task in pending),
+        )
+    for task in pending:
+        task.cancel()
+    # Like a TaskGroup, defer repeated cancellation until the drains settle.
+    while pending:
+        try:
+            await asyncio.wait(pending)
+        except asyncio.CancelledError:
+            cancelled = True
+        pending = [task for task in pending if not task.done()]
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 # Stop hooks that outlived the time limit, referenced until they complete.

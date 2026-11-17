@@ -13,11 +13,15 @@ engine tests require an accepted owner to generate real tokens after drain begin
 
 import asyncio
 import contextlib
+import gc
 import inspect
+import logging
 import os
 import signal
 import subprocess
 import sys
+import time
+import warnings
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from typing import Any
@@ -504,17 +508,50 @@ class _AsyncCallable:
         pass
 
 
-@pytest.mark.parametrize("hook", ["start", "stop"])
+async def _async_ready(self, state: State) -> bool:
+    return True
+
+
+def _async_hook_required(hook: str) -> str:
+    return (
+        f"`{hook}` must be an `async def` coroutine function; any other `{hook}` "
+        "is not supported. Rename the attribute if it is not a lifecycle hook."
+    )
+
+
+_SYNC_READY_REQUIRED = "; define `ready` with `def`, or rename the attribute."
+
+
 @pytest.mark.parametrize(
-    "value",
-    [lambda self, state: None, _AsyncCallable()],
-    ids=["sync_function", "async_callable_object"],
+    "hook, value, message",
+    [
+        *(
+            pytest.param(hook, value, _async_hook_required(hook), id=f"{hook}-{kind}")
+            for hook in ("start", "stop", "drain")
+            for kind, value in (
+                ("sync_function", lambda self, state: None),
+                ("async_callable_object", _AsyncCallable()),
+            )
+        ),
+        pytest.param(
+            "ready",
+            _async_ready,
+            "an async `ready` is not supported" + _SYNC_READY_REQUIRED,
+            id="ready-async_function",
+        ),
+        pytest.param(
+            "ready",
+            True,
+            "`ready` is not callable" + _SYNC_READY_REQUIRED,
+            id="ready-not_callable",
+        ),
+    ],
 )
-def test_sync_lifecycle_hook_is_rejected_at_load(
-    monkeypatch: pytest.MonkeyPatch, hook: str, value: Any
+def test_invalid_hook_is_rejected_at_load(
+    monkeypatch: pytest.MonkeyPatch, hook: str, value: Any, message: str
 ):
-    """A hook that is not an `async def` coroutine function would fail only
-    when awaited, or would not be recognized as a hook; reject it by name."""
+    """A hook that the server cannot call as intended would fail only when
+    called, or would not be recognized as a hook; reject it by name."""
 
     class _SyncHook(_LegacyEndpointPlugin):
         name = "sync_hook_plugin"
@@ -527,11 +564,7 @@ def test_sync_lifecycle_hook_is_rejected_at_load(
     )
     with pytest.raises(TypeError) as error:
         load_endpoint_plugins(())
-    assert str(error.value) == (
-        f"Endpoint plugin {_SyncHook.name}: `{hook}` must be an `async def` "
-        f"coroutine function; any other `{hook}` is not supported. Rename the "
-        "attribute if it is not a lifecycle hook."
-    )
+    assert str(error.value) == f"Endpoint plugin {_SyncHook.name}: {message}"
 
 
 @pytest.mark.parametrize("timeout", ["0", "-1"])
@@ -1057,11 +1090,11 @@ class _DrainPlugin(_LegacyEndpointPlugin):
 
 
 class _ReadyPlugin(_LegacyEndpointPlugin):
-    def __init__(self, result: bool | Exception):
-        super().__init__()
+    def __init__(self, result: object, name: str | None = None):
+        super().__init__(name=name)
         self.result = result
 
-    def ready(self, state: State) -> bool:
+    def ready(self, state: State) -> Any:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -1111,6 +1144,86 @@ async def test_ready_reports_plugin_readiness_and_draining(
         assert (await client.get("/ready")).status_code == ready_status
 
 
+async def _probe_ready(monkeypatch: pytest.MonkeyPatch, plugin: Any) -> list[int]:
+    """Probe `/ready` twice on a render server app with only `plugin`."""
+    app = await _build_plugin_app(monkeypatch, [plugin], None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return [(await client.get("/ready")).status_code for _ in range(2)]
+
+
+@pytest.fixture
+def plugin_logs(caplog_vllm: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
+    # Building the app can import a dependency that raises the root logger's
+    # level, which would hide these warnings from the first test that runs.
+    caplog_vllm.set_level(logging.INFO, logger="vllm.plugins")
+    return caplog_vllm
+
+
+def _messages(caplog: pytest.LogCaptureFixture, plugin_name: str) -> list[str]:
+    messages = (record.getMessage() for record in caplog.records)
+    return [message for message in messages if plugin_name in message]
+
+
+@pytest.mark.asyncio
+async def test_ready_returning_a_coroutine_is_not_ready_and_closed(monkeypatch):
+    """A synchronous wrapper that returns a coroutine passes the loader check;
+    the coroutine counts as not ready and is closed, never left unawaited."""
+    coroutines: list[Any] = []
+
+    class _Wrapper(_LegacyEndpointPlugin):
+        name = "coroutine_ready_plugin"
+
+        def ready(self, state: State) -> Any:
+            coroutines.append(_async_ready(self, state))
+            return coroutines[-1]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert await _probe_ready(monkeypatch, _Wrapper()) == [503, 503]
+        states = [inspect.getcoroutinestate(coroutine) for coroutine in coroutines]
+        coroutines.clear()
+        gc.collect()
+    assert states == [inspect.CORO_CLOSED] * 2
+    assert not [w for w in caught if "never awaited" in str(w.message)]
+
+
+@pytest.mark.asyncio
+async def test_non_bool_ready_result_is_not_ready_and_logged_once(
+    monkeypatch, plugin_logs
+):
+    name = "truthy_ready_plugin"
+    assert await _probe_ready(monkeypatch, _ReadyPlugin(1, name)) == [503, 503]
+    assert _messages(plugin_logs, name) == [
+        (
+            f"Endpoint plugin {name}: `ready` must return a bool; "
+            "treating the plugin as not ready"
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slow_ready_is_logged_once(monkeypatch, plugin_logs):
+    """`ready` runs on the event loop for every probe, so one slow call is
+    reported, but only once."""
+
+    class _SlowReady(_LegacyEndpointPlugin):
+        name = "slow_ready_plugin"
+
+        def ready(self, state: State) -> bool:
+            time.sleep(0.15)
+            return True
+
+    assert await _probe_ready(monkeypatch, _SlowReady()) == [200, 200]
+    assert _messages(plugin_logs, _SlowReady.name) == [
+        (
+            f"Endpoint plugin {_SlowReady.name}: a `ready` call took over 100 ms; "
+            "`ready` runs on the event loop for every /ready probe and must "
+            "return quickly"
+        )
+    ]
+
+
 @pytest.mark.asyncio
 async def test_accepted_owner_finishes_before_engine_shutdown(monkeypatch):
     events: list[str] = []
@@ -1140,11 +1253,14 @@ async def test_accepted_owner_finishes_before_engine_shutdown(monkeypatch):
         "stop:dummy_admin_endpoint_plugin",
     ]
     assert engine.shutdown_allowance is not None
-    assert 0 < engine.shutdown_allowance < 30
+    # Drains finished early, and engine shutdown gets at least half of 30 s.
+    assert 15 <= engine.shutdown_allowance < 30
 
 
 @pytest.mark.asyncio
-async def test_drain_timeout_isolates_errors_and_settles_peers(monkeypatch):
+async def test_drain_timeout_isolates_errors_and_settles_peers(
+    monkeypatch, plugin_logs
+):
     events: list[str] = []
     hanging = _DrainPlugin(events, "hanging")
     healthy = _DrainPlugin(events, "healthy")
@@ -1169,7 +1285,71 @@ async def test_drain_timeout_isolates_errors_and_settles_peers(monkeypatch):
     assert events.index("settled:healthy") < events.index("settled:hanging")
     assert events.index("settled:hanging") < events.index("engine_shutdown")
     assert events.index("engine_shutdown") < events.index("stop:error")
-    assert engine.shutdown_allowance == 0
+    assert engine.shutdown_allowance is not None
+    assert 0 < engine.shutdown_allowance <= 0.5
+    assert _messages(plugin_logs, "deadline") == [
+        (
+            "Endpoint plugin drain deadline expired; cancelling drains still "
+            "running: hanging"
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_drain_past_half_the_shutdown_timeout_leaves_engine_the_rest(
+    monkeypatch,
+):
+    """Plugin drains get the first half of `--shutdown-timeout`: a drain still
+    running then is cancelled, and engine shutdown gets the remainder."""
+    events: list[str] = []
+    plugin = _DrainPlugin(events)
+    engine = _ServingEngineClient(events, shutdown_timeout=1)
+    async with _serving(monkeypatch, [plugin], engine) as (state, task, _):
+        await _wait_started(state, task)
+        state.request_shutdown()
+        await _wait_closed(task)
+    assert not plugin.release.is_set()
+    assert events == ["drain:drain", "settled:drain", "engine_shutdown", "stop:drain"]
+    assert engine.shutdown_allowance is not None
+    assert 0 < engine.shutdown_allowance <= 0.5
+
+
+@pytest.mark.asyncio
+async def test_drain_deadline_warning_is_logged_before_drains_settle(
+    monkeypatch, plugin_logs
+):
+    """The warning names the drains still running when the deadline expires,
+    before they are cancelled, so a drain that ignores cancellation is named
+    while it holds shutdown."""
+    events: list[str] = []
+    release = asyncio.Event()
+
+    class _IgnoresCancellation(_DrainPlugin):
+        async def drain(self, state: State, timeout: float) -> None:
+            while not release.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await release.wait()
+            events.append("settled:ignores")
+
+    warning = (
+        "Endpoint plugin drain deadline expired; cancelling drains still "
+        "running: ignores"
+    )
+    engine = _ServingEngineClient(events, shutdown_timeout=1)
+    plugin = _IgnoresCancellation(events, "ignores")
+    try:
+        async with _serving(monkeypatch, [plugin], engine) as (state, task, _):
+            await _wait_started(state, task)
+            state.request_shutdown()
+            async with asyncio.timeout(_TIMEOUT_S):
+                while _messages(plugin_logs, "deadline") != [warning]:
+                    await asyncio.sleep(0.01)
+            assert events == []
+            release.set()
+            await _wait_closed(task)
+    finally:
+        release.set()
+    assert events == ["settled:ignores", "engine_shutdown", "stop:ignores"]
 
 
 @pytest.mark.asyncio
