@@ -9,6 +9,10 @@ from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
 
 _READ_CHUNK_SIZE = 64 * KiB_bytes
+_MAX_SIZE_MESSAGE = (
+    "Maximum file size exceeded. "
+    "Set VLLM_MAX_AUDIO_CLIP_FILESIZE_MB to increase this limit."
+)
 
 
 async def read_upload_with_limit(
@@ -42,7 +46,7 @@ async def read_upload_with_limit(
 
     if file.size is not None and file.size > max_bytes:
         raise VLLMValidationError(
-            "Maximum file size exceeded",
+            _MAX_SIZE_MESSAGE,
             parameter="audio_filesize_mb",
             value=file.size / MiB_bytes,
         )
@@ -56,7 +60,7 @@ async def read_upload_with_limit(
         total += len(chunk)
         if total > max_bytes:
             raise VLLMValidationError(
-                "Maximum file size exceeded",
+                _MAX_SIZE_MESSAGE,
                 parameter="audio_filesize_mb",
                 value=total / MiB_bytes,
             )

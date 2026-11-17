@@ -7,11 +7,10 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
-    SkinnyGemmConfig,
-    shape_dynamic_skinny_gemm,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    trtllm_gen_query_heads,
+)
 
 from ..cutedsl.dsa.attn_ds import TOPK
 from ..cutedsl.dsa.index import DIM, HEADS
@@ -116,24 +115,6 @@ def projection_policies(tp, rows, batches):
             tactic = (64, n, 4 if n == 8 else 2, stages)
         policies[batch] = tactic
     return policies
-
-
-class SkinnyProjection:
-    """B1/B2 skinny GEMM; static K loads two weight tiles before the PDL wait (the
-    projections now run `DecodeProjection`; kept for the layer benchmarks)."""
-
-    def __init__(self, weight, fallback):
-        self.weight, self.fallback, k = weight, fallback, weight.shape[1]
-        tactics = {1: (128, 4, 1), 2: (64, 4, 2)}
-        self.configs = {m: SkinnyGemmConfig(m, *t, 8, k) for m, t in tactics.items()}
-        for m, cfg in self.configs.items():  # compile before capture
-            shape_dynamic_skinny_gemm(weight.new_zeros(m, k), weight, cfg, None)
-
-    def run(self, x, out):
-        cfg = self.configs.get(x.shape[0])
-        if cfg is None:
-            return self.fallback.run(x, out)
-        return shape_dynamic_skinny_gemm(x, self.weight, cfg, None)
 
 
 def scratch(runtime, name, shape, dtype=torch.bfloat16):
@@ -390,10 +371,7 @@ def dcp_box(runtime, heads, dsa=False, flashinfer=False, partials="default"):
         interleave = parallel.cp_kv_cache_interleave_size
         q_heads = None
         if dsa and flashinfer:
-            # trtllm-gen MLA decode takes no head count between 64 and 128.
-            q_heads = group.world_size * heads
-            if 64 < q_heads < 128:
-                q_heads = 128
+            q_heads = trtllm_gen_query_heads(group.world_size * heads)
         elif dsa:
             q_heads = 64 if group.world_size * heads <= 64 else 128
         # The wide rows of this box's own layer kind (the MLA box past 64 rows only
