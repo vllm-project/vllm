@@ -51,7 +51,10 @@ class SharedWeights:
 
 def fp8_rows(linear) -> tuple[torch.Tensor, torch.Tensor]:
     """`linear`'s FP8 weight [N, K] and per-row E8M0 scales [N, K / 32] (uint8)."""
-    w = linear.weight.data
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
+
+    # row-major even when AITER's FlyDSL MXFP8 linear preshuffled it in place
+    w = row_major_weight(linear)
     n, k = w.shape
     assert w.element_size() == 1, f"FP8 weight expected, got {w.dtype}"
     s = linear.weight_scale.data.view(torch.uint8)
