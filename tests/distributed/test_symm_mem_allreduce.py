@@ -4,6 +4,7 @@
 import queue
 import random
 import typing
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -14,7 +15,11 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators import symm_mem
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+)
 from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
@@ -29,6 +34,33 @@ torch.manual_seed(42)
 random.seed(44)
 
 test_size_elements = 1024 * 1024
+
+
+def test_cross_node_without_nvlink_skips_symmetric_memory(monkeypatch) -> None:
+    process_group = object()
+    capability = MagicMock()
+    capability.as_version_str.return_value = "10.0"
+    symmetric_memory = MagicMock()
+    monkeypatch.setattr(symm_mem, "symm_mem_available", True)
+    monkeypatch.setattr(symm_mem, "torch_symm_mem", symmetric_memory)
+    monkeypatch.setattr(symm_mem.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        symm_mem.current_platform,
+        "get_device_capability",
+        lambda: capability,
+    )
+    monkeypatch.setattr(symm_mem.torch.accelerator, "set_device_index", lambda _d: None)
+    monkeypatch.setattr(symm_mem.dist, "get_world_size", lambda _group: 2)
+    monkeypatch.setattr(
+        symm_mem,
+        "get_symmetric_memory_topology",
+        lambda _group: SymmetricMemoryTopology.UNSUPPORTED,
+    )
+
+    communicator = symm_mem.SymmMemCommunicator(process_group, "cuda:0")
+
+    assert communicator.disabled
+    symmetric_memory.empty.assert_not_called()
 
 
 def symm_mem_allreduce_worker(local_rank: int, world_size: int, q: mp.Queue):

@@ -629,7 +629,7 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
         return
     assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["t"]
     assert sent == [
-        ("t", NOTIFY_PORT + get_port_offset(0, t), "write_failed", None)
+        ("t", NOTIFY_PORT + get_port_offset(0, t, 4), "write_failed", None)
         for t in range(4)
     ]
     # The request's other write tasks are dropped.
@@ -667,7 +667,7 @@ def test_unconnected_fan_in_writer_tells_the_owning_rank_how_many_write():
 
     assert sent == [
         (
-            NOTIFY_PORT + get_port_offset(1, 0),
+            NOTIFY_PORT + get_port_offset(1, 0, 1),
             "write_failed",
             {"num_writers": 2, "sender": [0, 1]},
         )
