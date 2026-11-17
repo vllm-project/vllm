@@ -50,6 +50,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing.processor import PromptUpdateDetails
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .utils import (
@@ -153,8 +154,8 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
       * config → `Gemma4UnifiedConfig` (not `Gemma4Config`)
       * vision_config.`num_soft_tokens` (not `default_output_length`)
 
-    Everything else (token sequencing, audio limits, video frame budget,
-    parser construction) is inherited unchanged.
+    Audio token counts follow raw frames instead of tower subsampling.
+    Audio limits, video frame budget, and parser construction are inherited.
     """
 
     def get_hf_config(self):
@@ -188,6 +189,26 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
+
+    def get_audio_repl(
+        self,
+        *,
+        audio_len: int,
+        processor: Gemma4UnifiedProcessor | None,
+    ) -> PromptUpdateDetails:
+        """Emit one audio token per raw frame, without tower downsampling."""
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        samples_per_token = processor.feature_extractor.audio_samples_per_token
+        num_tokens = math.ceil(audio_len / samples_per_token)
+        config = self.get_hf_config()
+        token_ids = (
+            [config.boa_token_id]
+            + [processor.audio_token_id] * num_tokens
+            + [getattr(config, "eoa_token_id", config.eoa_token_index)]
+        )
+        return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
 
     def _compute_num_soft_tokens(
         self,

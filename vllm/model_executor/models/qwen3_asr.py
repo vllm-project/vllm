@@ -307,8 +307,8 @@ class Qwen3ASRMultiModalProcessor(
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         if "input_features" not in processed_data:

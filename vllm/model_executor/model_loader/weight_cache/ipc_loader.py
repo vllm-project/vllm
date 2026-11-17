@@ -34,18 +34,18 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
+    _load_device,
+    build_model_from_processed_weights,
     get_draft_load_config,
-    initialize_model,
-    process_weights_after_loading,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfigMismatchError,
+    TensorKind,
     UnsupportedQuantForIPCError,
     WeightCacheKey,
     WeightCacheState,
     WeightCacheUnavailableError,
-    check_ipc_platform_support,
-    check_ipc_quant_support,
+    check_weight_cache_loader_support,
     get_current_device_uuid,
     get_socket_path,
     recv_msg,
@@ -57,9 +57,7 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     record_external_weight_charge,
     record_external_weight_fallback,
 )
-from vllm.model_executor.utils import weights_already_processed
 from vllm.tracing import instrument
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -228,26 +226,14 @@ class IpcModelLoader(BaseModelLoader):
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
-        # An unsupported platform is a permanent misconfiguration rather than
-        # a transient daemon outage, so it is raised even when fallback is on.
-        check_ipc_platform_support()
-        if vllm_config.parallel_config.enable_eplb:
-            raise ValueError("The IPC weight cache loader does not support EPLB.")
+        # An unsupported platform or role is a permanent misconfiguration
+        # rather than a transient daemon outage, so it is raised even when
+        # fallback is on.
+        check_weight_cache_loader_support(
+            vllm_config, model_config, is_draft=self.is_draft
+        )
         state_fetched = False
         try:
-            # Cross-check the routing flag against the identity of the model
-            # being loaded: a draft load that lost its flag (or a target load
-            # that got one) would hit the wrong daemon group and
-            # fingerprint-mismatch.
-            spec = vllm_config.speculative_config
-            inferred = spec is not None and model_config is spec.draft_model_config
-            if inferred != self.is_draft:
-                raise CacheConfigMismatchError(
-                    f"Weight cache role mismatch: loading "
-                    f"{'draft' if inferred else 'target'} model but the loader "
-                    f"was configured for the "
-                    f"{'draft' if self.is_draft else 'target'} group"
-                )
             state = self._fetch_entries(
                 model_config,
                 vllm_config.cache_config,
@@ -255,7 +241,7 @@ class IpcModelLoader(BaseModelLoader):
                 vllm_config.kernel_config,
             )
             state_fetched = True
-            return self._build_model(vllm_config, model_config, prefix, state)
+            model = self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
@@ -279,6 +265,17 @@ class IpcModelLoader(BaseModelLoader):
             if state_fetched and self.mode == "copy":
                 self._send_release()
             torch.accelerator.empty_cache()
+        else:
+            if self.mode == "copy":
+                self._send_release()
+            else:
+                self._watch_daemon()
+            logger.info(
+                "Mapped %d tensors from the weight cache daemon (%s mode)",
+                len(state.entries),
+                self.mode,
+            )
+            return model
         model = self._fallback_load(vllm_config, model_config, prefix)
         if self.mode == "zero_copy":
             record_external_weight_fallback(self._resolve_socket_path(), self.is_draft)
@@ -291,106 +288,37 @@ class IpcModelLoader(BaseModelLoader):
         prefix: str,
         state: WeightCacheState,
     ) -> nn.Module:
-        device_config = vllm_config.device_config
-        load_device = (
-            device_config.device
-            if self.load_config.device is None
-            else self.load_config.device
+        _, device_index = _load_device(self.load_config, vllm_config)
+        tensors, kinds = self._apply_entries(state, device_index)
+        model = build_model_from_processed_weights(
+            vllm_config,
+            model_config,
+            prefix,
+            tensors,
+            kinds,
+            aliases=state.aliases,
+            attrs=state.attrs,
+            load_config=self.load_config,
         )
-        target_device = torch.device(load_device)
-        device_index = (
-            target_device.index
-            if target_device.index is not None
-            else torch.accelerator.current_device_index()
-        )
-        with set_default_torch_dtype(model_config.dtype):
-            with torch.device("meta"):
-                model = initialize_model(
-                    vllm_config=vllm_config,
-                    model_config=model_config,
-                    prefix=prefix,
-                )
-            check_ipc_quant_support(model)
-            self._apply_entries(model, state, device_index)
-            # Flags that load_weights would have set (e.g. EAGLE ownership of
-            # embed_tokens / lm_head); the daemon ran it, this process did not.
-            for name, value in state.attrs.items():
-                setattr(model, name, value)
-            # The daemon exports tensors that already went through
-            # process_weights_after_loading; re-run it in pre-processed mode
-            # so quant methods only rebuild Python-side state (e.g. the MoE
-            # kernel). Leftovers are materialized afterwards so that
-            # placeholders the daemon-side post-processing consumed are
-            # dropped rather than filled with uninitialized memory.
-            with weights_already_processed():
-                process_weights_after_loading(model, model_config, target_device)
-            _materialize_remaining_meta_tensors(
-                model, torch.device(target_device.type, device_index)
-            )
-        if self.mode == "copy":
-            self._send_release()
-        else:
-            self._watch_daemon()
-        logger.info(
-            "Mapped %d tensors from the weight cache daemon (%s mode)",
-            len(state.entries),
-            self.mode,
-        )
-        return model.eval()
+        return model
 
     def _apply_entries(
-        self,
-        model: nn.Module,
-        state: WeightCacheState,
-        device_index: int,
-    ) -> None:
-        # remove_duplicate=False keeps tied module aliases reachable by name:
-        # a tied lm_head *is* the embedding module, so the deduplicated view
-        # would not contain "lm_head" at all.
-        modules = dict(model.named_modules(remove_duplicate=False))
-        registered: dict[str, torch.Tensor] = {}
+        self, state: WeightCacheState, device_index: int
+    ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind]]:
+        """Resolve the daemon's entries to this process's tensors and kinds.
 
-        def _register(name: str, tensor: torch.Tensor, is_param: bool) -> None:
-            module_name, _, leaf = name.rpartition(".")
-            module = modules.get(module_name)
-            if module is None:
-                raise RuntimeError(f"Cached tensor {name} has no matching module")
-            # Replace via registration rather than param.data assignment,
-            # which fails for meta tensors. Entries may also introduce
-            # post-quantization tensors absent from the meta model.
-            module._parameters.pop(leaf, None)
-            module._buffers.pop(leaf, None)
-            if is_param:
-                obj: torch.Tensor = (
-                    tensor
-                    if isinstance(tensor, nn.Parameter)
-                    else nn.Parameter(tensor, requires_grad=False)
-                )
-                module.register_parameter(leaf, obj)
-            else:
-                obj = tensor
-                module.register_buffer(leaf, obj)
-            registered[name] = obj
-
+        In "copy" mode every tensor is cloned into engine-owned memory so the
+        daemon can be asked to release its cache afterwards.
+        """
+        tensors: dict[str, torch.Tensor] = {}
+        kinds: dict[str, TensorKind] = {}
         for name, entry in state.entries.items():
             tensor = entry.rebuild(device_index)
             if self.mode == "copy":
                 tensor = tensor.clone()
-            _register(name, tensor, entry.kind == "param")
-
-        # Re-establish tied-weight aliases by registering the *same* object the
-        # canonical name resolved to, so parameter identity (and the tie) is
-        # preserved instead of allocating uninitialized memory.
-        for alias_name, canonical_name in state.aliases.items():
-            obj = registered.get(canonical_name)
-            if obj is None:
-                logger.warning(
-                    "Cached alias %s references missing canonical tensor %s",
-                    alias_name,
-                    canonical_name,
-                )
-                continue
-            _register(alias_name, obj, isinstance(obj, nn.Parameter))
+            tensors[name] = tensor
+            kinds[name] = entry.kind
+        return tensors, kinds
 
     def _fetch_entries(
         self,
@@ -534,12 +462,19 @@ class IpcModelLoader(BaseModelLoader):
             )
 
     def _send_release(self) -> None:
-        try:
-            with self._connect(self.connect_timeout_s) as conn:
-                send_msg(conn, {"cmd": "release"})
-                recv_msg(conn)
-        except (WeightCacheUnavailableError, ConnectionError, OSError):
-            logger.warning("Failed to ask the weight cache daemon to release")
+        with self._connect(self.connect_timeout_s) as conn:
+            conn.settimeout(self.state_timeout_s)
+            send_msg(conn, {"cmd": "release"})
+            response = recv_msg(conn)
+            if not isinstance(response, dict) or response.get("status") != "ok":
+                message = (
+                    response.get("message", response)
+                    if isinstance(response, dict)
+                    else response
+                )
+                raise WeightCacheUnavailableError(
+                    f"Weight cache daemon refused release: {message}"
+                )
 
     def _watch_daemon(self) -> threading.Thread | None:
         """Watch for the exit of the daemon serving the zero-copy weights.
@@ -615,26 +550,3 @@ class IpcModelLoader(BaseModelLoader):
         return loader.load_model(
             vllm_config=vllm_config, model_config=model_config, prefix=prefix
         )
-
-
-def _materialize_remaining_meta_tensors(model: nn.Module, device: torch.device) -> None:
-    """Allocate any tensors the daemon did not provide.
-
-    These are typically parameters removed on the daemon side by
-    process_weights_after_loading; they are not expected to be read at
-    runtime, so they are left uninitialized.
-    """
-    for module_name, module in model.named_modules():
-        for leaf, param in list(module._parameters.items()):
-            if param is not None and param.device.type == "meta":
-                logger.warning(
-                    "Materializing empty parameter %s.%s missing from the weight cache",
-                    module_name,
-                    leaf,
-                )
-                module._parameters[leaf] = nn.Parameter(
-                    torch.empty_like(param, device=device), requires_grad=False
-                )
-        for leaf, buffer in list(module._buffers.items()):
-            if buffer is not None and buffer.device.type == "meta":
-                module._buffers[leaf] = torch.empty_like(buffer, device=device)

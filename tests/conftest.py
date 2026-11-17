@@ -240,7 +240,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="gloo" if current_platform.is_cpu() else "nccl",
+                backend=current_platform.dist_backend,
             )
             initialize_model_parallel(1, 1)
             yield
@@ -297,6 +297,32 @@ def workspace_init():
         init_workspace_manager(torch.device(0))
     yield
     reset_workspace_manager()
+
+
+@pytest.fixture
+def narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep dummy FP8 weights within +-1, as before full-range dummy FP8 codes.
+
+    For tests that compare dummy-weight outputs of paths that are not bitwise
+    equivalent (greedy tokens across engines, fused vs. unfused kernels).
+    Full-range FP8 codes, NVFP4 block scales included, scale up activations,
+    so rounding noise flips near-tied greedy tokens or exceeds absolute
+    tolerances. The patch applies to this process only, so the engine core
+    runs in process; the model must also run in it (one worker, no
+    multiprocessing executor).
+    """
+    from vllm.model_executor.model_loader import dummy_loader
+
+    original = dummy_loader.initialize_single_dummy_weight
+
+    def initialize(param: torch.Tensor, *args, **kwargs) -> None:
+        if param.is_floating_point() and torch.finfo(param.dtype).bits == 8:
+            kwargs.setdefault("low", -1.0)
+            kwargs.setdefault("high", 1.0)
+        original(param, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_loader, "initialize_single_dummy_weight", initialize)
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -371,7 +397,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -409,7 +435,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -956,7 +982,6 @@ class VllmRunner:
     The default value of some arguments have been modified from
     {class}`~vllm.LLM` as follows:
 
-    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
     - `block_size`: To reduce memory usage, set default to `64` if on XPU
@@ -975,7 +1000,7 @@ class VllmRunner:
         convert: ConvertOption = "auto",
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",

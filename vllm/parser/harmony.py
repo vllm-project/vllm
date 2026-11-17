@@ -83,7 +83,7 @@ class Segment(NamedTuple):
     completed_message: Message | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ChunkResult:
     segments: list[Segment]
     reasoning_token_count: int

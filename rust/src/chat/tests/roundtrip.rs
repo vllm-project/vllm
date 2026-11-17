@@ -1083,6 +1083,7 @@ fn decoded_completion_stream(
     let mut events = vec![DecodedTextEvent::Start {
         prompt_token_ids: Arc::from(prompt_token_ids.clone().into_boxed_slice()),
         prompt_logprobs: None,
+        prompt_token_id_logprobs: None,
     }];
 
     let chunks = match completion_body(tokenizer, completion, assistant_stop_suffix)? {
@@ -1132,7 +1133,6 @@ fn decoded_completion_stream(
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -1148,7 +1148,6 @@ fn decoded_completion_stream(
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-                sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
@@ -1159,6 +1158,7 @@ fn decoded_completion_stream(
                 sampled: vllm_text::SampledDelta {
                     token_ids: chunk.token_ids,
                     logprobs: None,
+                    sampling_mask: None,
                 },
                 finished: finished.map(Box::new),
             });

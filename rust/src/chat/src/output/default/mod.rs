@@ -422,7 +422,6 @@ mod tests {
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
