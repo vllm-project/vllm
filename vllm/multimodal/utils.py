@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import replace
 from itertools import groupby
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import numpy as np
 import numpy.typing as npt
@@ -170,6 +170,15 @@ def get_use_audio_in_video(
 ) -> bool:
     """Whether the processor interleaves audio into video for this request."""
     return bool(get_load_audio_from_video(mm_processor_kwargs))
+
+
+VIDEO_AUDIO_UUID_PREFIX: Final[str] = "vllm-audio-in-video:"
+"""Prefix of the UUID the renderer gives the audio track taken from a video
+when `use_audio_in_video` is set.
+
+A `None` audio item under such a UUID stands for a video without an audio
+track, as opposed to a data-less reference to a cached audio item.
+"""
 
 
 def get_mm_features_in_window(

@@ -17,7 +17,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.media.audio import NoAudioStreamError
-from vllm.multimodal.utils import get_load_audio_from_video
+from vllm.multimodal.utils import VIDEO_AUDIO_UUID_PREFIX, get_load_audio_from_video
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
@@ -71,9 +71,6 @@ def _loads_audio_from_video(
     return bool(get_load_audio_from_video(kwargs))
 
 
-_VIDEO_AUDIO_UUID_PREFIX: Final[str] = "vllm-audio-in-video:"
-
-
 def _video_audio_uuid(video_uuid: str | None) -> str | None:
     """Return the UUID for the audio track extracted from a video.
 
@@ -81,7 +78,7 @@ def _video_audio_uuid(video_uuid: str | None) -> str | None:
     items would get the same `uuid:` cache key despite holding different data.
     The prefix keeps the derived UUID apart from client-chosen ones.
     """
-    return None if video_uuid is None else _VIDEO_AUDIO_UUID_PREFIX + video_uuid
+    return None if video_uuid is None else VIDEO_AUDIO_UUID_PREFIX + video_uuid
 
 
 def _warn_video_without_audio(video_url: str, video_uuid: str | None) -> None:
@@ -332,15 +329,17 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         ):
             audio_uuid = _video_audio_uuid(uuid)
             try:
-                audio = self._connector.fetch_audio(video_url)
+                audio = self._connector.fetch_audio(video_url, from_video=True)
             except NoAudioStreamError:
                 # Only a valid video without an audio track degrades to
                 # video-only; keep mm_data/mm_uuids aligned with a sentinel
-                # UUID so the engine can match the pair. Corrupt or
-                # over-limit audio still raises.
+                # UUID so the engine can match the pair. The sentinel always
+                # carries the prefix, which tells it apart from a data-less
+                # reference to a cached audio item. Corrupt or over-limit
+                # audio still raises.
                 _warn_video_without_audio(video_url, uuid)
                 audio = None
-                audio_uuid = audio_uuid or random_uuid()
+                audio_uuid = audio_uuid or (VIDEO_AUDIO_UUID_PREFIX + random_uuid())
             audio_placeholder = self._tracker.add("audio", (audio, audio_uuid))
             self._add_placeholder("audio", audio_placeholder)
 
@@ -371,7 +370,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         self._add_placeholder("video", placeholder)
         if audio_embeds is not None:
-            self.parse_audio_embeds(audio_embeds, uuid)
+            # Same UUID `parse_video` gives the extracted track, so the audio
+            # resolves to one cache key whether sent as media or as embeds.
+            self.parse_audio_embeds(audio_embeds, _video_audio_uuid(uuid))
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -530,15 +531,15 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     async def _video_audio_with_uuid_async(self, video_url: str, uuid: str | None):
         audio_uuid = _video_audio_uuid(uuid)
         try:
-            audio = await self._connector.fetch_audio_async(video_url)
+            audio = await self._connector.fetch_audio_async(video_url, from_video=True)
         except NoAudioStreamError:
             # A video without an audio track degrades to video-only. The
-            # returned None carries a sentinel UUID so `_resolve_items` keeps
-            # the pair: a bare (None, None) entry would trip the empty-media
-            # validation.
+            # returned None carries a prefixed sentinel UUID so `_resolve_items`
+            # keeps the pair: a bare (None, None) entry would trip the
+            # empty-media validation.
             _warn_video_without_audio(video_url, uuid)
             audio = None
-            audio_uuid = audio_uuid or random_uuid()
+            audio_uuid = audio_uuid or (VIDEO_AUDIO_UUID_PREFIX + random_uuid())
         return audio, audio_uuid
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
@@ -609,7 +610,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         )
         self._add_placeholder("video", placeholder)
         if audio_embeds is not None:
-            self.parse_audio_embeds(audio_embeds, uuid)
+            # Same UUID `parse_video` gives the extracted track, so the audio
+            # resolves to one cache key whether sent as media or as embeds.
+            self.parse_audio_embeds(audio_embeds, _video_audio_uuid(uuid))
 
     async def _video_embeds_with_uuid_async(
         self,
