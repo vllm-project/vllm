@@ -59,7 +59,11 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import (
+    check_stop,
+    keep_prompt_embeds_until_finished,
+    remove_all,
+)
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine import (
     EngineCoreEventType,
@@ -219,6 +223,18 @@ class Scheduler(SchedulerInterface):
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
+
+        # Prompt-embeds rows the workers hold on the GPU, per request, until
+        # its prompt is computed (or it finishes, see the helper). None without
+        # enable_prompt_embeds, when no request carries prompt_embeds.
+        self.max_num_prompt_embeds_tokens = (
+            self.scheduler_config.max_num_prompt_embeds_tokens or 0
+        )
+        self.prompt_embeds_rows: dict[str, int] = {}
+        self.num_prompt_embeds_rows = 0
+        self.keep_prompt_embeds_until_finished = keep_prompt_embeds_until_finished(
+            vllm_config
+        )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -1123,6 +1139,10 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
+                if not self._prompt_embeds_fit(request):
+                    skip_request(request_queue)
+                    continue
+
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
@@ -1611,6 +1631,7 @@ class Scheduler(SchedulerInterface):
                 ):
                     raise RuntimeError(f"Invalid request status: {request.status}")
                 scheduled_new_reqs.append(request)
+                self._reserve_prompt_embeds(request)
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -1849,6 +1870,7 @@ class Scheduler(SchedulerInterface):
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
+        self._release_prompt_embeds(request.request_id)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
@@ -1875,6 +1897,27 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _prompt_embeds_fit(self, request: Request) -> bool:
+        """Check if the request's prompt embeds fit within the current capacity."""
+        if request.prompt_embeds is None:
+            return True
+        num_rows = request.prompt_embeds.shape[0]
+        num_held = self.prompt_embeds_rows.get(request.request_id, 0)
+        num_used = self.num_prompt_embeds_rows - num_held
+        return num_used + num_rows <= self.max_num_prompt_embeds_tokens
+
+    def _reserve_prompt_embeds(self, request: Request) -> None:
+        """Reserve GPU memory for the request's prompt embeds."""
+        self._release_prompt_embeds(request.request_id)
+        if request.prompt_embeds is None:
+            return
+        num_rows = request.prompt_embeds.shape[0]
+        self.prompt_embeds_rows[request.request_id] = num_rows
+        self.num_prompt_embeds_rows += num_rows
+
+    def _release_prompt_embeds(self, req_id: str) -> None:
+        self.num_prompt_embeds_rows -= self.prompt_embeds_rows.pop(req_id, 0)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1908,6 +1951,13 @@ class Scheduler(SchedulerInterface):
             # in order.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
+            if (
+                req_id in self.prompt_embeds_rows
+                and not self.keep_prompt_embeds_until_finished
+                and request.num_computed_tokens >= self.prompt_embeds_rows[req_id]
+            ):
+                # The workers drop the rows after this step reads them.
+                self._release_prompt_embeds(req_id)
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -3240,6 +3290,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
+        self._release_prompt_embeds(request.request_id)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

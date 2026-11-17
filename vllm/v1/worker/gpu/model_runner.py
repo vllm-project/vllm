@@ -1107,6 +1107,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dummy_mm_inputs, mm_budget
                 )
 
+        # Hold the prompt_embeds rows the scheduler may admit, so that the peak
+        # counts them (see PromptEmbedsState).
+        prompt_embeds_rows = None
+        max_prompt_embeds_rows = self.scheduler_config.max_num_prompt_embeds_tokens
+        if max_prompt_embeds_rows and self.is_first_pp_rank:
+            prompt_embeds_rows = torch.empty(
+                max_prompt_embeds_rows,
+                self.model_config.get_inputs_embeds_size(),
+                dtype=self.dtype,
+                device=self.device,
+            )
+
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens,
             skip_attn=True,
@@ -1123,7 +1135,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._dummy_pooler_run(hidden_states)
 
         torch.accelerator.synchronize()
-        del hidden_states, sample_hidden_states
+        del hidden_states, sample_hidden_states, prompt_embeds_rows
         self.reset_encoder_cache()
         gc.collect()
 

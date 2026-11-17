@@ -593,6 +593,75 @@ def test_max_num_active_seqs_caps_admission():
     assert scheduler.max_num_running_reqs == 16
 
 
+def _prompt_embeds_request(request_id: str, num_rows: int) -> Request:
+    sampling_params = SamplingParams(max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        prompt_embeds=torch.zeros(num_rows, 8),
+    )
+
+
+def _new_req_ids(output: SchedulerOutput) -> list[str]:
+    return [req.req_id for req in output.scheduled_new_reqs]
+
+
+def test_prompt_embeds_admission_waits_for_gpu_budget():
+    """A prompt_embeds request waits while its rows would push the rows held on
+    the GPU past max_num_prompt_embeds_tokens (here max_model_len). Requests
+    without embeds are admitted past it, and it is admitted once a held prompt
+    is fully computed, before that request finishes."""
+    scheduler = create_scheduler(max_model_len=64, enable_prompt_embeds=True)
+    scheduler.add_request(_prompt_embeds_request("a", 40))
+    scheduler.add_request(_prompt_embeds_request("b", 40))
+    scheduler.add_request(create_requests(1, num_tokens=10, req_ids=["c"])[0])
+
+    assert _new_req_ids(scheduler.schedule()) == ["a", "c"]
+    # a's whole prompt was scheduled, so the workers drop its rows.
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+    assert "a" in scheduler.requests
+
+
+def test_prompt_embeds_budget_released_on_preemption():
+    """Preempting a request mid-prefill releases its rows (the workers drop
+    them), so a waiting prompt_embeds request that did not fit is admitted."""
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=16, enable_prompt_embeds=True
+    )
+    request = _prompt_embeds_request("a", 40)
+    scheduler.add_request(request)
+    scheduler.add_request(_prompt_embeds_request("b", 40))
+    assert _new_req_ids(scheduler.schedule()) == ["a"]
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+
+
+def test_prompt_embeds_held_until_finished_with_recompute_policy():
+    """With kv_load_failure_policy="recompute", a failed KV load can roll a
+    running request back without re-sending it, so its rows stay on the GPU,
+    and count against the budget, until it finishes."""
+    scheduler = create_scheduler(
+        max_model_len=64,
+        enable_prompt_embeds=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+        kv_load_failure_policy="recompute",
+    )
+    scheduler.add_request(_prompt_embeds_request("a", 40))
+    scheduler.add_request(_prompt_embeds_request("b", 40))
+
+    assert _new_req_ids(scheduler.schedule()) == ["a"]
+    assert _new_req_ids(scheduler.schedule()) == []
+
+    scheduler.finish_requests("a", RequestStatus.FINISHED_ABORTED)
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)

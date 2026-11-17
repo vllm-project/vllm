@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -18,6 +19,11 @@ class PromptEmbedsState:
     off the per-step hot path. A per-request pointer table (UVA) then lets a
     single triton kernel overlay all scheduled prompt-embeds rows onto
     `inputs_embeds` each step, with no python loops or per-request H2D copies.
+
+    A request's embeddings are dropped after the step that computes its last
+    prompt position, unless `keep_until_finished`. The scheduler admits
+    requests so that the rows held here stay within
+    `max_num_prompt_embeds_tokens`, which memory profiling reserves.
     """
 
     def __init__(
@@ -26,8 +32,10 @@ class PromptEmbedsState:
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
+        keep_until_finished: bool = False,
     ):
         self.hidden_size = hidden_size
+        self.keep_until_finished = keep_until_finished
         self.dtype = dtype
         self.device = device
 
@@ -94,6 +102,23 @@ class PromptEmbedsState:
             TOKEN_BLOCK=TOKEN_BLOCK,
             BLOCK_SIZE=1024,
         )
+        if not self.keep_until_finished:
+            self._drop_computed(input_batch)
+
+    def _drop_computed(self, input_batch: InputBatch) -> None:
+        # Freeing is stream-ordered after the kernel above, which reads them.
+        # The stale UVA length is harmless: once its rows are computed, the
+        # kernel skips a request before reading its pointer.
+        num_reqs = input_batch.num_reqs
+        idx_mapping = input_batch.idx_mapping_np[:num_reqs]
+        embeds_lens = self.embeds_lens.np[idx_mapping]
+        end = (
+            input_batch.num_computed_tokens_np[:num_reqs]
+            + input_batch.num_scheduled_tokens[:num_reqs]
+        )
+        for i in np.flatnonzero((embeds_lens > 0) & (end >= embeds_lens)).tolist():
+            self.gpu_tensors.pop(input_batch.req_ids[i], None)
+            self.embeds_lens.np[idx_mapping[i]] = 0
 
 
 @triton.jit

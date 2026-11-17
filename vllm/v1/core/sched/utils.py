@@ -2,9 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+def keep_prompt_embeds_until_finished(vllm_config: "VllmConfig") -> bool:
+    """Whether workers keep a request's `prompt_embeds` until it finishes.
+
+    Otherwise they are dropped once the prompt is computed. A KV load that
+    fails under `kv_load_failure_policy="recompute"` rolls a running request
+    back without re-sending it to the workers, so its rows must stay.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return (
+        kv_transfer_config is not None
+        and kv_transfer_config.kv_load_failure_policy == "recompute"
+    )
 
 
 def _has_repeating_pattern(

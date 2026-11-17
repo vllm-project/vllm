@@ -99,6 +99,9 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     encoder_cache_size: int | None = None,
+    enable_prompt_embeds: bool = False,
+    max_num_prompt_embeds_tokens: int | None = None,
+    kv_load_failure_policy: str | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -126,6 +129,7 @@ def create_scheduler(
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
         runner=runner,
+        enable_prompt_embeds=enable_prompt_embeds,
     )
     if mm_encoder_only:
         model_config.multimodal_config.mm_encoder_only = True
@@ -150,6 +154,7 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        max_num_prompt_embeds_tokens=max_num_prompt_embeds_tokens,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -182,6 +187,9 @@ def create_scheduler(
             kv_role=kv_role,
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
+    if kv_load_failure_policy is not None:
+        assert kv_transfer_config is not None
+        kv_transfer_config.kv_load_failure_policy = kv_load_failure_policy
 
     if num_speculative_tokens is not None:
         assert speculative_config is None

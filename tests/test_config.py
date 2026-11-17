@@ -878,6 +878,38 @@ def test_hisparse_rejects_unsupported_platform(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("enable_prompt_embeds", "requested", "expected", "warns"),
+    [
+        (False, None, None, False),
+        (True, None, 64, False),
+        (True, 16, 64, True),
+        (True, 128, 128, False),
+    ],
+)
+def test_max_num_prompt_embeds_tokens_fits_any_request(
+    caplog, disable_log_dedup, enable_prompt_embeds, requested, expected, warns
+):
+    """The prompt-embeds GPU budget defaults to, and is raised to, max_model_len
+    so any request can be admitted; it is left unset without prompt embeds."""
+    with caplog.at_level(logging.WARNING):
+        config = VllmConfig(
+            model_config=ModelConfig(
+                "facebook/opt-125m",
+                max_model_len=64,
+                enable_prompt_embeds=enable_prompt_embeds,
+            ),
+            scheduler_config=SchedulerConfig(
+                max_model_len=64,
+                is_encoder_decoder=False,
+                max_num_prompt_embeds_tokens=requested,
+            ),
+        )
+
+    assert config.scheduler_config.max_num_prompt_embeds_tokens == expected
+    assert ("Raising max_num_prompt_embeds_tokens" in caplog.text) == warns
+
+
+@pytest.mark.parametrize(
     "kv_transfer_config,kv_offloading_size",
     [
         (None, None),
