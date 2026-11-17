@@ -31,7 +31,7 @@ class cudaIpcMemHandle_t(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
-@dataclass
+@dataclass(slots=True)
 class Function:
     name: str
     restype: Any

@@ -40,16 +40,18 @@ if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
             "Dedicated ReplaySSM CI requires FlashInfer 0.7.0 checkpointing and "
             "materialization APIs, including active_request_indices"
         )
+    required_gpus = int(os.environ.get("VLLM_TEST_REPLAYSSM_NUM_GPUS", "2"))
     if (
         not current_platform.is_cuda()
-        or current_platform.device_count() < 2
+        or current_platform.device_count() < required_gpus
         or any(
             current_platform.get_device_total_memory(device) < 40_000_000_000
-            for device in range(2)
+            for device in range(required_gpus)
         )
     ):
         raise RuntimeError(
-            "Dedicated ReplaySSM CI requires two CUDA GPUs with at least 40 GB each"
+            f"Dedicated ReplaySSM CI requires {required_gpus} CUDA GPU(s) "
+            "with at least 40 GB each"
         )
 
 # Mamba2 (Nemotron-3) hybrid.
@@ -99,7 +101,6 @@ def _check_replayssm_parity(
     # common-mode and only ReplaySSM varies.
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
@@ -186,7 +187,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
         speculative_config["prompt_lookup_max"] = 3
     common = dict(
         max_model_len=1024,
-        trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         mamba_backend="flashinfer",
@@ -275,7 +275,6 @@ def _check_replayssm_prefix_caching(
 ):
     common = dict(
         max_model_len=8192,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         mamba_cache_mode="align",
         mamba_backend=mamba_backend,
@@ -423,13 +422,12 @@ def _metric_counts(llm) -> dict[str, int]:
 
 
 def _stress_mamba_block_size(worker) -> int:
-    from vllm.v1.kv_cache_interface import MambaSpec, iter_layer_specs
+    from vllm.v1.core.kv_cache_utils import is_mamba_group
 
     sizes = {
-        spec.block_size
+        group.block_size
         for group in worker.model_runner.kv_cache_config.kv_cache_groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
-        if isinstance(spec, MambaSpec)
+        if is_mamba_group(group)
     }
     assert len(sizes) == 1, sizes
     return sizes.pop()
@@ -523,7 +521,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
     for use_replayssm in (True, False):
         with vllm_runner(
             MAMBA2_MTP_MODEL,
-            trust_remote_code=True,
             max_model_len=32_768,
             max_num_seqs=4,
             max_num_batched_tokens=2048,
