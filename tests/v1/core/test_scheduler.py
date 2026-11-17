@@ -1798,7 +1798,7 @@ def test_cache_clearing_pause_rejects_inflight_remote_kv(sleep: bool):
     core.model_executor = Mock()
     core.mm_receiver_cache = None
 
-    with pytest.raises(RuntimeError, match="Failed to reset the KV connector cache"):
+    with pytest.raises(RuntimeError, match="KV prefix or connector cache"):
         if sleep:
             core.sleep(level=1, mode="keep")
         else:
