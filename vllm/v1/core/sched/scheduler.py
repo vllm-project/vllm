@@ -756,9 +756,7 @@ class Scheduler(SchedulerInterface):
             throttled = self._num_backlog_steps % self.prefill_backlog_interval != 0
         else:
             self._num_backlog_steps = 0
-        defer_prefills = throttled and any(
-            not r.is_prefill_chunk for r in self.running
-        )
+        defer_prefills = throttled and any(not r.is_prefill_chunk for r in self.running)
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
