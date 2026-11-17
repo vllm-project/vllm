@@ -76,6 +76,16 @@ def test_gptq_gemm_allocates_temp_dq_only_for_reconstruct(
     assert reconstruct_peak >= temp_dq_bytes
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() != (12, 0),
+    reason="MAX_Q_GEMM_ROWS_SM120 lowers the 4-bit cutoff only on sm_120",
+)
+def test_gptq_gemm_sm120_reconstruct_cutoff():
+    temp_dq_bytes = 4096 * 4096 * 2
+    assert gptq_gemm_peak_bytes(32, True, 4) < temp_dq_bytes
+    assert gptq_gemm_peak_bytes(50, True, 4) >= temp_dq_bytes
+
+
 @pytest.mark.parametrize("quant_type", [scalar_types.uint4b8, scalar_types.uint8b128])
 @pytest.mark.parametrize("group_size", [-1, 32, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

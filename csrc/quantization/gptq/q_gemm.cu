@@ -26,6 +26,9 @@ namespace gptq {
 #define MAX_GROUPS_IN_BLOCK (BLOCK_KN_SIZE / 32)
 #define MAX_Q_GEMM_ROWS 50
 #define MAX_Q_GEMM_ROWS_8BIT 24
+// On sm_120 the fused 4-bit kernel loses to reconstruct + cuBLAS from M=33
+// up at every measured K; the stock 50-row cutoff stays elsewhere.
+#define MAX_Q_GEMM_ROWS_SM120 32
 #define MAX_ALT_GEMM_ROWS 8
 #define THREADS_X 32
 #define THREADS_Y 32
@@ -1327,8 +1330,13 @@ void reconstruct_gptq(const uint32_t* b_q_weight, const uint32_t* b_gptq_qzeros,
 
 bool should_reconstruct(int size_m, bool use_exllama, int bit) {
   if (use_exllama) {
+    int max_rows_4bit = MAX_Q_GEMM_ROWS;
+    const cudaDeviceProp* prop = get_device_prop();
+    if (prop->major == 12 && prop->minor == 0) {
+      max_rows_4bit = MAX_Q_GEMM_ROWS_SM120;
+    }
     return ((bit == 8 && size_m > MAX_Q_GEMM_ROWS_8BIT) ||
-            (bit != 8 && size_m > MAX_Q_GEMM_ROWS));
+            (bit != 8 && size_m > max_rows_4bit));
   }
   // The 2/3-bit kernels are somehow slower than dequant + gemm baseline, so
   // we disabled them for now.
