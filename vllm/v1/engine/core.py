@@ -1934,7 +1934,10 @@ class EngineCoreProc(EngineCore):
                         num_requests,
                         shutdown_timeout,
                     )
-                self._shutdown_deadline = time.monotonic() + shutdown_timeout
+                # A later SIGTERM/SIGINT re-enters this branch; keep the first
+                # deadline, since the process manager's kill is timed from it.
+                if self._shutdown_deadline is None:
+                    self._shutdown_deadline = time.monotonic() + shutdown_timeout
 
             self.shutdown_state = EngineShutdownState.SHUTTING_DOWN
 

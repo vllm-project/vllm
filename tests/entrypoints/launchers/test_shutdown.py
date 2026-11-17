@@ -16,6 +16,7 @@ import psutil
 import pytest
 from prometheus_client.parser import text_string_to_metric_families
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.network_utils import get_open_port
 
@@ -425,6 +426,11 @@ async def test_wait_timeout_with_short_duration():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend closes in-flight connections at the drain deadline "
+    "instead of returning aborts",
+)
 async def test_wait_timeout_aborts_requests_past_deadline():
     """Verify a request still running at the drain deadline ends with
     finish_reason='abort' and the server exits within the budget."""
