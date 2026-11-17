@@ -1297,6 +1297,7 @@ def run_mla_benchmark(
     num_kv_splits: int | None = None,
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    *,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
@@ -1315,8 +1316,8 @@ def run_mla_benchmark(
                                  (single config mode only)
         num_kv_splits: Number of KV splits for CUTLASS (single config mode only)
         index_topk: Topk value for sparse MLA backends (default 2048)
-        prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
-            When set, forces the specified FlashAttention version for prefill.
+        prefill_backend: Backend used for MHA prefill (e.g., "fa3", "fa4").
+            Sparse MLA routing is controlled by config.sparse_mla_route.
         output_scale: Static per-tensor FP8 scale for prefill output (None = bf16).
         fuse_quant_op: With output_scale set, fuse the FP8 write into the prefill
             kernel vs a standalone post-quant kernel. See _run_single_benchmark.

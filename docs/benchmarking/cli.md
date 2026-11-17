@@ -68,6 +68,9 @@ and `mqa` variants. When calling the benchmark runner from Python, set
 builder's decision. Import `SparseMLAPrefillRoute` from
 `vllm.v1.attention.backends.mla.sparse_utils`. This replaces
 the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
+The runner's FP8 options `output_scale` and `fuse_quant_op` are keyword-only;
+old positional route overrides raise `TypeError` instead of being interpreted
+as quantization options. Move route overrides into `BenchmarkConfig`.
 `BenchmarkResult.actual_sparse_mla_route` records the executed prefill route
 (or `SPARSE_MQA` for decode-only sparse batches). The result table shows this
 route below each timing; JSON and CSV include its enum name in
