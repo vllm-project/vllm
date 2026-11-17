@@ -68,6 +68,10 @@ message GenerateRequest {
   // Media loading options keyed by modality, as in the HTTP `media_io_kwargs`
   // request field. Only `video.fps` (frames sampled per second) is supported.
   google.protobuf.Struct media_io_kwargs = 19;
+  // Delay the terminal response until EngineCore acknowledges scheduler
+  // retirement, including frontend stop-string cancellation. Not a GPU or
+  // external-media release fence. Defaults to false.
+  bool wait_for_retirement = 20;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
@@ -206,6 +210,8 @@ message GenerateResponse {
   // Only present in first response
   optional PromptInfo prompt_info = 1;
   SequenceOutput outputs = 2;
+  // Only true on an opted-in terminal response after scheduler retirement.
+  bool scheduler_retired = 3;
 }
 
 message SequenceOutput {

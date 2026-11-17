@@ -70,6 +70,9 @@ The gRPC listener also serves `grpc.health.v1.Health`. Kubernetes probes should
 use the `liveness` service for liveness and `readiness` for readiness; see
 [Rust frontend gRPC health checks](../docs/deployment/k8s.md#rust-frontend-grpc-health-checks).
 
+For opt-in scheduler cancellation acknowledgements, including frontend
+stop-string matches, see [gRPC request retirement](../docs/serving/online_serving/grpc_retirement.md).
+
 ### RL weight synchronization
 
 With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer

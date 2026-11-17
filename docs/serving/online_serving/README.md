@@ -2,6 +2,10 @@
 
 vLLM provides an HTTP server that is compatible with many interfaces!
 
+The native Rust frontend also provides gRPC APIs. See
+[request retirement acknowledgements](grpc_retirement.md) for opting into
+EngineCore scheduler cancellation confirmation.
+
 ## OpenAI-Compatible Server
 
 We currently support the following OpenAI APIs:
