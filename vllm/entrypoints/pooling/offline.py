@@ -62,15 +62,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         # Use thread pool executor to accelerate preprocessing.
         self._executor = self.renderer._executor
 
-    def _resolve_content_format(
-        self,
-        chat_template_content_format: ChatTemplateContentFormatOption | None,
-    ) -> ChatTemplateContentFormatOption:
-        """Fallback to the engine-level content format when unset."""
-        if chat_template_content_format is not None:
-            return chat_template_content_format
-        return self.chat_template_config.chat_template_content_format
-
     def encode(
         self,
         prompts: PoolingInput | Sequence[PoolingInput] | DataPrompt,
@@ -565,6 +556,15 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
+
+    def _resolve_content_format(
+        self,
+        chat_template_content_format: ChatTemplateContentFormatOption | None,
+    ) -> ChatTemplateContentFormatOption:
+        """Fallback to the engine-level content format when unset."""
+        if chat_template_content_format is not None:
+            return chat_template_content_format
+        return self.chat_template_config.chat_template_content_format
 
     def _run_tiling_engine(
         self,

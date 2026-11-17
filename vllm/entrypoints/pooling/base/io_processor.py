@@ -276,6 +276,7 @@ class PoolingIOProcessor:
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=prompt_extras_dict.get("mm_processor_kwargs"),
         )
 
         def request_factory() -> RequestGenerator:
