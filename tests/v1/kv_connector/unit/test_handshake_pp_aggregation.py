@@ -84,11 +84,6 @@ def _run_engine_core_handshake(
         engine_core_module, "maybe_attach_gc_debug_callback", lambda: None
     )
     monkeypatch.setattr(engine_core_module, "enable_envs_cache", lambda: None)
-    monkeypatch.setattr(engine_core_module, "get_hash_fn_by_name", lambda name: None)
-    monkeypatch.setattr(engine_core_module, "init_none_hash", lambda hash_fn: None)
-    monkeypatch.setattr(
-        engine_core_module, "get_request_block_hasher", lambda *args: None
-    )
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(data_parallel_rank_local=0),
@@ -99,6 +94,7 @@ def _run_engine_core_handshake(
             prefill_schedule_interval=1,
         ),
         speculative_config=None,
+        kv_transfer_config=None,
         ec_transfer_config=None,
         is_mm_encoder_only=False,
         max_concurrent_batches=1,
@@ -110,7 +106,7 @@ def _run_engine_core_handshake(
         ),
         cache_config=SimpleNamespace(
             enable_prefix_caching=False,
-            prefix_caching_hash_algo="builtin",
+            prefix_caching_hash_algo="sha256",
         ),
     )
 
