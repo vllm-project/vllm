@@ -11,12 +11,16 @@ import torch
 from pydantic import TypeAdapter
 
 from vllm.config import replace
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     TensorKind,
-    WeightCacheKey,
-    parse_seed_address,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
     send_msg,
+)
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    WeightCacheKey,
+    parse_seed_address,
     verify_socket_owner,
 )
 from vllm.platforms import current_platform

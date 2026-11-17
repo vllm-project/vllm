@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The `peer_ipc` weight mover: copy storages through CUDA IPC on one host."""
+"""The `peer_ipc` weight mover: copy storages between GPUs on one host."""
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
+    TensorEntry,
+)
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
     WeightMover,
@@ -16,17 +19,27 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
 )
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        IPCBackend,
+    )
+
 
 class PeerIpcMover(WeightMover):
-    """Copy storages through CUDA IPC handles on the same host."""
+    """Copy storages through node-local weight-sharing handles."""
 
     name = PEER_IPC_BACKEND
 
-    def __init__(self, device_index: int | None = None):
+    def __init__(
+        self,
+        device_index: int | None = None,
+        ipc_backend: "IPCBackend | None" = None,
+    ):
         # The D2D serving thread never set a device, and an IPC handle must
         # name the daemon's device; None means the device is already current
         # (e.g. the loader's own thread).
         self._device_index = device_index
+        self._ipc_backend = ipc_backend
 
     def prepare_seed(self, storages: list[torch.UntypedStorage]) -> dict:
         if self._device_index is not None:
@@ -35,11 +48,15 @@ class PeerIpcMover(WeightMover):
         gpu_uuid = None
         if torch.accelerator.device_count() > 0 and current_platform.is_cuda_alike():
             gpu_uuid = current_platform.get_device_uuid(index)
+        export = (
+            TensorEntry.from_tensor
+            if self._ipc_backend is None
+            else self._ipc_backend.export_tensor
+        )
         return {
             "backend": self.name,
             "storages": [
-                TensorEntry.from_tensor(storage_bytes(storage), "buffer")
-                for storage in storages
+                export(storage_bytes(storage), "buffer") for storage in storages
             ],
             "source_device_index": index,
             "source_gpu_uuid": gpu_uuid,
@@ -65,7 +82,7 @@ class PeerIpcMover(WeightMover):
             if source_index is None:
                 raise RuntimeError(
                     f"Source GPU {source_gpu_uuid} is not visible to this "
-                    "mirror; cannot open its CUDA IPC handle."
+                    "mirror; cannot open its local weight handle."
                 )
         entries = seed["storages"]
         if len(entries) != len(storages):

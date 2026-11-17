@@ -14,8 +14,10 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
 )
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     TensorKind,
+)
+from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_weight_cache_loader_support,
 )
 from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport

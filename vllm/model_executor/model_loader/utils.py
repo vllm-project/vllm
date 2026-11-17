@@ -28,8 +28,10 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     TensorKind,
+)
+from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_quant_support,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (

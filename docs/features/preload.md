@@ -35,9 +35,10 @@ Launch one weight cache daemon per GPU with a single command:
 vllm preload --model meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 4
 ```
 
-The daemon process loads and post-processes the weights once, then waits for
-engines. Each rank binds its Unix socket only after its shard is fully cached,
-so engines connecting before that simply fall back to disk loading.
+The daemon process loads, post-processes and warms up the weights once, then
+publishes their final snapshot and waits for engines. Each rank binds its Unix
+socket only after that snapshot is ready, so engines connecting before then
+simply fall back to disk loading.
 
 Then start (or restart) engines with the `ipc_cache` load format:
 
@@ -50,6 +51,66 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 The daemon itself must load from disk (or seed from a peer replica, see
 below); passing `--load-format ipc_cache` or `peer_cache` to `vllm preload`
 is an error.
+
+## Local sharing backends
+
+The preload daemon's `--weight-cache-backend` option selects how it holds and
+exports GPU weights:
+
+| Backend | Storage and sharing | Platforms |
+| --- | --- | --- |
+| `cuda_ipc` (default) | PyTorch CUDA IPC handles over the local Unix socket | CUDA and ROCm |
+| `vmm` | CUDA VMM allocations exported as POSIX file descriptors | CUDA on Linux |
+
+For example:
+
+```bash
+vllm preload --model /path/to/model --weight-cache-backend vmm
+vllm serve /path/to/model --load-format ipc_cache
+```
+
+The `ipc_cache` loader does not configure the backend again through
+`--model-loader-extra-config`. It negotiates with the daemon and accepts the
+backend named in its response; a response from an older daemon without that
+field defaults to `cuda_ipc`.
+
+A backend mismatch follows the ordinary cache-mismatch policy: disk fallback
+when enabled, an error otherwise. New engines can connect to existing CUDA IPC
+daemons; VMM daemons reject engines that do not advertise VMM support.
+
+After loading, post-processing and warmup, the daemon collects the model's
+final canonical parameters and buffers, including any tensors created or
+replaced during warmup. It then drops the model and releases startup runtime
+resources. CUDA IPC exports these tensors directly, preserving their storage
+sharing. VMM materializes each distinct GPU storage into an exportable
+`cuMemCreate` allocation and rebinds its views, preserving tied parameters,
+shared storages, offsets and strides. Storages move one at a time to avoid
+retaining a second complete model. Allocations are rounded to the driver's
+granularity; that padding counts in the external-weight memory budget. CPU
+tensors continue to use the existing by-value transfer path.
+
+The resulting `WeightSnapshot` is published before the daemon starts its
+listeners or reports readiness. For each consumer, CUDA IPC creates fresh
+handle reductions from the snapshot. VMM passes descriptors with `SCM_RIGHTS`
+over the owner-verified Unix socket, not as serialized process-local integers.
+Each engine imports the handles and owns its mappings until the last tensor
+view is destroyed. A connected engine does not need the daemon to stay alive
+to retain its imported allocations, but future engines need a live daemon to
+fetch them. Both `zero_copy` and `copy` loader modes work with either backend.
+Same-host peer seeding detects VMM storage and transfers its descriptors;
+remote seeding continues to use its configured copy mover.
+
+Both backends can be deployed independently of the serving Pod, provided GPU
+access, socket mounts, ownership and container settings allow it. VMM does not
+introduce that deployment capability. The daemon still loads the model and
+initializes CUDA; this backend does not implement a separate CUDA-free FD
+holder. It also does not add EPLB or sleep-mode support.
+
+The built-in `cuda_ipc` and `vmm` backends are the only statically supported
+backends. They implement `IPCBackend`, whose `materialize(tensors)` and
+`export_tensor(tensor, kind)` methods cover post-warmup materialization and
+per-consumer tensor export. Tensor reconstruction remains separate from the
+model's processed-weight contract and daemon-to-daemon copy movers.
 
 ## Preloading the FlashInfer autotune cache
 
@@ -71,10 +132,11 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
-After warmup, the daemon releases its communication resources and, on CUDA,
-cached cuBLAS workspaces before accepting engine connections. The model weights
-remain resident for CUDA IPC sharing. This reduces the daemon's GPU memory
-overhead; the amount reclaimed depends on the model and allocator state.
+After warmup and snapshotting, the daemon releases its communication resources
+and, on CUDA, cached cuBLAS workspaces before accepting engine connections. The
+snapshot's tensors remain resident for sharing through the selected backend.
+This reduces the daemon's GPU memory overhead; the amount reclaimed depends on
+the model and allocator state.
 
 ### Seeding warmup caches between daemons (D2D)
 
@@ -278,9 +340,11 @@ daemons at a trusted deployment.
 
 ## How it works
 
-1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
-   shard from disk using the configured loader, runs quantization
-   post-processing, and exports every parameter/buffer as a CUDA IPC handle.
+1. `vllm preload` spawns one daemon process per GPU. Each daemon loads and
+   post-processes its shard, runs warmup, then publishes a `WeightSnapshot` of
+   the final canonical parameters and buffers through the selected sharing
+   backend (CUDA IPC by default). It drops the model and startup runtime
+   resources before accepting engine connections.
 2. An engine started with `--load-format ipc_cache` builds its model on the
    meta device (no storage) and requests the tensors from the daemon on its
    GPU.
@@ -359,15 +423,15 @@ after startup.
 
 The loader supports two modes, selected via `--model-loader-extra-config`:
 
-- `zero_copy` (default): the engine maps the daemon's CUDA allocations
-  directly. The daemon must stay alive for the engine's lifetime, and each
-  GPU carries only one copy of the weights.
+- `zero_copy` (default): the engine maps the daemon's shared allocations
+  directly, so each GPU carries only one copy of the weights. Keep the daemon
+  running to support subsequent engine restarts.
 - `copy`: the engine clones every tensor into its own GPU memory and then
   asks the daemon to release its cache. Use this when the daemon should free
   GPU memory after handing off, at the cost of a full copy per restart.
 
 !!! warning
-    In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
+    In `zero_copy` mode the weights live in externally held backend allocations,
     so [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not
     be used with this loader.
 

@@ -181,7 +181,18 @@ class PreloadSubcommand(CLISubcommand):
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> None:
+        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
+            IPC_BACKENDS,
+        )
+
         EngineArgs.add_cli_args(parser)
+        parser.add_argument(
+            "--weight-cache-backend",
+            choices=IPC_BACKENDS,
+            default="cuda_ipc",
+            help="Local weight-sharing backend (default: cuda_ipc). "
+            "vmm uses CUDA VMM allocations and POSIX file descriptors on Linux.",
+        )
         parser.add_argument(
             "--weight-cache-socket-dir",
             type=str,
@@ -474,6 +485,7 @@ class PreloadSubcommand(CLISubcommand):
                             if mirror_devices is not None
                             else None,
                             warmup_cache_stores,
+                            args.weight_cache_backend,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"

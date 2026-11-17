@@ -5,7 +5,7 @@
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -15,6 +15,11 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     manifest_nbytes,
     rebuild_tensors,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        IPCBackend,
+    )
 
 SeedBackend = Literal["peer_ipc", "mooncake"]
 
@@ -92,14 +97,19 @@ class WeightMover(ABC):
         return None
 
 
-def get_mover(name: SeedBackend, *, device_index: int | None = None) -> WeightMover:
+def get_mover(
+    name: SeedBackend,
+    *,
+    device_index: int | None = None,
+    ipc_backend: "IPCBackend | None" = None,
+) -> WeightMover:
     """The mover for a backend; `device_index` pins the peer_ipc device."""
     if name == PEER_IPC_BACKEND:
         from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
             PeerIpcMover,
         )
 
-        return PeerIpcMover(device_index)
+        return PeerIpcMover(device_index, ipc_backend)
     if name == MOONCAKE_BACKEND:
         from vllm.model_executor.model_loader.weight_cache.weight_seed.mooncake import (
             MooncakeMover,

@@ -28,12 +28,14 @@ from collections.abc import Iterable
 from typing import Any, NamedTuple, Protocol
 
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
+    recv_msg,
+    send_msg,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     WeightCacheUnavailableError,
     recv_json,
-    recv_msg,
     send_json,
-    send_msg,
     verify_socket_owner,
 )
 

@@ -52,7 +52,12 @@ class WeightShardSeed(Seedable):
     def _mover(self, backend: SeedBackend) -> WeightMover:
         mover = self._movers.get(backend)
         if mover is None:
-            mover = get_mover(backend, device_index=self._daemon.device_index)
+            snapshot = self._daemon.snapshot
+            mover = get_mover(
+                backend,
+                device_index=self._daemon.device_index,
+                ipc_backend=None if snapshot is None else snapshot.backend,
+            )
             self._movers[backend] = mover
         return mover
 
@@ -98,8 +103,8 @@ class WeightShardSeed(Seedable):
         backend = parse_seed_backend(request.get("seed_backend", PEER_IPC_BACKEND))
         if backend == PEER_IPC_BACKEND:
             raise ValueError(
-                f"Seed backend {backend!r} copies through CUDA IPC, which "
-                "cannot cross hosts; mirror it over this daemon's Unix socket"
+                f"Seed backend {backend!r} requires node-local weight sharing; "
+                "mirror it over this daemon's Unix socket"
             )
 
     def resolve(self, request: dict[str, Any]) -> WeightsSeedPayload | dict[str, bool]:
@@ -112,8 +117,8 @@ class WeightShardSeed(Seedable):
             if not daemon.has_weights or self._release_pending:
                 raise ValueError("Weights were released")
             mover = self._mover(backend)
-            tensors, kinds, aliases, attrs = daemon._seed_state()
-            manifest, storages = build_manifest(tensors, kinds)
+            snapshot = daemon._seed_state()
+            manifest, storages = build_manifest(snapshot.tensors, snapshot.kinds)
             seed = mover.prepare_seed(storages)
             with self._lease_condition:
                 self._active_copies += 1
@@ -123,8 +128,8 @@ class WeightShardSeed(Seedable):
                 # without the safetensors to hash (see seed_mismatches).
                 "model": daemon.model_config.model,
                 "manifest": manifest,
-                "aliases": aliases,
-                "attrs": attrs,
+                "aliases": snapshot.aliases,
+                "attrs": snapshot.attrs,
                 "seed": seed,
             }
 

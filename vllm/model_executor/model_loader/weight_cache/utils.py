@@ -7,7 +7,6 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-import itertools
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -22,11 +21,12 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        TensorEntry,
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        CachedTensorEntry,
+        IPCBackend,
         TensorKind,
-        WeightCacheKey,
     )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -221,29 +221,23 @@ def collect_tensors(
     return tensors, kinds, aliases
 
 
-def export_entries(
-    model: torch.nn.Module,
-) -> tuple[dict[str, "TensorEntry"], dict[str, str]]:
-    """Export a model's tensors as `TensorEntry`s, preserving aliases.
+@dataclass(slots=True)
+class WeightSnapshot:
+    """Canonical post-warmup weights and their sharing backend."""
 
-    CUDA reduction arguments must be exported separately for each consumer so
-    that PyTorch registers a reference for each IPC mapping's lifetime.
+    tensors: dict[str, torch.Tensor]
+    kinds: dict[str, "TensorKind"]
+    aliases: dict[str, str]
+    attrs: dict[str, bool]
+    backend_name: str
+    backend: "IPCBackend"
 
-    Returns:
-        A `(entries, aliases)` pair, as `collect_tensors` but with each
-        tensor exported.
-
-    """
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        TensorEntry,
-    )
-
-    tensors, kinds, aliases = collect_tensors(model)
-    entries = {
-        name: TensorEntry.from_tensor(tensor, kinds[name])
-        for name, tensor in tensors.items()
-    }
-    return entries, aliases
+    def export_entries(self) -> dict[str, "CachedTensorEntry"]:
+        """Export fresh entries and CUDA IPC reductions for one consumer."""
+        return {
+            name: self.backend.export_tensor(tensor, self.kinds[name])
+            for name, tensor in self.tensors.items()
+        }
 
 
 def _unique_cuda_storage_bytes(tensors: Iterable[torch.Tensor]) -> int:
@@ -255,8 +249,8 @@ def _unique_cuda_storage_bytes(tensors: Iterable[torch.Tensor]) -> int:
     return sum(storages.values())
 
 
-def exported_weight_bytes(model: torch.nn.Module | None) -> int:
-    """Bytes of the distinct CUDA storages an engine maps from this model.
+def exported_weight_bytes(tensors: Iterable[torch.Tensor] | None) -> int:
+    """Bytes of the distinct CUDA storages an engine maps from a snapshot.
 
     This is the memory the engine would otherwise allocate for the weights
     itself. `memory_allocated()` also counts daemon-only state the engine
@@ -264,8 +258,6 @@ def exported_weight_bytes(model: torch.nn.Module | None) -> int:
     parameters/buffers that the engine rebuilds itself), so reporting it
     would shrink the engine's KV cache below that of a disk load.
     """
-    if model is None:
+    if tensors is None:
         return 0
-    return _unique_cuda_storage_bytes(
-        itertools.chain(model.parameters(), model.buffers())
-    )
+    return _unique_cuda_storage_bytes(tensors)
