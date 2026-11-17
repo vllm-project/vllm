@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the FlashInfer SM90 sparse MLA backend wiring and index packing.
 
-The FlashInfer wrapper and top-k conversion are replaced by CPU recorders;
-the tests pin the contract between the impl and the kernel API: page_size=1
-varlen rows, reserved-buffer refresh, plan parameters (dims, NoPE/rope scale,
-causality), ckv/kpe cache splitting, and the backend's model-shape gates.
+CPU recorders check API wiring; GPU tests exercise index packing and real
+FlashInfer plans, including async upper bounds and multi-chunk graph replay.
 """
 
 from types import SimpleNamespace
@@ -13,6 +11,26 @@ from typing import Any
 
 import pytest
 import torch
+from transformers import DeepseekV3Config
+
+from tests.models.utils import check_logprobs_close
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm import SamplingParams
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    CUDAGraphMode,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.v1.attention.backend import CommonAttentionMetadata
 
 # isort: off
 import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod
@@ -68,6 +86,7 @@ class FakeWrapper:
 
 class FakeState:
     def __init__(self, width, max_tokens=64):
+        self.max_tokens = max_tokens
         self.kv_indices = torch.zeros(max_tokens * width, dtype=torch.int32)
         self.kv_len_arr = torch.zeros(max_tokens, dtype=torch.int32)
         self.kv_indptr = torch.zeros(max_tokens + 1, dtype=torch.int32)
@@ -132,6 +151,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     state.kv_indptr[5:] = 17
     meta = make_batch(rows, topk_rows, [3])
     meta.state = state
+    meta.chunk_states = None
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
     dtype = torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16
@@ -535,6 +555,314 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
             state.pack_indices(slots)
             outs.append(state.wrapper.run(q, q[..., :0], kv, kv[..., :0]))
         torch.testing.assert_close(outs[0], outs[1], atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+@pytest.mark.parametrize("qk_rope,kv_dtype", [(0, "fp8_e4m3"), (64, "auto")])
+@pytest.mark.parametrize("rows,packed", [(13, False), (16600, False), (16600, True)])
+def test_chunked_plan_matches_exact_and_replays(
+    tmp_path, dist_init, qk_rope, kv_dtype, rows, packed
+):
+    """Large MQA plans preserve row contexts, packed KV strides and graph replay."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    heads, topk, kpool, width = SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH
+    DeepseekV3Config(
+        architectures=["DeepseekV3ForCausalLM"],
+        hidden_size=512,
+        max_position_embeddings=32768,
+        num_hidden_layers=1,
+        num_attention_heads=heads,
+        kv_lora_rank=HEAD,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=qk_rope,
+        v_head_dim=128,
+        index_topk=topk,
+        index_kpool=kpool,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        max_model_len=32768,
+    )
+    parallel_config = ParallelConfig()
+    config = VllmConfig(
+        model_config=model_config,
+        parallel_config=parallel_config,
+        compilation_config=CompilationConfig(
+            mode=0, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+        ),
+        cache_config=CacheConfig(block_size=BLOCK_SIZE, cache_dtype=kv_dtype),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=32768,
+            max_num_batched_tokens=32768,
+            max_num_seqs=4,
+        ),
+        attention_config=AttentionConfig(sparse_mla_force_mqa=True),
+        speculative_config=SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=2,
+            enable_adaptive_verification=True,
+            target_model_config=model_config,
+            target_parallel_config=parallel_config,
+        ),
+    )
+    slots = torch.empty((rows, width), dtype=torch.int32, device=device)
+    with set_current_vllm_config(config):
+        layer = MLAAttention(
+            num_heads=heads,
+            scale=(HEAD + qk_rope) ** -0.5,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=qk_rope,
+            v_head_dim=128,
+            q_lora_rank=1536,
+            kv_lora_rank=HEAD,
+            kv_b_proj=ColumnParallelLinear(HEAD, heads * 256, bias=False),
+            cache_config=config.cache_config,
+            prefix="model.layers.0.self_attn.attn",
+            attn_backend=FlashInferMLASparseSM90Backend,
+            use_sparse=True,
+            topk_indices_buffer=slots,
+        )
+        spec = MLAAttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=HEAD + qk_rope,
+            dtype=torch.uint8 if kv_dtype == "fp8_e4m3" else torch.bfloat16,
+        )
+        builder = FlashInferMLASparseSM90Builder(
+            spec,
+            [layer.layer_name],
+            config,
+            device,
+        )
+        batch = BatchSpec(
+            seq_lens=[4096, 12000, 10000],
+            query_lens=[1, 8192, rows - 8193] if rows > 8193 else [1, 5, 7],
+        )
+        cam = create_common_attn_metadata(
+            batch,
+            BLOCK_SIZE,
+            device,
+            arange_block_indices=True,
+        )
+        meta = builder.build(0, cam)
+        assert meta.state is not None
+        impl = layer.impl
+        assert isinstance(impl, FlashInferMLASparseSM90Impl)
+        chunks = meta.chunk_states or [(0, rows, meta.state)]
+        assert len(chunks) == (3 if rows > 16384 else 1)
+        assert all(state.workspace is builder.state.workspace for _, _, state in chunks)
+        assert builder.get_varlen_cudagraph_max_query_len(config, spec) == 3
+
+        dtype = torch.float8_e4m3fn if kv_dtype == "fp8_e4m3" else torch.bfloat16
+        num_blocks = cam.block_table_tensor.numel()
+        kv = torch.randn(
+            num_blocks,
+            2 if packed else 1,
+            BLOCK_SIZE,
+            HEAD + qk_rope,
+            device=device,
+        ).to(dtype)[:, 0]
+        cache = kv.view(torch.uint8) if kv_dtype == "fp8_e4m3" else kv
+        reference_kv = kv.contiguous().view(-1, 1, HEAD + qk_rope)
+        q = torch.randn(rows, heads, HEAD, device=device, dtype=torch.bfloat16)
+        q_pe = torch.randn(rows, heads, qk_rope, device=device, dtype=torch.bfloat16)
+        exact = sm90_mod._SM90State(
+            device,
+            heads,
+            dtype,
+            8192,
+            width,
+            HEAD,
+            qk_rope,
+            layer.scale,
+            topk,
+            kpool,
+        )
+        scale = {"ckv_scale": 1.0, "kpe_scale": 1.0} if kv_dtype == "fp8_e4m3" else {}
+        block_table = cam.block_table_tensor.cpu()
+
+        def refresh(step):
+            # Adaptive verification changes device query splits, not host bounds.
+            query_lens = torch.tensor(batch.query_lens)
+            query_lens[0] += step
+            query_lens[-1] -= step
+            qsl = torch.cat((torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0)))
+            cam.query_start_loc.copy_(qsl)
+            req_id = torch.repeat_interleave(torch.arange(3), query_lens)
+            ctx = (
+                torch.tensor(batch.seq_lens)[req_id]
+                + step
+                - (qsl[req_id + 1] - torch.arange(rows) - 1)
+            )
+            valid = torch.where(ctx <= topk, ctx, topk + ctx % kpool)
+            logical = (torch.arange(width)[None, :] + step * 7) % ctx[:, None]
+            physical = (
+                block_table[req_id[:, None], logical // BLOCK_SIZE] * BLOCK_SIZE
+                + logical % BLOCK_SIZE
+            ).to(torch.int32)
+            logical[torch.arange(width) >= valid[:, None]] = -1
+            physical[logical < 0] = -1
+            slots.copy_(logical)
+            cam.seq_lens.copy_(torch.tensor(batch.seq_lens) + step)
+            step_cam = CommonAttentionMetadata(
+                query_start_loc=cam.query_start_loc,
+                query_start_loc_cpu=cam.query_start_loc_cpu,
+                seq_lens=cam.seq_lens,
+                seq_lens_cpu_upper_bound=torch.tensor(batch.seq_lens) + step + 5,
+                num_reqs=cam.num_reqs,
+                num_actual_tokens=rows,
+                max_query_len=cam.max_query_len,
+                max_seq_len=cam.max_seq_len + step + 5,
+                block_table_tensor=cam.block_table_tensor,
+                slot_mapping=cam.slot_mapping,
+            )
+            builder.build(0, step_cam)
+            return valid.to(torch.int32), physical.to(device)
+
+        refresh(0)
+        impl.forward_mqa((q, q_pe), cache, meta, layer)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out, _ = impl.forward_mqa((q, q_pe), cache, meta, layer)
+        for step in (1, 2):
+            valid, physical = refresh(step)
+            q.add_(0.01)
+            graph.replay()
+            for start, end, _ in chunks:
+                exact.plan(end - start, valid[start:end], None, None)
+                exact.pack_indices(physical[start:end])
+                expected = exact.wrapper.run(
+                    q[start:end],
+                    q_pe[start:end],
+                    reference_kv[..., :HEAD],
+                    reference_kv[..., HEAD:],
+                    **scale,
+                )
+                torch.testing.assert_close(
+                    out[start:end], expected, atol=1e-2, rtol=1e-2
+                )
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+@pytest.mark.parametrize("heads", [64, 65, 128, 384])
+def test_chunk_capacity_bounds_planner_work_items(heads):
+    """Multiple head tiles per query must fit the planner's fixed work list."""
+    rows = sm90_mod._max_plan_chunk_rows(heads)
+    state = sm90_mod._SM90State(
+        torch.device("cuda"),
+        heads,
+        torch.bfloat16,
+        rows,
+        TOPK,
+        HEAD,
+        0,
+        HEAD**-0.5,
+        TOPK,
+        1,
+    )
+    for live_rows in (rows, rows // 2 + 1, 1):
+        state.plan(
+            live_rows, torch.full((live_rows,), TOPK, dtype=torch.int32), None, None
+        )
+        assert state._plan_offsets is not None and state._int_ws is not None
+        num_works_idx = state._plan_offsets[0]
+        assert 0 < int(state._int_ws[num_works_idx]) <= 8192
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+def test_large_mqa_step_matches_scheduler_chunking(tmp_path, vllm_runner):
+    """A real engine handles >16K rows without changing generation/logprobs."""
+    DeepseekV3Config(
+        architectures=["DeepseekV32ForCausalLM"],
+        vocab_size=4096,
+        hidden_size=2048,
+        intermediate_size=4096,
+        num_hidden_layers=1,
+        num_attention_heads=32,
+        num_key_value_heads=32,
+        q_lora_rank=512,
+        kv_lora_rank=HEAD,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        index_n_heads=64,
+        index_head_dim=128,
+        index_topk=2048,
+        max_position_embeddings=32768,
+        first_k_dense_replace=1,
+        num_nextn_predict_layers=0,
+    ).save_pretrained(tmp_path)
+    prompts = [
+        {"prompt_token_ids": [2 + (i * 17 + j * 13) % 4000 for i in range(n)]}
+        for j, n in enumerate((17, 16600))
+    ]
+    results = []
+    for budget in (8192, 32768):
+        with vllm_runner(
+            str(tmp_path),
+            load_format="dummy",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            seed=42,
+            max_model_len=32768,
+            max_num_seqs=4,
+            max_num_batched_tokens=budget,
+            block_size=64,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            gpu_memory_utilization=0.25,
+            attention_config={
+                "backend": "FLASHINFER_MLA_SPARSE_SM90",
+                "sparse_mla_force_mqa": True,
+            },
+        ) as runner:
+            outputs = runner.llm.generate(
+                prompts,
+                SamplingParams(
+                    temperature=0, max_tokens=4, ignore_eos=True, logprobs=5
+                ),
+                use_tqdm=False,
+            )
+            assert len(outputs) == len(prompts)
+            assert all(len(r.outputs[0].token_ids) == 4 for r in outputs)
+            results.append(
+                [
+                    (
+                        list(r.outputs[0].token_ids),
+                        r.outputs[0].text,
+                        r.outputs[0].logprobs,
+                    )
+                    for r in outputs
+                ]
+            )
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="scheduler chunks",
+        name_1="planner chunks",
+        always_check_logprobs=True,
+    )
+    for reference, actual in zip(*results):
+        assert reference[2] is not None and actual[2] is not None
+        for expected, observed in zip(reference[2], actual[2]):
+            torch.testing.assert_close(
+                torch.tensor([observed[token].logprob for token in expected]),
+                torch.tensor([expected[token].logprob for token in expected]),
+                atol=1e-2,
+                rtol=1e-2,
+            )
 
 
 def test_supports_combination_gates(monkeypatch, default_vllm_config):
