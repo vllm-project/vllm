@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from functools import partial
+
 import torch
 from transformers import PreTrainedConfig
 
@@ -20,6 +22,7 @@ from vllm.model_executor.layers.linear import (
     QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
+    apply_flattened,
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -208,11 +211,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        flatten = x.ndim > 2 and x.is_contiguous()
-        flat_x = x.view(-1, x.shape[-1]) if flatten else x
-        output = self._get_quant_method().apply(self.base_layer, flat_x, bias)
-        if flatten:
-            output = output.view(*x.shape[:-1], -1)
+        apply = partial(self._get_quant_method().apply, self.base_layer, bias=bias)
+        output = apply_flattened(apply, x)
         return self._apply_lora_to_output(x, output)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -258,10 +258,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            flatten = x.ndim > 2 and x.is_contiguous()
-            flat_x = x.view(-1, x.shape[-1]) if flatten else x
-            output = self._get_quant_method().apply(self.base_layer, flat_x, bias)
-            return output.view(*x.shape[:-1], -1) if flatten else output
+            quant_method = self._get_quant_method()
+            apply = partial(quant_method.apply, self.base_layer, bias=bias)
+            return apply_flattened(apply, x)
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without
