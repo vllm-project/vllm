@@ -405,7 +405,9 @@ def test_fused_decode_matches_unfused(
             weight=(0.1 * torch.randn(qkv_dim, 1, 4)).bfloat16().cuda(), bias=None
         ),
         norm=norm,
-        _aiter_fused_conv_bias=None,
+        _aiter_fused_conv_bias=torch.zeros(
+            qkv_dim, device="cuda", dtype=torch.bfloat16
+        ),
     )
     for name in (
         "_forward_core_rocm",

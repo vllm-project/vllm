@@ -862,7 +862,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 logger.info_once(
                     "Not using the AITER fused GDN decode kernel: %s", reason
                 )
-        self._aiter_fused_conv_bias: torch.Tensor | None = None
+        if self.use_aiter_fused_gdn_decode and self.conv1d.bias is None:
+            # The fused kernel requires a conv bias.
+            self.register_buffer(
+                "_aiter_fused_conv_bias",
+                self.conv1d.weight.new_zeros(self.conv1d.weight.shape[0]),
+                persistent=False,
+            )
         self.vllm_config = vllm_config
         # FlashInfer's prefill emits mid-prefill states, so an align-mode
         # checkpoint needs no split prefill.
@@ -2347,13 +2353,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
-        conv_bias = self.conv1d.bias
-        if conv_bias is None:
-            if self._aiter_fused_conv_bias is None:
-                self._aiter_fused_conv_bias = conv_weights.new_zeros(
-                    conv_weights.shape[0]
-                )
-            conv_bias = self._aiter_fused_conv_bias
+        conv_bias = (
+            self.conv1d.bias
+            if self.conv1d.bias is not None
+            else self._aiter_fused_conv_bias
+        )
         gdn_aiter_fused_gdn_decode_qkvz(
             qkvz[:num_tokens],
             ba[:num_tokens],
