@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,7 +10,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm import logger as vllm_logger
-from vllm.config import VllmConfig
+from vllm.config import CompilationMode, VllmConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
@@ -29,12 +30,9 @@ from vllm.v1.watermarking.spec_decode import (
     create_speculative_target_watermarker,
     speculative_target_watermark_key,
 )
-from vllm.v1.watermarking.watermarker import (
-    RandomSampler,
-    Watermarker,
-    WatermarkSample,
-)
+from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu import buffer_utils
+from vllm.v1.worker.gpu import model_runner as mrv2
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.watermark import (
     draft_watermarking_mask,
@@ -1214,68 +1212,175 @@ def test_sampler_keeps_the_full_dual_key_watermarker_with_greedy_drafts():
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+def _speculative_config(draft_sample_method):
+    return SimpleNamespace(
+        method="mtp",
+        num_speculative_tokens=1,
+        draft_sample_method=draft_sample_method,
+        rejection_sample_method="standard",
+        enable_adaptive_verification=False,
+        use_local_argmax_reduction=False,
+        fly_entropy_threshold=0.3,
+        fly_entropy_top_k=3,
+        draft_decode_context_parallel_size=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("draft_sample_method", "watermarker_type"),
+    [("greedy", DualKeyGumbelWatermarker), ("probabilistic", GumbelWatermarker)],
 )
-def test_set_watermarked_sample_as_argmax_keeps_dual_key_routing():
-    device = "cuda"
-    num_rows, vocab_size = 256, 512
+def test_model_runner_sampler_watermarker_follows_draft_sample_method(
+    monkeypatch, draft_sample_method, watermarker_type
+):
+    class StubWatermarkSampler(GPUWatermarkSampler):
+        def __init__(self, watermarker, **kwargs):
+            self.watermarker = watermarker
+
+    monkeypatch.setattr(
+        mrv2,
+        "DeviceMemoryProfiler",
+        lambda: nullcontext(SimpleNamespace(consumed_memory=0)),
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "get_model_loader",
+        lambda load_config: SimpleNamespace(load_model=lambda **kwargs: None),
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "init_model_state",
+        lambda *args: SimpleNamespace(
+            num_new_sampled_tokens_per_step=1, custom_sampler=lambda sampler: None
+        ),
+    )
+    monkeypatch.setattr(mrv2, "build_custom_logits_processors", lambda *args: [])
+    monkeypatch.setattr(mrv2, "GPUWatermarkSampler", StubWatermarkSampler)
+    monkeypatch.setattr(mrv2, "StructuredOutputsWorker", lambda **kwargs: None)
+    model_config = SimpleNamespace(
+        logits_processors=None,
+        logprobs_mode="raw_logprobs",
+        use_fp64_gumbel=False,
+        enable_trace_replay=False,
+        return_sampling_mask=False,
+        enable_sleep_mode=False,
+    )
+    runner = object.__new__(mrv2.GPUModelRunner)
+    vars(runner).update(
+        vllm_config=SimpleNamespace(
+            load_config=None,
+            model_config=model_config,
+            watermark_config=WatermarkConfig(key=42, algorithm="dual_key_gumbel"),
+        ),
+        model_config=model_config,
+        speculative_config=_speculative_config(draft_sample_method),
+        parallel_config=SimpleNamespace(enable_batch_sharded_sampling=False),
+        compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
+        eplb=SimpleNamespace(
+            prepare_load=lambda: None,
+            maybe_register_model=lambda *args: False,
+            maybe_start_async_loop=lambda *args: None,
+        ),
+        jit_warmup_registry=SimpleNamespace(activate=nullcontext),
+        device=torch.device("cpu"),
+        lora_config=None,
+        use_aux_hidden_state_outputs=False,
+        speculator=None,
+        pp_handler=None,
+        encoder_cache=None,
+        req_states=None,
+        num_speculative_steps=1,
+        max_num_reqs=2,
+        vocab_size=8,
+        is_pooling_model=False,
+        is_first_pp_rank=True,
+        is_last_pp_rank=True,
+    )
+
+    mrv2.GPUModelRunner.load_model(runner)
+
+    assert type(runner.sampler.watermarker) is watermarker_type
+    assert runner.rejection_sampler.sampler is runner.sampler
+
+
+class StubSpeculator(DraftModelSpeculator):
+    def capture(self): ...
+
+    def init_cudagraph_manager(self, cudagraph_mode): ...
+
+    def load_draft_model(self, target_model, target_attn_layer_names): ...
+
+    def propose(self, *args, **kwargs): ...
+
+
+@pytest.mark.parametrize(
+    ("draft_sample_method", "draft_watermarker_type"),
+    [("greedy", type(None)), ("probabilistic", DraftWatermarker)],
+)
+def test_speculator_watermarks_only_probabilistic_drafts(
+    monkeypatch, draft_sample_method, draft_watermarker_type
+):
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.speculator._target_feeds_hc_residual",
+        lambda vllm_config: False,
+    )
+    speculative_config = _speculative_config(draft_sample_method)
+    speculative_config.draft_model_config = SimpleNamespace(
+        get_hidden_size=lambda: 8, get_vocab_size=lambda: 8
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            max_model_len=32, dtype=torch.float32, use_fp64_gumbel=False
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_rank=0,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        watermark_config=WatermarkConfig(key=42, algorithm="dual_key_gumbel"),
+    )
+
+    speculator = StubSpeculator(vllm_config, torch.device("cpu"))
+
+    assert type(speculator.draft_watermarker) is draft_watermarker_type
+
+
+def test_set_watermarked_sample_as_argmax_keeps_dual_key_routing(monkeypatch):
+    num_rows, vocab_size = 64, 32
     torch.manual_seed(0)
     watermarker = DualKeyGumbelWatermarker(key=42, context_width=1, alpha=0.5)
-    contexts = torch.arange(num_rows, device=device).unsqueeze(-1)
-    logits = torch.randn(num_rows, vocab_size, device=device)
-    temperature = torch.ones(num_rows, device=device)
-    seeds = torch.arange(num_rows, dtype=torch.int64, device=device)
-    rows = torch.arange(num_rows, device=device)
-    pos = torch.full((num_rows,), 7, dtype=torch.int64, device=device)
-
-    sampler = object.__new__(GPUWatermarkSampler)
+    contexts = torch.arange(num_rows).unsqueeze(-1)
+    logits = torch.randn(num_rows, vocab_size)
+    sampler = _pin_sampler(
+        watermarking=[True] * num_rows,
+        temperatures=[1.0] * num_rows,
+        contexts=contexts.tolist(),
+    )
     sampler.watermarker = watermarker
-    sampler.deduplicate_contexts = "none"
-    sampler.use_fp64_gumbel = False
-    sampler.watermarking = SimpleNamespace(
-        np=np.ones(num_rows, dtype=bool),
-        gpu=torch.ones(num_rows, dtype=torch.bool, device=device),
+    # The routing draw sends even rows to key A and odd rows to key B.
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda logits, *args, **kwargs: torch.arange(logits.shape[0]) % 2,
     )
-    sampler.sampling_states = SimpleNamespace(
-        temperature=SimpleNamespace(
-            np=np.ones(num_rows, dtype=np.float32), gpu=temperature
-        ),
-        seeds=SimpleNamespace(gpu=seeds),
-    )
-    sampler._get_contexts = lambda *args: contexts
-
-    random_sampler = RandomSampler(
-        expanded_idx_mapping=rows,
-        temperatures=temperature,
-        seeds=seeds,
-        positions=pos,
-        use_fp64=False,
-    )
-    skip_mask = torch.zeros(num_rows, dtype=torch.bool, device=device)
-    expected = watermarker.sample(logits, contexts, random_sampler, skip_mask).token_ids
-    key_a = watermarker.draft_watermarker.sample(
-        logits, contexts, random_sampler, skip_mask
-    ).token_ids
-    key_b = watermarker.target_watermarker.sample(
-        logits, contexts, random_sampler, skip_mask
-    ).token_ids
+    key_a = watermarker.draft_watermarker.sample(logits, contexts).token_ids
+    key_b = watermarker.target_watermarker.sample(logits, contexts).token_ids
 
     _, restore = sampler.set_watermarked_sample_as_argmax(
         logits,
-        rows,
+        torch.arange(num_rows),
         np.arange(num_rows),
-        pos,
-        torch.zeros(num_rows, dtype=torch.int64, device=device),
-        torch.zeros(num_rows, dtype=torch.int64, device=device),
+        torch.zeros(num_rows, dtype=torch.int64),
+        torch.zeros(num_rows, dtype=torch.int64),
+        torch.zeros(num_rows, dtype=torch.int64),
     )
 
     assert restore is not None
-    pinned = logits.argmax(dim=-1)
-    restore()
-    assert torch.equal(pinned, expected)
-    assert (pinned != key_a).any()
-    assert (pinned != key_b).any()
+    expected = torch.where(torch.arange(num_rows) % 2 == 0, key_a, key_b)
+    assert torch.equal(logits.argmax(dim=-1), expected)
+    assert not torch.equal(key_a, key_b)
 
 
 @pytest.mark.parametrize(
@@ -1517,15 +1622,6 @@ def test_draft_context_deduplication_broadcasts_the_draft_step():
 
 @pytest.mark.parametrize("partial", [False, True])
 def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch, partial):
-    class StubSpeculator(DraftModelSpeculator):
-        def capture(self): ...
-
-        def init_cudagraph_manager(self, cudagraph_mode): ...
-
-        def load_draft_model(self, target_model, target_attn_layer_names): ...
-
-        def propose(self, *args, **kwargs): ...
-
     class StubModel:
         @staticmethod
         def compute_logits(hidden_states):
