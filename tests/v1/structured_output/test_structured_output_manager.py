@@ -22,6 +22,7 @@ from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.reasoning import ReasoningParser
+from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -114,6 +115,49 @@ def _to_token_ids(tokenizer, texts: tuple[str | int, ...]) -> list[int]:
         else _single_token(tokenizer, t)
         for t in texts
     ]
+
+
+@pytest.mark.parametrize("mode", ["uncommitted", "committed", "mask"])
+@pytest.mark.parametrize("close_tail", [None, 1, 2, 3])
+def test_kimi_reopened_draft_keeps_first_constraint(tokenizer, mode, close_tail):
+    close = tokenizer.encode("<|close|>think<|sep|>")
+    reopen = tokenizer.encode("<|open|>think<|sep|>")
+    prefix = tokenizer.encode(".") + close
+    split = 0 if close_tail is None else len(prefix) - close_tail
+    draft = prefix[split:] + reopen
+    manager, request = _build_harness(
+        tokenizer,
+        "xgrammar",
+        reasoning_ended=False,
+        num_spec_tokens=len(draft) if mode == "mask" else 0,
+    )
+    manager.reasoner_cls = KimiK3ReasoningParser
+    assert request.structured_output_request is not None
+    request.append_output_token_ids(tokenizer.encode("Plan") + prefix[:split])
+    if mode == "committed":
+        request.append_output_token_ids(draft)
+    try:
+        bounds = manager._get_constraint_bounds(
+            request, draft, spec_tokens_committed=mode == "committed"
+        )
+        boundary = len(prefix) - split
+        assert bounds.grammar_start == bounds.constraint_start == boundary
+        assert request.structured_output_request.reasoning_ended is False
+        if mode == "mask":
+            mask = manager.grammar_bitmask(
+                {request.request_id: request},
+                [request.request_id],
+                {request.request_id: draft},
+            )
+            assert mask is not None
+            token = reopen[0]
+            assert not (int(mask[boundary, token // 32]) & (1 << (token % 32)))
+            accepted = prefix[split:] + tokenizer.encode("{}")
+            request.append_output_token_ids(accepted)
+            assert manager.accept_tokens(request, accepted)
+            assert request.structured_output_request.reasoning_ended is True
+    finally:
+        manager.clear_backend()
 
 
 def _wait_for_grammar(request: Request) -> None:
