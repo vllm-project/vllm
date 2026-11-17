@@ -625,12 +625,24 @@ def _detect_tool_reference_support(chat_template: str) -> bool:
     return "tool_reference" in chat_template
 
 
+def _is_deferred(tool: dict[str, Any]) -> bool:
+    return bool(
+        tool.get("defer_loading") or tool.get("function", {}).get("defer_loading")
+    )
+
+
 def _expand_tool_references(
     conversation: list[ConversationMessage],
     tools: list[dict[str, Any]] | None,
-) -> list[ConversationMessage]:
+) -> tuple[list[ConversationMessage], list[dict[str, Any]] | None]:
     """Render `tool_reference` parts as the referenced tool's definition, so
-    templates that skip unknown part types still show the loaded schema."""
+    templates that skip unknown part types still show the loaded schema.
+
+    Returns the conversation and the tools to pass to the template. Referenced
+    tools are left out, since their definition is now in the conversation, and
+    other deferred tools are moved last. A search that loads deferred tools then
+    leaves the rendered tool list unchanged, keeping the prompt prefix cached.
+    """
     definitions: dict[str, str] = {}
     for tool in tools or []:
         fn = tool.get("function", tool)
@@ -640,6 +652,7 @@ def _expand_tool_references(
             {k: fn[k] for k in ("name", "description", "parameters") if k in fn}
         )
 
+    referenced: set[str] = set()
     expanded: list[ConversationMessage] = []
     for msg in conversation:
         content = msg.get("content")
@@ -653,6 +666,7 @@ def _expand_tool_references(
         for part in content:
             if isinstance(part, dict) and part.get("type") == "tool_reference":
                 name = part.get("name", "")
+                referenced.add(name)
                 part = {"type": "text", "text": definitions.get(name, name)}
             parts.append(part)
         new_msg = dict(msg)
@@ -661,7 +675,15 @@ def _expand_tool_references(
         else:
             new_msg["content"] = parts
         expanded.append(new_msg)  # type: ignore[arg-type]
-    return expanded
+
+    if not tools or not any(_is_deferred(t) for t in tools):
+        return expanded, tools
+    template_tools = [t for t in tools if not _is_deferred(t)] + [
+        t
+        for t in tools
+        if _is_deferred(t) and t.get("function", t).get("name") not in referenced
+    ]
+    return expanded, template_tools
 
 
 def _convert_developer_to_system(
@@ -961,7 +983,7 @@ def safe_apply_chat_template(
         )
     # Some templates (e.g. GLM-5.3) expand tool_reference from `tools` natively.
     if not _detect_tool_reference_support(chat_template):
-        conversation = _expand_tool_references(conversation, tools)
+        conversation, tools = _expand_tool_references(conversation, tools)
     resolved_kwargs = resolve_chat_template_kwargs(
         tokenizer=tokenizer,
         chat_template=chat_template,
