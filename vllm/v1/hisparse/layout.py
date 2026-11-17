@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     HiSparseHotManager,
@@ -369,9 +370,19 @@ def create_hisparse_layout(
     min_host_blocks = cdiv(vllm_config.model_config.max_model_len, gpu_block_size) + 2
     if host_num_blocks < min_host_blocks:
         raise ValueError(
-            f"HiSparse host pool has {host_num_blocks} blocks but max_model_len "
-            f"needs {min_host_blocks}; increase host_pool_gib."
+            f"HiSparse host pool holds {host_num_blocks * gpu_block_size} tokens "
+            f"but max_model_len needs {min_host_blocks * gpu_block_size}; "
+            f"increase host_pool_gib to at least "
+            f"{cdiv(min_host_blocks * logical_block_bytes * 100, GiB_bytes) / 100:.2f}."
         )
+    logger.info_once(
+        "HiSparse host pool: %.2f GiB per replica holds %d tokens; pinning "
+        "%.2f GiB %s.",
+        host_budget / GiB_bytes,
+        host_num_blocks * gpu_block_size,
+        host_num_blocks * host_block_stride / GiB_bytes,
+        "per replica, shared by its TP ranks" if shared_host_pool else "per rank",
+    )
 
     return HiSparseLayout(
         source_group=source_group,
