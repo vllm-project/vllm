@@ -493,7 +493,7 @@ class PipelinedEngine:
 
 
 def _create_async_pp_scheduler(
-    num_spec: int, pp_size: int = 3, num_blocks: int = 5
+    num_spec: int, pp_size: int = 3, num_blocks: int = 5, **kwargs
 ) -> AsyncScheduler:
     scheduler = create_scheduler(
         async_scheduling=True,
@@ -502,6 +502,7 @@ def _create_async_pp_scheduler(
         num_blocks=num_blocks,
         block_size=16,
         max_num_batched_tokens=512,
+        **kwargs,
     )
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
@@ -905,9 +906,7 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
         looked_up.append(request.request_id)
         return hits[request.request_id]
 
-    monkeypatch.setattr(
-        scheduler.kv_cache_manager, "get_num_local_computed_tokens", hit
-    )
+    monkeypatch.setattr(scheduler.kv_cache_manager, "get_num_cached_tokens", hit)
     # 16 + 0 + 16 + 16 + 400 + 400 = 848 tokens -> ceil(848 / 4).
     assert scheduler._pp_microbatch_cap(512) == 212
     assert looked_up == ids[:4]
@@ -936,12 +935,15 @@ def test_pp_microbatch_cap_progress(unchunked: str | None):
     """No zero-token steps: the cap stays at least the MTP prefill lookahead (which
     trims chunks near the prompt end), and is skipped when prompts or media can't
     be chunked (a media item larger than the cap would otherwise never fit)."""
-    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
-    scheduler.pp_microbatch_min_tokens = 1
-    scheduler.num_prefill_lookahead = 4
+    kwargs = {unchunked: unchunked == "disable_chunked_mm_input"} if unchunked else {}
+    scheduler = _create_async_pp_scheduler(
+        num_spec=0, pp_size=4, num_blocks=1000, **kwargs
+    )
     if unchunked:
-        flag = unchunked == "disable_chunked_mm_input"
-        setattr(scheduler.scheduler_config, unchunked, flag)
+        assert scheduler.pp_microbatch_min_tokens == 0
+    else:
+        scheduler.pp_microbatch_min_tokens = 1
+    scheduler.num_prefill_lookahead = 4
     scheduler.add_request(create_requests(1, 400, max_tokens=1)[0])
     steps: list[int] = []
     while sum(steps) < 400 and 0 not in steps:

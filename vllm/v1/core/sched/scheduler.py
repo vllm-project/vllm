@@ -402,7 +402,6 @@ class Scheduler(SchedulerInterface):
 
         self.pp_size = self.parallel_config.pipeline_parallel_size
         self.use_pp = self.pp_size > 1
-        self.pp_microbatch_min_tokens = self.scheduler_config.pp_microbatch_min_tokens
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -430,6 +429,16 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        )
+        # PP microbatch cap (see `_pp_microbatch_cap`); 0 disables it. Unchunked
+        # prefills or media, and Mamba-aligned prefills, need chunks the cap can't
+        # promise.
+        self.pp_microbatch_min_tokens = (
+            self.scheduler_config.pp_microbatch_min_tokens
+            if self.scheduler_config.enable_chunked_prefill
+            and not self.scheduler_config.disable_chunked_mm_input
+            and not self.need_mamba_block_aligned_split
+            else 0
         )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
@@ -721,8 +730,6 @@ class Scheduler(SchedulerInterface):
             remaining = request.num_prompt_tokens - request.num_computed_tokens
             if remaining > 0:
                 prefill += remaining
-            elif remaining == 0 and request.num_in_flight_tokens > 0:
-                pass  # last prompt chunk in flight
             elif not self._needs_no_more_steps(request):
                 decode += 1 + len(request.spec_token_ids)
         waiting = itertools.chain(
@@ -736,7 +743,7 @@ class Scheduler(SchedulerInterface):
             # full budget. num_tokens: a preempted request's hit can cover its
             # generated tokens too.
             hit = (
-                self.kv_cache_manager.get_num_local_computed_tokens(request)
+                self.kv_cache_manager.get_num_cached_tokens(request)
                 if i < self.pp_size
                 else 0
             )
@@ -746,7 +753,7 @@ class Scheduler(SchedulerInterface):
         cap = max(
             self.pp_microbatch_min_tokens,
             self.num_prefill_lookahead,
-            -(-prefill // self.pp_size),
+            cdiv(prefill, self.pp_size),
         )
         return min(budget, cap + decode)
 
@@ -783,16 +790,7 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
-        if (
-            self.use_pp
-            and self.pp_microbatch_min_tokens
-            and token_budget > 0
-            # Unchunked prefills or media, and Mamba-aligned prefills, need chunks
-            # the cap can't promise.
-            and self.scheduler_config.enable_chunked_prefill
-            and not self.scheduler_config.disable_chunked_mm_input
-            and not self.need_mamba_block_aligned_split
-        ):
+        if self.use_pp and self.pp_microbatch_min_tokens and token_budget > 0:
             token_budget = self._pp_microbatch_cap(token_budget)
 
         # Encoder-related.
