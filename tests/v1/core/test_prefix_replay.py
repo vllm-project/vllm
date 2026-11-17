@@ -11,17 +11,17 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import MockKVConfig, create_model_runner_output
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowMLASpec,
+    MLAAttentionSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, new_kv_cache_group
 
 BLOCK_SIZE = 16
 WINDOW = 32
@@ -49,22 +49,24 @@ def _replay_scheduler(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowMLASpec(
-                    block_size=BLOCK_SIZE,
-                    num_kv_heads=1,
-                    head_size=64,
-                    dtype=torch.bfloat16,
+                SlidingWindowManager.layer_config(
+                    MLAAttentionSpec(
+                        block_size=BLOCK_SIZE,
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.bfloat16,
+                    ),
                     sliding_window=WINDOW,
                     bounded_replay=True,
                 ),
@@ -152,6 +154,42 @@ def test_hit_replays_window_without_reallocating():
 
     scheduler.update_from_output(out, _step_output(out, [first, second]))
     assert second.num_computed_tokens == NUM_PROMPT_TOKENS
+
+
+@pytest.mark.parametrize("via_connector", [False, True])
+def test_throttle_defers_prefix_replay(via_connector):
+    """A one-token cache-hit tail still needs prefill when its window replays."""
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig() if via_connector else None
+    )
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=HIT_TOKENS + 1,
+        same_prompt=not via_connector,
+        block_size=BLOCK_SIZE,
+    )
+    _prefill(scheduler, first)
+    if via_connector:
+        scheduler.connector.config = dataclasses.replace(
+            scheduler.connector.config, matched_tokens=HIT_TOKENS
+        )
+    scheduler.add_request(second)
+
+    for _ in range(2):
+        out = scheduler.schedule(throttle_prefills=True)
+        assert out.num_scheduled_tokens == {first.request_id: 1}
+        assert second.num_computed_tokens == 0
+        assert second.replay_start == 0
+        scheduler.update_from_output(out, _step_output(out, [first]))
+
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens == {
+        first.request_id: 1,
+        second.request_id: WINDOW + 1,
+    }
+    new_req = _new_req_data(out, second)
+    assert new_req.num_computed_tokens == HIT_TOKENS - WINDOW
+    assert new_req.replay_start == HIT_TOKENS - WINDOW
 
 
 def test_replay_only_chunks_make_progress():
@@ -272,15 +310,19 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
 
 
-def test_decode_bench_fill_does_not_replay():
+@pytest.mark.parametrize("throttle_prefills", [False, True])
+def test_decode_bench_fill_does_not_replay(throttle_prefills):
     """DecodeBenchConnector fills every group like a P/D transfer, so a filled
     request starts with a one-token decode step, not a replay."""
     scheduler = _replay_scheduler(use_kv_connector="DecodeBenchConnector")
-    request = create_requests(
-        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
-    )[0]
-    scheduler.add_request(request)
+    first, request = create_requests(
+        num_requests=2, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )
+    scheduler.add_request(first)
     out = scheduler.schedule()
+    scheduler.update_from_output(out, _step_output(out, [first]))
+    scheduler.add_request(request)
+    out = scheduler.schedule(throttle_prefills=throttle_prefills)
     assert _new_req_data(out, request).replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == 1
 

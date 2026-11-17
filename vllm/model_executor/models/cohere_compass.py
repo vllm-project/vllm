@@ -1493,6 +1493,9 @@ class CohereCompassForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                self.visual.attn_backend, "cu_seqlens"
+            ),
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -2096,11 +2099,6 @@ class CohereCompassForConditionalGeneration(
         del modality, mm_kwargs
         merge_size = self.config.vision_config.spatial_merge_size
         return num_mm_embeds * merge_size**2, num_mm_embeds
-
-
-@lru_cache
-def _cached_tensor(x, device) -> torch.Tensor:
-    return torch.tensor(x, device=device)
 
 
 class CohereCompassAttention(nn.Module):
