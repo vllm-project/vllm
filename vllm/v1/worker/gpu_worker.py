@@ -250,9 +250,7 @@ class Worker(WorkerBase):
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
 
-        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
-
-        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
+        self.elastic_ep_executor = self._make_elastic_ep_executor()
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
@@ -274,7 +272,7 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-        validate_worker_profiler_config(self.profiler_config)
+        self._validate_profiler_config()
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -285,6 +283,15 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+
+    def _validate_profiler_config(self) -> None:
+        validate_worker_profiler_config(self.profiler_config)
+
+    def _make_elastic_ep_executor(self):
+        """Construct elastic EP lazily so platform workers can opt out."""
+        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+
+        return ElasticEPScalingExecutor(self)
 
     @property
     def sleep_mode_backend(self) -> "SleepModeBackend":
