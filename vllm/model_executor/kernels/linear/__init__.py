@@ -199,6 +199,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterTritonPerTensorFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
@@ -380,6 +381,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
     },
     "machete": {
@@ -489,6 +491,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -1054,6 +1057,14 @@ def init_mxfp8_linear_kernel(
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and platform is PlatformEnum.CUDA
+        and bmm_batch_size is None
+    ):
+        possible = prioritize_humming(possible)
+        possible = [k for k in possible if k.supports_batch_invariance()]
+
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(
         possible,
@@ -1299,16 +1310,27 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(
+    use_a16: bool = False, act_dtype: torch.dtype | None = None
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform.
 
-    Returns a placeholder for requantization sources, which have no kernel."""
+    Args:
+        use_a16: Weight-only (W4A16) instead of W4A4.
+        act_dtype: Activation dtype of a W4A16 layer, so that BF16-only
+            kernels are skipped for FP16 models. None if unknown.
+
+    Returns:
+        The kernel, or a placeholder for requantization sources, which have
+        no kernel.
+
+    """
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeNvFp4LinearKernel()
 
-    config = NvFp4LinearLayerConfig()
+    config = NvFp4LinearLayerConfig(act_dtype=act_dtype)
     a16_kernels = (
         B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1352,6 +1374,10 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
+        cutedsl_ok = (
+            cutedsl_ok
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.can_implement(config)[0]
+        )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         elif not prefers_humming(compute_capability):
@@ -1361,6 +1387,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         if use_a16 and force_kernel not in a16_kernels:
             raise ValueError(f"{force_kernel.__name__} does not support W4A16")
         is_supported, reason = force_kernel.is_supported()
+        if is_supported:
+            is_supported, reason = force_kernel.can_implement(config)
         if not is_supported:
             raise ValueError(
                 f"Forced NVFP4 kernel {force_kernel.__name__} is not "
@@ -1496,6 +1524,7 @@ __all__ = [
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
+    "AiterTritonPerTensorFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
