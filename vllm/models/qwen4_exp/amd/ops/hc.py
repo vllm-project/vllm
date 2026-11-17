@@ -186,7 +186,8 @@ def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Te
     return out
 
 
-# Smallest M where the kernel beats the unfused chain on MI355X, cold and hot cache.
+# Smallest timed M at which the kernel beats the unfused chain on MI355X, from
+# HBM and from cache.
 MIN_FUSED_UP_M = 256
 _UP_GATE_MIX_HC = 4
 _UP_GATE_MIX_HS = 2560
@@ -217,6 +218,7 @@ def _hc_up_gate_mix_kernel(
     NUM_XCDS: tl.constexpr,
 ) -> None:
     GRID_N: tl.constexpr = HS // BLOCK_N
+    tl.static_assert(HS % BLOCK_N == 0)
     tl.static_assert(GRID_N % NUM_XCDS == 0)
     tl.static_assert(RANK % BLOCK_K == 0)
 
@@ -597,8 +599,9 @@ def hc_up_gate_mix(
 
     The fused kernel rounds the gate to bf16 and sums the streams in the
     unfused chain's order; only the GEMM's accumulation order differs.
-    Smaller inputs run the unfused chain. Only hc_count 4, hidden size 2560
-    and rank 320 are supported.
+    Smaller inputs run the unfused chain. Supported on gfx950 with bf16
+    weights, hc_count 4, hidden size 2560 and rank 320
+    (`hc_up_gate_mix_supported`).
     """
     return torch.ops.vllm.qwen4_exp_hc_up_gate_mix(lowrank, xn, w_up)
 
