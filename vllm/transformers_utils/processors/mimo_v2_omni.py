@@ -48,7 +48,7 @@ _mean_std_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class ImageInput:
     # PIL.Image | torch.Tensor (C,H,W)
     image: Any
@@ -56,7 +56,7 @@ class ImageInput:
     min_pixels: int | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoInput:
     # tuple[frames_TCHW: torch.Tensor, timestamps_T: torch.Tensor]
     video: Any
@@ -73,14 +73,14 @@ class VideoInput:
     segment_type: Literal["individual", "partial"] = "individual"
 
 
-@dataclass
+@dataclass(slots=True)
 class AudioInput:
     # tuple[waveform_1D, sr]
     # | np.ndarray | torch.Tensor (T,n_vq)
     audio: Any
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoAudioInput:
     video: Any  # same as VideoInput.video
     audio: Any  # same as AudioInput.audio
@@ -97,14 +97,14 @@ class VideoAudioInput:
     segment_type: Literal["individual", "partial"] = "individual"
 
 
-@dataclass
+@dataclass(slots=True)
 class Content:
     type: Literal["text", "image", "video", "audio", "video_audio"]
     content: Any
     is_target: bool | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class MiMoVLInputSample:
     input_ids: torch.Tensor
     labels: torch.Tensor | None
