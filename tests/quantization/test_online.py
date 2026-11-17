@@ -926,8 +926,7 @@ def test_online_quantization_configures_prequantized_moe(
     # Serialized experts are materialized and requantized one layer at a time.
     assert layer._quant_method.uses_meta_device
     assert all(
-        p.is_meta
-        for p in layer._quant_method.requantization_source_parameters.values()
+        p.is_meta for p in layer._quant_method.requantization_source_parameters.values()
     )
 
 
