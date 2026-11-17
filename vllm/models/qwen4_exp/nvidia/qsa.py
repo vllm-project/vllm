@@ -55,7 +55,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
-from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
+from ..common.qsa_indexer import qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .ops.qsa_prefill_deepgemm import (
@@ -63,6 +63,7 @@ from .ops.qsa_prefill_deepgemm import (
     reserve_deepgemm_prefill,
 )
 from .qsa_indexer import QSAIndexer
+from .qsa_indexer_metadata import QSAIndexerMetadata
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):

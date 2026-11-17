@@ -28,7 +28,7 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.math_utils import cdiv, round_up
 
 if TYPE_CHECKING:
-    from ...common.qsa_indexer import QSAIndexerMetadata
+    from ..qsa_indexer_metadata import QSAIndexerMetadata
 
 _NUM_HEADS = 4
 _HEAD_DIM = 128

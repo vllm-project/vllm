@@ -10,21 +10,36 @@ import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.models.qwen4_exp.common import qsa_indexer as qsa_common
-from vllm.models.qwen4_exp.common.qsa_indexer import (
-    QSAIndexerMetadata,
-    QSAIndexerMetadataBuilder,
-    qsa_kv_cache_dtype,
-)
+from vllm.models.qwen4_exp.common.qsa_indexer import qsa_kv_cache_dtype
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.nvidia import qsa_indexer
+from vllm.models.qwen4_exp.nvidia import qsa_indexer_metadata as qsa_nvidia
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.utils import clear_layer_kv_caches
+
+# ROCm keeps the common builder; NVIDIA has its own copy with the DeepGEMM
+# prefill plan.
+QSA_INDEXER_BUILDERS = pytest.mark.parametrize(
+    "builder_cls",
+    [qsa_common.QSAIndexerMetadataBuilder, qsa_nvidia.QSAIndexerMetadataBuilder],
+)
+
+
+def _builder_without_init(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> qsa_common.QSAIndexerMetadataBuilder | qsa_nvidia.QSAIndexerMetadataBuilder:
+    builder = builder_cls.__new__(builder_cls)
+    if isinstance(builder, qsa_nvidia.QSAIndexerMetadataBuilder):
+        builder.use_deepgemm_prefill = False
+    return builder
+
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -258,10 +273,13 @@ def _qsa_sparse_paged_attention_reference(
 
 
 @requires_qsa_metadata_kernels
-def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
+@QSA_INDEXER_BUILDERS
+def test_qsa_indexer_metadata_marks_cudagraph_padding_inert(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> None:
     device = torch.device("cuda")
-    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
-    builder.use_deepgemm_prefill = False
+    builder = _builder_without_init(builder_cls)
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -311,10 +329,13 @@ def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
 
 
 @requires_qsa_metadata_kernels
-def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
+@QSA_INDEXER_BUILDERS
+def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> None:
     device = torch.device("cuda")
-    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
-    builder.use_deepgemm_prefill = False
+    builder = _builder_without_init(builder_cls)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -480,10 +501,13 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
 
 
 @requires_qsa_metadata_kernels
-def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
+@QSA_INDEXER_BUILDERS
+def test_qsa_compressed_metadata_keeps_dummy_slots_inert(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> None:
     device = torch.device("cuda")
-    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
-    builder.use_deepgemm_prefill = False
+    builder = _builder_without_init(builder_cls)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False
@@ -914,7 +938,7 @@ def test_qsa_prefill_selection_correctness(
     if can_use_deepgemm_prefill(q, cache):
         # The constants persist across cases; reserve the largest any case uses.
         reserve_deepgemm_prefill(q.device, 8192 * compress_ratio, compress_ratio, rows)
-        metadata = QSAIndexerMetadata(
+        metadata = qsa_nvidia.QSAIndexerMetadata(
             block_table=page_table,
             slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
             seq_lens=sequence_lengths,
