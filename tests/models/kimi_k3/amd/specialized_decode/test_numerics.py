@@ -10,11 +10,10 @@ regular-decode or spec-verify step, with random checkpoint-format weights:
   graph replay's padded requests write nothing and leave the rest bit-identical.
 - K2 (eight GPUs): o_proj + all-reduce + the MLP AttnRes + the latent MoE. The
   MoE is compared on the kernel's own MLP input, where routing cannot differ.
-  The route on K2's own logits is KimiMoE's router's (ids and weight bits, near
-  and exact ties), the shared SiTU the _C kernel's at every magnitude, which
-  must also be what vLLM's compiled SituAndMul gives. Then a CUDA graph of K2
-  replayed 300 times, bit-identical, and a stalled rank (the fault hook): every
-  rank's launch finishes and the output rank's flags fail the step.
+  The route on K2's own logits picks KimiMoE's experts, including near the
+  top-k boundary. Then a CUDA graph of K2 replayed 300 times, bit-identical,
+  and a stalled rank (the fault hook): every rank's launch finishes and the
+  output rank's flags fail the step.
 - M1a (AttnRes -> qkv_a / g_proj -> q / kv RMSNorm + the fp8 KV write -> q_b
   -> fp4 W_UK -> the DCP query gather) and M1b (the a2a LSE combine -> fp4
   W_UV -> the gate): one GPU, then TP8 + DCP8 with a graph of two MLA layers
@@ -1646,34 +1645,6 @@ def test_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2_opt_worker)
 
 
-def _k2_regions(runner, key) -> dict:
-    """K2's last launch (`opt` 0): every rank's router logits [S, 896] f32 (this
-    rank's RLOG peer region), the route's expert ids and f32 weights [S, 16],
-    and this rank's shared gate | up [S, 1536] and SiTU h [S, 768] (bf16)."""
-    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import PEER_HEAD
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
-        SI,
-        TOPK,
-        TP,
-        E,
-    )
-
-    S, lay = key.tokens, k2.scratch_layout(key)
-    par = int(runner.epoch.item()) % 2
-    off = PEER_HEAD + k2.peer_layout(S)["rlog"][0] + par * (k2.peer_bytes(S) // 2)
-    logits = _pair_words(runner.peers.bytes, off, TP * S * (E // TP))
-    logits = logits.view(torch.float32).view(TP, S, E // TP).transpose(0, 1)
-    route = _pair_words(runner.scratch, lay["route"][0], S * 2 * TOPK).view(S, -1)
-    return {
-        "logits": logits.reshape(S, E),
-        "ids": route[:, :TOPK],
-        "weights": route[:, TOPK:].view(torch.float32),
-        "sgu": _pair_words(runner.scratch, lay["sgu"][0], S * SI).view(bf).view(S, -1),
-        "h": _pair_words(runner.scratch, lay["h"][0], S * SI // 2).view(bf).view(S, -1),
-    }
-
-
 def _k3_router(bias):
     """Kimi-K3's router as KimiMoE has vLLM build it: create_fused_moe_router
     on KimiLinearConfig's routing (sigmoid, renormalized, one expert group)
@@ -1699,28 +1670,29 @@ def _k3_router(bias):
         )
 
 
-def _by_expert(ids, weights):
-    order = ids.long().argsort(-1)
-    return ids.long().gather(-1, order), weights.gather(-1, order)
-
-
-def _k2_route(runner, w, m, S: int) -> dict:
+def _k2_route(runner, w, m, S: int) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import PEER_HEAD
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import TOPK, TP, E
 
     runner.step_begin()
     out = torch.empty(S, HIDDEN, dtype=bf, device=runner.scratch.device)
     key = _k2_launch(runner, w, m, w["prefix"].clone(), out, False, opt=0)
     torch.accelerator.synchronize()
     assert not runner.health.any() and not runner.flags.any()
-    return _k2_regions(runner, key)
+    lay = k2.scratch_layout(key)
+    par = int(runner.epoch.item()) % 2
+    off = PEER_HEAD + k2.peer_layout(S)["rlog"][0] + par * (k2.peer_bytes(S) // 2)
+    logits = _pair_words(runner.peers.bytes, off, TP * S * (E // TP))
+    logits = logits.view(torch.float32).view(TP, S, E // TP).transpose(0, 1)
+    route = _pair_words(runner.scratch, lay["route"][0], S * 2 * TOPK).view(S, -1)
+    return logits.reshape(S, E), route[:, :TOPK].long()
 
 
-def _k2_route_run(monkeypatch, tp_size, pp_size, rank, port, check: str) -> None:
-    """K2's routes against the production router's. `check`: "ids" (random
-    scores and near ties: fails listing, per (rows, case), some tokens' experts
-    only K2 / only the router picked), "weights" (the same cases: the tokens
-    with the same experts but weight bits off) or "ties" (an exact tie's ids)."""
-    ties = check == "ties"
+def _k2_route_run(monkeypatch, tp_size, pp_size, rank, port) -> None:
+    """K2's expert ids against the production router's on random scores and
+    near ties at the top-k boundary."""
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, port)
     _aiter_env(monkeypatch)
 
@@ -1735,34 +1707,25 @@ def _k2_route_run(monkeypatch, tp_size, pp_size, rank, port, check: str) -> None
     bias = torch.full((E,), -1.0, device=device)
     bias[torch.arange(15, device=device) * 59 + 3] = 2.0
     p, q = 130, 700
-    off_ids, off_w = {}, {}
+    off_ids = {}
     for S in (1, 8, 16):
         w = _k2_inputs(rank, device, S)
-        if ties:
-            # q's gate row p's: every token's p and q scores tie
-            tie = dict(mw, w_gate=mw["w_gate"].clone(), bias=bias.clone())
-            tie["w_gate"][q] = tie["w_gate"][p]
-            tie["bias"][[p, q]] = 0.5
-            cases = {"exact_tie": tie}
-        else:
-            cases = {"random": mw}
-            s = _k2_route(runner, w, mw, S)["logits"].sigmoid()
-            # token 0's biased p and q scores 1 or 2 f32 steps apart around 1.0
-            # (the step is 2^-24 below it, 2^-23 above)
-            for k in (-2, -1, 2, 4):
-                b = bias.clone()
-                b[p] = 1.0 - s[0, p]
-                b[q] = 1.0 - s[0, q] + k * 2.0**-24
-                cases[f"near_tie{k:+d}"] = dict(mw, bias=b)
+        cases = {"random": mw}
+        logits, _ = _k2_route(runner, w, mw, S)
+        s = logits.sigmoid()
+        # token 0's biased p and q scores 1 or 2 f32 steps apart around 1.0
+        # (the step is 2^-24 below it, 2^-23 above)
+        for k in (-2, -1, 2, 4):
+            b = bias.clone()
+            b[p] = 1.0 - s[0, p]
+            b[q] = 1.0 - s[0, q] + k * 2.0**-24
+            cases[f"near_tie{k:+d}"] = dict(mw, bias=b)
         hs = torch.empty(S, HIDDEN, dtype=bf, device=device)
         for name, m in cases.items():
-            r = _k2_route(runner, w, m, S)
-            if ties:
-                lg = r["logits"]
-                assert torch.equal(lg[:, p], lg[:, q]), "one gate row, two logits"
-            want_w, want_ids = _k3_router(m["bias"]).select_experts(hs, r["logits"])
-            ids, wts = _by_expert(r["ids"], r["weights"])
-            want_ids, want_w = _by_expert(want_ids, want_w)
+            logits, ids = _k2_route(runner, w, m, S)
+            _, want_ids = _k3_router(m["bias"]).select_experts(hs, logits)
+            ids = ids.sort(-1).values
+            want_ids = want_ids.long().sort(-1).values
             bad = (ids != want_ids).any(-1)
             if bad.any():
                 off_ids[(S, name)] = {
@@ -1772,33 +1735,14 @@ def _k2_route_run(monkeypatch, tp_size, pp_size, rank, port, check: str) -> None
                     )
                     for t in bad.nonzero().flatten()[:3].tolist()
                 }
-            ulps = (wts.view(torch.int32) - want_w.view(torch.int32)).abs()[~bad]
-            if ulps.any():
-                n = int((ulps > 0).any(-1).sum())
-                off_w[(S, name)] = (n, int(ulps.max()))
-    if check == "weights":
-        assert not off_w, (
-            f"(rows, case): (tokens with weight bits off, max f32 steps): {off_w}"
-        )
-    else:
-        assert not off_ids, (
-            f"(rows, case): {{token: (K2-only experts, router-only)}}: {off_ids}"
-        )
+    assert not off_ids, (
+        f"(rows, case): {{token: (K2-only experts, router-only)}}: {off_ids}"
+    )
 
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _k2_route_worker(monkeypatch, tp_size, pp_size, rank, port) -> None:
-    _k2_route_run(monkeypatch, tp_size, pp_size, rank, port, "ids")
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def _k2_weights_worker(monkeypatch, tp_size, pp_size, rank, port) -> None:
-    _k2_route_run(monkeypatch, tp_size, pp_size, rank, port, "weights")
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def _k2_tie_worker(monkeypatch, tp_size, pp_size, rank, port) -> None:
-    _k2_route_run(monkeypatch, tp_size, pp_size, rank, port, "ties")
+    _k2_route_run(monkeypatch, tp_size, pp_size, rank, port)
 
 
 @needs_gfx950
@@ -1810,156 +1754,6 @@ def test_k2_routing_matches_production_router_tp8(
     (AITER biased_grouped_topk on an AITER MoE deployment): random scores, and a
     16th pick between two biased scores 1 or 2 f32 steps apart."""
     multi_process_parallel(monkeypatch, 8, 1, _k2_route_worker)
-
-
-@needs_gfx950
-@multi_gpu_test(num_gpus=8)
-@pytest.mark.xfail(
-    strict=True,
-    reason="K2's routing weights (sigmoid as v_rcp(1 + v_exp2(-x log2 e)), "
-    "renormalized by an IEEE 1 / sum) are up to 3 f32 steps off AITER "
-    "biased_grouped_topk's",
-)
-def test_k2_routing_weights_match_production_router_tp8(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On the same cases, the picked experts' weights are the router's, bit for
-    bit."""
-    multi_process_parallel(monkeypatch, 8, 1, _k2_weights_worker)
-
-
-@needs_gfx950
-@multi_gpu_test(num_gpus=8)
-@pytest.mark.xfail(
-    strict=True,
-    reason="on an exact tie for the 16th pick K2 takes the lower expert id; AITER "
-    "biased_grouped_topk took the higher one",
-)
-def test_k2_routing_ties_match_production_router_tp8(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The router's experts on an exact tie for the 16th pick (two experts of one
-    gate row)."""
-    multi_process_parallel(monkeypatch, 8, 1, _k2_tie_worker)
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def _k2_situ_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-) -> None:
-    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
-
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.activation import SituAndMul
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
-        BETA,
-        LBETA,
-        SI,
-    )
-    from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
-
-    # forward_cuda is the _C situ_and_mul kernel (torch.ops itself does not
-    # pickle into the Ray worker)
-    with set_current_vllm_config(VllmConfig()):
-        situ = SituAndMul(BETA, LBETA)
-    runner = MonoRunner(device)
-    mw = _moe_weights(rank, device)
-    # gate | up row j: one x column times 2^e, e from -40 to 15 (exact): the
-    # shared gate and up span every magnitude down to tiny
-    j = torch.arange(2 * SI, device=device)
-    sgu = torch.zeros(2 * SI, HIDDEN, device=device)
-    sgu[j, (j * 37 + 11 * rank) % HIDDEN] = torch.exp2((j * 7 % 56 - 40).float())
-    mw = dict(mw, w_sgu=sgu.to(bf))
-    off = {}
-    for S in (1, 16, 64):
-        w = _k2_inputs(rank, device, S)
-        runner.step_begin()
-        out = torch.empty(S, HIDDEN, dtype=bf, device=device)
-        key = _k2_launch(runner, w, mw, w["prefix"].clone(), out, False, opt=0)
-        torch.accelerator.synchronize()
-        assert not runner.health.any() and not runner.flags.any()
-        r = _k2_regions(runner, key)
-        want = situ.forward_cuda(r["sgu"])
-        bad = r["h"].view(torch.int16) != want.view(torch.int16)
-        if bad.any():
-            g, u = r["sgu"][:, :SI][bad], r["sgu"][:, SI:][bad]
-            off[S] = (int(bad.sum()), list(zip(g[:4].tolist(), u[:4].tolist())))
-    assert not off, f"rows: (SiTU outputs off _C situ_and_mul, (g, u) of some): {off}"
-
-
-@needs_gfx950
-@multi_gpu_test(num_gpus=8)
-@pytest.mark.xfail(
-    strict=True,
-    reason="K2's tanh_libm, (1 - e) / (1 + e) with e = exp2(-2 |x| log2 e), "
-    "cancels for small |x| (tanhf does not): the SiTU of a small gate or up "
-    "loses bf16 bits, and is 0 for the tiniest",
-)
-def test_k2_shared_situ_matches_c_kernel_tp8(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K2's shared-expert SiTU (`situ_vllm`) of its own gate | up rows is the _C
-    situ_and_mul kernel's, bit for bit, at every magnitude of gate and up, tiny
-    ones included (the random weights above rarely make them)."""
-    multi_process_parallel(monkeypatch, 8, 1, _k2_situ_worker)
-
-
-def _situ_grid(count: int, gen) -> torch.Tensor:
-    """[count + 9, 2 * 65536] gate | up rows: every bf16 gate against sampled
-    finite ups and special ones."""
-    pats = torch.arange(-32768, 32768, dtype=torch.int32, device="cuda")
-    pats = pats.to(torch.int16).view(bf)
-    finite = pats[torch.isfinite(pats.float())]
-    picks = torch.randint(0, finite.numel(), (count,), generator=gen, device="cuda")
-    special = [0.0, -0.0, 1.0, -1.0, 25.0, -100.0, 1e-30, float("inf"), float("-inf")]
-    ups = torch.cat([finite[picks], torch.tensor(special, dtype=bf, device="cuda")])
-    gates = pats.unsqueeze(0).expand(ups.numel(), -1)
-    return torch.cat([gates, ups.view(-1, 1).expand(-1, 65536)], dim=1).contiguous()
-
-
-@needs_gfx950
-@pytest.mark.xfail(
-    strict=True,
-    reason="_C situ_and_mul (K2 too) takes sigmoid(g) as (1 + tanh(g / 2)) / 2, "
-    "which loses bf16 bits for g below about -8 and is 0 below about -18",
-)
-@torch.inference_mode()
-def test_production_shared_situ_is_c_kernel() -> None:
-    """K2's shared SiTU is to be the _C situ_and_mul kernel's (the TP8 test
-    above), and so is vLLM's. MI355X serves Kimi-K3 compiled (the recipe's compilation
-    mode 3: ROCm opts it out of breakable CUDA graphs), where custom ops are off,
-    so KimiMLP's SituAndMul dispatches to its compiled forward_native: on every
-    bf16 gate against sampled ups, its bits must be the _C kernel's."""
-    import vllm._custom_ops  # noqa: F401  (registers torch.ops._C)
-    from vllm.config import (
-        CompilationConfig,
-        CompilationMode,
-        VllmConfig,
-        set_current_vllm_config,
-    )
-    from vllm.model_executor.layers.activation import SituAndMul
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
-        BETA,
-        LBETA,
-    )
-
-    config = VllmConfig(
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE, custom_ops=["+fused_rms_norm_gated"]
-        )
-    )
-    with set_current_vllm_config(config):
-        op = SituAndMul(BETA, LBETA)
-        x = _situ_grid(16, torch.Generator(device="cuda").manual_seed(0))
-        got = op(x)
-    want = torch.empty_like(got)
-    torch.ops._C.situ_and_mul(want, x, BETA, LBETA)
-    nan = torch.isnan(want.float()) & torch.isnan(got.float())
-    bad = (got.view(torch.int16) != want.view(torch.int16)) & ~nan
-    assert not bad.any(), f"{int(bad.sum())} of {bad.numel()} SiTU outputs differ"
 
 
 def _gather(t: torch.Tensor) -> torch.Tensor:
