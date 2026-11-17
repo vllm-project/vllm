@@ -4,6 +4,8 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use std::collections::BTreeMap;
+
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -21,30 +23,49 @@ use vllm_text::{
 use super::pb;
 use crate::model_names::ServedModelNames;
 
-fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
-    KvHintsEnvelope {
-        protocol_version: hints.protocol_version,
-        message_id: hints.message_id,
-        actions: hints
-            .actions
-            .into_iter()
-            .map(|action| KvHintAction {
+/// Payload key that `KVHintAction.block_hashes` fills.
+const KV_HINT_BLOCK_HASHES_KEY: &str = "block_hashes";
+
+fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> Result<KvHintsEnvelope, Status> {
+    let actions = hints
+        .actions
+        .into_iter()
+        .map(|action| {
+            let mut payload: BTreeMap<String, serde_json::Value> = action
+                .payload
+                .map(|payload| {
+                    payload
+                        .fields
+                        .into_iter()
+                        .map(|(key, value)| (key, proto_value_to_json(&value)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !action.block_hashes.is_empty() {
+                if payload.contains_key(KV_HINT_BLOCK_HASHES_KEY) {
+                    return Err(Status::invalid_argument(format!(
+                        "kv_hints action `{}` sets block_hashes both as a field and in payload",
+                        action.action_id
+                    )));
+                }
+                payload.insert(
+                    KV_HINT_BLOCK_HASHES_KEY.to_string(),
+                    serde_json::Value::from(action.block_hashes),
+                );
+            }
+            Ok(KvHintAction {
                 action_id: action.action_id,
                 action_type: action.action_type,
                 action_version: action.action_version,
-                payload: action
-                    .payload
-                    .map(|payload| {
-                        payload
-                            .fields
-                            .into_iter()
-                            .map(|(key, value)| (key, proto_value_to_json(&value)))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                payload,
             })
-            .collect(),
-    }
+        })
+        .collect::<Result<_, Status>>()?;
+    Ok(KvHintsEnvelope {
+        protocol_version: hints.protocol_version,
+        message_id: hints.message_id,
+        actions,
+    })
 }
 
 // ========================================================================================
@@ -87,7 +108,7 @@ pub fn to_text_request(
         req.request_id
     };
     let session_id = req.session_id.filter(|s| !s.is_empty());
-    let kv_hints = req.kv_hints.map(kv_hints_from_proto);
+    let kv_hints = req.kv_hints.map(kv_hints_from_proto).transpose()?;
     let reasoning_gate = req.engine_reasoning_gate.unwrap_or_default();
 
     let sampling = req.sampling.as_ref();
@@ -855,6 +876,7 @@ mod tests {
                     action_type: "example.action".to_string(),
                     action_version: "1.0".to_string(),
                     payload: json_to_proto_struct(&serde_json::json!({"source": "g2"})),
+                    block_hashes: vec![],
                 }],
             }),
             ..base_request()
@@ -871,6 +893,52 @@ mod tests {
             hints.actions[0].payload.get("source"),
             Some(&serde_json::json!("g2"))
         );
+        assert_eq!(hints.actions[0].payload.get("block_hashes"), None);
+    }
+
+    fn kv_fetch_request(payload: serde_json::Value, block_hashes: Vec<u64>) -> pb::GenerateRequest {
+        pb::GenerateRequest {
+            kv_hints: Some(pb::KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![pb::KvHintAction {
+                    action_id: "fetch-0".to_string(),
+                    action_type: "kv.fetch".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: json_to_proto_struct(&payload),
+                    block_hashes,
+                }],
+            }),
+            ..base_request()
+        }
+    }
+
+    #[test]
+    fn kv_hint_block_hashes_keep_all_64_bits() {
+        let hashes = vec![0, (1 << 53) + 1, u64::MAX];
+        let req = kv_fetch_request(
+            serde_json::json!({"source_control_endpoint": "tcp://10.0.0.2:17771"}),
+            hashes.clone(),
+        );
+
+        let text = to_text_request(req, false, &served()).expect("convert ok");
+        let payload = &text.kv_hints.expect("kv hints").actions[0].payload;
+        assert_eq!(
+            payload.get("block_hashes"),
+            Some(&serde_json::json!(hashes))
+        );
+        assert_eq!(
+            payload.get("source_control_endpoint"),
+            Some(&serde_json::json!("tcp://10.0.0.2:17771"))
+        );
+    }
+
+    #[test]
+    fn kv_hint_block_hashes_in_field_and_payload_rejected() {
+        let req = kv_fetch_request(serde_json::json!({"block_hashes": [1]}), vec![2]);
+
+        let err = to_text_request(req, false, &served()).expect_err("conflicting block_hashes");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
