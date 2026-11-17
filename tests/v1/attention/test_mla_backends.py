@@ -31,9 +31,9 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
-    _use_masked_mha,
     build_mla_chunked_context_metadata,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import _use_masked_mha
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
