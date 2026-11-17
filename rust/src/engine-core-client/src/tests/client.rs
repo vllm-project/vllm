@@ -4123,6 +4123,12 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                         watermarking: Some(
                             true,
                         ),
+                        prefill_progress: Some(
+                            PrefillProgress {
+                                request_id: "req-1",
+                                remaining_prefill_tokens: 4,
+                            },
+                        ),
                     },
                 ],
                 scheduler_stats: None,

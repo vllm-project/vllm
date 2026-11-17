@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, RequestError, RequestSpecDecodeMetrics, StopReason,
+    EngineCoreFinishReason, PrefillProgress, RequestError, RequestSpecDecodeMetrics, StopReason,
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
@@ -211,6 +211,7 @@ pub struct GenerateOutput {
     /// request finishes, so text decoding can drop the rows of tokens cut off
     /// by a stop string.
     pub routed_experts: AuxOutputRows,
+    pub prefill_progress: Option<Box<PrefillProgress>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -272,6 +273,9 @@ impl GenerateOutput {
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions.append(next.weight_versions);
         self.routed_experts.append(next.routed_experts);
+        if next.prefill_progress.is_some() {
+            self.prefill_progress = next.prefill_progress;
+        }
         self.timestamps = next.timestamps;
     }
 }
@@ -304,6 +308,7 @@ impl GenerateOutput {
             spec_decode_metrics: None,
             weight_versions,
             routed_experts: AuxOutputRows::default(),
+            prefill_progress: None,
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -380,6 +385,10 @@ impl GenerateOutputStream {
         let raw = raw.output;
 
         // Populate the one-time prompt info on the first output.
+        let progress_only = raw.prefill_progress.is_some()
+            && raw.new_token_ids.is_empty()
+            && raw.finish_reason.is_none();
+
         if let Some(info) = &mut self.pending_prompt_info
             && info.prompt_logprobs.is_none()
         {
@@ -427,7 +436,11 @@ impl GenerateOutputStream {
         }
         let output = GenerateOutput {
             request_id: raw.request_id,
-            prompt_info: self.pending_prompt_info.take(),
+            prompt_info: if progress_only {
+                None
+            } else {
+                self.pending_prompt_info.take()
+            },
             token_ids: raw.new_token_ids,
             logprobs,
             finish_reason,
@@ -438,6 +451,7 @@ impl GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
             routed_experts: AuxOutputRows::from_engine(raw.routed_experts),
+            prefill_progress: raw.prefill_progress,
             timestamps: self.request_metrics.timestamps(),
         };
 
