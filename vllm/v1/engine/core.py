@@ -821,17 +821,11 @@ class EngineCore:
             if self.deferred_step is None:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
-                if len(batch_queue) < self.batch_queue_size and (
-                    model_executed
-                    or (
-                        self.scheduler.has_requests()
-                        # PP: otherwise empty steps only fill the queue.
-                        and (
-                            not self._pp_admission
-                            or self.scheduler.has_decode_awaiting_cadence()
-                        )
-                    )
-                ):
+                schedule_more = model_executed or self.scheduler.has_requests()
+                if schedule_more and not model_executed and self._pp_admission:
+                    # PP: empty steps only help a decode awaiting the cadence.
+                    schedule_more = self.scheduler.has_decode_awaiting_cadence()
+                if schedule_more and len(batch_queue) < self.batch_queue_size:
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, model_executed
@@ -843,8 +837,7 @@ class EngineCore:
             return None, False
 
         if (
-            self._pp_admission
-            and self.deferred_step is None
+            (self._pp_admission and self.deferred_step is None)
             and len(batch_queue) < self.batch_queue_size
             and self._handle_inputs_while_waiting(batch_queue[-1][0], stop_on_add=True)
         ):
