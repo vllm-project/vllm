@@ -17,7 +17,6 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
-from vllm.distributed.eplb.eplb_state import _commit_eplb_maps
 from vllm.distributed.utils import (
     allocate_group_ports,
     enter_steady_state,
@@ -268,7 +267,7 @@ class WorkerSentinel:
             p2l, num_logical, num_local_experts
         )
         # p2l was updated in place; the commit derives l2p/lrc from it.
-        _commit_eplb_maps(eplb_model_state, p2l.cpu())
+        eplb_model_state._commit_eplb_maps(p2l.cpu())
         # Preserve physical expert IDs: slot ownership is unchanged by EPLB;
         # only the logical expert stored in each surviving slot changes.
 
