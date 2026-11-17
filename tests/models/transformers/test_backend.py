@@ -178,40 +178,36 @@ def test_output_head_transform(
     )
 
 
-def test_output_head_moe(vllm_runner: type[VllmRunner]) -> None:
-    """GraniteMoe keeps its head (`logits_scaling`), which `MoEMixin` must not
-    replace, and which batch-sharded sampling would skip."""
-    with vllm_runner(
-        "ibm-granite/granite-3.0-1b-a400m-base",
-        model_impl="transformers",
-        load_format="dummy",
-        hf_overrides={"num_hidden_layers": 1},
-        max_model_len=512,
-        gpu_memory_utilization=0.5,
-    ) as model_test:
-        has_local = model_test.apply_model(
-            lambda model: hasattr(model, "compute_logits_local")
-        )
-        assert has_local == [False]
-
-
-GRANITE_KWARGS = dict(
+OUTPUT_HEAD_KWARGS = dict(
     model_impl="transformers",
     load_format="dummy",
     hf_overrides={"num_hidden_layers": 1},
     max_model_len=512,
     gpu_memory_utilization=0.5,
 )
-"""Granite keeps its head (`logits_scaling`) and its vocab (49155) is padded."""
+
+
+@create_new_process_for_each_test("spawn")
+def test_output_head_moe(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept head is not replaced by `MoEMixin`."""
+    # Disable multiprocessing so that the patch applies to the engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(causal, "probe_output_head", lambda *args: None)
+    model = "ibm-granite/granite-3.0-1b-a400m-base"
+    with vllm_runner(model, **OUTPUT_HEAD_KWARGS) as model_test:
+        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        assert has_head == [True]
+        model_test.generate_greedy(["Hello"], max_tokens=4)
 
 
 @multi_gpu_test(num_gpus=2)
 def test_output_head_lora(vllm_runner: type[VllmRunner]) -> None:
     """The kept head projects `[1, n, h]` hidden states, which LoRA's `lm_head`
     must see as `[n, h]` to reorder the TP-sharded vocab."""
-    model = "ibm-granite/granite-3.0-2b-instruct"
-    kwargs = GRANITE_KWARGS | dict(enable_lora=True, tensor_parallel_size=2)
-    with vllm_runner(model, **kwargs) as model_test:
+    kwargs = OUTPUT_HEAD_KWARGS | dict(enable_lora=True, tensor_parallel_size=2)
+    with vllm_runner("jhu-clsp/ettin-decoder-17m", **kwargs) as model_test:
         model_test.generate_greedy(["Hello"], max_tokens=4)
 
 
@@ -227,8 +223,7 @@ def test_output_head_fallback(
         raise AttributeError("'_OutputEmbeddings' object has no attribute 'weight'")
 
     monkeypatch.setattr(causal, "probe_output_head", probe_output_head)
-    model = "ibm-granite/granite-3.0-2b-instruct"
-    with vllm_runner(model, **GRANITE_KWARGS) as model_test:
+    with vllm_runner("jhu-clsp/ettin-decoder-17m", **OUTPUT_HEAD_KWARGS) as model_test:
         has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
         assert has_head == [False]
 
@@ -1071,20 +1066,30 @@ def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
     torch.testing.assert_close(logits, expected)
 
 
+LOGIT_TRANSFORMS = {
+    "LlamaForCausalLM": (1.0, None),
+    "Gemma2ForCausalLM": (1.0, 30.0),
+    "CohereForCausalLM": (0.0625, None),
+    "GraniteForCausalLM": (0.25, None),
+    "HyperCLOVAXForCausalLM": (0.125, None),
+}
+
+
 @pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
-def test_only_projection_is_detected(model_type, arch, overrides, renames):
-    """Only heads which apply nothing but their output embeddings are skipped."""
+def test_logit_transform_is_detected(model_type, arch, overrides, renames):
+    """Heads which only scale or soft cap the logits are left to `LogitsProcessor`,
+    so they keep its fused path and batch-sharded sampling."""
     model = build_causal_lm(model_type, arch, "meta", **overrides)
     assert (output_head := to_output_head(model, type(model.base_model)))
-    only_projection = probe_output_head(output_head, model.config.hidden_size)
-    assert only_projection is (arch == "LlamaForCausalLM")
+    logit_transform = probe_output_head(output_head, model.config.hidden_size)
+    assert logit_transform == LOGIT_TRANSFORMS.get(arch)
 
 
 def test_output_head_calling_base_model_submodule():
     """OPT calls its base model's decoder directly, which the stub also serves."""
     model = build_causal_lm("opt", "OPTForCausalLM", "meta", ffn_dim=128)
     assert (output_head := to_output_head(model, type(model.base_model)))
-    assert probe_output_head(output_head, model.config.hidden_size)
+    assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
 
 
 def test_transformers_model_class_honours_remote_code_config(monkeypatch):

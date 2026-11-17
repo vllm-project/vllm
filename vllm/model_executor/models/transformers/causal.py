@@ -111,7 +111,8 @@ class OutputHead:
 
     module: PreTrainedModel | None
     """The `ForCausalLM` with its base model stubbed out, or `None` if it applies
-    nothing but its output embeddings, which `lm_head` computes on its own."""
+    nothing but its output embeddings, `scale` and `soft_cap`, which `lm_head` and
+    `LogitsProcessor` compute on their own."""
     output_embeddings: _OutputEmbeddings
     """Stands in for the output embeddings in `module`."""
     in_features: int
@@ -122,6 +123,8 @@ class OutputHead:
     """Checkpoint name -> vLLM name of the head's weights."""
     forward_kwargs: dict[str, bool]
     """The `_FORWARD_KWARGS` which `module.forward` takes."""
+    scale: float = 1.0
+    soft_cap: float | None = None
 
 
 def to_output_head(
@@ -199,16 +202,28 @@ def ignore_torch_compile(model: nn.Module) -> Iterator[None]:
             setattr(cls, IGNORE_COMPILE_KEY, False)
 
 
-def probe_output_head(output_head: OutputHead, hidden_size: int) -> bool:
-    """Whether `output_head` applies nothing but its output embeddings, which must
-    still be the identity."""
+def probe_output_head(
+    output_head: OutputHead, hidden_size: int
+) -> tuple[float, float | None] | None:
+    """The `scale` and `soft_cap` of `LogitsProcessor` which `output_head` applies
+    after its output embeddings, which must still be the identity, or `None` if it
+    applies anything else."""
     assert (model := output_head.module) is not None
+    kwargs = output_head.forward_kwargs
     # Heads with parameters still have them on "meta", so can only be run there
-    has_parameters = next(model.parameters(), None) is not None
-    device = "meta" if has_parameters else "cpu"
-    hidden_states = torch.randn(1, 3, hidden_size, device=device)
-    logits = model(inputs_embeds=hidden_states, **output_head.forward_kwargs).logits
-    return not has_parameters and torch.equal(logits, hidden_states)
+    if next(model.parameters(), None) is not None:
+        model(inputs_embeds=torch.empty(1, 3, hidden_size, device="meta"), **kwargs)
+        return None
+    hidden_states = 50 * torch.randn(1, 3, hidden_size)
+    hidden_states[0, 0, :2] = torch.tensor([1.0, 1e6])
+    logits = model(inputs_embeds=hidden_states, **kwargs).logits
+    # A scale maps 1 to itself and a soft cap maps large logits to itself
+    scale, soft_cap = logits[0, 0, :2].tolist()
+    if torch.allclose(logits, scale * hidden_states):
+        return scale, None
+    if torch.allclose(logits, soft_cap * torch.tanh(hidden_states / soft_cap)):
+        return 1.0, soft_cap
+    return None
 
 
 class CausalMixin(VllmModelForTextGeneration, Base):
@@ -238,14 +253,14 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         vocab_size = self.text_config.vocab_size
         if output_head is None:
             in_features, bias = self.text_config.hidden_size, False
-            self.logits_processor = LogitsProcessor(
-                vocab_size,
-                scale=getattr(self.text_config, "logit_scale", 1.0),
-                soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
-            )
+            scale = getattr(self.text_config, "logit_scale", 1.0)
+            soft_cap = getattr(self.text_config, "final_logit_softcapping", None)
         else:
             in_features, bias = output_head.in_features, output_head.bias
-            self.logits_processor = LogitsProcessor(vocab_size)
+            scale, soft_cap = output_head.scale, output_head.soft_cap
+        self.logits_processor = LogitsProcessor(
+            vocab_size, scale=scale, soft_cap=soft_cap
+        )
         self.lm_head = ParallelLMHead(
             vocab_size,
             in_features,
@@ -279,8 +294,11 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         with init_on_device_without_buffers("meta"), ignore_compile:
             model = model_cls._from_config(self.config, dtype=self.model_config.dtype)
         output_head = to_output_head(model.eval(), type(self.model))
+        if output_head is None:
+            return None
         hidden_size = self.text_config.hidden_size
-        if output_head is not None and probe_output_head(output_head, hidden_size):
+        if logit_transform := probe_output_head(output_head, hidden_size):
+            output_head.scale, output_head.soft_cap = logit_transform
             output_head.module = None
         return output_head
 
