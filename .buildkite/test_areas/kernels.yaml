@@ -136,9 +136,24 @@ steps:
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/model_executor/models/config.py
+  - vllm/config/attention.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/model_executor/kernels/attention/dsa/sparse_mqa_logits.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - tests/model_executor/layers/test_mla_short_prefill_indexer.py
+  - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - pytest -v -s kernels/test_top_k_per_row.py
+    - >-
+      pytest -v -s
+      model_executor/layers/test_mla_short_prefill_indexer.py
+      models/deepseek_v41/nvidia/test_candidate_indexer.py
+      -k "candidate_logits or candidate_indexer"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
@@ -560,12 +575,18 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
       - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+      - tests/kernels/attention/test_dcp_indexer_rocm.py
       - tests/kernels/attention/test_kimi_mxfp4_indexer.py
+      - tests/kernels/attention/test_rocm_aiter_flydsl_sparse_mla.py
+      - vllm/models/kimi_k3/amd/ops/flydsl_sparse_mla.py
+      - vllm/models/kimi_k3/amd/ops/flydsl_sparse_mla_gfx950.py
+      - tests/kernels/attention/test_rocm_aiter_mla_sparse_index_remap.py
       - vllm/models/kimi_k3/amd/ops/fp4_indexer.py
       - vllm/models/kimi_k3/amd/dsa.py
       - vllm/models/kimi_k3/amd/ops/fp4_indexer_prefill.py
       - vllm/models/kimi_k3/common/dsa_cache.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/model_executor/kernels/attention/dsa/dcp_indexer_rocm.py
       - vllm/model_executor/layers/sparse_attn_indexer.py
       - vllm/v1/kv_cache_interface.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode.py
@@ -579,7 +600,10 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - pytest -v -s tests/kernels/attention/test_dcp_indexer_rocm.py
       - pytest -v -s tests/kernels/attention/test_kimi_mxfp4_indexer.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_flydsl_sparse_mla.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_sparse_index_remap.py
 
 - label: ":nvidia: (L4) Quantization Kernels"
   key: kernels-quantization-test
@@ -601,9 +625,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) Quantization Kernels"
+      label: ":amd: (MI300 DPX) Quantization Kernels"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -684,6 +708,8 @@ steps:
   - vllm/model_executor/layers/mamba/gdn
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
+  - vllm/triton_utils/allocation.py
+  - vllm/triton_utils/tensor_descriptor.py
   - vllm/v1/attention/backends/gdn_attn.py
   commands:
     - pytest -v -s kernels/mamba
@@ -807,14 +833,16 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - vllm/models/minimax_m3/common/indexer.py
   - vllm/models/minimax_m3/common/ops/sparse_attn.py
   - vllm/models/minimax_m3/common/sparse_attention.py
+  - vllm/models/minimax_m3/nvidia/indexer_flashinfer.py
   - vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py
   - tests/v1/attention/utils.py
   - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
   commands:
-    - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k "prefill_sparse_attention_correctness or flashinfer_indexer_impl_matches_triton"
     - pytest -v -s tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
 
 - label: ":nvidia: (B200) Kernels"
@@ -831,6 +859,7 @@ steps:
   - csrc/attention/mla/
   - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fusion/
+  - vllm/model_executor/kernels/linear/nvfp4/
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
@@ -1189,6 +1218,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+    - pytest -v -s kernels/moe/test_deepep_v2_async_finalize.py
   mirror:
     amd:
       automatic_shard: true
@@ -1316,6 +1346,7 @@ steps:
 
 - label: ":amd: (MI355) Mamba SSM Kernels"
   key: amd-mamba-ssm-kernels-mi355
+  automatic_shard: true
   dind: false
   device: mi355_1
   num_devices: 1
