@@ -4,7 +4,7 @@ meta:
   provider: "inclusionAI"
   description: "Ling-3.1-flash MoE model with block-FP8 weights, tool calling, and reasoning support"
   date_added: 2026-10-14
-  date_updated: 2026-10-15
+  date_updated: 2026-11-17
   tasks:
     - text
   performance_headline: "Block-FP8 weights with BF16 compute and TP8 + EP8 deployment"
@@ -15,11 +15,7 @@ meta:
 
 model:
   model_id: "inclusionAI/Ling-3.1-flash"
-  min_vllm_version: "nightly"
-  nightly_required: true
-  docker_image:
-    nvidia: "vllm/vllm-openai:nightly"
-    amd: "vllm/vllm-openai-rocm:nightly"
+  min_vllm_version: "0.33.0"
   architecture: moe
   parameter_count: "560B"
   active_parameters: "25B"
@@ -27,8 +23,6 @@ model:
   base_args:
     - "--trust-remote-code"
     - "--enable-expert-parallel"
-    - "--gpu-memory-utilization"
-    - "0.9"
     - "--enable-chunked-prefill"
     - "--compilation-config"
     - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
@@ -84,7 +78,7 @@ guide: |
 
   ## Prerequisites
 
-  - **vLLM:** nightly build (`vllm/vllm-openai-rocm:nightly` on AMD)
+  - **vLLM:** 0.33.0 or newer (`vllm/vllm-openai-rocm` on AMD)
   - **Deployment:** a single node with 8 GPUs, using TP8 + EP8
   - **Precision:** serialized block FP8 weights with BF16 compute
   - **Context length:** 262,144 tokens
@@ -98,7 +92,6 @@ guide: |
     --trust-remote-code \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.9 \
     --enable-chunked-prefill \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
     --enable-prefix-caching \
@@ -109,7 +102,7 @@ guide: |
 
   ### AMD MI355X
 
-  Use the ROCm nightly image `vllm/vllm-openai-rocm:nightly`,
+  Use the ROCm image `vllm/vllm-openai-rocm:latest`,
   enable AITER and launch using the command:
 
   ```bash
@@ -117,7 +110,6 @@ guide: |
     --trust-remote-code \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.9 \
     --enable-chunked-prefill \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
     --enable-prefix-caching \
@@ -167,4 +159,4 @@ guide: |
   ## References
 
   - [Ling-3.1-flash on Hugging Face](https://huggingface.co/inclusionAI/Ling-3.1-flash)
-  - [vLLM nightly installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/#install-the-latest-code)
+  - [vLLM installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/)

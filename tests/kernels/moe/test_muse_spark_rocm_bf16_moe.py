@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x ROCm MoE experts, deployment checks and post-expert finalize."""
+"""Muse Spark ROCm MoE experts, deployment checks and post-expert finalize."""
 
 from collections.abc import Callable
 from dataclasses import fields
@@ -24,6 +24,8 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    derive_aiter_quant_type,
+    mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
@@ -60,6 +62,7 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     validate_mxfp4_deployment,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 def _parallel_config(
@@ -423,7 +426,12 @@ _FAIL_CLOSED_EVERYWHERE = [
     (_moe_config(parallel_config=_parallel_config(sp_size=2)), "sequence"),
     (_moe_config(parallel_config=_parallel_config(enable_eplb=True)), "EPLB"),
     (_moe_config(is_lora_enabled=True), "LoRA"),
-    (_moe_config(skip_final_all_reduce=True), "unreduced"),
+    (
+        _moe_config(
+            parallel_config=_parallel_config(tp_size=8), skip_final_all_reduce=True
+        ),
+        "unreduced",
+    ),
 ]
 
 
@@ -442,6 +450,15 @@ def test_unsupported_deployments_fail_closed(
 ) -> None:
     with pytest.raises(NotImplementedError, match=reason):
         validate(config)
+
+
+def test_expert_parallel_moe_may_leave_the_final_reduce_to_the_model() -> None:
+    config = _moe_config(
+        parallel_config=_parallel_config(ep_size=8), skip_final_all_reduce=True
+    )
+    validate_bf16_deployment(config)
+    validate_fp8_deployment(config)
+    validate_mxfp4_deployment(config)
 
 
 @pytest.mark.parametrize(
@@ -635,7 +652,9 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         moe_config=config,
         activation=MoEActivation.SILU,
         quant_config=quant_config,
+        quant_type=derive_aiter_quant_type(quant_config),
         output_dtype=dtype,
+        **mxfp4_w4a16_extra_kwargs(quant_config, config),
     ).clone()
     actual = _run().clone()
     routes = parked[0]
@@ -871,9 +890,9 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
 
 
 def _post_expert_norm_module(hidden_size: int) -> torch.nn.Module:
-    from vllm.models.muse_spark.common.layers import MuseSpark1xRMSNormWithInputScale
+    from vllm.models.muse_spark.common.layers import MuseSparkRMSNormWithInputScale
 
-    norm = MuseSpark1xRMSNormWithInputScale(
+    norm = MuseSparkRMSNormWithInputScale(
         hidden_size=hidden_size,
         eps=1e-8,
         has_weight=True,
@@ -1030,3 +1049,48 @@ def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
     assert not _online_mxfp4_applies(prefix.format(0))
     assert not _online_mxfp4_applies(prefix.format(61))
     assert issubclass(MuseSparkOnlineMXFP4FusedMoE, MuseSparkQuarkOCPMXFusedMoE)
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+def test_token_sharded_stream_keeps_only_the_current_ranks_finalized_rows(
+    monkeypatch,
+) -> None:
+    set_random_seed(0)
+    num_tokens, top_k, hidden = 8, 8, 256
+    norm = _post_expert_norm_module(hidden).cuda()
+    routed = torch.randn(num_tokens, top_k, hidden, device="cuda", dtype=torch.bfloat16)
+    weights = torch.softmax(torch.randn(num_tokens, top_k, device="cuda"), dim=-1)
+    ids = torch.zeros(num_tokens, top_k, dtype=torch.int32, device="cuda")
+    scattered: list[int] = []
+
+    def _reduce_scatter(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        assert dim == 0
+        scattered.append(x.shape[0])
+        return x[x.shape[0] // 2 :]
+
+    module = "vllm.models.muse_spark.amd.muse_moe_runner"
+    monkeypatch.setattr(
+        f"{module}.tensor_model_parallel_reduce_scatter", _reduce_scatter
+    )
+    for name in ("all_gather", "all_reduce"):
+        monkeypatch.setattr(
+            f"{module}.tensor_model_parallel_{name}",
+            lambda *args, **kwargs: pytest.fail("the stream stays token-sharded"),
+        )
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(f"{module}._FINALIZE_CHUNK_ELEMS", 4 * top_k * hidden)
+
+    reducer = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=True)
+    reducer.reduce_dtype = torch.bfloat16
+    output = torch.full(
+        (num_tokens, hidden), float("nan"), device="cuda", dtype=torch.bfloat16
+    )
+    with amd_muse_moe_runner.token_sharded_moe_output():
+        reducer.apply(output, routed, weights, ids, False)
+
+    assert scattered == [num_tokens]
+    reference = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=False)
+    expected = reference.apply(None, routed[4:], weights[4:], ids[4:], False)
+    torch.testing.assert_close(output[4:], expected)
+    assert output[:4].isnan().all()

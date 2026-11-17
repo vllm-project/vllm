@@ -64,18 +64,29 @@ that vLLM can hide table lookups behind the compute of the preceding layers
 (see below).
 
 In vLLM, hashing, lookup, and gating run as fused Triton kernels over FP8
-rows with ue8m0 block scales. The layer layout — table sizes, n-gram size,
-head count — is fixed by the checkpoint and is not user-configurable. Only the
+or packed MXFP4 rows with ue8m0 block-32 scales. The layer layout — table
+sizes, n-gram size, head count — is fixed by the checkpoint and is not user-configurable. Only the
 storage and sharding described below are configurable, via
 `--engram-config`, which takes a JSON object and can also be set field by
 field as `--engram-config.<field>`
 ([CLI reference](../cli/serve.md#-engram-config)).
+
+DeepSeek V4.1 checkpoints select packed MXFP4 tables with
+`quantization_config.engram_embed_quant: "mxfp4"`; absent or `"fp8"` keeps
+FP8 tables. MXFP4 stores two E2M1 values per byte, with the even column in
+the low nibble. If specified, `engram_embed_block_size` must be `32`,
+`engram_embed_scale_dtype` must be `"ue8m0"`, and `engram_embed_layers` must
+match `engram_layer_ids`. Mixed per-layer table formats are not supported.
+These fields are read from checkpoint metadata.
 
 ## CPU offload
 
 Engram tables dwarf typical embedding weights: [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 carries two Engram layers of roughly 384M table rows each, with 256-byte FP8
 entries plus their ue8m0 block scales — about 200 GB of table weights alone.
+The MXFP4 tables in `nvidia/DeepSeek-V4.1-Flash-NVFP4` use 128-byte rows
+plus 8 scale bytes, reducing the full tables to about 104 GB (97 GiB).
+Packed tables work with CPU offload, shared host storage, and GPU peer reads.
 Because lookups are deterministic — the indices are known from the token ids
 alone, before the forward pass — the tables need not sit in GPU memory at
 all. By default vLLM stores them in **pinned host memory** and serves lookups
@@ -96,6 +107,41 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 CPU offload requires a GPU with UVA support;
 vLLM fails fast when it is unavailable.
 
+## Disk offload (Qwen4Exp)
+
+`disk_offload` keeps Qwen4Exp PLE tables in the checkpoint files: no table
+is allocated in GPU or pinned host memory, and nothing is copied to an offload
+directory. Each step reads that step's rows from the safetensors files on the
+host. Use it where neither `cpu_offload` nor a resident table fits, for example
+on unified-memory GPUs such as DGX Spark, where pinned host memory comes out of
+the same pool as the weights and the KV cache:
+
+```bash
+vllm serve <qwen4exp-checkpoint> --engram-config '{"disk_offload": true}'
+```
+
+It applies only to Qwen4Exp on CUDA and takes precedence over `cpu_offload`.
+
+Rows are read with `preadv` and copied to fixed device buffers before the
+forward, so CUDA graphs replay unchanged. They stay in the checkpoint format
+(BF16, FP8 or NVFP4) and are decoded on the GPU, so an unquantized table must
+match `--dtype`. Rows that were read recently are served from the OS page
+cache, which is shared by co-located ranks, not counted in the worker's RSS,
+and reclaimed by the kernel under memory pressure.
+
+Costs and limits:
+
+- The read needs the step's token ids, so it waits for the previous step on
+  the GPU, and every TP rank reads all of its rows.
+- A row that is not in the page cache is read from disk. For a fast first
+  request, read the PLE shard files once after the server has started.
+- The checkpoint files must not change while the server runs. Truncation stops
+  the engine with an error naming the file; deleting or renaming is safe.
+- Weight reload and elastic EP are unsupported. Loading fails when tensors are
+  not file-backed safetensors views (`.bin`, runai, `fastsafetensors`,
+  `instanttensor`, or `--safetensors-load-strategy eager`);
+  `--load-format dummy` serves zeros.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
@@ -115,7 +161,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload`,
+`disk_offload` and, on NVIDIA, `dp_shared_memory`.
 
 ## Sharing host tables across DP replicas
 
@@ -136,6 +183,27 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Splitting GPU tables across engines (DeepSeek V4.1)
+
+Engines in one NVLink domain, such as the prefill engines of a disaggregated
+deployment, can split each GPU table's rows over all of their GPUs instead of
+keeping a host copy per engine. Each GPU holds 1/`peer_group_size` of every
+table and reads the other rows from their owner's HBM:
+
+```bash
+# Every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
+--engram-config.cpu_offload false \
+--engram-config.peer_group_size 18 \
+--engram-config.peer_group_store "$HOME/engram-peers/$SLURM_JOB_ID/store"
+```
+
+`peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
+a file the engines meet through once at startup: give every engine the same
+path, reachable by all of them (a shared filesystem across nodes) and fresh per
+launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1, PP=1
+and `cpu_offload` disabled. Weights cannot be reloaded, and restarting one
+engine means restarting the group.
+
 ## Limitations
 
 - CUDA-alike platforms only.
@@ -143,3 +211,5 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
+- MXFP4 tables use BF16 row exchange when DP-sharded; the batched FP8
+  exchange optimization is disabled for these tables.

@@ -166,7 +166,7 @@ def main(args):
         # Score matrix
         for i, q_emb in enumerate(query_embeddings):
             print(f"  {queries[i]:<33s}", end="")
-            for j, d_emb in enumerate(doc_embeddings):
+            for d_emb in doc_embeddings:
                 score = compute_maxsim(q_emb, d_emb)
                 print(f"  {score:6.2f}", end="")
             print()
