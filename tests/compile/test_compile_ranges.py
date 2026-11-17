@@ -140,6 +140,26 @@ def test_compile_config_get_compile_ranges():
     ]
 
 
+def test_compile_ranges_idempotent():
+    compilation_config = CompilationConfig(
+        compile_ranges_endpoints=[32, 8],
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=compilation_config,
+    )
+
+    compilation_config.pass_config.fuse_rope_kvcache = True
+    vllm_config._set_compile_ranges()
+    vllm_config._set_compile_ranges()
+
+    assert compilation_config.compile_ranges_endpoints == [8, 32, 256, 8192]
+
+
 class PostGradStaticShapeChecker(InductorPass):
     """Asserts that compile_sizes entries produce graphs with fully concrete
     (non-symbolic) shapes, and compile_ranges entries have symbolic shapes."""

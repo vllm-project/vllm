@@ -37,9 +37,11 @@ else()
   # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
   # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
   # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
-  # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48).
+  # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48), plus the SM90
+  # FP8 x FP4 Mega MoE kernel (vllm-project/DeepGEMM#44) and the MegaMoE
+  # combine-readiness fix under CUDA graph replay (vllm-project/DeepGEMM#59).
   # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "82ca617e5879d0efb0aba5b91b1c81852588af6f")
+  set(_DEEPGEMM_UPSTREAM_TAG "196f33873c658bde81a669bb645bac4823f8cd61")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
