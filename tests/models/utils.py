@@ -435,6 +435,7 @@ def softmax(data):
 class ModelInfo:
     name: str
     revision: str | None = None
+    trust_remote_code: bool = False
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
@@ -485,6 +486,7 @@ def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
+    vllm_extra_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
