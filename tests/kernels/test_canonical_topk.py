@@ -132,3 +132,24 @@ def test_sparse_indexer_topk_is_canonical(
     finally:
         get_indexer_topk.cache_clear()
     torch.testing.assert_close(indices.cpu(), expected, rtol=0, atol=0)
+
+
+def test_determinism_disables_fused_mqa_topk(monkeypatch: pytest.MonkeyPatch):
+    """The fused prefill kernel keeps no scores to canonicalize: the shared
+    eligibility rule (planner and every indexer) turns it off under the flag."""
+    import vllm.envs as envs
+    from vllm.model_executor.kernels.attention.dsa import fused_mqa_topk as fused
+
+    monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", True, raising=False)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False, raising=False)
+    monkeypatch.setattr(envs, "VLLM_DETERMINISTIC_SPARSE_TOPK", False, raising=False)
+    monkeypatch.setattr(fused, "fused_mqa_topk_available", lambda: True)
+    eligible = dict(
+        query_shape=(fused.FUSED_MQA_TOPK_HEADS, fused.FUSED_MQA_TOPK_HEAD_DIM),
+        topk=max(fused.FUSED_MQA_TOPK_TOPKS),
+        fp4_cache=False,
+        full_context=True,
+    )
+    assert fused.use_fused_mqa_topk(**eligible)
+    monkeypatch.setattr(envs, "VLLM_DETERMINISTIC_SPARSE_TOPK", True, raising=False)
+    assert not fused.use_fused_mqa_topk(**eligible)
