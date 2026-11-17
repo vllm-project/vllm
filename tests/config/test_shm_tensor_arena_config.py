@@ -16,6 +16,12 @@ def test_arena_size_flags_without_arena_warn(caplog_vllm):
     assert "enable_shm_tensor_arena is off" in caplog_vllm.text
 
 
+def test_slot_mb_below_arena_minimum_is_not_rejected_with_the_arena_off():
+    """The size has no effect with the arena off, so it only warns."""
+    config = ParallelConfig(shm_tensor_arena_slot_mb=4)
+    assert config.shm_tensor_arena_slot_mb == 4
+
+
 def test_arena_defaults_do_not_warn(caplog_vllm):
     with caplog_vllm.at_level("WARNING"):
         ParallelConfig()
