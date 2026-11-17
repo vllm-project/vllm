@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling kernels (NVIDIA).
 
-``rmsnorm`` / ``sconv`` import eagerly. The SwiGLU kernels and the FA4
+`rmsnorm` / `sconv` import eagerly. The SwiGLU kernels and the FA4
 relative-attention wrapper are exposed lazily to keep this package's
 import path lightweight.
 """

@@ -3,14 +3,14 @@
 """Regression tests for issue #42403.
 
 A request's stop-token set (the generation_config eos list plus any
-user-supplied ``stop_token_ids``) is invisible to xgrammar, which only knows
+user-supplied `stop_token_ids`) is invisible to xgrammar, which only knows
 the tokenizer's single eos. Such tokens can therefore escape the grammar
 bitmask while the FSM is still mid-object and truncate structured output.
-``compile_grammar`` now forwards ``all_stop_token_ids`` to the matcher as
-``override_stop_tokens`` so xgrammar masks them until the grammar completes.
+`compile_grammar` now forwards `all_stop_token_ids` to the matcher as
+`override_stop_tokens` so xgrammar masks them until the grammar completes.
 
 Issue #60580: xgrammar only treats tokens that decode to an empty string as
-special, so a tokenizer's control tokens (e.g. ``<|im_start|>``) matched
+special, so a tokenizer's control tokens (e.g. `<|im_start|>`) matched
 grammar text and could be sampled inside a JSON string. Structural tags and
 Lark grammars, which can name such tokens, must still be able to emit them.
 """

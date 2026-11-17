@@ -18,7 +18,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
+from vllm.v1.worker.gpu.async_utils import StepTimingSample, new_d2h_stream, stream
 from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,
@@ -214,7 +214,7 @@ def build_cost_tables_from_curves(
 class AdmittedDraftCounts:
     """Per-request admitted draft counts, in flight to the host."""
 
-    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event):
+    def __init__(self, cpu: torch.Tensor, event: torch.Event):
         self._cpu = cpu
         self._event = event
 
@@ -236,7 +236,7 @@ class AdaptiveVerificationManager:
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
-        self._copy_stream = torch.cuda.Stream(device)
+        self._copy_stream = new_d2h_stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
         # Rejection sampling verifies logits in one contiguous chunk; the
@@ -271,7 +271,7 @@ class AdaptiveVerificationManager:
             self._admitted_drafts_cpu = torch.empty(
                 max_num_reqs, dtype=torch.int32, pin_memory=True
             )
-            self._admitted_drafts_event = torch.cuda.Event(blocking=True)
+            self._admitted_drafts_event = torch.Event(blocking=True, device=device)
 
         # Two D2H slots preserve stale inputs for budget selection.
         self._stale_confidences = [
@@ -283,7 +283,9 @@ class AdaptiveVerificationManager:
             )
             for _ in range(2)
         ]
-        self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
+        self._copy_events = [
+            torch.Event(blocking=True, device=device) for _ in range(2)
+        ]
         self._pending_resets: list[int] = []
         self._stale_idx = 0
         for slot in self._stale_confidences:
@@ -390,7 +392,7 @@ class AdaptiveVerificationManager:
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
 
-        current_stream = torch.cuda.current_stream(self.req_states.device)
+        current_stream = torch.accelerator.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
@@ -403,7 +405,7 @@ class AdaptiveVerificationManager:
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
 
-        Stashes the chosen budget in ``_batch_budget`` for the compaction and
+        Stashes the chosen budget in `_batch_budget` for the compaction and
         reallocation that follow in the same step.
         """
         assert self.cost_tables is not None
@@ -459,6 +461,8 @@ class AdaptiveVerificationManager:
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        # Rank-local confidences must not select different TP execution sizes.
+        draft_budget = get_tp_group().broadcast_object(draft_budget, src=0)
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -544,6 +548,8 @@ class AdaptiveVerificationManager:
                     draft_budget,
                     self._draft_survival,
                 )
+                # Equal totals alone do not ensure identical request boundaries.
+                get_tp_group().broadcast(capacities, src=0)
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)
@@ -566,7 +572,7 @@ class AdaptiveVerificationManager:
             0 < draft_budget < int(scheduled_drafts.sum())
         ):
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
-            current_stream = torch.cuda.current_stream(self.req_states.device)
+            current_stream = torch.accelerator.current_stream(self.req_states.device)
             self._copy_stream.wait_stream(current_stream)
             with stream(self._copy_stream, current_stream):
                 admitted_cpu.copy_(capacities, non_blocking=True)
