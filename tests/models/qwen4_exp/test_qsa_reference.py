@@ -947,6 +947,7 @@ def test_qsa_prefill_selection_correctness(
         sequence_lengths.index_select(0, token_to_req.long()) // compress_ratio,
     )
 
+    from vllm.models.qwen4_exp.nvidia.ops import qsa_prefill_deepgemm
     from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
         can_use_deepgemm_prefill,
         prepare_deepgemm_prefill,
@@ -960,8 +961,11 @@ def test_qsa_prefill_selection_correctness(
         assert can_use_deepgemm_prefill(q, cache)
     deepgemm_prefill = None
     if can_use_deepgemm_prefill(q, cache):
-        # The constants persist across cases; reserve the largest any case uses.
-        reserve_deepgemm_prefill(q.device, 8192 * compress_ratio, compress_ratio, rows)
+        # The constants are reserved once per process; size them per case.
+        monkeypatch.setattr(qsa_prefill_deepgemm, "_constants", None)
+        reserve_deepgemm_prefill(
+            q.device, max(sequence_lens) + seq_len_slack, compress_ratio, rows
+        )
         metadata = qsa_nvidia.QSAIndexerMetadata(
             block_table=page_table,
             slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
@@ -987,7 +991,7 @@ def test_qsa_prefill_selection_correctness(
         deepgemm_prefill = prepare_deepgemm_prefill(
             metadata, query_start_loc.cpu(), sequence_lengths.cpu() + seq_len_slack
         )
-        if force_chunk:
+        if force_chunk and query_lens == [3, 33]:
             # With no budget, each request is its own group, so the second
             # one's keys are packed from a nonzero offset; the 33-row request
             # splits at one Q tile and reuses its gathered keys.
