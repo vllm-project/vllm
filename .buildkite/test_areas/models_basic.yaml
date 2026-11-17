@@ -437,6 +437,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
@@ -555,6 +556,7 @@ steps:
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_indexer_logits_dtype_config.py
+  - tests/models/test_qwen3_5_slot.py
   - tests/models/test_beam_weight_mapping.py
   - tests/models/test_beam_numerics.py
   - tests/models/transformers/fusers/
@@ -589,6 +591,7 @@ steps:
       models/test_alice_ai.py
       models/test_alice_ai_config.py
       models/test_indexer_logits_dtype_config.py
+      models/test_qwen3_5_slot.py
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
