@@ -53,6 +53,7 @@ from common import (
 
 from vllm.config.cache import CacheDType
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -1280,7 +1281,7 @@ def main():
         variant_backends = []
         for num_q_heads in num_q_heads_values:
             for backend in backends:
-                for variant, _, _ in variants:
+                for variant, _ in variants:
                     label = f"{backend}_{variant}"
                     if model_sweep is not None:
                         label = model_sweep.get_label(label, num_q_heads)
@@ -1389,6 +1390,8 @@ def main():
         if prefill_backends:
             # Use first decode backend for impl construction
             decode_backend = backends[0]
+            is_sparse = AttentionBackendEnum[decode_backend].get_class().is_sparse()
+            index_topk = 2048
             total = len(prefill_backends) * len(args.batch_specs)
 
             console.print(
@@ -1398,6 +1401,15 @@ def main():
 
             with tqdm(total=total, desc="Prefill benchmarking") as pbar:
                 for spec in args.batch_specs:
+                    prefill_route = None
+                    if is_sparse:
+                        max_seq_len = max(r.kv_len for r in parse_batch_spec(spec))
+                        # Measure MHA explicitly instead of an automatic MQA fallback.
+                        prefill_route = (
+                            SparseMLAPrefillRoute.DENSE_MHA
+                            if max_seq_len <= index_topk
+                            else SparseMLAPrefillRoute.MASKED_MHA
+                        )
                     for pb in prefill_backends:
                         config = BenchmarkConfig(
                             backend=decode_backend,
@@ -1411,13 +1423,14 @@ def main():
                             profile_memory=args.profile_memory,
                             warmup_ms=args.warmup_ms,
                             prefill_backend=pb,
+                            sparse_mla_route=prefill_route,
                             kv_lora_rank=args.kv_lora_rank,
                             qk_nope_head_dim=args.qk_nope_head_dim,
                             qk_rope_head_dim=args.qk_rope_head_dim,
                             v_head_dim=args.v_head_dim,
                         )
 
-                        result = run_benchmark(config)
+                        result = run_benchmark(config, index_topk=index_topk)
 
                         # Label result with prefill backend name for display
                         labeled_config = replace(result.config, backend=pb)

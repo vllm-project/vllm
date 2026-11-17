@@ -69,6 +69,14 @@ builder's decision. Import `SparseMLAPrefillRoute` from
 `vllm.v1.attention.backends.mla.sparse_utils`. This replaces
 the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
 
+The YAML `prefill_backends` comparison explicitly measures MHA. For sparse MLA,
+it uses dense MHA when every sequence fits within the benchmark's top-k of 2048,
+and masked MHA otherwise. Masked MHA requires `fa4`.
+Unsupported prefill backends report an error instead
+of falling back to sparse MQA and labeling its timing as the requested backend.
+FP8 output comparisons also require an MHA prefill route; an automatic sparse
+MQA route reports an error instead of silently omitting output quantization.
+
 ## Dataset Overview
 
 <style>

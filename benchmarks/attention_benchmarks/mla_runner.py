@@ -862,6 +862,8 @@ def _run_single_benchmark(
         has_prefill = metadata.prefill is not None
     if not has_decode and not has_prefill:
         raise RuntimeError("Metadata has neither decode nor prefill metadata")
+    if output_scale is not None and not has_prefill:
+        raise ValueError("FP8 output benchmarking requires an MHA prefill route")
 
     num_decode = (
         metadata.num_decode_tokens
@@ -1179,6 +1181,10 @@ def _run_mla_benchmark_batched(
                 and config.sparse_mla_route is SparseMLAPrefillRoute.MASKED_MHA
             )
             if force_masked_mha:
+                if prefill_backend not in (None, "fa4"):
+                    raise ValueError(
+                        "Sparse MLA masked MHA requires prefill_backend=fa4"
+                    )
                 impl.masked_mha_available = True
                 from vllm.model_executor.layers.attention.sparse_mla_attention import (
                     GLOBAL_TOPK_MASK_MAX_BYTES,
