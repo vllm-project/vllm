@@ -15,11 +15,11 @@ sync):
 1. quantize x into send[slot]: INT4, one fp16 scale per 32 values (4.5 bits
    per value);
 2. wait until the peer has consumed our call k - 2 (own counter
-   ``consumed`` >= k - 1, hipStreamWaitValue64);
+   `consumed` >= k - 1, hipStreamWaitValue64);
 3. copy send[slot] into the peer's recv[slot] (hipMemcpyAsync with
    hipMemcpyDeviceToDeviceNoCU: the SDMA engines);
 4. peer.arrived = k + 1 (hipStreamWriteValue64 into the peer's memory);
-5. wait until own ``arrived`` >= k + 1: the peer's call k is in recv[slot];
+5. wait until own `arrived` >= k + 1: the peer's call k is in recv[slot];
 6. out = dq(rank 0's message) + dq(rank 1's message) in fp32, then the input
    dtype. Both ranks add the same two exact fp32 values (a 4-bit integer times
    an fp16 scale is exact in fp32), so the outputs are bitwise identical on the
@@ -163,9 +163,9 @@ class _Hip:
 
 
 class DmaAllReduce:
-    """All-reduce (sum) of bf16/fp16 tensors between the two ranks of ``group``
+    """All-reduce (sum) of bf16/fp16 tensors between the two ranks of `group`
     (a CPU/gloo group, for the handle exchange at init). Tensors up to
-    ``max_bytes``; ``numel`` must be a multiple of 32. Collective: both ranks
+    `max_bytes`; `numel` must be a multiple of 32. Collective: both ranks
     construct it in the same order."""
 
     def __init__(self, group, device: torch.device, max_bytes: int):
@@ -178,7 +178,7 @@ class DmaAllReduce:
         self.q_off_s = _align(self.max_elems // 2)
         self.slot_bytes = _align(self.q_off_s + self.max_elems // GROUP * 2)
         self.calls = 0
-        with torch.cuda.device(device):
+        with torch.accelerator.device_index(device.index):
             self.send = self._malloc(_SLOTS * self.slot_bytes)
             # shared region: [arrived u64][consumed u64] ... recv slots from _ALIGN on
             self.shared = self._malloc(_ALIGN + _SLOTS * self.slot_bytes)
