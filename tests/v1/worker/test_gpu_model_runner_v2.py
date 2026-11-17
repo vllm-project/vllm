@@ -186,6 +186,56 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
     restore_for_sampling.assert_not_called()
 
 
+class _StopAfterAuxOutput(Exception):
+    pass
+
+
+def test_last_pp_rank_passes_hidden_states_and_logits_to_the_aux_output_connector():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_last_pp_rank = True
+    runner.pcp_manager = None
+    runner.pp_handler = None
+    runner.sample = lambda hidden_states, input_batch, grammar_output: (None,) * 3
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        compute_prompt_logprobs=lambda *args: {},
+        compute_prompt_token_id_logprobs=lambda *args: {},
+    )
+    tensor = SimpleNamespace(gpu=None, np=None)
+    runner.req_states = SimpleNamespace(
+        all_token_ids=tensor, num_computed_tokens=tensor, prompt_len=tensor
+    )
+    runner.model = SimpleNamespace(compute_logits=lambda rows: rows * 2)
+    received = []
+
+    def prepare_output(input_batch, hidden_states=None, logits_fn=None):
+        received.append((input_batch, hidden_states, logits_fn))
+        raise _StopAfterAuxOutput
+
+    runner.aux_output_connector = SimpleNamespace(prepare_output=prepare_output)
+    input_batch = SimpleNamespace(req_ids=["r"])
+    hidden_states = torch.randn(3, 4)
+    runner.execute_model_state = ExecuteModelState(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=hidden_states,
+        aux_hidden_states=None,
+        dp_sync_state=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        cudagraph_stats=None,
+        num_spec_tokens_to_schedule=0,
+    )
+
+    with pytest.raises(_StopAfterAuxOutput):
+        runner.sample_tokens(None)
+
+    ((batch, hidden, logits_fn),) = received
+    assert batch is input_batch and hidden is hidden_states
+    rows = torch.ones(2, 4)
+    assert torch.equal(logits_fn(rows), rows * 2)
+
+
 @pytest.mark.parametrize(
     "enabled,expected_events",
     [

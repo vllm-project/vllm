@@ -183,7 +183,13 @@ def test_object_key_prefix_is_validated(kwargs, error):
 
 
 @pytest.mark.parametrize(
-    "name,value", [("mooncake_config_path", "objects.json")], ids=["mooncake-config"]
+    "name,value",
+    [
+        ("enable_return_hidden_states", True),
+        ("return_topk_logprobs", 2),
+        ("mooncake_config_path", "objects.json"),
+    ],
+    ids=["hidden-states", "topk-logprobs", "mooncake-config"],
 )
 def test_session_fields_require_object_key_prefix(name, value):
     with pytest.raises(ValueError, match=f"{name} requires object_key_prefix"):

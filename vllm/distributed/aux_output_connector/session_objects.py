@@ -288,7 +288,8 @@ class SessionObjectWriter:
                 state.block_hashes[end // len(rows) - 1 - state.hash_start].hex(),
             )
             keys.append(key)
-            values.append(save(self._fields(np.concatenate(pieces))))
+            fields = self._take_fields(state, end - object_size, end)
+            values.append(save({**self._fields(np.concatenate(pieces)), **fields}))
             pieces = []
             first = index + 1
             state.staged.clear()
@@ -296,9 +297,51 @@ class SessionObjectWriter:
         if keys:
             self._put((keys, values))
 
-    def add_tail(self, key: str, rows: np.ndarray) -> None:
+    def add_tail(
+        self, key: str, rows: np.ndarray, fields: dict[str, np.ndarray]
+    ) -> None:
         """Write the rows after a request's last full object."""
-        self._put(([key], [save(self._fields(np.array(rows)))]))
+        fields = {**self._fields(np.array(rows)), **fields}
+        self._put(([key], [save(fields)]))
+
+    @staticmethod
+    def field_rows(
+        state: _WorkerRequestState, start: int, end: int
+    ) -> dict[str, np.ndarray]:
+        """Rows `[start, end)` of the staged fields of a request."""
+        fields = {}
+        for name, (first, stop, chunks) in state.fields.items():
+            assert first <= start and stop >= end, (
+                f"{name} rows of positions [{start}, {end}) are incomplete"
+            )
+            pieces = []
+            position = first
+            for chunk in chunks:
+                if position >= end:
+                    break
+                if position + len(chunk) > start:
+                    pieces.append(chunk[max(start - position, 0) : end - position])
+                position += len(chunk)
+            fields[name] = np.concatenate(pieces)
+        return fields
+
+    @staticmethod
+    def _take_fields(
+        state: _WorkerRequestState, start: int, end: int
+    ) -> dict[str, np.ndarray]:
+        """Rows `[start, end)` of the staged fields; later rows stay staged. A
+        remainder of less than half the buffer it views is copied so that it
+        does not keep that buffer alive."""
+        fields = SessionObjectWriter.field_rows(state, start, end)
+        for name, (position, stop, chunks) in state.fields.items():
+            while chunks and position + len(chunks[0]) <= end:
+                position += len(chunks.pop(0))
+            if chunks and position < end:
+                rest = chunks[0][end - position :]
+                buffer = rest if rest.base is None else rest.base
+                chunks[0] = rest.copy() if 2 * rest.nbytes < buffer.nbytes else rest
+            state.fields[name] = end, stop, chunks
+        return fields
 
     def close(self) -> None:
         self._closed.set()

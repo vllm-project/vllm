@@ -123,5 +123,10 @@ def read_aux_rows(
                     f"auxiliary-output object {key!r} is missing after {timeout_s}s"
                 )
             time.sleep(0.05)
-        parts.append(load(data)[field])
+        rows = load(data)
+        if field not in rows:
+            raise BlockObjectStoreError(
+                f"auxiliary-output object {key!r} has no field {field!r}"
+            )
+        parts.append(rows[field])
     return np.concatenate(parts) if parts else np.empty(0)

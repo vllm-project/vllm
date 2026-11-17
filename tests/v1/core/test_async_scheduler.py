@@ -966,11 +966,14 @@ class SessionEngine:
                     ]
         step = None
         if rows:
-            self.capturer.snapshot_routing_data.return_value = torch.from_numpy(
-                np.concatenate(rows)
-            )
+            routing = np.concatenate(rows)
+            self.capturer.snapshot_routing_data.return_value = torch.from_numpy(routing)
             step = self.worker.prepare_output(
-                _input_batch(list(block_ids), np.array(starts), np.cumsum([0] + counts))
+                _input_batch(
+                    list(block_ids), np.array(starts), np.cumsum([0] + counts)
+                ),
+                torch.from_numpy(routing[:, 0, :1].astype(np.float32)),
+                _two_logits,
             )
         self._in_flight[id(scheduler_output)] = step
         return scheduler_output
@@ -1306,6 +1309,10 @@ def test_preempted_session_request_whose_accepted_drafts_complete_an_object():
     assert outputs["second"].aux_output_keys is None
 
 
+def _two_logits(hidden_states):
+    return torch.cat([hidden_states, -hidden_states], dim=1)
+
+
 class HostTierSpec(OffloadingSpec):
     manager_cls = CPUOffloadingManager
 
@@ -1577,8 +1584,11 @@ def test_session_request_resumed_after_a_reset_sends_hashes_from_its_hit():
     engine.close()
 
 
-def test_reset_writes_the_objects_its_preempted_session_request_completed():
+@pytest.mark.parametrize("fields", [False, True], ids=["rows", "fields"])
+def test_reset_writes_the_objects_its_preempted_session_request_completed(fields):
     engine = _tier_engine(connector=None)
+    engine.worker._return_hidden_states = fields
+    engine.worker._topk_logprobs = 2 if fields else 0
     engine.set_version(1)
     (request,) = _session_requests(["r"], 40, 12, lookahead=1)
     engine.scheduler.add_request(request)
@@ -1589,6 +1599,19 @@ def test_reset_writes_the_objects_its_preempted_session_request_completed():
     resumed = engine.schedule()
     rows = read_aux_rows(engine.store, [key], "routed_experts", timeout_s=5)
     assert rows[:, 0, 0].tolist() == list(range(32, 48))
+    if fields:
+        hidden = read_aux_rows(engine.store, [key], "hidden_states", timeout_s=5)
+        assert hidden[:, 0].tolist() == list(range(32, 48))
+        expected = torch.log_softmax(_two_logits(torch.from_numpy(hidden)), dim=-1)
+        expected = expected.topk(2)
+        np.testing.assert_array_equal(
+            read_aux_rows(engine.store, [key], "topk_token_ids", timeout_s=5),
+            expected.indices.numpy(),
+        )
+        np.testing.assert_allclose(
+            read_aux_rows(engine.store, [key], "topk_logprobs", timeout_s=5),
+            expected.values.numpy(),
+        )
     engine.step(resumed, {"r": [0]})
     engine.run()
     engine.close()
