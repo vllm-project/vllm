@@ -82,18 +82,32 @@ def _quantize(values, GROUPS: tl.constexpr):
 
 @triton.jit
 def _quantize_query(
-    Q, Payload, Scales, QS: tl.constexpr, QH: tl.constexpr, H: tl.constexpr
+    Q,
+    Payload,
+    Scales,
+    QS: tl.constexpr,
+    QH: tl.constexpr,
+    H: tl.constexpr,
+    HB: tl.constexpr,
 ):
-    row, head = tl.program_id(0), tl.program_id(1)
-    group = tl.arange(0, 4)
-    scale_offsets = row * 256 + group * 64 + (head % 16) * 4 + head // 16
-    if head < H:
-        values = tl.load(Q + row * QS + head * QH + tl.arange(0, 128)).to(tl.float32)
-        packed, scales = _quantize(values, 4)
-        tl.store(Payload + (row * H + head) * 64 + tl.arange(0, 64), packed)
-        tl.store(Scales + scale_offsets, scales)
-    else:
-        tl.store(Scales + scale_offsets, tl.full((4,), 0, tl.uint8))
+    # HB heads of a row a program (one head a program left prefill launch-bound).
+    # The 64 head slots of a row's scales are all written: zero past H.
+    row, block = tl.program_id(0), tl.program_id(1)
+    head = block * HB + tl.arange(0, HB)
+    valid = head < H
+    values = tl.load(
+        Q + row * QS + head[:, None] * QH + tl.arange(0, 128)[None, :],
+        valid[:, None],
+        0.0,
+    ).to(tl.float32)
+    packed, scales = _quantize(tl.reshape(values, (HB * 128,)), HB * 4)
+    byte = (row * H + block * HB) * 64 + tl.arange(0, HB * 64)
+    tl.store(Payload + byte, packed, tl.arange(0, HB * 64) < (H - block * HB) * 64)
+    group = tl.arange(0, 4)[None, :]
+    scale_offsets = row * 256 + group * 64 + (head[:, None] % 16) * 4
+    scale_offsets += head[:, None] // 16
+    scales = tl.where(valid[:, None], tl.reshape(scales, (HB, 4)), 0)
+    tl.store(Scales + scale_offsets, scales.to(tl.uint8))
 
 
 @triton.jit
@@ -220,12 +234,16 @@ def _query_buffers(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return payload, scales
 
 
-def quantize_queries(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def quantize_queries(
+    q: torch.Tensor, heads_per_program: int = 16
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize [rows, heads, 128] without folding scales into head weights."""
     payload, scales = _query_buffers(q)
     rows, heads, _ = q.shape
     if rows:
-        _quantize_query[(rows, 64)](q, payload, scales, q.stride(0), q.stride(1), heads)
+        _quantize_query[(rows, 64 // heads_per_program)](
+            q, payload, scales, q.stride(0), q.stride(1), heads, heads_per_program
+        )
     return payload, scales
 
 
