@@ -13,7 +13,7 @@ use vllm_tokenizer::Tokenizer;
 use super::super::MediaPartSource;
 use super::KimiK3Variant;
 use crate::EffortValue;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_tool_message};
 use crate::reasoning::ReasoningControl;
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
@@ -216,9 +216,10 @@ pub(super) fn render_request_with_media_order(
 /// message's tool calls.
 ///
 /// A run whose `tool_call_id`s all match is reordered into call order. Any
-/// other run keeps its message order, and each message resolves its tool name
-/// from the call its id matches, else the name sent with it, else the call at
-/// its position among the tool messages since that assistant message.
+/// other run keeps its message order and ignores the ids, as
+/// `build_chat_segments()` does: each message takes the name sent with it,
+/// else the call at its position among the tool messages since that
+/// assistant message.
 fn flush_tool_run(
     out: &mut K3TokenWriter<'_>,
     run: &mut Vec<(usize, ChatMessage)>,
@@ -248,22 +249,20 @@ fn flush_tool_run(
             unreachable!("pending tool run only holds tool responses");
         };
         *tool_index += 1;
-        let current_pos = *tool_index;
-        let (position, tool_name) =
-            if let Some((matched_pos, matched_name)) = id_index.get(&tool_call_id) {
-                (*matched_pos, matched_name.clone())
-            } else if let Some(explicit_name) = name.filter(|name| !name.is_empty()) {
-                (current_pos, explicit_name)
-            } else if let Some(positional_name) = preceding_tool_names.get(current_pos - 1) {
-                (current_pos, positional_name.clone())
-            } else {
-                return Err(Error::InvalidToolMessage(
-                    "Kimi K3 tool messages need a resolvable tool name: \
-                     carry a matching tool_call_id, an explicit `name`, or \
-                     match a preceding assistant tool_call by order."
-                        .to_string(),
-                ));
-            };
+        let (position, tool_name) = if all_id_matched {
+            let (position, name) = &id_index[&tool_call_id];
+            (*position, name.clone())
+        } else if let Some(name) = name.filter(|name| !name.is_empty()) {
+            (*tool_index, name)
+        } else if let Some(name) = preceding_tool_names.get(*tool_index - 1) {
+            (*tool_index, name.clone())
+        } else {
+            bail_invalid_tool_message!(
+                "Tool messages need a resolvable tool name: \
+                 carry a matching tool_call_id, an explicit `name`, or \
+                 match a preceding assistant tool_call by order."
+            );
+        };
         resolved.push((position, message_index, content, tool_name));
     }
 

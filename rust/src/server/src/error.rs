@@ -327,16 +327,16 @@ mod tests {
 
     #[test]
     fn invalid_tool_message_maps_to_invalid_request() {
-        let error = vllm_chat::Error::InvalidToolMessage(
-            "Kimi K3 tool messages need a resolvable tool name".to_string(),
-        );
+        let error = vllm_chat::Error::InvalidToolMessage {
+            message: "Tool messages need a resolvable tool name".to_string(),
+        };
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
         assert_eq!(
             response.error.message,
-            "Kimi K3 tool messages need a resolvable tool name"
+            "Tool messages need a resolvable tool name"
         );
     }
 

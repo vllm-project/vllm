@@ -548,8 +548,8 @@ pub enum ChatMessage {
     Tool {
         content: MessageContent,
         tool_call_id: String,
-        /// Name of the tool that produced the result. Its `tool` alias is
-        /// folded in by `normalize_tool_name_alias`.
+        /// Name of the tool that produced the result. OpenAI's schema has no
+        /// such field; clients send it, and the Python frontend keeps it too.
         name: Option<String>,
     },
     #[serde(rename = "function")]
@@ -623,40 +623,16 @@ fn normalize_reasoning_aliases(message: &mut Value) {
     }
 }
 
-/// Fold the `tool` alias of a tool message into `name`, the key Kimi K3's
-/// reference encoder also reads the tool name from.
-///
-/// As with the reasoning aliases, the alias is always removed, and a non-null
-/// one fills `name` only when it is absent or null.
-fn normalize_tool_name_alias(message: &mut Value) {
-    let Some(message) = message.as_object_mut() else {
-        return;
-    };
-    if message.get("role").and_then(Value::as_str) != Some("tool") {
-        return;
-    }
-    let Some(alias_value) = message.remove("tool") else {
-        return;
-    };
-    if alias_value.is_null() {
-        return;
-    }
-    if message.get("name").is_none_or(Value::is_null) {
-        message.insert("name".to_string(), alias_value);
-    }
-}
-
 impl<'de> Deserialize<'de> for ChatMessage {
-    /// Normalize the reasoning and tool-name aliases, then dispatch on the role
-    /// tag: standard roles keep their derived errors, and any other string role
-    /// becomes [`ChatMessage::Custom`].
+    /// Normalize the reasoning aliases, then dispatch on the role tag: standard
+    /// roles keep their derived errors, and any other string role becomes
+    /// [`ChatMessage::Custom`].
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let mut value = Value::deserialize(deserializer)?;
         normalize_reasoning_aliases(&mut value);
-        normalize_tool_name_alias(&mut value);
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)

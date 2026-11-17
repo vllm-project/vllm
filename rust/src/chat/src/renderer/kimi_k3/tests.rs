@@ -454,14 +454,18 @@ fn unmatched_tool_call_id_falls_back_to_explicit_name() {
         .assert_eq(&rendered);
 }
 
+fn weather_and_search_calls() -> ChatMessage {
+    ChatMessage::assistant_blocks(vec![
+        tool_call("call-a", "weather", "{}"),
+        tool_call("call-b", "search", "{}"),
+    ])
+}
+
 /// As in `build_chat_segments()`, the name on the message wins over call order.
 #[test]
 fn explicit_name_takes_precedence_over_preceding_assistant_order() {
     let rendered = render_history(vec![
-        ChatMessage::assistant_blocks(vec![
-            tool_call("call-a", "weather", "{}"),
-            tool_call("call-b", "search", "{}"),
-        ]),
+        weather_and_search_calls(),
         ChatMessage::tool_response_named("result-b", "rewritten-b", Some("search".to_string())),
     ]);
 
@@ -472,15 +476,38 @@ fn explicit_name_takes_precedence_over_preceding_assistant_order() {
 #[test]
 fn unmatched_tool_call_id_falls_back_to_preceding_assistant_order() {
     let rendered = render_history(vec![
-        ChatMessage::assistant_blocks(vec![
-            tool_call("call-a", "weather", "{}"),
-            tool_call("call-b", "search", "{}"),
-        ]),
+        weather_and_search_calls(),
         ChatMessage::tool_response("result-a", "rewritten-a"),
         ChatMessage::tool_response("result-b", "rewritten-b"),
     ]);
 
     expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|open|>call tool="search" index="2"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="weather" index="1"<|sep|>result-a<|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="search" index="2"<|sep|>result-b<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+/// As in `build_chat_segments()`, one unmatched id makes the whole run fall
+/// back to call order, even for the message whose id does match.
+#[test]
+fn partly_matched_tool_run_ignores_ids() {
+    let rendered = render_history(vec![
+        weather_and_search_calls(),
+        ChatMessage::tool_response("result-b", "call-b"),
+        ChatMessage::tool_response("result-a", "rewritten-a"),
+    ]);
+
+    expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|open|>call tool="search" index="2"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="weather" index="1"<|sep|>result-b<|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="search" index="2"<|sep|>result-a<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+/// An empty `name` is no name: the result falls back to call order.
+#[test]
+fn empty_tool_name_counts_as_absent() {
+    let rendered = render_history(vec![
+        ChatMessage::assistant_blocks(vec![tool_call("call-a", "weather", "{}")]),
+        ChatMessage::tool_response_named("result-a", "rewritten-a", Some(String::new())),
+    ]);
+
+    expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="weather" index="1"<|sep|>result-a<|close|>message<|sep|><|end_of_msg|>"#]]
         .assert_eq(&rendered);
 }
 
@@ -503,9 +530,9 @@ fn orphaned_tool_message_without_name_or_assistant_is_validation_error() {
 
     assert!(error.is_request_validation_error());
     expect![[r#"
-        InvalidToolMessage(
-            "Kimi K3 tool messages need a resolvable tool name: carry a matching tool_call_id, an explicit `name`, or match a preceding assistant tool_call by order.",
-        )
+        InvalidToolMessage {
+            message: "Tool messages need a resolvable tool name: carry a matching tool_call_id, an explicit `name`, or match a preceding assistant tool_call by order.",
+        }
     "#]]
     .assert_debug_eq(&error);
 }

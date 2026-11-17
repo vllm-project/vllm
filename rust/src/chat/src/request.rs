@@ -361,8 +361,7 @@ impl ChatMessage {
         }
     }
 
-    /// Construct one tool-role message carrying the tool name sent with it; an
-    /// empty name counts as absent.
+    /// Construct one tool-role message carrying the tool name sent with it.
     pub fn tool_response_named(
         content: impl Into<ChatContent>,
         tool_call_id: impl Into<String>,
@@ -371,7 +370,7 @@ impl ChatMessage {
         Self::ToolResponse {
             content: content.into(),
             tool_call_id: tool_call_id.into(),
-            name: name.filter(|name| !name.is_empty()),
+            name,
         }
     }
 

@@ -321,7 +321,7 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
         } => Ok(VllmChatMessage::tool_response_named(
             convert_content(content)?,
             tool_call_id,
-            name.filter(|name| !name.is_empty()),
+            name,
         )),
         ChatMessage::Function { .. } => {
             bail_invalid_request!("Function messages are not supported.")
@@ -1645,15 +1645,13 @@ mod tests {
         assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
     }
 
-    /// A tool message keeps the tool name sent with it, under `name` or its
-    /// `tool` alias; `name` wins when both are sent, and an empty name is none.
+    /// A tool message keeps the `name` sent with it. As in the Python frontend,
+    /// a `tool` key is not an alias for it.
     #[test]
-    fn convert_tool_message_preserves_optional_name_and_tool_alias() {
+    fn convert_tool_message_preserves_optional_name() {
         let names = [
             json!({"name": "get_weather"}),
-            json!({"tool": "search"}),
-            json!({"name": "get_weather", "tool": "search"}),
-            json!({"name": ""}),
+            json!({"tool": "get_weather"}),
             json!({}),
         ]
         .map(|extra| {
@@ -1669,12 +1667,6 @@ mod tests {
 
         expect![[r#"
             [
-                Some(
-                    "get_weather",
-                ),
-                Some(
-                    "search",
-                ),
                 Some(
                     "get_weather",
                 ),
