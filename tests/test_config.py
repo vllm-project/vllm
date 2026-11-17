@@ -1867,7 +1867,8 @@ _MOE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 # The fixture pretends to be a CUDA host, so FP8 quantization setup calls a CUDA
 # op that ROCm builds lack and leaves vllm.models half-imported for later tests.
 _SKIP_FP8_ON_ROCM = pytest.mark.skipif(
-    current_platform.is_rocm(), reason="FP8 setup needs CUDA ops"
+    current_platform.is_rocm() or current_platform.is_xpu(),
+    reason="FP8 setup needs CUDA ops",
 )
 
 
