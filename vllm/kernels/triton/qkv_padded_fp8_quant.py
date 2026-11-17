@@ -418,8 +418,8 @@ def dynamic_quantize_pad_qkv_fp8_triton(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Dynamic per-tensor FP8 quantization of Q, K and V with head_dim padding.
 
-    Records each tensor's amax at ``amax_history[i][pos]``, writes
-    ``scales[i]`` from the history max and returns the quantized, padded
+    Records each tensor's amax at `amax_history[i][pos]`, writes
+    `scales[i]` from the history max and returns the quantized, padded
     tensors, like the unfused path, in two kernel launches. Q, K and V must
     have the same 3D/4D shape; they may be strided views of one QKV buffer.
     """
