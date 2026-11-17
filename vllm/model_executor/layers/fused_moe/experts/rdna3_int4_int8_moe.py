@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Int4 x int8 (W4A8) MoE decode experts for RDNA3/RDNA3.5 (gfx11).
+"""Int4-weight, int8-activation MoE decode experts for RDNA3/RDNA3.5 (gfx11).
 
 For small batches, `moe_w4a8_decode_rdna3` replaces the two Triton WNA16
 GEMMs, the activation and the top-k reduction with three HIP launches.
 Activations and the SiLU-and-mul output are quantized to int8 per 32 values
-and reduced with `v_dot4_i32_iu8`, so the numerics differ slightly from
-the W4A16 Triton path; this backend is therefore only used when requested
-with `--moe-backend rdna3_w4a8`.
+(`kInt8Dynamic32Sym`) and reduced with `v_dot4_i32_iu8`. The experts are
+selected for that activation key, i.e. with
+`--quantization-config.moe.activation int8_per_group_32`, or with
+`--moe-backend rdna3_int4_int8`.
 
 Weights stay in the `TritonWNA16Experts` format (uint8, two codes per byte,
 optional nibble-packed zero points), so larger batches and unsupported
 configurations fall back to the Triton kernels on the same tensors. A request
 therefore decodes with int8 activations while the batch has at most
-`RDNA3_W4A8_MAX_TOKENS` tokens and with fp16/bf16 activations above that.
+`RDNA3_INT4_INT8_MAX_TOKENS` tokens and with fp16/bf16 activations above that.
 """
 
 from math import prod
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kInt4Static32Asym,
     kInt4StaticAsym,
+    kInt8Dynamic32Sym,
 )
 from vllm.platforms import current_platform
 
@@ -40,7 +42,7 @@ from vllm.platforms import current_platform
 # faster than the Triton WNA16 GEMMs at every M measured, 1.1-1.3x on
 # Flash-Next and 2.0-7.5x on Qwen3.6. Not measured above 64; larger steps
 # (prefill chunks, more than 64 decoding requests) use the Triton kernels.
-RDNA3_W4A8_MAX_TOKENS = 64
+RDNA3_INT4_INT8_MAX_TOKENS = 64
 
 
 def _align16(nbytes: int) -> int:
@@ -61,8 +63,8 @@ def moe_w4a8_workspace_bytes(M: int, K: int, N: int, top_k: int) -> int:
     )
 
 
-def rdna3_w4a8_moe_kernel_available() -> bool:
-    """Whether the W4A8 MoE decode kernel is built and the GPU is gfx11."""
+def rdna3_int4_int8_moe_kernel_available() -> bool:
+    """Whether the int4 x int8 MoE decode kernel is built and the GPU is gfx11."""
     if not current_platform.is_rocm():
         return False
 
@@ -75,19 +77,28 @@ def rdna3_w4a8_moe_kernel_available() -> bool:
     )
 
 
-class Rdna3W4A8Experts(TritonWNA16Experts):
-    """Triton WNA16 experts with a W4A8 HIP decode path on gfx11."""
+class Rdna3Int4Int8Experts(TritonWNA16Experts):
+    """Triton WNA16 experts with an int4 x int8 HIP decode path on gfx11."""
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return rdna3_w4a8_moe_kernel_available()
+        return rdna3_int4_int8_moe_kernel_available()
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        # Not weight-only like the Triton parent: the decode kernel quantizes
+        # activations itself, to the one key `_supports_quant_scheme` accepts.
+        return activation_key
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return activation_key is None and weight_key in (
+        return activation_key == kInt8Dynamic32Sym and weight_key in (
             kInt4Static,
             kInt4StaticAsym,
             kInt4Static32,
@@ -103,7 +114,7 @@ class Rdna3W4A8Experts(TritonWNA16Experts):
         activation: MoEActivation,
         apply_router_weight_on_input: bool,
     ) -> bool:
-        if hidden_states.size(0) > RDNA3_W4A8_MAX_TOKENS:
+        if hidden_states.size(0) > RDNA3_INT4_INT8_MAX_TOKENS:
             return False
         if activation != MoEActivation.SILU:
             return False
@@ -160,7 +171,7 @@ class Rdna3W4A8Experts(TritonWNA16Experts):
             expert_tokens_meta,
             activation,
         )
-        if M <= RDNA3_W4A8_MAX_TOKENS:
+        if M <= RDNA3_INT4_INT8_MAX_TOKENS:
             # The decode kernel's scratch lives in workspace2, which holds
             # fp16/bf16 elements (N is the gate_up width, 2x intermediate).
             needed = -(-moe_w4a8_workspace_bytes(M, K, N // 2, topk) // 2)

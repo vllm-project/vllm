@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness tests for the RDNA3/RDNA3.5 (gfx11) W4A8 MoE decode kernel.
+"""Correctness tests for the RDNA3/RDNA3.5 (gfx11) int4 x int8 MoE decode kernel.
 
 `moe_w4a8_decode_rdna3` consumes the TritonWNA16Experts weight tensors
 (uint8 codes, optional nibble-packed zero points) and quantizes activations
@@ -10,7 +10,7 @@ to int8 per 32 values. It is checked against:
   - the Triton WNA16 `fused_experts` path on the same tensors (loose
     tolerance, int8 activation error only), which also pins the layout.
 
-Run `pytest tests/kernels/quantization/test_rdna3_moe_w4a8.py`.
+Run `pytest tests/kernels/quantization/test_rdna3_moe_int4_int8.py`.
 """
 
 import pytest
@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
-    pytest.skip("RDNA3 W4A8 MoE kernel is ROCm-only", allow_module_level=True)
+    pytest.skip("RDNA3 int4 x int8 MoE kernel is ROCm-only", allow_module_level=True)
 
 from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
 from vllm import _custom_ops as ops  # noqa: E402
@@ -31,11 +31,11 @@ from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
 from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
     int4_w4a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (  # noqa: E402
-    RDNA3_W4A8_MAX_TOKENS,
-    Rdna3W4A8Experts,
+from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (  # noqa: E402, E501
+    RDNA3_INT4_INT8_MAX_TOKENS,
+    Rdna3Int4Int8Experts,
     moe_w4a8_workspace_bytes,
-    rdna3_w4a8_moe_kernel_available,
+    rdna3_int4_int8_moe_kernel_available,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import (  # noqa: E402
     TritonWNA16Experts,
@@ -45,7 +45,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (  # noqa: E402
 )
 
 pytestmark = pytest.mark.skipif(
-    not rdna3_w4a8_moe_kernel_available(),
+    not rdna3_int4_int8_moe_kernel_available(),
     reason="Requires a gfx11 GPU and the moe_w4a8_decode_rdna3 op",
 )
 
@@ -264,7 +264,7 @@ def test_workspace_too_small_is_rejected():
         _run(x, ids, wts, w, workspace=small)
 
 
-# ----------------------------------------------- through Rdna3W4A8Experts
+# ----------------------------------------------- through Rdna3Int4Int8Experts
 
 
 def _experts(cls, E, K, N, top_k, w, num_experts=None):
@@ -310,20 +310,20 @@ def vllm_config():
         yield
 
 
-@pytest.mark.parametrize("M", [1, 4, RDNA3_W4A8_MAX_TOKENS])
+@pytest.mark.parametrize("M", [1, 4, RDNA3_INT4_INT8_MAX_TOKENS])
 def test_apply_matches_triton(vllm_config, M):
     E, K, N, top_k, group = 16, 512, 256, 4, 64
     x, ids, wts, w, _ = _setup(E, K, N, top_k, group, torch.bfloat16, True, M)
-    out = _apply(_experts(Rdna3W4A8Experts, E, K, N, top_k, w), x, w, ids, wts)
+    out = _apply(_experts(Rdna3Int4Int8Experts, E, K, N, top_k, w), x, w, ids, wts)
     ref = _apply(_experts(TritonWNA16Experts, E, K, N, top_k, w), x, w, ids, wts)
     assert _rel_err(out, ref) < 5e-2
 
 
 def test_apply_falls_back_to_triton_above_max_tokens(vllm_config):
     E, K, N, top_k, group = 16, 512, 256, 4, 64
-    M = RDNA3_W4A8_MAX_TOKENS + 1
+    M = RDNA3_INT4_INT8_MAX_TOKENS + 1
     x, ids, wts, w, _ = _setup(E, K, N, top_k, group, torch.bfloat16, True, M)
-    out = _apply(_experts(Rdna3W4A8Experts, E, K, N, top_k, w), x, w, ids, wts)
+    out = _apply(_experts(Rdna3Int4Int8Experts, E, K, N, top_k, w), x, w, ids, wts)
     ref = _apply(_experts(TritonWNA16Experts, E, K, N, top_k, w), x, w, ids, wts)
     torch.testing.assert_close(out, ref, rtol=0, atol=0)
 
@@ -341,7 +341,7 @@ def test_apply_expert_map(vllm_config):
     E = int(local.sum())
     kwargs = dict(expert_map=expert_map, global_num_experts=E_global)
     out = _apply(
-        _experts(Rdna3W4A8Experts, E, K, N, top_k, w_local, E_global),
+        _experts(Rdna3Int4Int8Experts, E, K, N, top_k, w_local, E_global),
         x, w_local, ids, wts, **kwargs,
     )  # fmt: skip
     ref = _apply(
@@ -361,6 +361,6 @@ def test_apply_fused_shared_expert(vllm_config):
     ids = ids % E_routed
     ids[:, -1] = E_routed  # the shared expert slot
     E = E_routed + 1
-    out = _apply(_experts(Rdna3W4A8Experts, E, K, N, top_k, w), x, w, ids, wts)
+    out = _apply(_experts(Rdna3Int4Int8Experts, E, K, N, top_k, w), x, w, ids, wts)
     ref = _apply(_experts(TritonWNA16Experts, E, K, N, top_k, w), x, w, ids, wts)
     assert _rel_err(out, ref) < 5e-2

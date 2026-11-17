@@ -18,8 +18,9 @@ The negative (non-gfx1100) tests verify at three layers:
   3. Runtime mock: patches on_gfx1100() to False and verifies that the
      Python dispatch chain rejects the RDNA3 path.
 
-The W4A8 MoE decode kernel (GFX11_OPS) supports every gfx11 GPU, so it has its
-own guard (VLLM_ROCM_HAS_GFX11 / VLLM_ROCM_GFX11) and is checked separately.
+The int4 x int8 MoE decode kernel (GFX11_OPS) supports every gfx11 GPU, so it
+has its own guard (VLLM_ROCM_HAS_GFX11 / VLLM_ROCM_GFX11) and is checked
+separately.
 
 Run `pytest tests/kernels/quantization/test_rdna3_compile_guards.py`.
 """
@@ -451,13 +452,13 @@ class TestMoEDispatchMocked:
         with patch("vllm.platforms.rocm.on_gfx1100", return_value=False):
             assert rdna3_moe_kernel_available() is False
 
-    def test_w4a8_kernel_unavailable_when_mocked_non_gfx11(self):
-        from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (
-            rdna3_w4a8_moe_kernel_available,
+    def test_int4_int8_kernel_unavailable_when_mocked_non_gfx11(self):
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (  # noqa: E501
+            rdna3_int4_int8_moe_kernel_available,
         )
 
         with patch("vllm.platforms.rocm.on_gfx11", return_value=False):
-            assert rdna3_w4a8_moe_kernel_available() is False
+            assert rdna3_int4_int8_moe_kernel_available() is False
 
     @pytest.mark.parametrize(
         "weight_key",
@@ -591,9 +592,9 @@ class TestWNA16OracleWiring:
             WNA16MoEBackend.TRITON
         )
 
-    def test_w4a8_backend_maps_to_w4a8_experts(self):
-        from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (
-            Rdna3W4A8Experts,
+    def test_int4_int8_backend_maps_to_int4_int8_experts(self):
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (  # noqa: E501
+            Rdna3Int4Int8Experts,
         )
         from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
             WNA16MoEBackend,
@@ -601,14 +602,30 @@ class TestWNA16OracleWiring:
             map_wna16_backend,
         )
 
-        assert backend_to_kernel_cls(WNA16MoEBackend.RDNA3_W4A8) == [Rdna3W4A8Experts]
-        assert map_wna16_backend("rdna3_w4a8") == WNA16MoEBackend.RDNA3_W4A8
+        assert backend_to_kernel_cls(WNA16MoEBackend.RDNA3_INT4_INT8) == [
+            Rdna3Int4Int8Experts
+        ]
+        assert map_wna16_backend("rdna3_int4_int8") == WNA16MoEBackend.RDNA3_INT4_INT8
 
-    def test_w4a8_backend_is_opt_in(self):
-        """W4A8 changes activation numerics, so auto selection never picks it."""
+    def test_int4_int8_backend_leads_only_for_int8_activations(self):
+        """The int8-activation backend comes first in the priority list, but
+        auto selection only offers it for a kInt8Dynamic32Sym request."""
         from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
             WNA16MoEBackend,
+            _filter_by_activation,
             _get_priority_backends,
         )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8DynamicTokenSym,
+            kInt8Dynamic32Sym,
+        )
 
-        assert WNA16MoEBackend.RDNA3_W4A8 not in _get_priority_backends()
+        backends = _get_priority_backends()
+        assert backends[0] == WNA16MoEBackend.RDNA3_INT4_INT8
+        assert _filter_by_activation(backends, kInt8Dynamic32Sym)[0] == (
+            WNA16MoEBackend.RDNA3_INT4_INT8
+        )
+        for key in (None, kFp8DynamicTokenSym):
+            assert WNA16MoEBackend.RDNA3_INT4_INT8 not in _filter_by_activation(
+                backends, key
+            )
