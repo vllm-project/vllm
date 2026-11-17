@@ -108,7 +108,7 @@ def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     return recipient, TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingState:
     """Mutable state for streaming event processing."""
 
@@ -815,7 +815,7 @@ class _StateType(Enum):
     TOOL_CALL = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class SimpleStreamingState:
     output_index: int = 0
     current_item_id: str = ""

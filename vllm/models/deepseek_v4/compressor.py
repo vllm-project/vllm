@@ -29,10 +29,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
 )
 
 
@@ -94,9 +94,8 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
-        mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
-        self.block_size = mla_spec.block_size
+        assert isinstance(self.kv_cache_spec, MLAAttentionSpec)
+        self.block_size = self.kv_cache_spec.block_size
 
         self.token_to_req_indices = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
@@ -176,19 +175,21 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
         # full-cache rows share state pages with contiguous KV pages, so padding
         # would break page matching.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
-        return SlidingWindowMLASpec(  # only has one vector instead of K + V
+        spec = MLAAttentionSpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
             head_size=self.state_dim,
             dtype=self.dtype,
-            sliding_window=self.sliding_window,
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+        )
+        return SlidingWindowManager.layer_config(
+            spec, sliding_window=self.sliding_window
         )
 
     def forward(self): ...
