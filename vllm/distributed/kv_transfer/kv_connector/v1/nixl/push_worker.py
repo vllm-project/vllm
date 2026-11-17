@@ -89,8 +89,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # With UCX worker threads, posting a large WRITE waits on them.
     _DEFAULT_NUM_THREADS: int = 0
-    # The writer, engine and handshake threads all call the agent.
-    _SYNCHRONIZE_AGENT: bool = True
 
     _supports_pp_hma = True
 

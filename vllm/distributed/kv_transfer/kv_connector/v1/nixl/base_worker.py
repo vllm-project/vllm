@@ -166,8 +166,6 @@ class NixlBaseConnectorWorker:
 
     # Default UCX `num_threads` (kv_connector_extra_config can override it).
     _DEFAULT_NUM_THREADS: int = 4
-    # Whether the NIXL agent is created with NIXL_THREAD_SYNC_RW locking.
-    _SYNCHRONIZE_AGENT: bool = False
 
     # Only NixlPushConnector supports PP with HMA or packed KV caches.
     _supports_pp_hma = False
@@ -794,9 +792,11 @@ class NixlBaseConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", self._DEFAULT_NUM_THREADS
         )
+        # Handshake threads load remote agents while others post, and NIXL only
+        # locks the agent given a sync mode. RW keeps posting/status concurrent.
         sync_params = (
             {"sync_mode": nixl_thread_sync_t.NIXL_THREAD_SYNC_RW}
-            if self._SYNCHRONIZE_AGENT and nixl_thread_sync_t is not None
+            if nixl_thread_sync_t is not None
             else {}
         )
         if nixl_agent_config is None:

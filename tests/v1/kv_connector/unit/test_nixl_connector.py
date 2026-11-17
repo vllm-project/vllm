@@ -5214,7 +5214,9 @@ class _BackendRecordingNixlWrapper(FakeNixlWrapper):
 def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_backends):
     """kv_connector_extra_config.ucx_backend_params reaches UCX's create_backend."""
 
-    def agent_config(backends=None, num_threads=0, capture_telemetry=False):
+    def agent_config(
+        backends=None, num_threads=0, capture_telemetry=False, sync_mode=None
+    ):
         return SimpleNamespace(
             backends=["UCX"] if backends is None else backends,
             num_threads=num_threads,
@@ -5246,10 +5248,10 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
 
 
 @pytest.mark.parametrize("transfer_mode", ["pull", "push"])
-def test_push_agent_is_synchronized_without_thread_pool(dist_init, transfer_mode):
-    """Push calls the NIXL agent from several threads and posts from its writer
-    thread: it gets a locking agent and no UCX thread pool, whose posting waits
-    on the pool's threads."""
+def test_agent_is_synchronized(dist_init, transfer_mode):
+    """Handshake threads load remote agents while other threads post, so the
+    agent locks in both modes. Push posts from its writer thread with no UCX
+    thread pool, whose posting waits on the pool's threads."""
     configs: list[dict[str, Any]] = []
     rw = object()
 
@@ -5282,9 +5284,5 @@ def test_push_agent_is_synchronized_without_thread_pool(dist_init, transfer_mode
         )
         connector.shutdown()
     [config] = configs
-    if transfer_mode == "push":
-        assert config["num_threads"] == 0
-        assert config["sync_mode"] is rw
-    else:
-        assert config["num_threads"] == 4
-        assert "sync_mode" not in config
+    assert config["num_threads"] == (0 if transfer_mode == "push" else 4)
+    assert config["sync_mode"] is rw
