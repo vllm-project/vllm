@@ -180,14 +180,22 @@ __global__ void gemm_mxfp4_swmmac_skinny(const uint8_t*, const float*,
 // {1..8}: KW=8 is best or within ~5% everywhere (e.g. N=1024/K=4096 M=1:
 // KW4 16.5us
 // -> KW8 12.0us; N=4096: 19.6 -> 18.1; N=34816/K=5120: 171 -> 167). KW=16
-// only helps at N=1024 (-13%) and costs 20-35% at N=4096-5120, so no N term.
-static int skinny_kw() {
-  static const int v = [] {
+// only helps at N=1024 (-13%) and costs 20-35% at N=4096-5120. Below 1024
+// columns the grid has too few blocks for K-split-8 to fill the GPU (N=96,
+// the fused in_proj_ba of Qwen3.8-27B: 6 blocks; KW=8 22us -> KW=16 12.5us),
+// so the same rule as the skinny WMMA kernel applies: double KW while
+// blocks*KW < 512, here capped at 16.
+static int skinny_kw(int N) {
+  static const int ov = [] {
     const char* e = std::getenv("VLLM_MXFP4_RDNA4_SKINNY_KW");
-    const int k = e ? atoi(e) : 8;
-    return (k == 1 || k == 2 || k == 8 || k == 16) ? k : 4;
+    const int k = e ? atoi(e) : 0;
+    return (k == 1 || k == 2 || k == 4 || k == 8 || k == 16) ? k : 0;
   }();
-  return v;
+  if (ov) return ov;
+  const int blocks = (N + 15) / 16;
+  int kw = 8;
+  while (kw < 16 && blocks * kw < 512) kw *= 2;
+  return kw;
 }
 
 template <typename T>
@@ -196,7 +204,7 @@ static void launch_t(const uint8_t* aq, const float* ascale,
                      int N, int K, cudaStream_t st) {
   using namespace vllm::mxfp4_rdna4_swmmac;
   const dim3 grd((N + 15) / 16);
-  switch (skinny_kw()) {
+  switch (skinny_kw(N)) {
     case 1:
       gemm_mxfp4_swmmac_skinny<T, 1, 4>
           <<<grd, 32, 0, st>>>(aq, ascale, b_q, b_scales, c, M, N, K);
