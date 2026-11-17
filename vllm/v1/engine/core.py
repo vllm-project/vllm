@@ -243,6 +243,9 @@ class EngineCore:
             and parallel_config.pipeline_parallel_size > 1
             and parallel_config.data_parallel_size == 1
         )
+        # PP: an in-flight empty step that no request needs. Until it completes
+        # or something changes, schedule no more, so they don't fill the queue.
+        self._idle_step: Future[Any] | None = None
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
@@ -570,6 +573,7 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        self._idle_step = None
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -790,7 +794,9 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
-        if self.deferred_step is None and self.scheduler.has_requests():
+        if (
+            self.deferred_step is None and self._idle_step is None
+        ) and self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -832,6 +838,8 @@ class EngineCore:
                 if schedule_more and not model_executed and self._pp_admission:
                     # PP: empty steps only help a decode awaiting the cadence.
                     schedule_more = self.scheduler.has_decode_awaiting_cadence()
+                    if not schedule_more:
+                        self._idle_step = future
                 if schedule_more and len(batch_queue) < self.batch_queue_size:
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
@@ -861,6 +869,8 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
         iteration_details = self._untimed_iteration_details(scheduler_output)
+        if scheduler_output.total_num_scheduled_tokens or future is self._idle_step:
+            self._idle_step = None
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
