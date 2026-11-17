@@ -307,37 +307,42 @@ def test_short_causal_prefill_stays_on_ck(monkeypatch, fp8, kernel):
     assert len(kernel) == 2 and len(orig.calls) == 1
 
 
-def test_reused_query_survives_kv_quantization(fp8, kernel):
-    """A q quantized once reaches the kernel unchanged after k/v use the workspace."""
+def test_reused_query_matches_per_call_quantization(fp8, kernel):
+    """Hoisting the quantization gives the kernel what quantizing per call would."""
     args = _inputs()
-    quantized_q = fp8.quantize_query(args["q"], args["cu_seqlens_q"])
-    expected = quantized_q[0].clone()
-
-    fp8.triton_fp8_prefill_attn(orig=_Orig(), quantized_q=quantized_q, **args)
-
-    assert len(kernel) == 1
-    torch.testing.assert_close(kernel[0].q.float(), expected.float(), atol=0, rtol=0)
-    torch.testing.assert_close(
-        kernel[0].descale_q.float(), quantized_q[1].float(), atol=0, rtol=0
+    quantized_q, quantized_kv = fp8.quantize_prefill(
+        args["q"], args["k"], args["v"], args["cu_seqlens_q"]
     )
 
-
-def test_reused_query_matches_per_call_quantization(fp8, kernel):
-    """Hoisting the q quantization gives the kernel the same q as quantizing per call."""
-    args = _inputs()
     fp8.triton_fp8_prefill_attn(orig=_Orig(), **args)
     fp8.triton_fp8_prefill_attn(
-        orig=_Orig(),
-        quantized_q=fp8.quantize_query(args["q"], args["cu_seqlens_q"]),
-        **args,
+        orig=_Orig(), quantized_q=quantized_q, quantized_kv=quantized_kv, **args
     )
 
     assert len(kernel) == 2
-    torch.testing.assert_close(
-        kernel[1].q.float(), kernel[0].q.float(), atol=0, rtol=0
+    for name in ("q", "k", "v", "descale_q", "descale_k", "descale_v"):
+        torch.testing.assert_close(
+            getattr(kernel[1], name).float(),
+            getattr(kernel[0], name).float(),
+            atol=0,
+            rtol=0,
+        )
+
+
+def test_context_chunk_reuses_the_hoisted_query(fp8, kernel):
+    """A chunk call on FP8 cache k/v takes the step's q without requantizing it."""
+    quantized_q, _ = fp8.quantize_prefill(
+        *(_inputs()[n] for n in ("q", "k", "v", "cu_seqlens_q"))
     )
+    args = _fp8_kv(_inputs())
+    args["causal"] = False
+
+    fp8.triton_fp8_prefill_attn(orig=_Orig(), quantized_q=quantized_q, **args)
+
+    (call,) = kernel
+    assert call.q is quantized_q[0][0]
     torch.testing.assert_close(
-        kernel[1].descale_q.float(), kernel[0].descale_q.float(), atol=0, rtol=0
+        call.descale_q.float(), quantized_q[1][0].float(), atol=0, rtol=0
     )
 
 
@@ -416,17 +421,6 @@ def test_profile_run_covers_a_full_prefill(fp8, kernel):
     lock_workspace()
     fp8.triton_fp8_prefill_attn(orig=_Orig(), **args)
     assert len(kernel) == 1
-
-
-def test_profile_run_short_of_the_prefill_is_caught(fp8, kernel):
-    """A reservation the prefill outgrows must fail, so the test above can pass."""
-    from vllm.v1.worker.workspace import lock_workspace
-
-    args = _inputs()
-    fp8.profile(args["q"], HQ, HKV, 1, 1)
-    lock_workspace()
-    with pytest.raises(AssertionError):
-        fp8.triton_fp8_prefill_attn(orig=_Orig(), **args)
 
 
 def test_unexpected_kwarg_falls_back_unchanged(fp8, kernel):

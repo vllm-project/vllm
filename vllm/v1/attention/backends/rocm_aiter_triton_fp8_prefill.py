@@ -14,16 +14,18 @@ from typing import Any
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.attention.ops.triton_per_tensor_fp8_quant import (
+    fused_per_tensor_fp8_quant,
+)
 
 logger = init_logger(__name__)
 
 _HEAD_DIM = 256
+_Quantized = tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]
 # Below this query length, quantizing q/k/v costs more than the kernel saves.
 _MIN_CAUSAL_SEQLEN_Q = 2048
 _KERNEL_KWARGS = frozenset(
@@ -101,26 +103,18 @@ def prefill_attn() -> Callable[..., Any]:
     )
 
 
-def _workspace_shapes(
-    num_q_tokens: int, num_kv_tokens: int, num_q_heads: int, num_kv_heads: int
-) -> list[tuple[tuple[int, ...], torch.dtype]]:
-    fp8 = current_platform.fp8_dtype()
-    shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
-        ((num_q_tokens, num_q_heads, _HEAD_DIM), fp8)
-    ]
-    if num_kv_tokens:
-        shapes += [((num_kv_tokens, num_kv_heads, _HEAD_DIM), fp8)] * 2
-    return shapes
-
-
-def quantize_query(
-    q: torch.Tensor, cu_seqlens_q: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize q once for an extend step to reuse over its context chunks."""
-    buf = current_workspace_manager().get_simultaneous(
-        *_workspace_shapes(q.shape[0], 0, q.shape[1], 0)
-    )[0]
-    return _quant(q, buf, q.shape[1], cu_seqlens_q.numel() - 1)
+def quantize_prefill(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens_q: torch.Tensor
+) -> tuple[_Quantized, _Quantized]:
+    """Quantize an extend step's q/k/v, so its context chunks can reuse q."""
+    batch = cu_seqlens_q.numel() - 1
+    (q8, k8, v8), (dq, dk, dv) = fused_per_tensor_fp8_quant(
+        q, k, v, fp8_dtype=current_platform.fp8_dtype()
+    )
+    return (
+        ((q8,), (_descale(dq, q.shape[1], batch),)),
+        ((k8, v8), (_descale(dk, k.shape[1], batch), _descale(dv, v.shape[1], batch))),
+    )
 
 
 def profile(
@@ -134,11 +128,14 @@ def profile(
 
     ``query`` gives dtype and device only. Its row count is not the bound: with
     microbatching the profile run splits the batch across ubatches, while a
-    later step can run unsplit at the full width on the same workspace slot.
+    later step can run unsplit at the full width.
     """
-    current_workspace_manager().get_simultaneous(
-        *_workspace_shapes(num_q_tokens, num_kv_tokens, num_q_heads, num_kv_heads)
-    )
+    fp8 = current_platform.fp8_dtype()
+    torch.empty((num_q_tokens, num_q_heads, _HEAD_DIM), dtype=fp8, device=query.device)
+    for _ in range(2):
+        torch.empty(
+            (num_kv_tokens, num_kv_heads, _HEAD_DIM), dtype=fp8, device=query.device
+        )
     # aiter allocates the output inside the call.
     torch.empty(
         (num_q_tokens, num_q_heads, _HEAD_DIM),
@@ -204,17 +201,13 @@ def _descale(scale: torch.Tensor, n_heads: int, batch: int) -> torch.Tensor:
     return scale.expand(batch, n_heads).contiguous()
 
 
-def _quant(
-    t: torch.Tensor,
-    buf: torch.Tensor,
-    n_heads: int,
-    batch: int,
-    scale: torch.Tensor | None = None,
-):
-    _, scale = ops.scaled_fp8_quant(
-        t.reshape(t.shape[0], -1), scale=scale, output=buf.view(t.shape[0], -1)
+def _quant(*tensors: torch.Tensor, batch: int) -> _Quantized:
+    out, scales = fused_per_tensor_fp8_quant(
+        *tensors, fp8_dtype=current_platform.fp8_dtype()
     )
-    return buf, _descale(scale, n_heads, batch)
+    return out, tuple(
+        _descale(s, t.shape[1], batch) for s, t in zip(scales, tensors, strict=True)
+    )
 
 
 def triton_fp8_prefill_attn(*, orig: Callable[..., Any], **kwargs: Any) -> Any:
@@ -224,15 +217,8 @@ def triton_fp8_prefill_attn(*, orig: Callable[..., Any], **kwargs: Any) -> Any:
     ``descale_v`` scale each, which ``orig`` cannot take.
     """
     # Not CK arguments, so they cannot stay in the fallback kwargs.
-    kv_quant_scales = kwargs.pop("kv_quant_scales", None)
-    quantized_q = kwargs.pop("quantized_q", None)
-    return _triton_or_orig(
-        orig,
-        kwargs,
-        kv_quant_scales=kv_quant_scales,
-        quantized_q=quantized_q,
-        **kwargs,
-    )
+    prequant = {k: kwargs.pop(k, None) for k in ("quantized_q", "quantized_kv")}
+    return _triton_or_orig(orig, kwargs, **prequant, **kwargs)
 
 
 def _triton_or_orig(
@@ -257,8 +243,8 @@ def _triton_or_orig(
     sink_ptr=None,
     descale_k=None,
     descale_v=None,
-    kv_quant_scales=None,
     quantized_q=None,
+    quantized_kv=None,
     **extra,
 ):
     kv_is_fp8 = descale_k is not None
@@ -291,23 +277,16 @@ def _triton_or_orig(
     batch = cu_seqlens_q.numel() - 1
     scale = softmax_scale if softmax_scale is not None else q.shape[-1] ** -0.5
 
-    bufs = current_workspace_manager().get_simultaneous(
-        *_workspace_shapes(
-            q.shape[0], 0 if kv_is_fp8 else k.shape[0], n_q_heads, n_kv_heads
-        )
-    )
-    # bufs[0] is where quantize_query wrote, so k/v below cannot overwrite a reused q.
-    q8, dq = quantized_q or _quant(q, bufs[0], n_q_heads, batch)
     if kv_is_fp8:
+        (q8,), (dq,) = quantized_q or _quant(q, batch=batch)
         k8, v8 = k, v
         dk = _descale(descale_k, n_kv_heads, batch)
         dv = _descale(descale_v, n_kv_heads, batch)
+    elif quantized_q is not None:
+        (q8,), (dq,) = quantized_q
+        (k8, v8), (dk, dv) = quantized_kv or _quant(k, v, batch=batch)
     else:
-        # The cache stores these same tokens with these scales, so reuse them
-        # instead of paying for an amax pass over k and v.
-        k_scale, v_scale = kv_quant_scales or (None, None)
-        k8, dk = _quant(k, bufs[1], n_kv_heads, batch, k_scale)
-        v8, dv = _quant(v, bufs[2], n_kv_heads, batch, v_scale)
+        (q8, k8, v8), (dq, dk, dv) = _quant(q, k, v, batch=batch)
     mha = _load_kernel()
     assert mha is not None
     o, lse = mha._flash_attn_forward(

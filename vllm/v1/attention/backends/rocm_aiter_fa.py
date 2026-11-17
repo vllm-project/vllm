@@ -1140,13 +1140,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
             return
         # The causal call and every context chunk quantize the same q to the same scale.
         q_quant: dict[str, Any] = {}
+        kv_quant: dict[str, Any] = {}
         if self.fp8_prefill:
-            q_quant["quantized_q"] = _fp8_prefill.quantize_query(query, cu_seqlens_q)
+            q_quant["quantized_q"], kv_quant["quantized_kv"] = (
+                _fp8_prefill.quantize_prefill(query, key, value, cu_seqlens_q)
+            )
         out, lse = self._prefill_attn(
             q=query,
             k=key,
             v=value,
             **q_quant,
+            **kv_quant,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
@@ -1182,8 +1186,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 fp8_workspace[: workspace.numel()].view(workspace.shape).unbind(0)
             )
             context_descales = dict(descale_k=k_scale, descale_v=v_scale)
-        elif self.fp8_prefill:
-            context_descales = dict(kv_quant_scales=(k_scale, v_scale))
         chunked_output = None
         chunked_lse = None
         for chunk_idx in range(num_chunks):
@@ -1376,8 +1378,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 else "NHD",
                 total_tokens=num_actual_tokens - num_decode_tokens,
             )
-        if self.fp8_prefill and not kv_descales:
-            kv_descales = dict(kv_quant_scales=(layer._k_scale, layer._v_scale))
         # calculate for pure prefills
         if num_prefills > 0:
             assert attn_metadata.prefill_metadata is not None
