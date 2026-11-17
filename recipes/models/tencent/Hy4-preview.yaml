@@ -4,7 +4,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent Hunyuan Hy4-preview — scaled-up MoE language model (770B total / 49B active) with a 10B MTP layer for speculative decoding, 1M context, and hy_v4 tool/reasoning parsers"
   date_added: 2026-08-28
-  date_updated: 2026-11-13
+  date_updated: 2026-11-17
   tasks:
     - text
   performance_headline: "Hunyuan Hy4-preview MoE — 770B/49B on 16xB200, 8xB300, 8xMI355X with MTP"
