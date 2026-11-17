@@ -837,6 +837,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
+        aux_output_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True)
+    )
+    monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", Mock())

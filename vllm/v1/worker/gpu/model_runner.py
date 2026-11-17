@@ -44,6 +44,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
+    add_pp_routes_buffer,
     get_aux_output_connector,
 )
 from vllm.distributed.parallel_state import (
@@ -587,6 +588,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.intermediate_tensors,
                 self.max_num_tokens,
                 self.model_config.mrope_num_dims,
+            )
+            add_pp_routes_buffer(
+                self.intermediate_tensors,
+                self.vllm_config,
+                self.max_num_tokens,
+                self.device,
             )
 
         get_offloader().post_init()
@@ -2125,6 +2132,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pp_handler.receive_positions(
                     intermediate_tensors, model_inputs["positions"], num_tokens
                 )
+                if self.aux_output_connector is not None:
+                    self.aux_output_connector.receive_pp_routes(
+                        intermediate_tensors, num_tokens
+                    )
             n = input_batch.num_tokens_after_padding
             model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
@@ -2241,6 +2252,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
             )
+            if self.aux_output_connector is not None:
+                output_intermediate_tensors = self.aux_output_connector.send_pp_routes(
+                    output_intermediate_tensors
+                )
             return self.pp_handler.send_positions(
                 output_intermediate_tensors, model_inputs["positions"]
             )[: input_batch.num_tokens]

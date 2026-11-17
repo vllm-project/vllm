@@ -1269,9 +1269,12 @@ class VllmConfig:
                 "AuxOutput Connector is incompatible with "
                 "adaptive speculative verification."
             )
-        if self.parallel_config.pipeline_parallel_size > 1:
+        if (
+            self.aux_output_config.enable_return_indexer_topk
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
             raise ValueError(
-                "AuxOutput Connector is incompatible with "
+                "--enable-return-indexer-topk is incompatible with "
                 "pipeline parallelism (PP > 1)."
             )
         if (

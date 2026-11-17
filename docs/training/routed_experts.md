@@ -16,7 +16,7 @@ Startup fails with a `ValueError` unless:
 - the runner is `generate` and the model is **MoE**;
 - **prefix caching is enabled** (the default). `--no-enable-prefix-caching` fails; the old v0.21 advice to disable it is wrong.
 
-Rejected at startup: adaptive speculative verification, PP > 1, DCP/PCP > 1, and the `NixlConnector`, `NixlPullConnector`, `NixlPushConnector`, `MoRIIOConnector`, `MooncakeConnector` KV connectors. Regular speculative decoding works.
+Rejected at startup: adaptive speculative verification, DCP/PCP > 1, and the `NixlConnector`, `NixlPullConnector`, `NixlPushConnector`, `MoRIIOConnector`, `MooncakeConnector` KV connectors. Regular speculative decoding works. With pipeline parallelism, each stage passes the routing of its layers and of the earlier stages to the next one with its intermediate tensors, and the last stage returns the rows of every layer.
 
 ### How it works: aux output connector
 

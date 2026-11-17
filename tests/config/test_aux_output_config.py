@@ -97,7 +97,6 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
             {"adaptive_verification": True},
             "adaptive speculative verification",
         ),
-        ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
     ],
@@ -113,6 +112,17 @@ def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
 )
 def test_aux_output_config_defers_attention_layout_to_kv_config(kwargs):
     VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
+
+
+def test_routed_experts_capture_accepts_pipeline_parallelism():
+    VllmConfig._verify_aux_output_compatibility(_config(pp=2))
+
+
+def test_indexer_topk_rejects_pipeline_parallelism():
+    config = _config(pp=2)
+    config.aux_output_config = AuxOutputConfig(enable_return_indexer_topk=True)
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        VllmConfig._verify_aux_output_compatibility(config)
 
 
 def test_aux_output_guards_are_inactive_when_capture_is_disabled():

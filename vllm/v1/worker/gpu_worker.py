@@ -33,6 +33,7 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.aux_output_connector.worker import PP_ROUTED_EXPERTS_KEY
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
@@ -1515,6 +1516,7 @@ class Worker(WorkerBase):
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
+                    all_gather_tensors={PP_ROUTED_EXPERTS_KEY: False},
                 )
             )
             assert tensor_dict is not None
@@ -1555,6 +1557,7 @@ class Worker(WorkerBase):
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=get_tp_group(),
+                all_gather_tensors={PP_ROUTED_EXPERTS_KEY: False},
             )
             self._pp_send_work = handles[1:]
 
