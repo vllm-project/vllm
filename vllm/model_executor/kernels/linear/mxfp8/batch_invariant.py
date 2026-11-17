@@ -48,6 +48,10 @@ class BatchInvariantMxfp8LinearKernel(Mxfp8LinearKernel):
     """Fixed-block FP8 GEMM; retain quantized weights through reload."""
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
+    @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
