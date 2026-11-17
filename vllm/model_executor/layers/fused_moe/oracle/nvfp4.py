@@ -7,16 +7,18 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
@@ -54,6 +56,8 @@ class NvFp4MoeBackend(Enum):
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 # Backends whose experts quantize the MoE input themselves, with one scale per
@@ -199,6 +203,34 @@ def _use_a16(backend: NvFp4MoeBackend, checkpoint_uses_a16: bool) -> bool:
     )
 
 
+class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
+    """NVFP4 MoE backend selection for one deployment configuration."""
+
+    name = "NvFp4"
+    placeholder_backend = NvFp4MoeBackend.NONE
+
+    def backend_to_kernel_cls(
+        self, backend: NvFp4MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+
+def nvfp4_backend_supports_csf_scales(
+    backend: NvFp4MoeBackend, config: FusedMoEConfig, use_a16: bool
+) -> bool:
+    """Whether the backend keeps `csf` checkpoint scales compressed."""
+    kernel_config = get_current_vllm_config().kernel_config
+    if (
+        backend != NvFp4MoeBackend.B12X
+        or _use_a16(backend, use_a16)
+        or kernel_config.b12x_moe_uncompressed_scales
+    ):
+        return False
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+
+    return B12xExperts.supports_csf_scales(config)
+
+
 def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -206,18 +238,12 @@ def select_nvfp4_moe_backend(
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        is_requantization_source,
-    )
-
-    # TODO: remove and let the oracles have an option to skip init.
-    if is_requantization_source():
-        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
-            Nvfp4QuantizationEmulationTritonExperts,
-        )
-
-        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+    # TODO: migrate to oracle base method.
+    source = NvFp4MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
 
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
@@ -252,58 +278,19 @@ def select_nvfp4_moe_backend(
             b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
         ]
 
-    use_batched = config.moe_parallel_config.use_batched_activation_format
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if use_batched
-        else mk.FusedMoEActivationFormat.Standard
+    activation_format = config.activation_format
+
+    runner_backend = config.moe_backend
+    requested_backend = (
+        map_nvfp4_backend(runner_backend) if runner_backend != "auto" else None
     )
-
-    def _make_log_backend(backend: NvFp4MoeBackend):
-        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using '{backend.value}' NvFp4 MoE backend out "
-            f"of potential backends: {available_backend_strs}."
-        )
-
-    def _make_log_unsupported(backend: NvFp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"NvFp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"NvFp4 MoE backend '{backend.value}' does not support the "
-                "deployment configuration."
-            )
-
-    def _return_or_raise(
-        backend: NvFp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-
-        raise ValueError(_make_log_unsupported(backend, reason))
+    oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        requested_backend = map_nvfp4_backend(runner_backend)
-        if _use_a16(requested_backend, False):
-            activation_key = None
+    if requested_backend is not None:
         # For batched activation format, use batched variant if available.
         if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            activation_format.is_batched
             and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         ):
             requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
@@ -319,25 +306,14 @@ def select_nvfp4_moe_backend(
                 f"'flashinfer_moe_ep_cutedsl', 'cutlass', 'b12x', 'marlin', "
                 f"or 'humming' instead."
             )
-        return _return_or_raise(
-            requested_backend, config, weight_key, activation_key, activation_format
-        )
+        return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            return backend, kernel_cls
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
@@ -358,6 +334,7 @@ def convert_to_nvfp4_moe_kernel_format(
     is_act_and_mul: bool,
     use_a16: bool = False,
     trtllm_hidden_alignment: int = 256,
+    csf_scales: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -395,7 +372,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             a2_scale=a2_scale,
             is_act_and_mul=is_act_and_mul,
-            reorder_w13=use_a16,
+            reorder_w13=use_a16 or csf_scales,
         )
     elif nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
         (
@@ -643,23 +620,11 @@ def make_nvfp4_moe_kernel(
     backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
+    csf_scales: bool = False,
 ) -> mk.FusedMoEKernel:
     # Marlin consumes A16 and must not receive per-token A4 metadata.
     if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
         per_token_activation = False
-
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-        input_dtype=moe_config.in_dtype if per_token_activation else None,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     extra_kwargs: dict[str, Any] = {}
     if per_token_activation:
@@ -673,28 +638,16 @@ def make_nvfp4_moe_kernel(
                 f"{backend.value}."
             )
         extra_kwargs["per_token_activation"] = True
+    if csf_scales:
+        extra_kwargs["csf_scales"] = True
 
-    # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_kwargs,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        prepare_finalize_kwargs={
+            "input_dtype": moe_config.in_dtype if per_token_activation else None
+        },
+        experts_kwargs=extra_kwargs,
     )
-
-    return kernel

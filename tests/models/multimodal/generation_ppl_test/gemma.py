@@ -12,6 +12,9 @@ MODELS = [
     GenerateModelInfo(
         "google/gemma-3-4b-it", image_token_id=262144, hf_ppl=119.61958312988281
     ),
+    GenerateModelInfo(
+        "google/gemma-4-E2B-it", image_token_id=258880, hf_ppl=71.00898742675781
+    ),
 ]
 
 

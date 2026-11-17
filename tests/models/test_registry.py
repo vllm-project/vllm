@@ -143,6 +143,25 @@ def test_registry_supports_hc_sp(model_arch, supported):
     assert model_info.supports_hc_sp is supported
 
 
+@pytest.mark.parametrize(
+    "model_arch,may_use",
+    [
+        # Its checkpoint has no MTP embedding, so under PP it needs the target's.
+        ("DeepSeekV4MTPModel", True),
+        # Not an EAGLE-capable model, so it never declares the attribute.
+        ("OPTForCausalLM", False),
+    ],
+)
+def test_registry_may_use_target_embed(model_arch, may_use):
+    """A drafter opts in to sharing the target's input embedding; under PP the
+    last rank then keeps a copy of it for the drafter."""
+    if model_arch == "DeepSeekV4MTPModel" and not current_platform.is_cuda():
+        pytest.skip("Only the NVIDIA DeepSeek-V4 MTP opts in")
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.may_use_target_embed is may_use
+
+
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "model_arch",
@@ -171,6 +190,8 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
     [
         # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
+        ("NemotronH_Nano_VL_V2", True),
+        ("NemotronH_Omni_Reasoning_V3", True),
         (
             "KimiLinearForCausalLM",
             not (current_platform.is_rocm() or current_platform.is_xpu()),

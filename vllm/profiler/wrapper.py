@@ -7,7 +7,7 @@ import json
 import os
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
 from uuid import uuid4
@@ -466,7 +466,7 @@ class TorchProfilerWrapper(WorkerProfiler):
 
 
 class ProtonProfilerWrapper(WorkerProfiler):
-    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+    """Worker profiler backed by `triton.profiler` (Proton)."""
 
     def __init__(
         self,
@@ -577,7 +577,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     @contextmanager
-    def capture_cuda_graphs(self) -> Iterator[None]:
+    def capture_cuda_graphs(self) -> Generator[None]:
         """Keep a Proton session active while vLLM captures CUDA graphs."""
         if not self._graph_attribution:
             yield
@@ -815,7 +815,7 @@ def create_graph_capture_profiler(
     """Create a profiler to observe CUDA graph capture, if configured.
 
     Applies only to backends that attribute graph replay activity which
-    need a session around capture (Proton with ``proton_graph_attribution``).
+    need a session around capture (Proton with `proton_graph_attribution`).
     """
     if (
         profiler_config.profiler == "proton"

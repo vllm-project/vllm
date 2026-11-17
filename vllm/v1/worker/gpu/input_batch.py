@@ -39,7 +39,7 @@ class InputBuffers:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]
@@ -239,7 +239,7 @@ def set_dummy_context(
     """Give each dummy request context_len of context, for profiling step cost
     and for DCP FULL cudagraph capture.
 
-    ``num_kv_blocks`` is the block count of each KV cache group's pool.
+    `num_kv_blocks` is the block count of each KV cache group's pool.
     """
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables

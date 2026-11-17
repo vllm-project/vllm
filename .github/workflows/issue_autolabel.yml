@@ -135,19 +135,11 @@ jobs:
                 keywords: [
                   { term: "Kimi",     searchIn: "both" },
                   { term: "Moonshot", searchIn: "both" },
+                  { term: "K3",       searchIn: "title" },
                 ],
                 substrings: [
                   { term: "moonshotai/", searchIn: "both" },
                   { term: "kimi",        searchIn: "title" },
-                ],
-              },
-              k3: {
-                keywords: [
-                  { term: "Kimi K3", searchIn: "both" },
-                  { term: "K3",      searchIn: "title" },
-                ],
-                substrings: [
-                  { term: "moonshotai/kimi-k3", searchIn: "both" },
                 ],
               },
               quantization: {
@@ -196,6 +188,9 @@ jobs:
               // models, hardware and libraries.
               deepseek: {
                 keywords: [{ term: "DeepSeek", searchIn: "title" }],
+                // DSv4 / DSv4.1 fold into the vendor label; we no longer track
+                // per-version DeepSeek labels.
+                regexPatterns: [{ pattern: "(?:\\bDSv4\\b|deepseek[-\\s_]?v4)", flags: "gi", searchIn: "title" }],
               },
               beam: {
                 // Bare "beam" also describes beam search; require a model identifier.
@@ -204,13 +199,6 @@ jobs:
                   flags: "gi",
                   searchIn: "title",
                 }],
-              },
-              // DSv4 and DSv4.1 are distinct architectures; these keep them exclusive.
-              DSv4: {
-                regexPatterns: [{ pattern: "(?:\\bDSv4\\b|deepseek[-\\s_]?v4)(?![._]?1)", flags: "gi", searchIn: "title" }],
-              },
-              "DSv4.1": {
-                regexPatterns: [{ pattern: "(?:\\bDSv4[._]?1\\b|deepseek[-\\s_]?v4[._]?1)", flags: "gi", searchIn: "title" }],
               },
               llama: {
                 keywords: [{ term: "Llama", searchIn: "title" }],

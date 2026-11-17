@@ -164,6 +164,14 @@ class RocmAttentionBackend(AttentionBackend):
         return [MultipleOf(16)]
 
     @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        # Only 16 (and 32, where a native kernel exists) runs on the native
+        # C++ paged-attention kernel; any other multiple of 16 falls back to
+        # the slower Triton path. Keep the native kernel for default-sized
+        # runs; explicit --block-size values are unaffected.
+        return 16
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # Head sizes with a native ROCm kernel are only 64 and 128 (see
         # csrc/rocm/attention_paged_attn_h{64,128}_*.cu); the remaining entries are
@@ -494,7 +502,12 @@ class RocmAttentionImpl(AttentionImpl):
             (16 // value_cache.element_size()) if interleaved_v else 0
         )
 
-        if block_size in (16, 32) and has_native_layout:
+        # The native kernel writes at most 512 chunks of x elements per token.
+        if (
+            block_size in (16, 32)
+            and has_native_layout
+            and self.num_kv_heads * (self.head_size // key_cache.shape[4]) <= 512
+        ):
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,
