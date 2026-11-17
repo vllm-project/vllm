@@ -299,6 +299,32 @@ def workspace_init():
     reset_workspace_manager()
 
 
+@pytest.fixture
+def narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep dummy FP8 weights within +-1, as before full-range dummy FP8 codes.
+
+    For tests that compare dummy-weight outputs of paths that are not bitwise
+    equivalent (greedy tokens across engines, fused vs. unfused kernels).
+    Full-range FP8 codes, NVFP4 block scales included, scale up activations,
+    so rounding noise flips near-tied greedy tokens or exceeds absolute
+    tolerances. The patch applies to this process only, so the engine core
+    runs in process; the model must also run in it (one worker, no
+    multiprocessing executor).
+    """
+    from vllm.model_executor.model_loader import dummy_loader
+
+    original = dummy_loader.initialize_single_dummy_weight
+
+    def initialize(param: torch.Tensor, *args, **kwargs) -> None:
+        if param.is_floating_point() and torch.finfo(param.dtype).bits == 8:
+            kwargs.setdefault("low", -1.0)
+            kwargs.setdefault("high", 1.0)
+        original(param, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_loader, "initialize_single_dummy_weight", initialize)
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield

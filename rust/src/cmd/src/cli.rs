@@ -610,6 +610,20 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_tokenizer_info_endpoint: bool,
 
+    /// If set to True, only enable the Tokens In<>Out endpoint.
+    /// This is intended for use in a Disaggregated Everything setup.
+    ///
+    /// Implies `--enable-scale-out` and `--skip-tokenizer-init`. Unlike Python,
+    /// it does not serve the unauthenticated legacy `/abort_requests`; use
+    /// `/inference/v1/abort_requests`.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub tokens_only: bool,
+
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
     /// prevent reverse proxies/tunnels with read timeouts from closing the
@@ -1018,7 +1032,7 @@ impl SharedRuntimeArgs {
             hf_config,
             skip_tokenizer_init,
             hf_token,
-        } = self.model.file_sources();
+        } = self.model_args().file_sources();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -1111,7 +1125,7 @@ impl SharedRuntimeArgs {
             hf_config,
             skip_tokenizer_init,
             hf_token,
-        } = self.model.file_sources();
+        } = self.model_args().file_sources();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -1172,6 +1186,15 @@ impl SharedRuntimeArgs {
         }
     }
 
+    /// The model arguments with `--tokens-only` applied, which implies
+    /// `--skip-tokenizer-init` as in Python's `EngineArgs`.
+    fn model_args(&self) -> ModelArgs {
+        ModelArgs {
+            skip_tokenizer_init: self.model.skip_tokenizer_init || self.tokens_only,
+            ..self.model.clone()
+        }
+    }
+
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
@@ -1189,7 +1212,8 @@ impl SharedRuntimeArgs {
             force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
-            enable_scale_out: self.enable_scale_out.unwrap_or(self.server_dev_mode),
+            enable_scale_out: self.tokens_only
+                || self.enable_scale_out.unwrap_or(self.server_dev_mode),
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
@@ -1537,7 +1561,7 @@ impl ServeArgs {
         });
 
         let mut managed_engine = self.managed_engine.clone();
-        managed_engine.python_args.extend(self.runtime.model.python_args());
+        managed_engine.python_args.extend(self.runtime.model_args().python_args());
         if let Some(logging_config) = self.runtime.logging_config_json() {
             managed_engine
                 .python_args

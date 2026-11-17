@@ -308,6 +308,8 @@ class Nvfp4FusionTestWorkerExtension:
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
+# Compares fused vs. unfused NVFP4 MLP outputs with an absolute tolerance.
+@pytest.mark.usefixtures("narrow_dummy_fp8_weights")
 def test_tp1_fp4_mixed_precision_act_fusion(
     model_name: str,
     matches_fn: Callable[[int], Matches],
