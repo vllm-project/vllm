@@ -4206,11 +4206,13 @@ class NixlBaseConnectorWorker:
         now = time.perf_counter()
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
             if engine_id in self._disconnected_remote_engines:
-                # The metadata may still be loaded; the connection is not.
-                logger.warning(
-                    "NIXL lost the connection to remote engine %s.", engine_id
-                )
-                self._mark_remote_engine_invalid(engine_id, now)
+                # Skip an engine whose agents were already removed (no NIXL state left).
+                if engine_id in self._remote_agents:
+                    # The metadata may still be loaded; the connection is not.
+                    logger.warning(
+                        "NIXL lost the connection to remote engine %s.", engine_id
+                    )
+                    self._mark_remote_engine_invalid(engine_id, now)
                 continue
             agents = self._remote_agents.get(engine_id, {}).values()
             try:
