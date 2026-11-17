@@ -297,39 +297,60 @@ __global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t* __restrict__ aq,
   const int k_begin = KSPLIT ? (int)blockIdx.z * k_per_split : 0;
   const int k_end =
       KSPLIT ? ((blockIdx.z == gridDim.z - 1) ? K : k_begin + k_per_split) : K;
-  for (int k_g = k_begin; k_g < k_end; k_g += kGroup) {
-    v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
-    // K-octet assignment: WMMA step s, lane half hi covers octet 2*hi + s.
-    // A and B agree, so the K sum is unchanged, and each lane's two B words
-    // (fragment-major layout) and 16 A bytes are each one contiguous load.
-    uint2 bw = {0u, 0u};
-    if (n_ok)
-      __builtin_memcpy(
-          &bw, b_q + ((size_t)(k_g / kGroup) * N + n_col) * 4 + 2 * hi, 8);
-    uint4 aw = {0u, 0u, 0u, 0u};
-    if (a_ok) __builtin_memcpy(&aw, aq + (size_t)a_row * K + k_g + 16 * hi, 16);
+  // Register prefetch ring: ISA inspection showed the old loop issuing its
+  // B/A loads and immediately draining them (s_wait_loadcnt 0) every 32-K
+  // group, then a second dependent round-trip for the E8M0 byte - two full
+  // memory latencies per 2 WMMAs with no loads in flight across groups, at
+  // 16 waves/SIMD already. Keep PF groups of B, A and scale loads in flight.
+  constexpr int PF = 4;
+  uint2 bw_r[PF];
+  uint4 aw_r[PF];
+  uint32_t sc_r[PF];
+  // Loads are unconditional on clamped indices and masked afterwards: when
+  // they sat under `if (n_ok)` / `if (a_ok)` the compiler could not count
+  // the outstanding loads and emitted s_wait_loadcnt 0 before every group,
+  // which drained the ring and made the prefetch worthless.
+  const int n_ld = n_ok ? n_col : (N - 1);
+  const int a_ld = a_ok ? a_row : (M - 1);
+  auto load = [&](int k_g, int d) {
+    __builtin_memcpy(&bw_r[d],
+                     b_q + ((size_t)(k_g / kGroup) * N + n_ld) * 4 + 2 * hi, 8);
+    sc_r[d] = b_scales[(size_t)(k_g / kGroup) * N + n_ld];
+    __builtin_memcpy(&aw_r[d], aq + (size_t)a_ld * K + k_g + 16 * hi, 16);
+  };
   #pragma unroll
-    for (int s = 0; s < 2; s++) {
-      v2i32 af;
-      af[0] = (int)(s == 0 ? aw.x : aw.z);
-      af[1] = (int)(s == 0 ? aw.y : aw.w);
-      const uint32_t qa = s == 0 ? bw.x : bw.y;
-      uint32_t blo, bhi;
-      dequant_mxfp4_8_e4m3(qa, blo, bhi);
-      v2i32 bf;
-      bf[0] = (int)blo;
-      bf[1] = (int)bhi;
-      grp = wmma_fp8(af, bf, grp);
-    }
-    // E8M0 is constant across the group and across this lane's 8 outputs,
-    // because the accumulator's N index is fixed per lane.
-    const float wsc =
-        n_ok ? mxfp4_e8m0_to_f32(b_scales[(size_t)(k_g / kGroup) * N + n_col])
-             : 0.0f;
-  #pragma unroll
-    for (int i = 0; i < 8; i++) acc[i] = fmaf(grp[i], wsc, acc[i]);
-  }
+  for (int d = 0; d < PF; d++)
+    if (k_begin + d * kGroup < k_end) load(k_begin + d * kGroup, d);
 
+  for (int k_g0 = k_begin; k_g0 < k_end; k_g0 += PF * kGroup) {
+  #pragma unroll
+    for (int d = 0; d < PF; d++) {
+      const int k_g = k_g0 + d * kGroup;
+      if (k_g >= k_end) break;
+      uint2 bw = bw_r[d];
+      uint4 aw = aw_r[d];
+      const float wsc = n_ok ? mxfp4_e8m0_to_f32(sc_r[d]) : 0.0f;
+      if (!n_ok) bw = {0u, 0u};
+      if (!a_ok) aw = {0u, 0u, 0u, 0u};
+      if (k_g + PF * kGroup < k_end) load(k_g + PF * kGroup, d);
+      v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
+  #pragma unroll
+      for (int s = 0; s < 2; s++) {
+        v2i32 af;
+        af[0] = (int)(s == 0 ? aw.x : aw.z);
+        af[1] = (int)(s == 0 ? aw.y : aw.w);
+        const uint32_t qa = s == 0 ? bw.x : bw.y;
+        uint32_t blo, bhi;
+        dequant_mxfp4_8_e4m3(qa, blo, bhi);
+        v2i32 bf;
+        bf[0] = (int)blo;
+        bf[1] = (int)bhi;
+        grp = wmma_fp8(af, bf, grp);
+      }
+  #pragma unroll
+      for (int i = 0; i < 8; i++) acc[i] = fmaf(grp[i], wsc, acc[i]);
+    }
+  }
   if (!n_ok) return;
   // gfx12 accumulator: lane -> n = lo, slot i -> m = 8*hi + i.
   #pragma unroll
