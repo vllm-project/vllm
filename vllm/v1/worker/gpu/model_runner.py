@@ -436,10 +436,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if isinstance(self.speculator, DraftModelSpeculator):
                 with self.draft_context(), self.jit_warmup_registry.activate():
                     self.speculator.load_model(self.model)
-                    log_layer_backends(
-                        self.speculator.model, self.speculator.draft_model_config
-                    )
                     assert self.speculative_config is not None
+                    log_layer_backends(
+                        self.speculator.model,
+                        self.speculative_config.draft_model_config,
+                    )
                     # The drafter never runs its MoE layers in this mode.
                     if not self.speculative_config.prefill_context_kv_only:
                         eplb_models_added = self.eplb.maybe_register_speculator(
