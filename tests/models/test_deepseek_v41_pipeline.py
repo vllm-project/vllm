@@ -109,6 +109,7 @@ def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch):
 
     layer = SimpleNamespace(
         mhc_stream=None,
+        ampere_mhc=False,
         engram=Engram(),
         hc_attn_fn=None,
         hc_attn_scale=None,
