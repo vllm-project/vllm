@@ -1156,6 +1156,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             # JIT the FlyDSL sparse MLA now, not on the first prefill that
             # reaches it (or never, inside a CUDA-graph capture).
             rocm_aiter_ops.flydsl_sparse_mla_warmup(self.num_heads)
+            if self.dcp_world_size > 1:
+                # The DCP branch attends every rank's heads (query gather).
+                rocm_aiter_ops.flydsl_sparse_mla_warmup(
+                    self.num_heads * self.dcp_world_size
+                )
 
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig
@@ -1653,17 +1658,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
                     compact_valid_to_front=False,
                 )
-                compact = attn_metadata.num_prefills == 0
-                if compact:
-                    indptr, packed = _compact_dcp_indices(indices)
-                else:
-                    indptr = (
-                        torch.arange(
-                            num_actual_toks + 1, dtype=torch.int32, device=q.device
-                        )
-                        * attn_metadata.topk_tokens
-                    )
-                    packed = cast(torch.Tensor, indices).flatten()
+                # Pack every step, prefill included: the gathered-heads kernel then
+                # walks this rank's ~topk / dcp_world_size keys per row instead of
+                # all topk (same keys in the same order, so the output is unchanged).
+                indptr, packed = _compact_dcp_indices(indices)
+                compact = True
             output = torch.empty(
                 (q.shape[0], q.shape[1], self.kv_lora_rank),
                 dtype=attn_metadata.attn_out_dtype,

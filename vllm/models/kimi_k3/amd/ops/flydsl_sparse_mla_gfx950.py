@@ -3,23 +3,26 @@
 # SPDX-FileCopyrightText: Copyright (C) 2024-2026, Advanced Micro Devices, Inc.
 # mypy: ignore-errors
 #
-# This file contains code copied from the ROCm/aiter project
-# (aiter/ops/flydsl/kernels/sparse_mla_fp8ds_gfx950.py @
-# a61e02c26a3915011e85b103574c25d457890825). The original source code was
-# licensed under the MIT license. It is carried in-tree so a stock aiter build
-# still gets the kernel; only the imports and this header differ.
+# The <= 16-head kernel and the helpers before it are copied from the
+# ROCm/aiter project (aiter/ops/flydsl/kernels/sparse_mla_fp8ds_gfx950.py @
+# a61e02c26a3915011e85b103574c25d457890825), with 64-bit KV addressing added.
+# The original source code was licensed under the MIT license. The many-head
+# kernel after it is built on those helpers.
 
 """FlyDSL sparse MLA forward over fp8_ds_mla records, gfx950.
 
 Serves the DeepSeek-V3.2 / Kimi-K3 fp8_ds_mla path of ``sparse_mla_fwd``
-(kv_lora_rank 512, rope 64, bf16 q, <= 16 heads, CSR index stream). The host
+(kv_lora_rank 512, rope 64, bf16 q, CSR index stream) with two kernels: one
+for <= 16 heads (``build_sparse_mla_fp8ds_module``) and one for multiples of
+16 such as the 96 gathered heads of Kimi-K3.1's DCP branch
+(``build_sparse_mla_fp8ds_mh_module``, see its section below). The host
 wrapper and its support predicate live in ``flydsl_sparse_mla.py``.
 
 Record (656 B): 512 e4m3 latent | 4 f32 per-128 pow2 scales | 64 bf16 rope.
 
-One 4-wave workgroup per query row (rows issued in reverse order, so the long
-causal tail starts first), 128-token tiles over the row's CSR slice
-``indices[indptr[q] : indptr[q + 1]]``:
+<= 16 heads: one 4-wave workgroup per query row (rows issued in reverse
+order, so the long causal tail starts first), 128-token tiles over the row's
+CSR slice ``indices[indptr[q] : indptr[q + 1]]``:
 
   * QK: wave w computes S for tokens [32w, 32w + 32) of the tile, all heads,
     from the raw fp8 latent: a scaled MFMA 16x16x128 with the record's pow2
@@ -49,13 +52,47 @@ Preconditions the host cannot check:
     this holds iff |latent| <= 57344. A larger scale is clamped to 2^7
     in-kernel, which keeps the output finite but makes it inexact.
   * Every consumed index i satisfies 0 <= i < kv rows (as for the Gluon path).
+
+The many-head kernel runs the same math (Q split into fp8 hi + lo, scaled fp8
+MFMA on the raw latent, bf16 MFMA for rope, fp16 PV on tr8-read raw fp8 with
+the V scale folded into P) laid out so that each KV tile is gathered into LDS
+once for all of a row's heads, instead of once per 16 heads:
+
+  * Workgroup = (query row, head split). It serves HG groups of 16 heads with
+    2 waves per group; NSPLIT = H / (16 HG) workgroups share a row, placed on
+    one XCD so they share its L2.
+  * The two waves of a group split the 512 latent columns: wave half c owns
+    columns [256c, 256c + 256) (record scale blocks 2c, 2c + 1) and rope dims
+    [32c, 32c + 32). It holds only its share of Q and accumulates only
+    O[:, 256c : 256c + 256].
+  * QK: each wave computes partial S over its columns for the tile's 32
+    tokens; the pair swaps the partials through LDS, so both hold the full S
+    and run the same softmax (no P exchange).
+  * Softmax: P = exp2(s - m + 4), with m allowed to lag the running max by up
+    to 4 (the O rescale is skipped while it does), so P <= 2^8 as above.
+  * PV: the S register layout is the PV B operand when the K order is
+    k = 8g + i <-> token 16(i // 4) + 4g + i % 4, which the tr8 V^T reads use.
+  * KV tiles of 32 tokens (latent 2 x [32][256 B] XOR-swizzled, rope
+    [32][128 B], scales [32][16 B]) are gathered into 2 LDS stages (tile i + 1
+    while tile i is computed) by global_load ... lds on 64-bit per-lane
+    addresses. The DMAs carry an alias scope that every LDS access is declared
+    not to alias, so the compiler does not wait for the in-flight tile before
+    each ds_read; the explicit vmcnt wait + barrier at the top of each tile
+    orders them.
+  * No has_invalid: every index in [indptr[0], indptr[T]) must be a valid
+    slot. Positions past a row's end are masked and read the row's first key:
+    a real record, so their P' = 0 adds exactly 0 (row 0, the null block, can
+    hold anything: CUDA-graph capture writes into it). Rows run long first; KV
+    scales are capped at 2^7; same preconditions otherwise.
 """
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from aiter.ops.flydsl.kernels import buffer_ops
 from aiter.ops.flydsl.kernels.tensor_shim import GTensor, buf_base_i64, ptr_buf_tensor
 from aiter.ops.flydsl.kernels.tensor_shim import _to_raw as _raw
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import arith, llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -65,6 +102,7 @@ __all__ = [
     "MAX_HEADS",
     "QK_ROPE_HEAD_DIM",
     "RECORD_BYTES",
+    "build_sparse_mla_fp8ds_mh_module",
     "build_sparse_mla_fp8ds_module",
 ]
 
@@ -818,3 +856,607 @@ def build_sparse_mla_fp8ds_module(num_heads, has_invalid, return_lse):
 
     launch_sparse_mla_fp8ds.compile_hints = {"waves_per_eu": 2, "fast_fp_math": False}
     return launch_sparse_mla_fp8ds
+
+
+# ---- the many-head kernel (H a multiple of 16, the DCP branch's 96 gathered
+# heads)
+
+# P = exp2(s - m + _MH_P_SHIFT) with m allowed to lag the running max by up to
+# _MH_TAU (lazy O rescale), so P <= 2^(_MH_TAU + _MH_P_SHIFT) and
+# P' = P * scale <= 2^15 fits fp16 for KV scales <= 2^7.
+_MH_P_SHIFT = 4.0
+_MH_TAU = 4.0
+_MH_NEG = -1.0e30
+# KV tile and its LDS stage: latent 2 x [_MH_TILE][256 B], rope
+# [_MH_TILE][128 B], scales [_MH_TILE][16 B] (one 1 KB DMA job).
+_MH_TILE = 32
+_MH_NS16 = _MH_TILE // 16  # QK subtiles a tile
+_MH_ROPE_OFF = _MH_TILE * 512
+_MH_SC_OFF = _MH_ROPE_OFF + _MH_TILE * 128
+_MH_STAGE = _MH_SC_OFF + 1024
+_MH_XCH_OFF = 2 * _MH_STAGE  # after the 2 stages: the QK partials exchange
+# Epilogue: a wave's O tile as bf16 [16 heads][256 dims], row pitch 512 + 16 B.
+_MH_OP = 528
+# Latent / rope DMA jobs of 1 KB a tile; + 1 scale job.
+_MH_NL, _MH_NR = _MH_TILE // 2, _MH_TILE // 8
+_MH_NJ = _MH_NL + _MH_NR + 1
+
+
+def _dma_scope():
+    """Alias scope of the KV DMAs (an ArrayAttr; built while the kernel is traced)."""
+    dom = '#llvm.alias_scope_domain<id = distinct[0]<>, description = "mla_lds">'
+    dma = ir.Attribute.parse(
+        f'#llvm.alias_scope<id = distinct[1]<>, domain = {dom}, description = "kv_dma">'
+    )
+    return ir.ArrayAttr.get([dma])
+
+
+def _ld(sc, elem, n, addr, align):
+    """LDS load of n x elem that does not alias an in-flight KV DMA (scope sc)."""
+    ty = T.vec(n, elem) if n > 1 else elem
+    v = llvm.load(ty, _lds_llvm_ptr(addr), alignment=align, noalias_scopes=sc)
+    return Vec(v) if n > 1 else v
+
+
+def _st(sc, vec, addr, align):
+    llvm.store(
+        Vec(vec).ir_value(), _lds_llvm_ptr(addr), alignment=align, noalias_scopes=sc
+    )
+
+
+def _tr8_scoped(sc, addr):
+    return Vec(
+        rocdl.ds_read_tr8_b64_(T.vec(2, T.i32), _lds_llvm_ptr(addr), noalias_scopes=sc)
+    )
+
+
+def _fsw(tok):
+    """16-B chunk swizzle of a 256-B latent half row: conflict-free QK (16
+    consecutive tokens) and tr8 reads."""
+    return (tok & 15) ^ (((tok >> 4) & 1) << 3)
+
+
+def _rsw(tok):
+    """16-B chunk swizzle of a 128-B rope row."""
+    return (tok >> 1) & 7
+
+
+def _f32(x):
+    return fx.Int32(x).bitcast(fx.Float32)
+
+
+def _amax_bf16(words):
+    """The max |x| over bf16 pairs (i32 words), as f32: a packed u16 max of the
+    magnitude bits."""
+    v2 = T.vec(2, T.i16)
+    m = None
+    for w in words:
+        mw = llvm.bitcast(v2, _raw(fx.Int32(fx.Int32(w) & 0x7FFF7FFF).ir_value()))
+        m = mw if m is None else arith.maxui(m, mw)
+    mi = fx.Int32(llvm.bitcast(T.i32, m))
+    lo16 = mi & 0xFFFF
+    hi16 = (mi >> 16) & 0xFFFF
+    return ((lo16 > hi16).select(lo16, hi16) << 16).bitcast(fx.Float32)
+
+
+def _quant_bf16(words, inv):
+    """bf16 pairs * inv -> fp8 hi = the value with its mantissa truncated to 3
+    bits (exact in e4m3 for |x * inv| >= 2^-6; smaller values are negligible
+    next to the block's amax in [128, 256)) and fp8 lo = the remainder * 16
+    (E8M0 of hi minus 4; the remainder is below one hi ulp, so * 16 stays
+    < 256)."""
+    hv, lv = [], []
+    for w in words:
+        w = fx.Int32(w)
+        t = w & fx.Int32(-0x000F0010)
+        x = [
+            (w << 16).bitcast(fx.Float32),
+            (w & fx.Int32(-0x10000)).bitcast(fx.Float32),
+        ]
+        h = [
+            (t << 16).bitcast(fx.Float32),
+            (t & fx.Int32(-0x10000)).bitcast(fx.Float32),
+        ]
+        for k in range(2):
+            hv.append(h[k] * inv)
+            lv.append((x[k] - h[k]) * (inv * 16.0))
+    return (
+        [_pack_fp8x4(hv[4 * i : 4 * i + 4]) for i in range(len(hv) // 4)],
+        [_pack_fp8x4(lv[4 * i : 4 * i + 4]) for i in range(len(lv) // 4)],
+    )
+
+
+def _barrier():
+    """s_barrier without the workgroup fence gpu.barrier adds: that release
+    fence would wait (vmcnt) for the in-flight KV DMA. Callers wait lgkmcnt /
+    vmcnt themselves; the memory clobber keeps LDS accesses in place."""
+    llvm.inline_asm(None, [], "s_barrier", "~{memory}", has_side_effects=True)
+
+
+def _order(pin=()):
+    """Compiler-only fence: LDS accesses are not moved across it, and the
+    values in `pin` (v4f32 MFMA accumulators) are produced before it (no-op asm
+    with tied operands). Returns the pinned values."""
+    pin = list(pin)
+    if not pin:
+        llvm.inline_asm(None, [], "", "~{memory}", has_side_effects=True)
+        rocdl.sched_barrier(0)
+        return []
+    irs = [Vec(v).ir_value() for v in pin]
+    if len(irs) == 1:
+        r = llvm.inline_asm(
+            irs[0].type, irs, "", "=v,0,~{memory}", has_side_effects=True
+        )
+        rocdl.sched_barrier(0)
+        return [Vec(r)]
+    ty = ir.Type.parse(f"!llvm.struct<({', '.join(['vector<4xf32>'] * len(irs))})>")
+    cons = ",".join(
+        ["=v"] * len(irs) + [str(i) for i in range(len(irs))] + ["~{memory}"]
+    )
+    ret = llvm.inline_asm(ty, irs, "", cons, has_side_effects=True)
+    rocdl.sched_barrier(0)
+    return [Vec(llvm.extractvalue(irs[i].type, ret, [i])) for i in range(len(irs))]
+
+
+def build_sparse_mla_fp8ds_mh_module(num_heads, return_lse, hg, waves_per_eu):
+    """JIT launcher of the many-head kernel for H = num_heads heads (a multiple
+    of 16), no has_invalid: hg 16-head groups per workgroup, waves_per_eu as
+    the compile hint."""
+    H = num_heads
+    if H % 16 or (H // 16) % hg:
+        raise ValueError(f"unsupported num_heads {H} with {hg} head groups")
+    nsplit = H // 16 // hg
+    W = 2 * hg  # waves
+    NTH = 64 * W
+    LDS = max(_MH_XCH_OFF + hg * 2 * _MH_NS16 * 1024, W * 16 * _MH_OP)
+    J = (_MH_NJ + W - 1) // W  # DMA instructions per wave per tile
+
+    name = (
+        f"sparse_mla_fp8ds_mh_gfx950_h{H}_g{hg}_w{waves_per_eu}"
+        f"_l{int(return_lse)}_flydsl"
+    )
+
+    @fx.struct
+    class Smem:
+        raw: fx.Array[fx.Uint8, LDS, 1024]
+
+    @flyc.kernel(name=name, known_block_size=[NTH, 1, 1])
+    def sparse_mla_fp8ds_mh_kernel(
+        Q: fx.Tensor,
+        KV: fx.Tensor,
+        IDX: fx.Tensor,
+        IPTR: fx.Tensor,
+        OUT: fx.Tensor,
+        LSE: fx.Tensor,
+        stride_q: fx.Int32,
+        stride_qh: fx.Int32,
+        stride_o: fx.Int32,
+        stride_oh: fx.Int32,
+        c_log2: fx.Float32,
+        n_q: fx.Int32,
+        idx_bytes: fx.Int32,
+    ):
+        sc = _dma_scope()
+        tid = fx.Int32(fx.thread_idx.x)
+        w = _readfirstlane(tid // 64)
+        lane = tid % 64
+        l16 = lane % 16
+        g = lane // 16
+        grp = w // 2
+        half = w % 2
+        bid = fx.Int32(fx.block_idx.x)
+        if const_expr(nsplit > 1):
+            # Workgroups go round-robin over the 8 XCDs: give each XCD a
+            # contiguous run of (row, split) so a row's splits share one L2.
+            per = fx.Int32(n_q * nsplit) // 8
+            sw = (bid % 8) * per + bid // 8
+            bid = (bid < per * 8).select(sw, bid)
+            sp = bid % nsplit
+            qi = bid // nsplit
+        else:
+            sp = fx.Int32(0)
+            qi = bid
+        qi = fx.Int32(n_q - 1) - qi  # long rows first
+        gi = sp * hg + grp  # 16-head group
+        head = gi * 16 + l16
+
+        q_t = GTensor(Q, dtype=T.i32, shape=(-1,))
+        kv_t = GTensor(KV, dtype=T.i32, shape=(-1,))
+        idx_t = _BoundedI32(IDX, idx_bytes)
+        ip_t = GTensor(IPTR, dtype=T.i32, shape=(-1,))
+        o_t = GTensor(OUT, dtype=T.i32, shape=(-1,))
+        lse_t = GTensor(LSE, dtype=T.i32, shape=(-1,))
+        kv_base = kv_t.base_i64  # i64: the cache may span more than 4 GiB
+        lds = fx.SharedAllocator().allocate(Smem).peek()
+        base = _readfirstlane(fx.ptrtoint(lds.raw.ptr))
+
+        # ---- this row's CSR slice and the indices of tiles 0 and 1 (issued
+        # before Q: vmcnt is in order)
+        ip_rsrc = ip_t.rsrc
+        r_beg = fx.Int32(
+            buffer_ops.buffer_load(ip_rsrc, qi, vec_width=1, is_scalar=True)
+        )
+        r_end = fx.Int32(
+            buffer_ops.buffer_load(ip_rsrc, qi + 1, vec_width=1, is_scalar=True)
+        )
+        r_len = r_end - r_beg
+        r_len = (r_len < 0).select(fx.Int32(0), r_len)
+        idxv = [fx.Int32(idx_t[r_beg + _MH_TILE * t + lane]) for t in range(2)]
+        # Masked tail positions gather the row's first key. An empty row computes
+        # no tile; its tile-0 gather reads row 0, never indices[r_beg], which lies
+        # past the row (possibly past the valid part of the index buffer).
+        pad_ix = (r_len > 0).select(_readfirstlane(idxv[0]), fx.Int32(0))
+
+        # ---- DMA jobs of this wave (1 KB each; lane L writes LDS bytes
+        # 16L .. 16L + 15 of the job):
+        #   latent n < _MH_NL: half n // 8, tokens 4(n % 8) + L // 16, swizzled
+        #     16-B chunk L % 16;
+        #   rope n - _MH_NL: tokens 8(n - _MH_NL) + L // 8, swizzled chunk L % 8;
+        #   scale: token L % _MH_TILE.
+        # Slots past _MH_NJ redo job n - _MH_NJ (same bytes, harmless).
+        def job(k, lane):
+            """-> (token, source byte in the record, stage-relative LDS byte) of
+            this wave's DMA slot k."""
+            n = w + W * k
+            n = (n < _MH_NJ).select(n, n - _MH_NJ)
+            is_l = n < _MH_NL
+            is_r = n < _MH_NL + _MH_NR
+            lh = n // (_MH_TILE // 4)
+            lt0 = 4 * (n % (_MH_TILE // 4))
+            ltok = lt0 + lane // 16
+            lsrc = 256 * lh + 16 * ((lane % 16) ^ _fsw(ltok))
+            ldst = lh * (_MH_TILE * 256) + lt0 * 256
+            rj = n - _MH_NL
+            rtok = 8 * rj + lane // 8
+            rsrc = 528 + 16 * ((lane % 8) ^ _rsw(rtok))
+            rdst = _MH_ROPE_OFF + 1024 * rj
+            stok = lane % _MH_TILE
+            return (
+                is_l.select(ltok, is_r.select(rtok, stok)),
+                is_l.select(lsrc, is_r.select(rsrc, fx.Int32(512))),
+                _readfirstlane(
+                    is_l.select(ldst, is_r.select(rdst, fx.Int32(_MH_SC_OFF)))
+                ),
+            )
+
+        def dma(idxv, tb, stage, lane=lane):
+            """Gather tile rows [tb, tb + _MH_TILE) into stage: idxv lane l holds
+            indices[r_beg + tb + l]. Always J DMAs per wave, so the vmcnt waits
+            below are static. The row offset is 64-bit: a buffer descriptor's
+            32-bit offset cannot reach past 4 GiB, and its wave-uniform base
+            cannot follow a per-lane gather."""
+            for k in range_constexpr(J):
+                tok, src, dst = job(k, lane)
+                ix = fx.Int32(
+                    rocdl.ds_bpermute(T.i32, _raw(tok * 4), _raw(fx.Int32(idxv)))
+                )
+                ix = (tb + tok < r_len).select(ix, pad_ix)
+                addr = kv_base + fx.Int64(ix) * fx.Int64(RECORD_BYTES) + fx.Int64(src)
+                rocdl.global_load_lds(
+                    _global_llvm_ptr(addr),
+                    _lds_llvm_ptr(base + stage * _MH_STAGE + dst),
+                    16,
+                    0,
+                    alias_scopes=sc,
+                )
+
+        dma(idxv[0], fx.Int32(0), fx.Int32(0))
+        _order()
+        # ---- Q: lane (h = l16, d = g) holds, for scale block 2 half + j, dims
+        # 32d .. 32d + 31 as fp8 hi / lo (one E8M0 per head and block), and rope
+        # dims 32 half + 8d .. + 7 (bf16).
+        q_row = (qi * stride_q + head * stride_qh) // 2  # i32 units
+        qv = []
+        for j in range_constexpr(2):
+            d0 = (256 * half + 128 * j + 32 * g) // 2
+            parts = [Vec(q_t.load(q_row + d0 + 4 * k, vec_size=4)) for k in range(4)]
+            qv.append([fx.Int32(p[i]) for p in parts for i in range(4)])  # 32 bf16
+        qr = Vec(q_t.load(q_row + (KV_LORA_RANK + 32 * half + 8 * g) // 2, vec_size=4))
+        _order()
+
+        nt = _readfirstlane((r_len + (_MH_TILE - 1)) // _MH_TILE)
+
+        # ---- quantize Q (waits for the Q loads only; the DMA was issued after them)
+        q8, q8l, qs, qsl = [], [], [], []
+        for j in range_constexpr(2):
+            a = _amax_bf16(qv[j])
+            a = _xmax(a)  # amax over the head's 128 dims of block 2 half + j
+            s, inv = _e8m0_for(a)
+            hi, lo = _quant_bf16(qv[j], inv)
+            q8.append(Vec.from_elements(hi, fx.Int32))
+            q8l.append(Vec.from_elements(lo, fx.Int32))
+            qs.append(s)
+            ls = fx.Int32(s) - 4
+            qsl.append((ls < 0).select(fx.Int32(0), ls))
+
+        def lane_offsets(lane):
+            """Per-lane LDS offsets (stage-relative). Swizzles only touch address
+            bits 4-7, so a subtile / chunk / block offset is an XOR on those bits
+            plus an add above them (an immediate)."""
+            l16 = lane % 16
+            g = lane // 16
+            hb = half * (_MH_TILE * 256)
+            qk0 = (
+                hb + l16 * 256 + 16 * ((2 * g) ^ l16)
+            )  # + 4096 s, ^ 128 ((s & 1) ^ j) ^ 16 e
+            rp0 = (
+                _MH_ROPE_OFF + l16 * 128 + 16 * ((4 * half + g) ^ _rsw(l16))
+            )  # + 2048 s
+            sc0 = _MH_SC_OFF + l16 * 16 + 8 * half  # + 256 s
+            ps0 = _MH_SC_OFF + 64 * g + 8 * half  # + 16 (16 s2 + r)
+            i8 = l16 // 2
+            tok0 = 16 * (i8 // 4) + 4 * g + i8 % 4
+            pv0 = hb + tok0 * 256 + 8 * (l16 % 2) + 16 * _fsw(tok0)  # ^ 16 d
+            x_wr = (
+                base + _MH_XCH_OFF + (grp * 2 + half) * (_MH_NS16 * 1024) + lane * 16
+            )  # + 1024 s
+            x_rd = (
+                base
+                + _MH_XCH_OFF
+                + (grp * 2 + 1 - half) * (_MH_NS16 * 1024)
+                + lane * 16
+            )
+            return g, qk0, rp0, sc0, ps0, pv0, x_wr, x_rd
+
+        # ---- tile phases (closures over the per-lane offsets)
+        def qk_phase(sb, offs):
+            """Partial S^T over this wave's columns of the tile in stage sb (lane
+            (h = l16, g) holds tokens 16s + 4g + r), written to this wave's
+            exchange slot."""
+            qk0, rp0, sc0, x_wr = offs[1], offs[2], offs[3], offs[6]
+            qkb = sb + qk0
+
+            def qk_read(s, j):
+                if const_expr(j == 2):
+                    return _ld(sc, T.i32, 4, sb + rp0 + 2048 * s, 16)
+                x = 128 * ((s & 1) ^ j)
+                return _cat(
+                    _ld(sc, T.i32, 4, (qkb ^ x) + 4096 * s, 16),
+                    _ld(sc, T.i32, 4, (qkb ^ (x + 16)) + 4096 * s, 16),
+                    4,
+                )
+
+            # Block j = 0 for every subtile, then j = 1, then rope; operands are
+            # read one step ahead.
+            steps = [(s_, j_) for j_ in range(3) for s_ in range(_MH_NS16)]
+            scp = [_ld(sc, T.i32, 2, sb + sc0 + 256 * s_, 8) for s_ in range(_MH_NS16)]
+            ops = [qk_read(*steps[0])]
+            qh = q8[0]
+            acc = [Vec.filled(4, 0.0, fx.Float32) for _ in range(_MH_NS16)]
+            for k in range_constexpr(len(steps)):
+                s, j = steps[k]
+                qcur = qh
+                if const_expr(k + 1 < len(steps)):
+                    ops.append(qk_read(*steps[k + 1]))
+                    if const_expr(steps[k + 1][0] == 0 and steps[k + 1][1] < 2):
+                        qh = q8[steps[k + 1][1]]
+                _order()
+                if const_expr(j < 2):
+                    se = (fx.Int32(scp[s][j]) >> 23) & 0xFF
+                    acc[s] = _mfma_fp8(ops[k], qcur, acc[s], se, qs[j])
+                    acc[s] = _mfma_fp8(ops[k], q8l[j], acc[s], se, qsl[j])
+                else:
+                    acc[s] = _mfma_bf16(ops[k], qr, acc[s])
+                    _st(sc, acc[s], x_wr + 1024 * s, 16)
+                ops[k] = None
+
+        def read_s(offs):
+            """Full S (own + partner partial) * log2(e) * softmax_scale."""
+            x_wr, x_rd = offs[6], offs[7]
+            sl = []
+            for s in range_constexpr(_MH_NS16):
+                own = _ld(sc, T.f32, 4, x_wr + 1024 * s, 16)
+                oth = _ld(sc, T.f32, 4, x_rd + 1024 * s, 16)
+                for r in range_constexpr(4):
+                    sl.append((fx.Float32(own[r]) + fx.Float32(oth[r])) * c_log2)
+            return sl
+
+        def softmax(sl, tb, m_old, l_old, o, gl):
+            """Online softmax step over the tile at tb.
+
+            -> (sl masked, m_new, l_old * alpha, m_cl, o rescaled).
+            """
+
+            # Only the last tile can hold positions >= r_len (wave-uniform branch).
+            @flyc.jit
+            def _mask(sl, tb=tb):
+                if tb + _MH_TILE > r_len:
+                    sl = [
+                        (tb + 16 * (k // 4) + 4 * gl + k % 4 < r_len).select(
+                            sl[k], fx.Float32(_MH_NEG)
+                        )
+                        for k in range(len(sl))
+                    ]
+                return sl
+
+            sl = _mask(sl)
+            tmax = fx.Float32(_MH_NEG)
+            for x in sl:
+                tmax = _fmax(tmax, x)
+            tmax = _xmax(tmax)
+            # Lazy rescale: move m (and rescale O) only when the tile max exceeds
+            # it by more than _MH_TAU.
+            m_cand = _fmax(m_old, tmax)
+            upd = m_cand > m_old + _MH_TAU
+            m_new = upd.select(m_cand, m_old)
+            alpha = (m_old - m_new).exp2(fastmath="afn")
+            # All masked so far: exp2(-1e30 + 1e20) = 0.
+            m_cl = _fmax(m_new - _MH_P_SHIFT, fx.Float32(-1.0e20))
+            any_upd = fx.Int64(rocdl.ballot(T.i64, _raw(upd.ir_value()))) != fx.Int64(0)
+
+            @flyc.jit
+            def _rescale(o, alpha=alpha, any_upd=any_upd):
+                if any_upd:
+                    o = [
+                        Vec.from_elements(
+                            [fx.Float32(Vec(o[i])[k]) * alpha for k in range(4)],
+                            fx.Float32,
+                        )
+                        for i in range(len(o))
+                    ]
+                return o
+
+            return sl, m_new, l_old * alpha, m_cl, _rescale(o)
+
+        def pv_phase(sb, offs, sl, m_cl, l_new, o):
+            """O^T[d, h] += V^T[d, tok] P'^T[tok, h], P' = P * (token's scale of
+            the column block, capped at 2^7). Groups of 4 output blocks; group
+            q + 1's tr8 (and scale) reads are issued before group q's MFMAs, and
+            group q - 1's accumulators are pinned there so the MFMAs stay in
+            place. -> (o, l_new)."""
+            pvb = sb + offs[5]
+            ps0 = offs[4]
+
+            def pv_reads(q):
+                rd = [_tr8_scoped(sc, pvb ^ (16 * (4 * q + i))) for i in range(4)]
+                psc = None
+                if const_expr(q % 2 == 0):
+                    # V scale of token 16 (i // 4) + 4g + i % 4, column block
+                    # 2 half + q // 2.
+                    psc = []
+                    for i in range_constexpr(8):
+                        tok = 16 * (i // 4) + i % 4
+                        sv = _ld(sc, T.i32, 1, sb + ps0 + 4 * (q // 2) + 16 * tok, 4)
+                        psc.append(_imin(fx.Int32(sv), fx.Int32(_SCALE_CAP_BITS)))
+                return rd, psc
+
+            nxt = pv_reads(0)
+            pl = None
+            pp = None
+            for q in range_constexpr(4):
+                cur = nxt
+                if const_expr(q + 1 < 4):
+                    nxt = pv_reads(q + 1)
+                if const_expr(q > 0):
+                    o[4 * (q - 1) : 4 * q] = _order(o[4 * (q - 1) : 4 * q])
+                else:
+                    _order()
+                    pl = [(sl[i] - m_cl).exp2(fastmath="afn") for i in range(8)]
+                    for x in pl:
+                        l_new = l_new + x
+                if const_expr(q % 2 == 0):
+                    vals = [pl[i] * _f32(cur[1][i]) for i in range(8)]
+                    pp = (
+                        Vec.from_elements(vals, fx.Float32)
+                        .to(fx.Float16)
+                        .bitcast(fx.Int32)
+                    )
+                for i in range_constexpr(4):
+                    d = 4 * q + i
+                    o[d] = _mfma_f16(_cvt_v8(cur[0][i]), pp, o[d])
+            o[12:16] = _order(o[12:16])
+            return o, l_new
+
+        offs = lane_offsets(lane)
+        init = [_raw(fx.Float32(_MH_NEG).ir_value()), _raw(fx.Float32(0.0).ir_value())]
+        init += [_raw(Vec.filled(4, 0.0, fx.Float32).ir_value()) for _ in range(16)]
+        init += [_raw(idxv[1].ir_value())]
+        for tile, st in range(0, nt, 1, init=init):
+            m_old = fx.Float32(st[0])
+            l_old = fx.Float32(st[1])
+            o = [Vec(st[2 + i]) for i in range(16)]
+            idxv_c = fx.Int32(st[18])
+            tb = fx.Int32(tile) * _MH_TILE
+            stage = fx.Int32(tile) & 1
+            sb = base + stage * _MH_STAGE
+
+            # Tile `tile` has landed (own DMAs) and is visible (barrier);
+            # everyone is done with tile - 1's stage, which takes tile + 1.
+            rocdl.s_waitcnt(vmcnt=0)
+            _barrier()
+            _guarded(
+                fx.Int32(tile) + 1 < nt,
+                lambda _v=idxv_c, _tb=tb + _MH_TILE, _s=1 - stage: dma(
+                    _v, _tb, _s, lane
+                ),
+            )
+            idxv_n = fx.Int32(idx_t[r_beg + tb + 2 * _MH_TILE + lane])
+            qk_phase(sb, offs)
+            rocdl.s_waitcnt(lgkmcnt=0)
+            _barrier()
+            sl = read_s(offs)
+            sl, m_new, l_new, m_cl, o = softmax(sl, tb, m_old, l_old, o, offs[0])
+            o, l_new = pv_phase(sb, offs, sl, m_cl, l_new, o)
+            fin = yield [m_new, l_new] + o + [idxv_n]
+
+        # ---- epilogue
+        rocdl.s_waitcnt(vmcnt=0)
+        l_tot = _xsum(fx.Float32(fin[1]))
+        has_l = l_tot > fx.Float32(0.0)
+        inv_l = has_l.select(fx.Float32(1.0) / l_tot, fx.Float32(0.0))
+        # O goes through LDS so each store instruction writes whole 512-B row segments.
+        _barrier()  # everyone is done with the KV stages and the exchange buffer
+        ob = base + w * (16 * _MH_OP)
+        for d in range_constexpr(16):
+            ov = Vec(fin[2 + d])
+            bf = Vec.from_elements(
+                [fx.Float32(ov[k]) * inv_l for k in range(4)], fx.Float32
+            ).to(fx.BFloat16)
+            _st(sc, bf.bitcast(fx.Int32), ob + l16 * _MH_OP + 32 * d + 8 * g, 8)
+        rocdl.s_waitcnt(lgkmcnt=0)
+        for k in range_constexpr(8):
+            e = lane + 64 * k
+            row = e // 32
+            ch = e % 32
+            v = _ld(sc, T.i32, 4, ob + row * _MH_OP + 16 * ch, 16)
+            o_t.store(
+                (qi * stride_o + (gi * 16 + row) * stride_oh + 256 * half + 8 * ch)
+                // 2,
+                v,
+                vec_size=4,
+            )
+        if const_expr(return_lse):
+            # Natural-log LSE of softmax_scale * q.k over the unmasked keys;
+            # -inf when there is none.
+            m_fin = fx.Float32(fin[0])
+            lse2 = (
+                m_fin
+                + fx.Float32(fx.log2(has_l.select(l_tot, fx.Float32(1.0))))
+                - _MH_P_SHIFT
+            )
+            lse = has_l.select(lse2 * _LN2, fx.Float32(float("-inf")))
+            lse_bits = lse.bitcast(fx.Int32)
+
+            def _st_lse(_v=lse_bits, _off=qi * H + head):
+                lse_t.store(_off, _v)
+
+            _guarded((half + g) == 0, _st_lse)
+
+    @flyc.jit
+    def launch_sparse_mla_fp8ds_mh(
+        Q,
+        KV,
+        IDX,
+        IPTR,
+        OUT,
+        LSE,
+        n_q,
+        stride_q,
+        stride_qh,
+        stride_o,
+        stride_oh,
+        c_log2,
+        idx_bytes,
+        stream: fx.Stream = fx.Stream(None),  # noqa: B008
+    ):
+        sparse_mla_fp8ds_mh_kernel(
+            Q,
+            KV,
+            IDX,
+            IPTR,
+            OUT,
+            LSE,
+            stride_q,
+            stride_qh,
+            stride_o,
+            stride_oh,
+            c_log2,
+            n_q,
+            idx_bytes,
+        ).launch(grid=(fx.Int64(n_q * nsplit), 1, 1), block=(NTH, 1, 1), stream=stream)
+
+    launch_sparse_mla_fp8ds_mh.compile_hints = {
+        "waves_per_eu": waves_per_eu,
+        "fast_fp_math": False,
+    }
+    return launch_sparse_mla_fp8ds_mh

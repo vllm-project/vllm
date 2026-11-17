@@ -4,9 +4,8 @@
 #
 # This file contains code copied from the ROCm/aiter project
 # (aiter/ops/flydsl/sparse_mla.py @ a61e02c26a3915011e85b103574c25d457890825).
-# The original source code was licensed under the MIT license. It is carried
-# in-tree so a stock aiter build still gets the kernel; only the imports and
-# this header differ from the original.
+# The original source code was licensed under the MIT license. It has since
+# been extended in-tree (the many-head kernel for more than 16 heads).
 
 """FlyDSL sparse MLA forward on the fp8_ds_mla cache (gfx950).
 
@@ -16,6 +15,11 @@ cache, kv_lora_rank 512, rope 64, at most 16 heads, bf16 dots, no sink, no
 second segment, no split-K. ``flydsl_sparse_mla_fp8ds_supported`` says whether
 a call is in that slice; ``rocm_aiter_ops`` routes it here when
 ``VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA=1``.
+
+The 96 gathered heads of Kimi-K3.1's DCP branch (decode, and query-gather
+prefill once its index stream is packed, i.e. without has_invalid) run on the
+many-head kernel of ``flydsl_sparse_mla_gfx950``, which gathers each KV tile
+once for all heads.
 """
 
 import functools
@@ -27,6 +31,7 @@ from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla_gfx950 import (
     MAX_HEADS,
     QK_ROPE_HEAD_DIM,
     RECORD_BYTES,
+    build_sparse_mla_fp8ds_mh_module,
     build_sparse_mla_fp8ds_module,
 )
 from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
@@ -36,6 +41,7 @@ LOG2E = 1.4426950408889634
 
 __all__ = [
     "flydsl_sparse_mla_fp8ds_fwd",
+    "flydsl_sparse_mla_fp8ds_heads_supported",
     "flydsl_sparse_mla_fp8ds_supported",
     "flydsl_sparse_mla_fp8ds_warmup",
 ]
@@ -44,10 +50,38 @@ __all__ = [
 # descriptor is sized in bytes (numel * 4) and kept well inside i32.
 _MAX_INDICES = 1 << 29
 
+# Head counts the many-head kernel serves (Kimi-K3.1: 12 local heads x DCP 8).
+MH_HEADS = (96,)
+
+# Many-head configs (hg, waves_per_eu), MI355X, ~128-512 keys per row:
+# one 96-head workgroup per row (12 waves) fills 176-256 rows best; below and
+# above that, three 32-head workgroups per row (4 waves, 2 per CU) do (more
+# workgroups in flight for few rows, a better tail past 256).
+_MH_ROW_WG = (6, 3)
+_MH_SPLIT_WG = (2, 2)
+
+
+def flydsl_sparse_mla_fp8ds_heads_supported(num_heads, has_invalid=False):
+    """Is there a kernel for num_heads (with has_invalid)? H <= 16, or H in
+    MH_HEADS without has_invalid (the many-head kernel does not mask entries
+    < 0)."""
+    return 1 <= num_heads <= MAX_HEADS or (num_heads in MH_HEADS and not has_invalid)
+
 
 @functools.cache
 def _get_launcher(num_heads, has_invalid, return_lse):
     return build_sparse_mla_fp8ds_module(num_heads, has_invalid, return_lse)
+
+
+@functools.cache
+def _get_mh_launcher(num_heads, config, return_lse):
+    return build_sparse_mla_fp8ds_mh_module(num_heads, return_lse, *config)
+
+
+def _mh_config(num_tokens, num_heads):
+    if num_heads == 96 and 176 <= num_tokens <= 256:
+        return _MH_ROW_WG
+    return _MH_SPLIT_WG
 
 
 @functools.lru_cache(maxsize=16)
@@ -110,17 +144,20 @@ def flydsl_sparse_mla_fp8ds_supported(
     """Can ``flydsl_sparse_mla_fp8ds_fwd`` serve this ``sparse_mla_fwd`` call?
 
     Takes ``sparse_mla_fwd``'s arguments. Reads host metadata only (no device
-    reads, no sync), so it is safe under CUDA-graph capture. has_invalid and
-    return_lse are accepted with either value.
+    reads, no sync), so it is safe under CUDA-graph capture. return_lse is
+    accepted with either value, has_invalid too for H <= 16.
 
-    True iff: gfx950; q is bf16 [T, H, 576] with 1 <= H <= 16, stride(2) == 1,
+    True iff: gfx950; q is bf16 [T, H, 576] with 1 <= H <= 16, or H in MH_HEADS
+    (96) without has_invalid (the many-head kernel), stride(2) == 1,
     even token/head strides and a 4 B aligned base; kv_buffer has a 16 B
     aligned base and holds 1-byte fp8_ds_mla records at a 656 B pitch
     ([N, 656], [N, 1, 656], [N, 1, 1, 656] or an unpadded [nb, block, 656])
     of any size (rows are addressed in 64 bits; slot ids are int32);
     kv_indptr / kv_indices are 1-D int32 or int64 on q's
     device with T + 1 / < 2^29 entries; out, if given, is bf16 [T, H, >= 512]
-    with stride(2) == 1, even strides and a 4 B aligned base; and none of
+    with stride(2) == 1, even strides and a 4 B aligned base; q and out (or the
+    one this returns) hold < 2^31 elements up to their last row (the kernels
+    address them with 32-bit offsets); and none of
     kv_scale, q_scale, attn_sink, the extra_* segment, the inverse-RoPE / MXFP8
     epilogue, kv_splits or skip_reduce is used, with dot_precision "bf16".
 
@@ -128,7 +165,7 @@ def flydsl_sparse_mla_fp8ds_supported(
     must be powers of two <= 2^7, which vLLM's fp8_ds_mla writer guarantees
     for any latent with |x| <= 57344. See the kernel module docstring.
     """
-    del has_invalid, return_lse  # both are served
+    del return_lse  # both are served
     if not (torch.is_tensor(q) and q.is_cuda and q.ndim == 3):
         return False
     if q.dtype != torch.bfloat16:
@@ -136,7 +173,9 @@ def flydsl_sparse_mla_fp8ds_supported(
     num_tokens, num_heads, d_qk = q.shape
     if kv_lora_rank != KV_LORA_RANK or qk_rope_head_dim != QK_ROPE_HEAD_DIM:
         return False
-    if d_qk != KV_LORA_RANK + QK_ROPE_HEAD_DIM or not 1 <= num_heads <= MAX_HEADS:
+    if d_qk != KV_LORA_RANK + QK_ROPE_HEAD_DIM:
+        return False
+    if not flydsl_sparse_mla_fp8ds_heads_supported(num_heads, has_invalid):
         return False
     if any(
         a is not None
@@ -165,6 +204,10 @@ def flydsl_sparse_mla_fp8ds_supported(
     if q.stride(2) != 1 or q.stride(0) % 2 or q.stride(1) % 2:
         return False
     if q.data_ptr() % 4:
+        return False
+    # Q and out rows are addressed with 32-bit offsets.
+    out_row = KV_LORA_RANK * num_heads if out is None else out.stride(0)
+    if num_tokens * max(q.stride(0), out_row) >= 2**31:
         return False
     if not torch.is_tensor(kv_buffer) or kv_buffer.device != q.device:
         return False
@@ -210,7 +253,7 @@ def flydsl_sparse_mla_fp8ds_fwd(
     """Sparse MLA over an fp8_ds_mla cache, ``sparse_mla_fwd`` semantics.
 
     Args:
-        q: [T, H, 576] bf16, H <= 16.
+        q: [T, H, 576] bf16, H <= 16, or H = 96 without has_invalid.
         kv_buffer: fp8_ds_mla records (512 e4m3 | 4 f32 per-128 scales |
             64 bf16 rope), see ``flydsl_sparse_mla_fp8ds_supported``.
         kv_indptr: [T + 1] CSR offsets into kv_indices. Row q attends
@@ -245,6 +288,7 @@ def flydsl_sparse_mla_fp8ds_fwd(
         kv_indices,
         kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=qk_rope_head_dim,
+        has_invalid=has_invalid,
         out=out,
     ):
         raise ValueError(
@@ -272,7 +316,12 @@ def flydsl_sparse_mla_fp8ds_fwd(
     if n_indices == 0:
         # Every row is empty; the kernel still wants a live index pointer.
         kv_indices = torch.zeros(1, dtype=torch.int32, device=q.device)
-    launcher = _get_launcher(num_heads, bool(has_invalid), bool(return_lse))
+    if num_heads > MAX_HEADS:
+        launcher = _get_mh_launcher(
+            num_heads, _mh_config(num_tokens, num_heads), bool(return_lse)
+        )
+    else:
+        launcher = _get_launcher(num_heads, bool(has_invalid), bool(return_lse))
     _run_compiled(
         launcher,
         q,
@@ -300,18 +349,29 @@ def flydsl_sparse_mla_fp8ds_warmup(
     heads: tuple[int, ...] = (1, 2, 4, 6, 8, 12, 16),
     has_invalid: tuple[bool, ...] = (False, True),
     return_lse: tuple[bool, ...] = (False, True),
-) -> None:
+) -> set[tuple[int, bool, bool]]:
     """Compile (and run once on a one-token problem) every listed configuration,
-    so no JIT compile lands inside a CUDA-graph capture."""
+    so no JIT compile lands inside a CUDA-graph capture. A head count in
+    MH_HEADS compiles both many-head configs (the row count picks one per call)
+    and skips has_invalid, which that kernel does not serve; a head count with
+    no kernel compiles nothing, and nothing compiles off gfx950.
+
+    Returns the (heads, has_invalid, return_lse) variants it compiled.
+    """
     dev = (
         torch.device("cuda", torch.accelerator.current_device_index())
         if device is None
         else torch.device(device)
     )
+    built: set[tuple[int, bool, bool]] = set()
+    if not _is_gfx950(dev.index):
+        return built  # every kernel here is gfx950-only: calls stay on Triton
     kv = torch.zeros(1, RECORD_BYTES, dtype=torch.uint8, device=dev)
     indptr = torch.tensor([0, 1], dtype=torch.int32, device=dev)
     indices = torch.zeros(1, dtype=torch.int32, device=dev)
     for num_heads in heads:
+        if not flydsl_sparse_mla_fp8ds_heads_supported(num_heads):
+            continue  # no kernel: those calls stay on Triton
         q = torch.zeros(
             1,
             num_heads,
@@ -319,9 +379,37 @@ def flydsl_sparse_mla_fp8ds_warmup(
             dtype=torch.bfloat16,
             device=dev,
         )
+        if num_heads in MH_HEADS:
+            out = torch.empty(
+                1, num_heads, KV_LORA_RANK, dtype=torch.bfloat16, device=dev
+            )
+            for rl in return_lse:
+                lse = torch.empty(1, num_heads, dtype=torch.float32, device=dev)
+                for config in (_MH_SPLIT_WG, _MH_ROW_WG):
+                    _run_compiled(
+                        _get_mh_launcher(num_heads, config, rl),
+                        q,
+                        kv,
+                        indices,
+                        indptr,
+                        out,
+                        lse if rl else out,
+                        1,
+                        q.stride(0),
+                        q.stride(1),
+                        out.stride(0),
+                        out.stride(1),
+                        LOG2E,
+                        4,
+                        torch.cuda.current_stream(dev),
+                    )
+                built.add((num_heads, False, rl))
+            continue
         for hi in has_invalid:
             for rl in return_lse:
                 flydsl_sparse_mla_fp8ds_fwd(
                     q, kv, indptr, indices, 1.0, has_invalid=hi, return_lse=rl
                 )
+                built.add((num_heads, hi, rl))
     torch.accelerator.synchronize(dev)
+    return built

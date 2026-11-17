@@ -2234,6 +2234,8 @@ class rocm_aiter_ops:
     # compiled and loaded, by flydsl_sparse_mla_warmup or an eager first call;
     # see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    # Head counts whose FlyDSL warmup or first call raised: Triton serves them.
+    _FLYDSL_SPARSE_MLA_FAILED: set[int] = set()
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -3813,21 +3815,14 @@ class rocm_aiter_ops:
         )
         return None
 
-    @staticmethod
-    def _flydsl_sparse_mla_warmup_fn() -> Callable | None:
-        """The FlyDSL sparse MLA warm-up, from the same modules as the ops."""
-        for module in (
-            "vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla",
-            "aiter.ops.flydsl.sparse_mla",
-        ):
-            try:
-                flydsl = importlib.import_module(module)
-            except Exception:
-                continue
-            fn = getattr(flydsl, "flydsl_sparse_mla_fp8ds_warmup", None)
-            if fn is not None:
-                return fn
-        return None
+    @classmethod
+    def _flydsl_sparse_mla_warmup_fn(cls) -> Callable | None:
+        """The FlyDSL sparse MLA warm-up of the module the ops come from."""
+        flydsl_ops = cls._flydsl_sparse_mla_ops()
+        if flydsl_ops is None:
+            return None
+        flydsl = importlib.import_module(flydsl_ops[0].__module__)
+        return getattr(flydsl, "flydsl_sparse_mla_fp8ds_warmup", None)
 
     @classmethod
     def flydsl_sparse_mla_warmup(cls, num_heads: int) -> None:
@@ -3837,27 +3832,48 @@ class rocm_aiter_ops:
         so the JIT (0.2-1.1 s per config on Kimi-K3.1) runs at model load, not
         on the first prefill that reaches the kernel; the warmed configs then
         also engage inside a CUDA-graph capture, which otherwise keeps a config
-        that never ran eagerly on the Triton kernel. Compiles the four
-        (has_invalid, return_lse) variants. A no-op when the flag is off, when
-        FlyDSL is absent, or once the configs are compiled.
+        that never ran eagerly on the Triton kernel. Compiles the
+        (has_invalid, return_lse) variants the module serves for num_heads
+        and marks exactly those (none for a head count it has no kernel for:
+        those calls stay on Triton). A no-op when the flag is off, when FlyDSL
+        is absent, or once a variant of num_heads is compiled. A failed warmup
+        is logged once and sends num_heads to Triton for good, rather than
+        failing the model load.
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
             return
-        keys = [(num_heads, hi, rl) for hi in (False, True) for rl in (False, True)]
-        if all(key in cls._FLYDSL_SPARSE_MLA_COMPILED for key in keys):
-            return
-        if cls._flydsl_sparse_mla_ops() is None:
+        if num_heads in cls._FLYDSL_SPARSE_MLA_FAILED or any(
+            key[0] == num_heads for key in cls._FLYDSL_SPARSE_MLA_COMPILED
+        ):
             return
         warmup = cls._flydsl_sparse_mla_warmup_fn()
         if warmup is None:
             return
         start = time.perf_counter()
-        warmup(heads=(num_heads,))
-        cls._FLYDSL_SPARSE_MLA_COMPILED.update(keys)
+        try:
+            built = warmup(heads=(num_heads,))
+        except Exception as e:
+            cls._FLYDSL_SPARSE_MLA_FAILED.add(num_heads)
+            logger.warning(
+                "FlyDSL sparse MLA: warmup for heads=%d failed (%s); those calls "
+                "use the Triton kernel.",
+                num_heads,
+                e,
+            )
+            return
+        if built is None:
+            # A module that does not report what it built (aiter's copy)
+            # builds every variant of a head count it takes.
+            built = {
+                (num_heads, hi, rl) for hi in (False, True) for rl in (False, True)
+            }
+        if not built:
+            return
+        cls._FLYDSL_SPARSE_MLA_COMPILED.update(built)
         logger.info(
             "FlyDSL sparse MLA: compiled heads=%d (%d configs) in %.1f s",
             num_heads,
-            len(keys),
+            len(built),
             time.perf_counter() - start,
         )
 
@@ -3881,16 +3897,22 @@ class rocm_aiter_ops:
         Returns (handled, lse). The FlyDSL kernel covers the bf16 q, fp8_ds_mla
         cache form with no scales, sink or extra segment (Kimi-K3.1 DSA); its
         supports() check reads host metadata only, so it is CUDA-graph safe.
-        The kernel runs one workgroup per query row, so batches below
-        VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS (decode, small chunks)
-        stay on the Triton kernel, which splits the rows and is faster there. A config that never ran eagerly is not compiled
+        The <= 16-head kernel runs one workgroup per query row, so its batches
+        below VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS (decode, small
+        chunks) stay on the Triton kernel, which splits the rows and is faster
+        there; the 96-head calls split rows themselves and take any batch. A config that never ran eagerly is not compiled
         yet, so under graph capture it stays on the Triton kernel rather than
-        JIT-compiling and loading a module mid-capture. A row with no unmasked
-        key gives out 0 and lse -inf (the Triton kernel gives NaN).
+        JIT-compiling and loading a module mid-capture. More than 16 heads run
+        only on what warmup built: the many-head kernel has a launcher per
+        row-count range, which a first call would build only one of. A head
+        count whose warmup or first call raised stays on Triton. A row with no
+        unmasked key gives out 0 and lse -inf (the Triton kernel gives NaN).
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
             return False, None
-        if q.shape[0] < cls._FLYDSL_SPARSE_MLA_MIN_TOKENS:
+        if q.shape[1] in cls._FLYDSL_SPARSE_MLA_FAILED:
+            return False, None
+        if q.shape[1] <= 16 and q.shape[0] < cls._FLYDSL_SPARSE_MLA_MIN_TOKENS:
             return False, None
         flydsl_ops = cls._flydsl_sparse_mla_ops()
         if flydsl_ops is None:
@@ -3903,32 +3925,48 @@ class rocm_aiter_ops:
             kv_indices,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
+            has_invalid=has_invalid,
             out=o,
             **support_kwargs,
         ):
             return False, None
+
+        def run():
+            return fwd(
+                q,
+                kv_buffer,
+                kv_indptr,
+                kv_indices,
+                sm_scale,
+                kv_lora_rank=kv_lora_rank,
+                qk_rope_head_dim=qk_rope_head_dim,
+                has_invalid=has_invalid,
+                out=o,
+                return_lse=return_lse,
+            )[1]
+
         key = (q.shape[1], has_invalid, return_lse)
-        if key not in cls._FLYDSL_SPARSE_MLA_COMPILED:
-            if torch.cuda.is_current_stream_capturing():
-                return False, None
-            cls._FLYDSL_SPARSE_MLA_COMPILED.add(key)
-            logger.info(
-                "FlyDSL sparse MLA: heads=%d has_invalid=%s return_lse=%s "
-                "(first call: %d tokens)",
-                *key,
-                q.shape[0],
+        if key in cls._FLYDSL_SPARSE_MLA_COMPILED:
+            return True, run()
+        if torch.cuda.is_current_stream_capturing() or q.shape[1] > 16:
+            return False, None
+        try:
+            lse = run()
+        except Exception as e:
+            cls._FLYDSL_SPARSE_MLA_FAILED.add(q.shape[1])
+            logger.warning(
+                "FlyDSL sparse MLA: first call for heads=%d failed (%s); those "
+                "calls use the Triton kernel.",
+                q.shape[1],
+                e,
             )
-        _, lse = fwd(
-            q,
-            kv_buffer,
-            kv_indptr,
-            kv_indices,
-            sm_scale,
-            kv_lora_rank=kv_lora_rank,
-            qk_rope_head_dim=qk_rope_head_dim,
-            has_invalid=has_invalid,
-            out=o,
-            return_lse=return_lse,
+            return False, None
+        cls._FLYDSL_SPARSE_MLA_COMPILED.add(key)
+        logger.info(
+            "FlyDSL sparse MLA: heads=%d has_invalid=%s return_lse=%s "
+            "(first call: %d tokens)",
+            *key,
+            q.shape[0],
         )
         return True, lse
 
