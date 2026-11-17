@@ -23,7 +23,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.parser.abstract_parser import DelegatingParser
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -150,6 +150,31 @@ def test_chat_completion_response_keeps_non_empty_tool_calls_payload():
 
     assert len(message["tool_calls"]) == 1
     assert message["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+def test_chat_completion_response_omits_null_annotations_and_prompt_tokens_details():
+    """The OpenAI spec types both as array/object, not nullable."""
+    payload = _chat_response(ChatMessage(role="assistant", content="done")).model_dump()
+
+    assert "annotations" not in payload["choices"][0]["message"]
+    assert "prompt_tokens_details" not in payload["usage"]
+
+
+def test_chat_completion_response_keeps_annotations_and_prompt_tokens_details():
+    citation = {"start_index": 0, "end_index": 4, "title": "t", "url": "https://x"}
+    response = _chat_response(
+        ChatMessage(
+            role="assistant",
+            content="done",
+            annotations=[{"type": "url_citation", "url_citation": citation}],
+        )
+    )
+    response.usage.prompt_tokens_details = PromptTokenUsageInfo(cached_tokens=1)
+
+    parsed = OpenAIChatCompletion.model_validate(response.model_dump())
+
+    assert parsed.choices[0].message.annotations[0].url_citation.url == "https://x"
+    assert parsed.usage.prompt_tokens_details.cached_tokens == 1
 
 
 def _stream_response(delta: DeltaMessage) -> ChatCompletionStreamResponse:

@@ -12,12 +12,9 @@ tolerance: 0.02
 # Measured TP1 acceptance length: 4.115; allow a 0.2 regression.
 min_acceptance_length: 3.915
 
-env:
-  VLLM_USE_V2_MODEL_RUNNER: "1"
 server_args: >-
   --tensor-parallel-size 2
   --max-model-len 4096
-  --gpu-memory-utilization 0.92
   --no-enable-prefix-caching
   --speculative-config.method dspark
   --speculative-config.model deepseek-ai/dspark_qwen3_4b_block7

@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight-stationary skinny GEMM for the MoE front: y[M, N] = x[M, K] @ W[N, K]^T.
 
-Each CTA owns ``rt`` 16-row N tiles; its ``rt * kq`` warps split K into ``kq`` ranges.
+Each CTA owns `rt` 16-row N tiles; its `rt * kq` warps split K into `kq` ranges.
 Weights enter registers and cp.async SMEM stages before the PDL wait. The epilogue
-publishes the first ``valid`` of ``split`` rows (router shard) as FP32 words at BF16
-column 3584 + 2 * (``slot`` + row) of a multicast [1, capacity, width] mailbox and the
-rest (latent down shard) as sanitized BF16 at column ``base``.
+publishes the first `valid` of `split` rows (router shard) as FP32 words at BF16
+column 3584 + 2 * (`slot` + row) of a multicast [1, capacity, width] mailbox and the
+rest (latent down shard) as sanitized BF16 at column `base`.
 
-``tg`` 0 is the single pass: warps load x from global and the cluster leader sums the
-K partials over DSMEM. ``tg`` > 0 streams tokens in groups of ``tg``: warp 0 bulk-copies
+`tg` 0 is the single pass: warps load x from global and the cluster leader sums the
+K partials over DSMEM. `tg` > 0 streams tokens in groups of `tg`: warp 0 bulk-copies
 the CTA's K slice of x once (one mbarrier per group) for all row tiles, and after each
 group's MMAs every warp pushes its 8-token x 16-row partial blocks to their owner CTAs
 (block % ks) with st.async; owners sum the ks * kq parts in K order and publish one
@@ -51,14 +51,14 @@ def positive_zero(low, high):
 
 @asm(Float32)
 def peer_load(pointer, peer):
-    """FP32 at the same shared-memory offset in cluster CTA ``peer``."""
+    """FP32 at the same shared-memory offset in cluster CTA `peer`."""
     code = "{ .reg .b32 a; mapa.shared::cluster.u32 a,$1,$2; "
     return code + "ld.shared::cluster.f32 $0,[a]; }", "=f,r,r", (pointer, Int32(peer))
 
 
 @asm(Uint32, pure=True)
 def positive_zero32(value):
-    """FP32 bits of ``value`` with -0.0 made +0.0, so it never equals the sentinel."""
+    """FP32 bits of `value` with -0.0 made +0.0, so it never equals the sentinel."""
     code = "{ .reg .pred p; setp.eq.u32 p,$1,0x80000000; selp.b32 $0,0,$1,p; }"
     return code, "=r,r", (Uint32(float_bits(value)),)
 
@@ -203,7 +203,7 @@ class WsGemm:
                 cute.arch.cluster_wait()
 
     def tiles(self, g):
-        """8-token tiles in token group ``g``."""
+        """8-token tiles in token group `g`."""
         return min(self.ng, self.nt - g * self.ng)
 
     @cute.jit
@@ -226,8 +226,8 @@ class WsGemm:
     def settle(
         self, args, red, recv, owned, cta, kpart, warp, lane, g: cutlass.Constexpr
     ):
-        """Owned blocks of token group ``g``: a warp per block waits for every K part,
-        sums them in K order, transposes through ``red`` and publishes."""
+        """Owned blocks of token group `g`: a warp per block waits for every K part,
+        sums them in K order, transposes through `red` and publishes."""
         for t in cutlass.range_constexpr(self.tiles(g)):
             for tile in cutlass.range_constexpr(self.rt):
                 blk = (g * self.ng + t) * self.rt + tile

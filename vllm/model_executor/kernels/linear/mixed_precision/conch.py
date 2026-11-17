@@ -27,6 +27,9 @@ class ConchLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if c.act_type not in (torch.float16, torch.bfloat16):
+            return False, "ConchLinearKernel only supports 16-bit activations"
+
         if c.weight_type not in _CONCH_SUPPORTED_WEIGHT_TYPES:
             error_msg = (
                 f"Weight type ({c.weight_type}) not supported by "
@@ -113,8 +116,8 @@ class ConchLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
         if self.config.zero_points:
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
-        elif self.w_zp_name is not None:
-            layer.register_parameter(self.w_zp_name, None)
+        else:
+            self._retire_unused_zp(layer)
 
     def apply_weights(
         self,
