@@ -1254,6 +1254,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
+        # XQA q1 uses persistent device views; the AR loop advances them
+        # between draft steps without rebuilding a host decode plan.
+        self.supports_draft_decode_metadata_update |= (
+            self.use_xqa
+            and current_platform.is_device_capability_family(120)
+            and self.kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and self.kv_cache_spec.dtype == torch.bfloat16
+            and self.global_hyperparameters.has_same_all_params is True
+            and self.window_left == -1
+            and not self.logits_soft_cap
+            and not self.has_sinks
+            and speculative_config is not None
+            and speculative_config.method == "mtp"
+            and not speculative_config.enable_adaptive_verification
+            and vllm_config.parallel_config.tensor_parallel_size == 1
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.data_parallel_size == 1
+            and not vllm_config.parallel_config.use_ubatching
+        )
         if self.has_sinks and (self.nvfp4_fa2 or not FlashInferBackend.supports_sink()):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
