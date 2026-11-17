@@ -23,7 +23,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.config import OffloadMode
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
 )
@@ -191,7 +191,7 @@ class SecondaryTierManager(ABC):
         primary_kv_view: memoryview,
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
-        mode: OffloadMode | str = OffloadMode.READWRITE,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ) -> None:
         """Args:
         offloading_spec: Offloading configuration.
@@ -199,9 +199,9 @@ class SecondaryTierManager(ABC):
         tier_type: Tier type identifier, set by SecondaryTierFactory
             from the registered tier type.
         backpressure_detector: Optional `BackpressureDetector`.
-        mode: Direction(s) in which this tier may transfer data. The tiering
-            manager skips stores to a tier whose mode cannot write, and the
-            tier returns MISS from lookups it cannot read.
+        access_mode: Direction(s) in which this tier may transfer data. The
+            tiering manager skips stores to a tier whose access_mode cannot
+            write, and the tier returns MISS from lookups it cannot read.
 
         """
         self._offloading_spec = offloading_spec
@@ -213,7 +213,7 @@ class SecondaryTierManager(ABC):
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
-        self.mode: OffloadMode = OffloadMode.from_config(mode)
+        self.access_mode: OffloadAccessMode = OffloadAccessMode.from_config(access_mode)
 
     @property
     def block_size_bytes(self) -> int:

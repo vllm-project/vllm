@@ -45,7 +45,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
-from vllm.v1.kv_offload.config import OffloadMode
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering import spec as tiering_spec_module
@@ -488,7 +488,7 @@ class TestTieringOffloadingManager:
     def test_read_only_tier_is_never_stored_to(self, manager_setup, monkeypatch):
         """A tier that cannot write gets no store job, so no primary chunk is
         pinned for a transfer that would never complete."""
-        self.secondary_tier1.mode = OffloadMode.READ
+        self.secondary_tier1.access_mode = OffloadAccessMode.READ
         tier1_submit_store = MagicMock(wraps=self.secondary_tier1.submit_store)
         monkeypatch.setattr(self.secondary_tier1, "submit_store", tier1_submit_store)
         chunks = to_keys(range(3))

@@ -10,12 +10,12 @@ from enum import Enum
 from typing import Any
 
 
-class OffloadMode(Enum):
+class OffloadAccessMode(Enum):
     """Direction(s) in which an offloading connector may transfer data.
 
-    Configured through the optional `mode` key of a connector's config:
-    `read` serves loads but never accepts stores, `write` accepts stores
-    but never serves loads, and `readwrite` (the default) does both.
+    Configured through the optional `access_mode` key of a connector's
+    config: `read` serves loads but never accepts stores, `write` accepts
+    stores but never serves loads, and `readwrite` (the default) does both.
     """
 
     READ = "read"
@@ -23,33 +23,33 @@ class OffloadMode(Enum):
     READWRITE = "readwrite"
 
     @classmethod
-    def from_config(cls, value: str | OffloadMode | None) -> OffloadMode:
-        """Parse a configured `mode` value, defaulting to `readwrite`."""
+    def from_config(cls, value: str | OffloadAccessMode | None) -> OffloadAccessMode:
+        """Parse a configured `access_mode` value, defaulting to `readwrite`."""
         if value is None:
             return cls.READWRITE
         if isinstance(value, cls):
             return value
         if not isinstance(value, str):
             raise ValueError(
-                f"mode must be a string, got {type(value).__name__}: {value!r}"
+                f"access_mode must be a string, got {type(value).__name__}: {value!r}"
             )
         try:
             return cls(value.strip().lower())
         except ValueError:
-            valid = ", ".join(repr(mode.value) for mode in cls)
+            valid = ", ".join(repr(access_mode.value) for access_mode in cls)
             raise ValueError(
-                f"Invalid mode {value!r}; expected one of {valid}"
+                f"Invalid access_mode {value!r}; expected one of {valid}"
             ) from None
 
     @property
     def can_read(self) -> bool:
         """Whether the connector may serve loads (read from the tier)."""
-        return self is not OffloadMode.WRITE
+        return self is not OffloadAccessMode.WRITE
 
     @property
     def can_write(self) -> bool:
         """Whether the connector may accept stores (write to the tier)."""
-        return self is not OffloadMode.READ
+        return self is not OffloadAccessMode.READ
 
 
 @dataclass(frozen=True, slots=True)

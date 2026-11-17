@@ -238,11 +238,11 @@ The filesystem and object-store tiers can publish hash-only `BlockStored` KV eve
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
-The `fs` and `obj` tiers accept an optional `mode` field that restricts the direction of traffic:
+The `fs` and `obj` tiers accept an optional `access_mode` field that restricts the direction of traffic:
 
 | Value | Behavior |
 | --- | --- |
-| `readwrite` | Both loads and stores (default; same behavior as omitting `mode`). |
+| `readwrite` | Both loads and stores (default; same behavior as omitting `access_mode`). |
 | `read` | Serves loads only. The tier is never written to. Use it to consume a cache populated by another instance. |
 | `write` | Accepts stores only. Lookups always miss, so the tier never serves loads. Use it to populate a shared cache that other instances read. |
 
@@ -271,7 +271,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
-| `mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
+| `access_mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -315,7 +315,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
-| `mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
+| `access_mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
 
 `store_config` fields:
 

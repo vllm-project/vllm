@@ -677,7 +677,7 @@ class TieringOffloadingManager(OffloadingManager):
         # A read-only tier never accepts stores; skipping the job here (rather
         # than in the tier) avoids pinning primary chunks for a job that would
         # never complete.
-        if not tier.mode.can_write:
+        if not tier.access_mode.can_write:
             return False
         detector = tier.bp_detector
         if detector is None:

@@ -371,7 +371,7 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "mode, can_read, can_write",
+    "access_mode, can_read, can_write",
     [
         (None, True, True),
         ("readwrite", True, True),
@@ -381,9 +381,11 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
         (" READ ", True, False),
     ],
 )
-def test_mode_sets_can_read_and_can_write(tmp_path, mode, can_read, can_write):
+def test_access_mode_sets_can_read_and_can_write(
+    tmp_path, access_mode, can_read, can_write
+):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
-    kwargs = {} if mode is None else {"mode": mode}
+    kwargs = {} if access_mode is None else {"access_mode": access_mode}
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=memoryview(tensor.numpy()),
@@ -394,27 +396,27 @@ def test_mode_sets_can_read_and_can_write(tmp_path, mode, can_read, can_write):
         **kwargs,
     )
     try:
-        assert tier.mode.can_read is can_read
-        assert tier.mode.can_write is can_write
+        assert tier.access_mode.can_read is can_read
+        assert tier.access_mode.can_write is can_write
     finally:
         tier.shutdown()
 
 
-@pytest.mark.parametrize("mode", ["both", "ro", ""])
-def test_invalid_mode_raises_at_construction(tmp_path, mode):
+@pytest.mark.parametrize("access_mode", ["both", "ro", ""])
+def test_invalid_access_mode_raises_at_construction(tmp_path, access_mode):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
 
-    with pytest.raises(ValueError, match="Invalid mode"):
+    with pytest.raises(ValueError, match="Invalid access_mode"):
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=memoryview(tensor.numpy()),
             tier_type="fs",
             root_dir=str(tmp_path),
-            mode=mode,
+            access_mode=access_mode,
         )
 
 
-def test_factory_forwards_mode_to_fs_tier(tmp_path):
+def test_factory_forwards_access_mode_to_fs_tier(tmp_path):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     tier = SecondaryTierFactory.create_secondary_tier(
         {
@@ -422,20 +424,20 @@ def test_factory_forwards_mode_to_fs_tier(tmp_path):
             "root_dir": str(tmp_path),
             "n_read_threads": 1,
             "n_write_threads": 1,
-            "mode": "read",
+            "access_mode": "read",
         },
         memoryview(tensor.numpy()),
         _MOCK_OFFLOADING_SPEC,
     )
     try:
         assert isinstance(tier, FileSystemTierManager)
-        assert tier.mode.can_read
-        assert not tier.mode.can_write
+        assert tier.access_mode.can_read
+        assert not tier.access_mode.can_write
     finally:
         tier.shutdown()
 
 
-def test_write_mode_stores_but_never_reports_a_hit(tmp_path):
+def test_write_access_mode_stores_but_never_reports_a_hit(tmp_path):
     """`write` publishes blocks to a shared cache that this tier never reads."""
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     tier = FileSystemTierManager(
@@ -445,7 +447,7 @@ def test_write_mode_stores_but_never_reports_a_hit(tmp_path):
         root_dir=str(tmp_path),
         n_read_threads=1,
         n_write_threads=1,
-        mode="write",
+        access_mode="write",
     )
     try:
         tier.submit_store(make_job(1, [key(1)], [0]))
@@ -457,7 +459,7 @@ def test_write_mode_stores_but_never_reports_a_hit(tmp_path):
         tier.shutdown()
 
 
-def test_read_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
+def test_read_access_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
     """`read` creates no files but reads blocks written by another instance."""
     root = str(tmp_path)
     writer_tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
@@ -490,7 +492,7 @@ def test_read_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
         root_dir=read_root,
         n_read_threads=1,
         n_write_threads=1,
-        mode="read",
+        access_mode="read",
     )
     try:
         assert not os.path.exists(reader.file_mapper.get_config_file_path())
@@ -507,7 +509,7 @@ def test_read_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
         root_dir=root,
         n_read_threads=1,
         n_write_threads=1,
-        mode="read",
+        access_mode="read",
     )
     try:
         assert reader.file_mapper.get_file_name(key(7)) == stored_path
