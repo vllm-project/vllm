@@ -243,7 +243,7 @@ class QuantFP8(CustomOp):
             x = F.pad(x, (0, padding), mode="constant", value=0.0)
 
         x_grouped = x.view(-1, num_groups, self.group_size)
-        absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
+        absmax = x_grouped.abs().amax(dim=-1, keepdim=True).float()
         scales_raw = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
         scales = (
             torch.exp2(torch.ceil(torch.log2(scales_raw)))
