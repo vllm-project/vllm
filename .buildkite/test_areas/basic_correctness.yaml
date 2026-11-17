@@ -7,13 +7,15 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
-  source_file_dependencies: &basic-correctness-deps
+  source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/basic_correctness/
+  - tests/model_executor/model_loader/test_safetensors_prefetch.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/models
+  - pytest -v -s model_executor/model_loader/test_safetensors_prefetch.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Basic Correctness Models"
@@ -29,7 +31,10 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
-  source_file_dependencies: *basic-correctness-deps
+  source_file_dependencies: &basic-correctness-deps
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/basic_correctness/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/cumem

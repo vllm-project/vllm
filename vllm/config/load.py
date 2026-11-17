@@ -66,21 +66,27 @@ class LoadConfig:
     cache directory of Hugging Face."""
     safetensors_load_strategy: SafetensorsLoadStrategy | None = None
     """
-    Specifies the loading strategy for safetensors weights.
+    Specifies the loading strategy for the default safetensors loader.
 
-    - None (default): Uses memory-mapped (lazy) loading. When an NFS
-      filesystem is detected and the total checkpoint size fits within 90%
-      of available RAM, prefetching is enabled automatically.
+    The `enable_multithread_load` option in `model_loader_extra_config` disables
+    auto-prefetch and supports only None and "lazy". Dedicated loaders such as
+    "fastsafetensors" and "instanttensor" implement their own loading behavior.
+
+    - None (default): Uses memory-mapped (lazy) loading. On Linux, NFS
+      (nfs/nfs4), Lustre, and WekaFS (wekafs) enable automatic prefetching when
+      the total checkpoint size fits within 90% of available RAM.
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
-      Unlike the default (None), auto-prefetch on NFS is not performed.
+      Unlike the default (None), automatic prefetching is disabled.
     - "eager": The entire file is read into CPU memory upfront before loading.
       This is recommended for models on network filesystems (e.g., Lustre, NFS)
       as it avoids inefficient random reads, significantly speeding up model
       initialization. However, it uses more CPU RAM.
-    - "prefetch": Checkpoint files are read into the OS page cache before
-      workers load them, speeding up the model loading phase. Useful on
-      network or high-latency storage.
+    - "prefetch": Checkpoint files are read into the OS page cache in the
+      background while weights are memory-mapped. Useful on network or
+      high-latency storage. Prefetching is forced regardless of filesystem
+      type or checkpoint size, with a warning if the total size exceeds 90%
+      of available RAM.
     - "torchao": Weights are loaded in upfront and then reconstructed
       into torchao tensor subclasses. This is used when the checkpoint
       was quantized using torchao and saved using safetensors.
