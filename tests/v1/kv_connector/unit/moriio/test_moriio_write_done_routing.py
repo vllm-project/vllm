@@ -741,8 +741,19 @@ def test_hybrid_write_requires_exactly_one_running_state_slot(local_state):
         writer._prepare_mamba_transfer_plans(task, RemoteAllocInfo(block_ids=[[], [9]]))
 
 
-def test_notify_ports_are_unique_across_tp_and_dp_ranks(monkeypatch):
-    """TP2 x DP2 workers must bind distinct notify and handshake ports."""
+@pytest.mark.parametrize(
+    ("dp_size", "tp_size", "expected_offsets"),
+    [
+        (2, 2, [[0, 1], [2, 3]]),
+        (2, 3, [[0, 1, 2], [3, 4, 5]]),
+        (3, 2, [[0, 1], [2, 3], [4, 5]]),
+    ],
+    ids=["dp2-tp2", "dp2-tp3", "dp3-tp2"],
+)
+def test_notify_ports_are_unique_across_tp_and_dp_ranks(
+    monkeypatch, dp_size, tp_size, expected_offsets
+):
+    """Both listeners must match the explicit DP-by-TP port layout."""
     kv_config = KVTransferConfig(
         kv_connector="MoRIIOConnector",
         kv_role="kv_producer",
@@ -754,26 +765,27 @@ def test_notify_ports_are_unique_across_tp_and_dp_ranks(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        moriio_common, "get_tensor_model_parallel_world_size", lambda: 2
+        moriio_common, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
     ports = []
     handshake_ports = []
-    for dp_rank in range(2):
-        for tp_rank in range(2):
+    for dp_rank in range(dp_size):
+        for tp_rank in range(tp_size):
             monkeypatch.setattr(
                 moriio_common, "get_tensor_model_parallel_rank", lambda r=tp_rank: r
             )
             vllm_config = VllmConfig(
                 kv_transfer_config=kv_config,
                 parallel_config=ParallelConfig(
-                    data_parallel_size=2,
+                    data_parallel_size=dp_size,
                     data_parallel_rank=dp_rank,
-                    data_parallel_size_local=2,
+                    data_parallel_size_local=dp_size,
                 ),
             )
             config = MoRIIOConfig.from_vllm_config(vllm_config)
             ports.append(config.notify_port)
             handshake_ports.append(config.handshake_port + config.port_offset)
 
-    assert ports == [61005, 61006, 61007, 61008]
-    assert handshake_ports == [6301, 6302, 6303, 6304]
+    offsets = [offset for row in expected_offsets for offset in row]
+    assert ports == [61005 + offset for offset in offsets]
+    assert handshake_ports == [6301 + offset for offset in offsets]
