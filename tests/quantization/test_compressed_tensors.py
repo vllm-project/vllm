@@ -816,6 +816,34 @@ def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
     assert anchored.ignore == ["model.layers.1.mlp.gate"]
 
 
+def test_deepseek_v4_small_regex_matches_vllm_names():
+    """Checkpoint regex from the 2-layer DeepSeek-V4 small model.
+
+    The saved target uses the checkpoint name ``w2``. vLLM's module is
+    ``model.layers.*.ffn.shared_experts.down_proj``. Leaving the ``re:``
+    target unchanged misses that module.
+    """
+    saved = r"re:^layers\.(?:0|1)\.ffn\.shared_experts\.w2\Z"
+    runtime = "model.layers.0.ffn.shared_experts.down_proj"
+    module = torch.nn.Linear(1, 1)
+    assert find_matched_target(runtime, module, [saved]) is None
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={saved: {"weights": "fp8"}},
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={"layers.": "model.layers."},
+            orig_to_new_substr={".shared_experts.w2": ".shared_experts.down_proj"},
+        )
+    )
+    rewritten = r"re:^model\.layers\.(?:0|1)\.ffn\.shared_experts\.down_proj\Z"
+    assert rewritten in config.target_scheme_map
+    assert find_matched_target(runtime, module, [rewritten]) == rewritten
+
+
 def test_apply_vllm_mapper_consolidates_ignore_after_rename():
     """Concrete ignore names are renamed, then folded.
 
