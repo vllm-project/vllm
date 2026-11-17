@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
+from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 
 MODELS = {
@@ -94,3 +96,45 @@ def test_variable_length_audio_batching(
     assert len(outputs) == len(ragged_clips)
     for output in outputs:
         assert len(output[1]) > 0, "Expected non-empty output"
+
+
+@pytest.mark.core_model
+def test_single_frame_audio_keeps_engine_usable(vllm_runner) -> None:
+    """Single-frame clips and subsequent ordinary audio produce completions."""
+    from transformers import AutoProcessor
+
+    model_name = MODELS["Gemma4ForConditionalGeneration"]
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": None},
+                    {"type": "text", "text": "Transcribe this audio."},
+                ],
+            }
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    clips = [
+        (np.zeros(samples, dtype=np.float32), 16000) for samples in (161, 320, 321)
+    ]
+    clips.append(AudioAsset("mary_had_lamb").audio_and_sample_rate)
+
+    with vllm_runner(
+        model_name,
+        dtype="bfloat16",
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 1},
+    ) as vllm_model:
+        # Mixed-length batching could pad a singleton frame and hide the bug.
+        for clip in clips:
+            outputs = vllm_model.llm.generate(
+                vllm_model.get_inputs([prompt], audios=[[clip]]),
+                sampling_params=SamplingParams(temperature=0, max_tokens=8),
+            )
+            assert len(outputs) == 1
+            assert outputs[0].finished
+            assert outputs[0].outputs[0].token_ids, "Expected generated tokens"

@@ -77,11 +77,11 @@ use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
     backend: DynChatBackend,
-    /// Effective model dtype reported by the engine.
-    /// Absent for text-only frontends without an engine handshake.
+    /// Effective model dtype that media tensors are encoded in; multimodal
+    /// requests are rejected without one.
     model_dtype: Option<ModelDtype>,
-    /// Effective runtime context length reported by the engine.
-    /// Absent for render-only frontends without an engine handshake.
+    /// Effective runtime context length. Absent for render-only frontends
+    /// without a configured `--max-model-len`.
     max_model_len: Option<usize>,
     /// Tool-call parser selection used when preparing generation requests.
     tool_call_parser: ParserSelection,
@@ -100,27 +100,18 @@ pub struct ChatRequestProcessor {
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
-    /// Create a processor using the effective model dtype and context length
-    /// reported by the engine. Multimodal inputs need the model dtype.
-    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
+    /// Create a processor using the engine's effective model dtype and context
+    /// length, from the engine handshake or, without an engine, from
+    /// configuration. Multimodal inputs need the model dtype.
+    pub fn new(
+        backend: DynChatBackend,
+        model_dtype: Option<ModelDtype>,
+        max_model_len: Option<u32>,
+    ) -> Self {
         Self {
             backend,
             model_dtype,
-            max_model_len: Some(max_model_len as usize),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: None,
-            reasoning_effort_map: HashMap::new(),
-            exclude_tools_when_tool_choice_none: false,
-        }
-    }
-
-    /// Create a render-only processor that rejects multimodal requests.
-    pub fn render_only(backend: DynChatBackend) -> Self {
-        Self {
-            backend,
-            model_dtype: None,
-            max_model_len: None,
+            max_model_len: max_model_len.map(|len| len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
@@ -210,16 +201,19 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = match media {
-            multimodal::MultimodalInput::Raw(parts) => {
-                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
-                    .await?
-            }
-            multimodal::MultimodalInput::Preprocessed(features) => {
-                info.prepare_preprocessed(features, token_ids.len())?
-            }
-        };
+        let multimodal::MultimodalInput { preprocessed, raw } = media;
+        let mut features = info.prepare_preprocessed(preprocessed, token_ids.len())?;
+        if !raw.is_empty() {
+            let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+            info.append_multimodal(
+                &mut features,
+                raw,
+                token_ids,
+                model_dtype,
+                self.max_model_len,
+            )
+            .await?;
+        }
         Ok(Some(features))
     }
 
@@ -371,7 +365,8 @@ impl ChatLlm {
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         let info = text.llm().info();
-        let processor = ChatRequestProcessor::new(backend, info.model_dtype, info.max_model_len);
+        let processor =
+            ChatRequestProcessor::new(backend, info.model_dtype, Some(info.max_model_len));
 
         Self { text, processor }
     }
@@ -469,7 +464,8 @@ impl ChatLlm {
 
     /// Prepare media for an already-tokenized request.
     /// Raw content is preprocessed; inline features are checked against model
-    /// capabilities, modality limits, and the final prompt positions.
+    /// capabilities, modality limits, and the final prompt positions. With
+    /// both, raw content expands only the tokens after the last feature range.
     pub async fn prepare_media(
         &self,
         media: impl Into<multimodal::MultimodalInput>,

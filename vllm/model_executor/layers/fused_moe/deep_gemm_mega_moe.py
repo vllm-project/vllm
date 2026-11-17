@@ -44,7 +44,7 @@ from vllm.utils.math_utils import cdiv
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MegaMoEActivation:
     """Gated activation fused into the MegaMoE L1 epilogue.
 
@@ -87,7 +87,7 @@ class MegaMoEActivation:
         return kwargs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MegaMoEWeightSpec:
     """Storage of one MegaMoE weight in the kernel layout."""
 
@@ -123,7 +123,7 @@ _NVFP4_WEIGHT = MegaMoEWeightSpec(
 _BF16_WEIGHT = MegaMoEWeightSpec(torch.bfloat16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MegaMoEWeightFormat:
     """One routed-expert precision of the MegaMoE feature matrix."""
 
@@ -827,7 +827,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             # DeepGEMM measures the SM locality-domain map that MegaMoE reads through
             # an MPS helper process, which stays alive until released. vLLM
             # localizes no weights, so cache the map and stop the helper now.
-            if hasattr(deep_gemm, "destroy_localizer"):
+            if current_platform.is_device_capability_family(100) and hasattr(
+                deep_gemm, "destroy_localizer"
+            ):
                 deep_gemm.destroy_localizer()
         return symm_buffer
 
