@@ -970,16 +970,13 @@ def expand_pools_and_append_tail(
     caller no longer needs to precompute it. Replaces ~25 elementwise kernels
     with one Triton launch.
 
-    `pool_ids` may be int32 (the topk kernels' native output) or int64; no
-    widening copy is needed. `seq_lens` may be int32 or int64; the kernel
-    reads `seq_lens[row] + seq_len_offset`, so passing `positions` with
-    `seq_len_offset=1` avoids a cast + add on the caller side.
+    `pool_ids` and `seq_lens` may be int32 or int64 (no cast needed). The
+    kernel reads `seq_lens[row] + seq_len_offset`, so callers can pass
+    `positions` with `seq_len_offset=1`.
 
-    If `out` is given (an int32 `[rows, W]` view with unit column stride,
-    e.g. a row slice of `topk_indices_buffer`), the result is written there
-    in place: columns `[0, topk + pool_size - 1)` as above and columns
-    `[topk + pool_size - 1, W)` set to -1. The caller can then skip the -1
-    fill for the rows it covers and the `buffer[rows, :cols] = result` copy.
+    `out` (optional, int32 `[rows, W]`, unit column stride, e.g. a row slice
+    of `topk_indices_buffer`) is filled in place, with -1 past column
+    `topk + pool_size - 1`, so the caller skips its own -1 fill and copy.
     """
     rows, n_groups = pool_ids.shape
     topk = n_groups * pool_size
