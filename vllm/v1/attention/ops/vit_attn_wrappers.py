@@ -374,9 +374,24 @@ def flashinfer_wrapper(
         sequence_lengths_kv = torch.full_like(sequence_lengths, kv_len)
         max_seqlen = q_len
         max_seqlen_kv = kv_len
+    elif sequence_lengths is None:
+        # Other encoder backends accept cumulative token offsets. Derive
+        # cuDNN's element offsets from the actual (possibly interleaved) views.
+        offsets = cu_seqlens.view(-1, 1, 1, 1)
+        batch_offsets_qko = offsets * q.stride(0)
+        batch_offsets_k = offsets * k.stride(0)
+        batch_offsets_v = offsets * v.stride(0)
+        sequence_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).view(-1, 1, 1, 1)
+        sequence_lengths_kv = sequence_lengths
+        if max_seqlen is None:
+            # The packed token count is a safe bound without a device sync.
+            max_seqlen = q.shape[0]
+        else:
+            with gpu_sync_allowed():
+                max_seqlen = int(max_seqlen)
+        max_seqlen_kv = max_seqlen
     else:
         assert max_seqlen is not None
-        assert sequence_lengths is not None
         assert len(cu_seqlens) % 2 == 0, "cu_seqlens must be divisible by 2"
         cu_seqlength = len(cu_seqlens) // 2
         batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
