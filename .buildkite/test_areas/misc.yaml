@@ -955,6 +955,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - vllm/v1/core/sched/output.py
   - vllm/v1/outputs.py
+  - vllm/v1/worker/gpu/sample/output.py
   - vllm/v1/worker/gpu/async_utils.py
   - tools/pre_commit/validate_config.py
   - tests/distributed/test_expert_placement.py
