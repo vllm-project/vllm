@@ -624,27 +624,44 @@ def qsa_select_paged_prefill(
     logits_width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
+    from .qsa_prefill_deepgemm import (
+        can_use_deepgemm_prefill,
+        deepgemm_prefill_logits,
+        gather_prefill_keys,
+        prefill_key_workspace,
+    )
+
+    dg_metadata = indexer_prefill_metadata
+    if dg_metadata is not None and can_use_deepgemm_prefill(q, k_cache):
+        # Padding rows past the last query token belong to no chunk; their
+        # zero visible blocks keep expand_qsa_block_indices from reading them.
+        packed = prefill_key_workspace(dg_metadata.max_num_keys)
+        topk_workspace = torch.empty(
+            (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
+        )
+        for chunk in dg_metadata.chunks:
+            if chunk.gather:
+                gather_prefill_keys(k_cache, page_table, dg_metadata, chunk, packed)
+            logits = deepgemm_prefill_logits(q, packed, chunk)
+            chunk_rows = slice(chunk.row_start, chunk.row_end)
+            _topk(
+                logits,
+                visible_blocks[chunk_rows],
+                token_topk,
+                compress_ratio,
+                block_indices[chunk_rows],
+                topk_workspace,
+            )
+            del logits
+        return
+
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     # always allocate the worst case to avoid memory fragmentation.
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
 
-    from .qsa_prefill_deepgemm import (
-        can_use_deepgemm_prefill,
-        deepgemm_prefill_logits,
-        gather_prefill_keys,
-    )
-
-    dg_metadata = indexer_prefill_metadata
-    if dg_metadata is not None and can_use_deepgemm_prefill(q, k_cache):
-        rows_per_chunk = dg_metadata.rows_per_chunk
-        packed = gather_prefill_keys(
-            k_cache, page_table, query_start_loc, visible_blocks, logits_width
-        )
-    else:
-        dg_metadata = None
-        budget_bytes = max(max_logits_bytes, page_table.shape[1] * k_cache.shape[1] * 4)
-        logits_workspace = q.new_empty(budget_bytes // 4, dtype=torch.float32)
+    budget_bytes = max(max_logits_bytes, page_table.shape[1] * k_cache.shape[1] * 4)
+    logits_workspace = q.new_empty(budget_bytes // 4, dtype=torch.float32)
 
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
@@ -653,23 +670,18 @@ def qsa_select_paged_prefill(
     for query_start in range(0, rows, rows_per_chunk):
         query_end = min(query_start + rows_per_chunk, rows)
         query_slice = slice(query_start, query_end)
-        if dg_metadata is not None:
-            logits = deepgemm_prefill_logits(
-                q, packed, dg_metadata, query_start, query_end
-            )
-        else:
-            logits = _prefill_logits(
-                q,
-                k_cache,
-                page_table,
-                query_start_loc,
-                visible_blocks,
-                logits_workspace,
-                max_query_len,
-                logits_width,
-                query_offset=query_start,
-                num_queries=query_end - query_start,
-            )
+        logits = _prefill_logits(
+            q,
+            k_cache,
+            page_table,
+            query_start_loc,
+            visible_blocks,
+            logits_workspace,
+            max_query_len,
+            logits_width,
+            query_offset=query_start,
+            num_queries=query_end - query_start,
+        )
         _topk(
             logits,
             visible_blocks[query_slice],
@@ -678,7 +690,6 @@ def qsa_select_paged_prefill(
             block_indices[query_slice],
             topk_workspace,
         )
-        del logits
 
 
 __all__ = [

@@ -208,9 +208,6 @@ def _metadata_launch_pdl() -> bool:
         "max_num_work",
         "num_search_steps",
         "work_search_steps",
-        "indexer_width",
-        "num_decodes",
-        "num_decode_tokens",
     ]
 )
 def _build_qsa_metadata_kernel(
@@ -223,11 +220,6 @@ def _build_qsa_metadata_kernel(
     visible_blocks_ptr,
     slot_mapping_ptr,
     k_work_metadata_ptr,
-    indexer_ks_ptr,
-    indexer_ke_ptr,
-    indexer_width,
-    num_decodes,
-    num_decode_tokens,
     block_table_stride_0: tl.constexpr,
     block_table_stride_1: tl.constexpr,
     num_reqs,
@@ -289,15 +281,6 @@ def _build_qsa_metadata_kernel(
         ),
     ).to(tl.int32)
     tl.store(visible_blocks_ptr + token_idx, visible_blocks, mask=store_mask)
-    if indexer_ks_ptr is not None:
-        # Gathered K contains only prefills; request IDs include leading decodes.
-        row = token_idx - num_decode_tokens
-        ks = tl.maximum(tl.where(mapped, request_idx, 0) - num_decodes, 0)
-        ks *= indexer_width
-        tl.store(indexer_ks_ptr + row, ks, mask=store_mask & (row >= 0))
-        tl.store(
-            indexer_ke_ptr + row, ks + visible_blocks, mask=store_mask & (row >= 0)
-        )
 
     # circular_buffer_size is constexpr, so each builder instance compiles out
     # the other QSA cache owner's slot-mapping rule.
@@ -421,10 +404,6 @@ def build_qsa_metadata_triton(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
-    indexer_ranges: tuple[torch.Tensor, torch.Tensor] | None = None,
-    indexer_width: int = 0,
-    num_decodes: int = 0,
-    num_decode_tokens: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build QSA indexer cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
@@ -468,11 +447,6 @@ def build_qsa_metadata_triton(
         visible_blocks,
         slot_mapping,
         k_work_metadata_buffer,
-        indexer_ranges[0] if indexer_ranges is not None else None,
-        indexer_ranges[1] if indexer_ranges is not None else None,
-        indexer_width,
-        num_decodes,
-        num_decode_tokens,
         block_table.stride(0),
         block_table.stride(1),
         num_reqs,
@@ -508,10 +482,6 @@ def _build_qsa_metadata_torch(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
-    indexer_ranges: tuple[torch.Tensor, torch.Tensor] | None = None,
-    indexer_width: int = 0,
-    num_decodes: int = 0,
-    num_decode_tokens: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     del request_capacity
     num_tokens = common_attn_metadata.num_actual_tokens
@@ -541,11 +511,6 @@ def _build_qsa_metadata_torch(
         .clamp_min_(0)
         .to(torch.int32)
     )
-    if indexer_ranges is not None:
-        ks, ke = indexer_ranges
-        ks.copy_((token_to_req[num_decode_tokens:] - num_decodes).clamp_min(0))
-        ks.mul_(indexer_width)
-        torch.add(ks, visible_blocks[num_decode_tokens:], out=ke)
     if circular_buffer_size > 0:
         slot_mapping = circular_qsa_slot_mapping(
             common_attn_metadata.block_table_tensor,
@@ -671,20 +636,22 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
         else:
             self.compress_ratio = 1
         self.storage_block_size = kv_cache_spec.num_states
-        model_config = vllm_config.model_config
-        self.use_deepgemm_prefill = (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
-            and not self.is_circular_buffer
-            and kv_cache_spec.dtype == torch.float8_e4m3fn
-            and kv_cache_spec.head_size == 128
-            and model_config is not None
-            and model_config.hf_text_config.indexer_n_heads == 4
-        )
-        if self.use_deepgemm_prefill:
-            from vllm.utils.deep_gemm import is_deep_gemm_supported
+        self.use_deepgemm_prefill = False
+        if current_platform.is_cuda() and not self.is_circular_buffer:
+            from ..nvidia.ops.qsa_prefill_deepgemm import (
+                deepgemm_prefill_supported,
+                max_gather_keys,
+            )
 
-            self.use_deepgemm_prefill = is_deep_gemm_supported()
+            model_config = vllm_config.model_config
+            self.use_deepgemm_prefill = deepgemm_prefill_supported(
+                kv_cache_spec.dtype,
+                model_config.hf_text_config.indexer_n_heads,
+                kv_cache_spec.head_size,
+            )
+            self.max_gather_keys = max_gather_keys(
+                model_config.max_model_len, self.compress_ratio
+            )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_buffer = torch.empty(
             max_tokens, dtype=torch.int32, device=device
@@ -700,17 +667,6 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
         )
         max_requests = vllm_config.scheduler_config.max_num_seqs
         self.request_capacity = max_requests
-        if self.use_deepgemm_prefill:
-            from ..nvidia.ops.qsa_prefill_deepgemm import (
-                init_deepgemm_prefill_constants,
-            )
-
-            max_width = max(
-                64, round_up(cdiv(model_config.max_model_len, self.compress_ratio), 64)
-            )
-            init_deepgemm_prefill_constants(
-                self.visible_blocks_buffer.device, max_tokens, max_requests * max_width
-            )
         if not self.is_circular_buffer and self.compress_ratio != 1:
             max_k_work = (
                 max_tokens + (self.compress_ratio - 1) * max_requests
@@ -761,20 +717,6 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
                 num_tokens + (self.compress_ratio - 1) * num_requests
             ) // self.compress_ratio
             k_work_metadata = self.k_work_metadata_buffer[:max_num_work]
-        indexer_ranges = None
-        indexer_width = 0
-        if self.use_deepgemm_prefill and num_prefill_tokens:
-            indexer_width = min(
-                max(
-                    64,
-                    cdiv(common_attn_metadata.max_seq_len, self.compress_ratio * 64)
-                    * 64,
-                ),
-                common_attn_metadata.block_table_tensor.shape[1]
-                * self.storage_block_size,
-            )
-            ks = self.visible_blocks_buffer.new_empty(num_prefill_tokens)
-            indexer_ranges = (ks, torch.empty_like(ks))
         token_to_req, logical_positions, visible_blocks, slot_mapping = (
             build_qsa_metadata(
                 common_attn_metadata,
@@ -789,10 +731,6 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
                 ),
                 k_work_metadata_buffer=k_work_metadata if build_k_work else None,
                 request_capacity=request_capacity,
-                indexer_ranges=indexer_ranges,
-                indexer_width=indexer_width,
-                num_decodes=num_decodes,
-                num_decode_tokens=num_decode_tokens,
             )
         )
         metadata = QSAIndexerMetadata(
@@ -815,11 +753,15 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
         )
-        if indexer_ranges is not None:
+        if self.use_deepgemm_prefill and num_prefill_tokens:
             from ..nvidia.ops.qsa_prefill_deepgemm import prepare_deepgemm_prefill
 
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
             metadata.indexer_prefill_metadata = prepare_deepgemm_prefill(
-                metadata, indexer_width, *indexer_ranges
+                metadata,
+                common_attn_metadata.query_start_loc_cpu,
+                common_attn_metadata.seq_lens_cpu_upper_bound,
+                self.max_gather_keys,
             )
         return metadata
 

@@ -643,10 +643,6 @@ def test_qsa_triton_metadata_matches_pytorch(
         if max_num_work
         else None
     )
-    actual_ranges = tuple(
-        torch.empty(5, dtype=torch.int32, device=device) for _ in range(2)
-    )
-    expected_ranges = tuple(torch.empty_like(tensor) for tensor in actual_ranges)
     actual_buffers = make_buffers()
     actual = qsa_common.build_qsa_metadata_triton(
         common,
@@ -655,10 +651,6 @@ def test_qsa_triton_metadata_matches_pytorch(
         compress_ratio=compress_ratio,
         k_work_metadata_buffer=actual_k_work,
         request_capacity=num_reqs,
-        indexer_ranges=actual_ranges,
-        indexer_width=64,
-        num_decodes=1,
-        num_decode_tokens=3,
     )
 
     expected_k_work = (
@@ -672,15 +664,9 @@ def test_qsa_triton_metadata_matches_pytorch(
         compress_ratio=compress_ratio,
         k_work_metadata_buffer=expected_k_work,
         request_capacity=num_reqs,
-        indexer_ranges=expected_ranges,
-        indexer_width=64,
-        num_decodes=1,
-        num_decode_tokens=3,
     )
 
     for actual_tensor, expected_tensor in zip(actual, expected):
-        torch.testing.assert_close(actual_tensor, expected_tensor)
-    for actual_tensor, expected_tensor in zip(actual_ranges, expected_ranges):
         torch.testing.assert_close(actual_tensor, expected_tensor)
     if actual_k_work is not None:
         torch.testing.assert_close(actual_k_work, expected_k_work)
@@ -849,6 +835,21 @@ def test_qsa_decode_selection_correctness(
     torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
+def test_qsa_deepgemm_prefill_plan() -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
+        plan_prefill_chunks,
+    )
+
+    # A 1000-key logits row has a 1280-float pitch; the budget holds 64 rows.
+    max_logits_bytes = 64 * 1280 * 4
+    # Short requests group until the next one would pass the K cap. The long
+    # request is alone and its rows split at the logits budget, keeping the
+    # keys gathered for its first chunk.
+    assert plan_prefill_chunks(
+        [10, 10, 10, 100], [400, 400, 400, 1000], 1000, max_logits_bytes
+    ) == [(0, 2, 0, 20), (2, 3, 0, 10), (3, 4, 0, 64), (3, 4, 64, 100)]
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
@@ -898,14 +899,20 @@ def test_qsa_prefill_selection_correctness(
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
         can_use_deepgemm_prefill,
-        init_deepgemm_prefill_constants,
         prepare_deepgemm_prefill,
+        reserve_deepgemm_prefill,
+    )
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        is_workspace_manager_initialized,
     )
 
     indexer_prefill_metadata = None
     if can_use_deepgemm_prefill(q, cache):
-        # Generous limits for this test's 36 rows and 2 narrow requests.
-        init_deepgemm_prefill_constants(q.device, 128, 8192)
+        if not is_workspace_manager_initialized():
+            init_workspace_manager(q.device)
+        # The constants persist across cases; reserve the largest any case uses.
+        reserve_deepgemm_prefill(q.device, 8192, rows)
         metadata = QSAIndexerMetadata(
             block_table=page_table,
             slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
@@ -922,18 +929,26 @@ def test_qsa_prefill_selection_correctness(
             num_prefill_tokens=rows,
             max_query_len=max(query_lens),
             decode_query_len=0,
-            max_seq_len=max(sequence_lengths) + seq_len_slack,
+            max_seq_len=sequence_lengths.max().item() + seq_len_slack,
             storage_block_size=cache.shape[1],
             compress_ratio=compress_ratio,
         )
-        width = min(
-            max(64, math.ceil(metadata.max_seq_len / (compress_ratio * 64)) * 64),
-            page_table.shape[1] * cache.shape[1],
-        )
-        ks = token_to_req * width
+        # seq_len_slack makes the host lengths an over-estimate, as under
+        # async spec decode. force_chunk also caps the K workspace at the
+        # longest request, so each request is its own group and the second
+        # one's keys are packed from a nonzero offset.
+        seq_lens_cpu = sequence_lengths.cpu() + seq_len_slack
+        max_keys = int(seq_lens_cpu.max()) // compress_ratio if force_chunk else 8192
         indexer_prefill_metadata = prepare_deepgemm_prefill(
-            metadata, width, ks, ks + visible_blocks
+            metadata, query_start_loc.cpu(), seq_lens_cpu, max_keys
         )
+        if force_chunk:
+            # One group per request; the 33-row request splits at 32 rows and
+            # reuses its gathered keys.
+            assert [
+                (c.req_start, c.row_start, c.row_end, c.gather)
+                for c in indexer_prefill_metadata.chunks
+            ] == [(0, 0, 3, True), (1, 3, 35, True), (1, 35, 36, False)]
 
     actual = torch.empty(
         (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
