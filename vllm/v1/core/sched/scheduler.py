@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import bisect
 import itertools
 import time
 from collections import defaultdict, deque
@@ -902,15 +901,25 @@ class Scheduler(SchedulerInterface):
                     ):
                         break
 
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    preempted_req = self.running[-1]
+                    # The request cannot be scheduled. Only evict requests
+                    # that have not been scheduled in this step. This keeps
+                    # running decode requests from being rolled back.
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        preemptable_reqs = self.running[req_index:]
+                        if not preemptable_reqs:
+                            break
+                        preempted_req = max(
+                            preemptable_reqs,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+                    else:
+                        preempted_req = self.running[-1]
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    preempted_req = self.running.pop()
+                    self.running.remove(preempted_req)
 
                     self._preempt_request(
                         preempted_req,
@@ -1533,10 +1542,7 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
-                if self.policy == SchedulingPolicy.PRIORITY:
-                    bisect.insort(self.running, request)
-                else:
-                    self.running.append(request)
+                self.running.append(request)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
