@@ -234,18 +234,12 @@ mod tests {
             .with_writer(std::io::sink)
             .with_filter(LevelFilter::INFO);
         let subscriber = tracing_subscriber::registry().with(timing_layer).with(info_layer);
-        let evaluated_debug_fields = AtomicUsize::new(0);
 
-        tracing::subscriber::with_default(subscriber, || {
-            assert_eq!(LevelFilter::current(), LevelFilter::INFO);
-            debug!(
-                value = evaluated_debug_fields.fetch_add(1, Ordering::Relaxed),
-                "debug event"
-            );
-            assert!(debug_span!("debug span").is_disabled());
-        });
-
-        assert_eq!(evaluated_debug_fields.load(Ordering::Relaxed), 0);
+        // As the global subscriber, this hint becomes `LevelFilter::current()`,
+        // which disables `DEBUG` callsites before their fields are evaluated.
+        // Observing that directly would depend on every other subscriber alive
+        // in the process, such as those of concurrent tests.
+        assert_eq!(subscriber.max_level_hint(), Some(LevelFilter::INFO));
     }
 
     #[test]
@@ -257,8 +251,8 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(timing_layer).with(debug_layer);
         let evaluated_debug_fields = AtomicUsize::new(0);
 
+        assert_eq!(subscriber.max_level_hint(), Some(LevelFilter::DEBUG));
         tracing::subscriber::with_default(subscriber, || {
-            assert_eq!(LevelFilter::current(), LevelFilter::DEBUG);
             debug!(
                 value = evaluated_debug_fields.fetch_add(1, Ordering::Relaxed),
                 "debug event"

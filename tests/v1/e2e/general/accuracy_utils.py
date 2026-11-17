@@ -21,7 +21,7 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.structured_output.utils import allocate_token_bitmask
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AccuracyTolerance:
     logprob_atol: float
     greedy_atol: float
