@@ -3,17 +3,17 @@
 """Kimi K3.1 specialized decode in the hybrid decomposition (TP-G attention groups
 with DCP G + routed experts EP over every rank, MegaMoE) on real ranks: admission
 (TP > 1 + EP, FP32 KDA conv and recurrent state, RecoverSSM), the hybrid plan
-(``runtime.hybrid.HybridStep``: q = 5 verify steps with the TP-G KDA / DSA
+(`runtime.hybrid.HybridStep`: q = 5 verify steps with the TP-G KDA / DSA
 providers, the stock SP MoE on the rank's row shard), and the step's output
 against the stock decode of the same step (stock: sequence parallel over the TP
 group, the MoE on the rank's row shard).
 
-Default: TP4 x DCP4 x DP1 (EP4) on one 4-GPU node; ``KIMI_K31_HYBRID_WORLD`` /
-``KIMI_K31_HYBRID_TP`` / ``KIMI_K31_HYBRID_DCP`` select other shapes (e.g. 8 / 4 / 4:
-two groups, EP8, launched one process per GPU by ``KIMI_K31_HYBRID_SRUN=1``).
+Default: TP4 x DCP4 x DP1 (EP4) on one 4-GPU node; `KIMI_K31_HYBRID_WORLD` /
+`KIMI_K31_HYBRID_TP` / `KIMI_K31_HYBRID_DCP` select other shapes (e.g. 8 / 4 / 4:
+two groups, EP8, launched one process per GPU by `KIMI_K31_HYBRID_SRUN=1`).
 
-Each rank runs ``vllm bench forward`` in-process on a layer-truncated K3.1
-(``KIMI_K31_DEP_MODEL``: a config-only K3.1 directory with a few layers, e.g. 3
+Each rank runs `vllm bench forward` in-process on a layer-truncated K3.1
+(`KIMI_K31_DEP_MODEL`: a config-only K3.1 directory with a few layers, e.g. 3
 KDA + 1 DSA + MegaMoE layers; dummy weights, balanced EP routing). The bench
 compares the step's CUDA graph replay (captured: the specialized decode) with the
 same step run eagerly (outside a capture the specialized decode never plans: the
@@ -74,9 +74,9 @@ pytestmark = [
 
 
 def admit(capture_sizes, plans):
-    """Admit the specialized decode under ``vllm bench forward`` (its graphs are
+    """Admit the specialized decode under `vllm bench forward` (its graphs are
     one-shot captures of each exact batch; the deployment's capture sizes are
-    ``capture_sizes``) and record every captured step's plan."""
+    `capture_sizes`) and record every captured step's plan."""
     import dataclasses
 
     import vllm.models.kimi_k3.nvidia.model as model

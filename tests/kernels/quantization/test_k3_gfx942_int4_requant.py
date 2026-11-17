@@ -26,6 +26,7 @@ from aiter.ops.shuffle import (  # noqa: E402
 from aiter.utility import fp4_utils  # noqa: E402
 
 from vllm.model_executor.layers.quantization import mxfp4  # noqa: E402
+from vllm.v1.worker import gpu_worker  # noqa: E402
 
 NUM_EXPERTS, ROWS, COLS = 128, 256, 2048
 # Kimi-K3 w2 per rank under TP8. 896 experts do not split evenly into chunks.
@@ -100,7 +101,7 @@ def _reference_requant(
 def load_model_allocator_settings():
     original = torch._C._accelerator_getAllocatorSettings()
     prefix = original.strip().rstrip(",")
-    settings = "max_split_size_mb:20"
+    settings = f"max_split_size_mb:{gpu_worker._MAX_SPLIT_SIZE_MB}"
     torch._C._accelerator_setAllocatorSettings(
         f"{prefix},{settings}" if prefix else settings
     )

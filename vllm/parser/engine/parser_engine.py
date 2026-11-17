@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Parser engine base that handles both reasoning and tool call
-extraction with a single :class:`StreamingParserEngine`.
+extraction with a single `StreamingParserEngine`.
 """
 
 from __future__ import annotations
@@ -110,9 +110,9 @@ class ToolCallSlot:
 
 
 class ParserEngine(Parser):
-    """A :class:`Parser` backed by a single declarative engine config.
+    """A `Parser` backed by a single declarative engine config.
 
-    Subclasses set the ``ParserEngineConfig`` in ``__init__`` to define the
+    Subclasses set the `ParserEngineConfig` in `__init__` to define the
     complete output format for a model (reasoning + tool calls).
     """
 
@@ -257,7 +257,7 @@ class ParserEngine(Parser):
         )
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
+        """See `ReasoningParser.adjust_initial_state_from_prompt`."""
         return
 
     def finish_streaming(self) -> DeltaMessage | None:
@@ -305,7 +305,7 @@ class ParserEngine(Parser):
     def _coerce_value(value: object, schema: dict) -> tuple[object, bool]:
         """Coerce a single value according to its schema.
 
-        Returns ``(coerced_value, changed)``.
+        Returns `(coerced_value, changed)`.
         """
         if isinstance(value, str):
             types = extract_types_from_schema(schema)
@@ -365,8 +365,8 @@ class ParserEngine(Parser):
         Middle values (followed by a comma) are stable across streaming
         ticks and included.  The trailing value is excluded for non-string
         values because type coercion may change its serialised form between
-        ticks, which would violate the ``startswith(prev)`` prefix invariant.
-        String values for keys in ``string_keys`` are prefix-stable, so stream
+        ticks, which would violate the `startswith(prev)` prefix invariant.
+        String values for keys in `string_keys` are prefix-stable, so stream
         their unterminated content instead of buffering long arguments until
         the closing tag arrives.
 
@@ -432,7 +432,7 @@ class ParserEngine(Parser):
     def _streamable_string_keys(properties: dict) -> set[str] | None:
         """Return keys whose trailing string values can safely stream.
 
-        ``None`` means there is no schema, so all string values keep their
+        `None` means there is no schema, so all string values keep their
         JSON representation as strings.  With a schema, only fields that can
         remain strings are safe to emit before the value is closed; fields
         coerced to bool/number/null/object/array may serialize differently.
@@ -449,9 +449,9 @@ class ParserEngine(Parser):
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct parameter types using the tool schema.
 
-        String values are coerced via :func:`coerce_to_schema_type`.
+        String values are coerced via `coerce_to_schema_type`.
         Nested objects and arrays are recursed into when the schema
-        defines ``properties`` or ``items``.  Without a schema, values
+        defines `properties` or `items`.  Without a schema, values
         stay as strings.
         """
         if not self._tools or not func_name:
@@ -549,10 +549,10 @@ class ParserEngine(Parser):
         """Strip trailing whitespace from reasoning, deferring it until we
         know whether more reasoning follows or reasoning has ended.
 
-        Runs in ``parse_delta`` *after* ``_events_to_delta`` (and any
+        Runs in `parse_delta` *after* `_events_to_delta` (and any
         subclass overrides) so that overrides see the raw reasoning text.
 
-        Gated by ``strip_trailing_reasoning_whitespace``; when disabled,
+        Gated by `strip_trailing_reasoning_whitespace`; when disabled,
         passes through unchanged.
         """
         if not self._strip_trailing_reasoning_ws:
@@ -653,8 +653,8 @@ class ParserEngine(Parser):
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from reasoning-stripped content.
 
-        Unlike :meth:`extract_tool_calls` which re-parses the full model
-        output, this method starts the parser engine in ``CONTENT`` state
+        Unlike `extract_tool_calls` which re-parses the full model
+        output, this method starts the parser engine in `CONTENT` state
         so it can parse content that has already had reasoning stripped.
         """
         self._check_skip_tool_parsing(request)
@@ -799,8 +799,8 @@ class ParserEngine(Parser):
     ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
         """Reset, feed, finish, and extract results in one pass.
 
-        Must be called as a unit — ``_events_to_delta`` populates tool
-        state that ``_build_extracted_result`` reads.
+        Must be called as a unit — `_events_to_delta` populates tool
+        state that `_build_extracted_result` reads.
         """
         if (
             self._complete_tool_call_validator is not None

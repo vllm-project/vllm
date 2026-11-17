@@ -46,9 +46,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Moondream3Config": "vllm.transformers_utils.configs.moondream3",
     "Moondream3TextConfig": "vllm.transformers_utils.configs.moondream3",
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
-    "MossTranscribeDiarizeConfig": (
-        "vllm.transformers_utils.configs.moss_transcribe_diarize"
-    ),
     "Nemotron3_5TranscribeConfig": (
         "vllm.transformers_utils.configs.nemotron3_5_transcribe"
     ),
@@ -57,9 +54,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "Lfm3Config": "vllm.transformers_utils.configs.lfm3",
     "Lfm3AudioConfig": "vllm.transformers_utils.configs.lfm3_audio",
+    "Lfm3OmniConfig": "vllm.transformers_utils.configs.lfm3_omni",
     "Lfm3VlConfig": "vllm.transformers_utils.configs.lfm3_vl",
     "Lfm3VlVisionConfig": "vllm.transformers_utils.configs.lfm3_vl",
-    "MuseSpark1xTextConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkVisionConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkAudioConfig": "vllm.transformers_utils.configs.muse_spark",
@@ -126,7 +123,6 @@ __all__ = [
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
-    "MossTranscribeDiarizeConfig",
     "Nemotron3_5TranscribeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
@@ -134,9 +130,9 @@ __all__ = [
     "Kimi_K25Config",
     "Lfm3Config",
     "Lfm3AudioConfig",
+    "Lfm3OmniConfig",
     "Lfm3VlConfig",
     "Lfm3VlVisionConfig",
-    "MuseSpark1xTextConfig",
     "MuseSparkTextConfig",
     "MuseSparkVisionConfig",
     "MuseSparkAudioConfig",
