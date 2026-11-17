@@ -43,7 +43,7 @@ class DsparkConfidenceTileLangKernel(
         """Dispatch to the TileLang JIT'd kernel; TileLang caches by shape."""
         confidence_head_fused_tilelang(*args, **kwargs)
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         n_embed: int,
