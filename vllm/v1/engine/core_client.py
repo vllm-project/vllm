@@ -903,6 +903,17 @@ class MPClient(EngineCoreClient):
             vllm_config.model_config.max_model_len, response.max_model_len
         )
 
+        # Byte-based capacity is resolved in the engine after model loading.
+        # Use the smallest reported capacity when routing across DP ranks.
+        if response.encoder_cache_size is not None:
+            scheduler_config = vllm_config.scheduler_config
+            current = scheduler_config.encoder_cache_size
+            scheduler_config.encoder_cache_size = (
+                response.encoder_cache_size
+                if current is None
+                else min(current, response.encoder_cache_size)
+            )
+
         # Setup KV cache config with initialization state from
         # engine core process. Sum num_gpu_blocks from all engines in DP case.
         num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0

@@ -65,11 +65,11 @@ class InputProcessor:
         self.renderer = renderer or renderer_from_config(vllm_config)
 
         self.supports_mm_inputs = model_config.supports_multimodal_inputs
-        self.mm_encoder_cache_size = 0
+        self._mm_encoder_cache_size = 0
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
             mm_budget = MultiModalBudget(vllm_config, mm_registry)
-            self.mm_encoder_cache_size = mm_budget.encoder_cache_size
+            self._mm_encoder_cache_size = mm_budget.encoder_cache_size
             self.skip_prompt_length_check = (
                 mm_budget.processor.info.skip_prompt_length_check
             )
@@ -81,6 +81,17 @@ class InputProcessor:
         self.process_inputs_async = make_async(
             self.process_inputs, executor=self.renderer._executor
         )
+
+    @property
+    def mm_encoder_cache_size(self) -> int:
+        # The frontend is constructed before the engine resolves a byte budget.
+        # Read the shared scheduler config after startup (synced by MPClient
+        # or updated directly by an in-process EngineCore).
+        if self.scheduler_config.encoder_cache_bytes is not None:
+            cache_size = self.scheduler_config.encoder_cache_size
+            if cache_size is not None:
+                return cache_size
+        return self._mm_encoder_cache_size
 
     @property
     def tokenizer(self) -> TokenizerLike | None:

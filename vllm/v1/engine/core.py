@@ -2177,6 +2177,11 @@ class EngineCoreProc(EngineCore):
             data_parallel_rank=self.engine_index,
             max_num_seqs=scheduler_config.max_num_seqs,
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
+            encoder_cache_size=(
+                scheduler_config.encoder_cache_size
+                if scheduler_config.encoder_cache_bytes is not None
+                else None
+            ),
             instance_id=self.vllm_config.instance_id,
             supports_lora=self.vllm_config.lora_config is not None,
             max_loras=(

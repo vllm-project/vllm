@@ -595,6 +595,12 @@ def test_byte_budget_resolves_and_updates_workers(budget_bytes, reports, expecte
     )
     EngineCore._resolve_encoder_cache_budget(core)
     assert config.encoder_cache_size == expected
+    token_config = _scheduler_config(
+        max_num_batched_tokens=16384, encoder_cache_size=expected
+    )
+    assert compute_mm_encoder_budget(
+        config, {"image": 2048}
+    ) == compute_mm_encoder_budget(token_config, {"image": 2048})
     from vllm.multimodal.encoder_budget import measure_encoder_output_layouts
 
     core.collective_rpc.assert_any_call(measure_encoder_output_layouts)
@@ -657,6 +663,82 @@ def test_resolved_byte_budget_keeps_the_compute_budget():
     compute_budget, cache_size = compute_mm_encoder_budget(config, {"image": 2048})
     assert compute_budget == 16384
     assert cache_size == 65536
+
+
+@pytest.mark.parametrize("multiprocess", [False, True])
+def test_byte_budget_frontend_uses_resolved_capacity(multiprocess):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import msgspec
+
+    from vllm.exceptions import VLLMValidationError
+    from vllm.v1.engine import EngineCoreReadyResponse
+    from vllm.v1.engine.core_client import MPClient
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    config = _scheduler_config(
+        max_num_batched_tokens=16384, encoder_cache_bytes=2 << 30
+    )
+    model_config = SimpleNamespace(max_model_len=16384, runner_type="generate")
+    processor = object.__new__(InputProcessor)
+    processor.scheduler_config = config
+    processor.model_config = model_config
+    processor.supports_mm_inputs = True
+    processor.skip_prompt_length_check = False
+    processor.renderer = Mock()
+    _, processor._mm_encoder_cache_size = compute_mm_encoder_budget(
+        config, {"image": 2048}
+    )
+    prompt = {
+        "type": "multimodal",
+        "prompt_token_ids": [1] * 4096,
+        "mm_placeholders": {"image": [PlaceholderRange(offset=0, length=4096)]},
+    }
+    with pytest.raises(VLLMValidationError, match="pre-allocated encoder cache"):
+        processor._validate_model_input(prompt, "decoder")
+
+    if multiprocess:
+        client = object.__new__(MPClient)
+        client._effective_attention_block_sizes = set()
+        client.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+            model_config=model_config,
+            parallel_config=SimpleNamespace(_coord_store_port=0),
+            scheduler_config=config,
+        )
+        response = EngineCoreReadyResponse(
+            max_model_len=16384,
+            num_gpu_blocks=100,
+            block_size=16,
+            dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
+            world_size=2,
+            data_parallel_size=2,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            data_parallel_rank=0,
+            max_num_seqs=256,
+            max_num_batched_tokens=16384,
+            instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
+            encoder_cache_size=65536,
+        )
+        client._apply_ready_response(msgspec.msgpack.encode(response))
+        assert processor.mm_encoder_cache_size == 65536
+        response.encoder_cache_size = 32768
+        response.data_parallel_rank = 1
+        client._apply_ready_response(msgspec.msgpack.encode(response))
+        assert processor.mm_encoder_cache_size == 32768
+    else:
+        # InprocClient shares the scheduler config with EngineCore.
+        config.encoder_cache_size = 65536
+        assert processor.mm_encoder_cache_size == 65536
+
+    processor._validate_model_input(prompt, "decoder")
 
 
 def test_capacity_decides_whether_reuse_survives_another_request():
