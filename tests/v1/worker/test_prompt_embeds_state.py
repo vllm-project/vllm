@@ -29,6 +29,7 @@ from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 
 HIDDEN = 24
 MAX_NUM_REQS = 8
+MAX_NUM_ROWS = 16
 DEVICE = torch.device(current_platform.device_type)
 
 
@@ -53,6 +54,7 @@ class _Batch:
 def _make_state(keep_until_finished: bool = False) -> PromptEmbedsState:
     return PromptEmbedsState(
         MAX_NUM_REQS,
+        MAX_NUM_ROWS,
         HIDDEN,
         torch.float32,
         DEVICE,
@@ -201,3 +203,15 @@ def test_keeps_embeds_until_finished_for_recompute():
     out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[2], num_tokens=4)
 
     torch.testing.assert_close(out, embeds[2:6].to(DEVICE))
+
+
+def test_rows_over_budget_fail_loudly():
+    """Rows held on the GPU must stay within the profiled budget. Adding past
+    it means the scheduler and workers disagree on when rows are freed."""
+    state = _make_state()
+    state.add_request(0, _NewReqData("a", torch.randn(10, HIDDEN)))
+    with pytest.raises(AssertionError, match="max_num_prompt_embeds_tokens"):
+        state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
+
+    state.remove_request("a")
+    state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))

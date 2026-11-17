@@ -29,6 +29,7 @@ class PromptEmbedsState:
     def __init__(
         self,
         max_num_reqs: int,
+        max_num_rows: int,
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -42,6 +43,9 @@ class PromptEmbedsState:
         # req_id -> (embeds, is_token_ids mask or None). Holds the references
         # that keep the pointer table below valid.
         self.gpu_tensors: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
+        # Rows held in gpu_tensors, bounded by the scheduler's budget.
+        self.max_num_rows = max_num_rows
+        self.num_rows = 0
 
         # Indexed by req_state index. Stale entries after removal are
         # harmless: add_request rewrites all fields for every index it claims.
@@ -50,12 +54,21 @@ class PromptEmbedsState:
         self.embeds_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        self._release(new_req_data.req_id)
         prompt_embeds = new_req_data.prompt_embeds
         if prompt_embeds is None:
-            self.gpu_tensors.pop(new_req_data.req_id, None)
             self.embeds_lens.np[req_index] = 0
             return
 
+        # The scheduler releases rows when it schedules the step that drops
+        # them, this holds only while steps run in order and each removes
+        # requests before adding new ones.
+        num_rows = prompt_embeds.shape[0]
+        assert self.num_rows + num_rows <= self.max_num_rows, (
+            f"prompt_embeds rows exceed max_num_prompt_embeds_tokens "
+            f"({self.num_rows} held + {num_rows} > {self.max_num_rows})"
+        )
+        self.num_rows += num_rows
         embeds = async_tensor_h2d(prompt_embeds, device=self.device, dtype=self.dtype)
         embeds = embeds.contiguous()
         is_token_ids = new_req_data.prompt_is_token_ids
@@ -68,7 +81,12 @@ class PromptEmbedsState:
         self.embeds_lens.np[req_index] = embeds.shape[0]
 
     def remove_request(self, req_id: str) -> None:
-        self.gpu_tensors.pop(req_id, None)
+        self._release(req_id)
+
+    def _release(self, req_id: str) -> None:
+        tensors = self.gpu_tensors.pop(req_id, None)
+        if tensors is not None:
+            self.num_rows -= tensors[0].shape[0]
 
     def apply_staged_writes(self) -> None:
         self.embeds_ptrs.copy_to_uva()
@@ -117,7 +135,7 @@ class PromptEmbedsState:
             + input_batch.num_scheduled_tokens[:num_reqs]
         )
         for i in np.flatnonzero((embeds_lens > 0) & (end >= embeds_lens)).tolist():
-            self.gpu_tensors.pop(input_batch.req_ids[i], None)
+            self._release(input_batch.req_ids[i])
             self.embeds_lens.np[idx_mapping[i]] = 0
 
 

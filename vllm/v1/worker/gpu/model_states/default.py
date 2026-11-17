@@ -45,8 +45,11 @@ class DefaultModelState(ModelState):
 
         self.prompt_embeds_state: PromptEmbedsState | None = None
         if self.model_config.enable_prompt_embeds:
+            max_num_rows = self.scheduler_config.max_num_prompt_embeds_tokens
+            assert max_num_rows is not None
             self.prompt_embeds_state = PromptEmbedsState(
                 self.max_num_reqs,
+                max_num_rows,
                 self.inputs_embeds_size,
                 self.dtype,
                 self.device,
