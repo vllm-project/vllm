@@ -406,6 +406,12 @@ class SamplingParams(
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
     _watermarking_skipped: bool = False
+    _watermark_context_start: int | None = None
+    """Engine-internal. Index into the submitted prompt where generated
+    tokens begin. Only set by beam search, whose per-step requests carry the
+    beam-so-far as their prompt; watermark contexts must treat those tokens
+    as generated history rather than prompt. `None` falls back to the request
+    prompt length, which is the correct boundary for every ordinary request."""
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
