@@ -840,7 +840,7 @@ def test_keep_last_output_token_rehashes_block_of_kept_token():
 
     expected = Request(
         request_id="expected",
-        prompt_token_ids=prompt + [999],
+        prompt_token_ids=[*prompt, 999],
         sampling_params=SamplingParams(max_tokens=16),
         pooling_params=None,
         mm_features=[_audio_feature(offset=len(prompt), identifier="audio")],
@@ -849,8 +849,8 @@ def test_keep_last_output_token_rehashes_block_of_kept_token():
     assert session.block_hashes == expected.block_hashes
 
 
-def _chunk(**kwargs) -> DummyRequest:
-    return DummyRequest("session", **({"max_tokens": 1} | kwargs))
+def _chunk(max_tokens: int = 1, **kwargs) -> DummyRequest:
+    return DummyRequest("session", max_tokens=max_tokens, **kwargs)
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])

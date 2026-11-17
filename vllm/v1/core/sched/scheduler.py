@@ -2930,8 +2930,8 @@ class Scheduler(SchedulerInterface):
         for req_id, features in new_mm_features.items():
             start = len(self.requests[req_id].mm_features) - len(features)
             self._pending_encoder_input_ids.setdefault(req_id, set()).update(
-                start + i
-                for i, feature in enumerate(features)
+                i
+                for i, feature in enumerate(features, start)
                 if feature.data is not None and "address" not in feature.data
             )
 
