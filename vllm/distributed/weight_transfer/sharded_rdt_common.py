@@ -36,23 +36,25 @@ Sync (`update_weights`, one per sync):
     components so independent pipeline stages pull in parallel.
     A pull is `bucket(consumer_id, seq, sync_idx)`: only the index travels.
     The producer waits until the bucket's unit is gathered in sync `sync_idx`,
-    then returns the boxes. By default they are contiguous tensors, one per
-    piece, which Ray copies into the producer's NIXL memory pool. With
-    `flat_buckets`, the producer packs them itself, with one fused copy, into
-    one byte tensor (pieces at `flat_layout`) carved from an arena it
-    registered with NIXL once, so Ray only describes it. Either way the pull
-    lands in a buffer Ray allocates on the consumer, which copies every piece
-    into its destinations with one fused copy and loads the fallbacks.
+    then packs its boxes, with one fused copy, into one byte tensor (pieces
+    at `flat_layout`) carved from an arena it registered with NIXL once, so
+    Ray only describes it. The consumer receives the bucket into a slice of
+    its own receive arena, registered with NIXL once per plan (one slot of
+    the largest bucket per pull in flight), and copies every piece into its
+    destinations with one fused copy, and loads the fallbacks. Ray holds a
+    target only weakly and silently receives into a buffer of its own when
+    the target is gone, so the consumer keeps each slot view alive until its
+    pull is applied and fails the sync if a pull did not land in its slot.
 
 Release:
     A consumer drops each ref once its bucket is applied, which frees the
-    pool block. The producer releases a gathered unit once every live
+    producer's arena block. The producer releases a gathered unit once every live
     consumer has registered and every bucket reading from the unit has been
     freed; that is the trainer's credit to gather the next unit.
 
-Pool: each producer registers `pool_bytes(...)` at startup (Ray's pool, or
-with `flat_buckets` its own arena) and admits a bucket only while the bytes of
-served, unfreed buckets fit, so a full pool slows pulls down instead of
+Arena: each producer registers an arena of `arena_bytes(...)` at startup and
+admits a bucket only while a block for it can be carved from the arena next
+to the served, unfreed ones, so a full arena slows pulls down instead of
 failing them.
 """
 
@@ -63,11 +65,9 @@ from typing import Any
 
 import torch
 
-# Per-piece buckets lean on the NIXL sender memory pool as Ray 2.60 packs it
-# (one descriptor per bucket). Flat buckets need only `register_nixl_memory`,
-# `wait_tensor_freed` and concurrent `ray.get` on lists, all in Ray 2.56.
-RDT_MIN_RAY_VERSION = "2.60.0"
-RDT_MIN_RAY_VERSION_FLAT = "2.56.0"
+# `register_nixl_memory`, `set_target_for_ref`, `wait_tensor_freed` and
+# concurrent `ray.get` on lists, all in Ray 2.56.
+RDT_MIN_RAY_VERSION = "2.56.0"
 DEFAULT_BUFFER_BYTES = 1 << 30
 DEFAULT_NUM_BUFFERS = 2
 
@@ -75,7 +75,7 @@ Box = tuple[tuple[int, int], ...]
 # One bucket on the wire: (name, box as [[start, stop], ...]) per piece.
 WireBucket = list[tuple[str, list[list[int]]]]
 
-_POOL_ALIGNMENT = 16  # Ray carves pool blocks on 16 B
+_PIECE_ALIGNMENT = 16  # every piece of a flat bucket starts on 16 B
 
 
 def validate_int(name: str, value: object, *, minimum: int) -> None:
@@ -99,13 +99,11 @@ def validate_sharded_rdt_settings(
     )
 
 
-def check_ray_rdt_version(flat_buckets: bool | None = None) -> None:
-    """Refuse an installed Ray older than `RDT_MIN_RAY_VERSION` (or
-    `RDT_MIN_RAY_VERSION_FLAT` with `flat_buckets`). `None`, where the mode
-    is not known yet, checks the lower of the two.
+def check_ray_rdt_version() -> None:
+    """Refuse an installed Ray older than `RDT_MIN_RAY_VERSION`.
 
     vLLM does not depend on Ray, so no pin carries this; without the check an
-    old Ray fails deep in the first pull, or runs far slower.
+    old Ray fails deep in the first pull.
 
     Raises:
         ValueError: the installed Ray is too old.
@@ -115,13 +113,12 @@ def check_ray_rdt_version(flat_buckets: bool | None = None) -> None:
 
     from packaging import version
 
-    minimum = RDT_MIN_RAY_VERSION if flat_buckets is False else RDT_MIN_RAY_VERSION_FLAT
     current = version.parse(importlib.metadata.version("ray"))
-    if current < version.parse(minimum):
+    if current < version.parse(RDT_MIN_RAY_VERSION):
         raise ValueError(
             f"The 'sharded_rdt' weight transfer backend requires Ray >= "
-            f"{minimum} (flat_buckets={flat_buckets}); found {current}. "
-            f"Run `pip install -U 'ray>={minimum}'`."
+            f"{RDT_MIN_RAY_VERSION}; found {current}. "
+            f"Run `pip install -U 'ray>={RDT_MIN_RAY_VERSION}'`."
         )
 
 
@@ -144,12 +141,6 @@ def deregister_nixl_memory(tensor: torch.Tensor) -> None:
     _ray_experimental().deregister_nixl_memory(tensor)
 
 
-def register_nixl_memory_pool(nbytes: int, device: torch.device) -> None:
-    """Register this process's NIXL sender memory pool; Ray packs every
-    returned tensor into it."""
-    _ray_experimental().register_nixl_memory_pool(nbytes, device)
-
-
 def box_shape(box: Box) -> tuple[int, ...]:
     return tuple(stop - start for start, stop in box)
 
@@ -159,9 +150,9 @@ def box_slices(box: Box) -> tuple[slice, ...]:
 
 
 def piece_nbytes(box: Box, dtype: torch.dtype) -> int:
-    """A piece's bytes in the pool, counting the block alignment Ray adds."""
+    """A piece's bytes in a flat bucket, counting its 16 B alignment."""
     nbytes = math.prod(box_shape(box)) * dtype.itemsize
-    return -(-nbytes // _POOL_ALIGNMENT) * _POOL_ALIGNMENT
+    return -(-nbytes // _PIECE_ALIGNMENT) * _PIECE_ALIGNMENT
 
 
 FlatPiece = tuple[int, int, torch.dtype, tuple[int, ...]]
@@ -344,16 +335,16 @@ class RdtRouter:
                 )
 
 
-def pool_bytes(
+def arena_bytes(
     *,
     buffer_bytes: int,
     num_buffers: int,
     num_consumers: int,
     largest_tensor_bytes: int,
 ) -> int:
-    """The NIXL pool one producer registers: `num_buffers` buckets for each
+    """The NIXL arena one producer registers: `num_buffers` buckets for each
     consumer that may pull from it, plus one bucket of slack for a free still
     on its way and for fragmentation. A bucket is at most `buffer_bytes`, or
     one tensor larger than that."""
-    bucket = max(buffer_bytes, largest_tensor_bytes) + _POOL_ALIGNMENT
+    bucket = max(buffer_bytes, largest_tensor_bytes) + _PIECE_ALIGNMENT
     return (num_buffers * max(1, num_consumers) + 1) * bucket

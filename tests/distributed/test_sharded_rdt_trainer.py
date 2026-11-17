@@ -106,7 +106,9 @@ def _attach_server(engine, consumer_ids=(0,)):
         if m.name in engine._owned_names
     }
     units = {m.name: u for m, u in zip(engine._meta, engine._units)}
-    server = _Server(served=served, units=units, pool_bytes=1 << 20, stall_timeout_s=20)
+    server = _Server(
+        served=served, units=units, arena_bytes=1 << 20, stall_timeout_s=20
+    )
     server.outstanding = []
     engine._server = server
     engine._rpc = lambda method, *args: getattr(server, method)(*args)
@@ -186,7 +188,7 @@ def test_owners_outside_the_trainer_are_refused():
         _engine(_Source(_PP, {"embed.weight": (0, 2)}), world=2)
 
 
-def test_pool_covers_the_consumers_that_may_pull_from_the_rank():
+def test_arena_covers_the_consumers_that_may_pull_from_the_rank():
     """With experts on rank 1 only, both consumers may pull from it; rank 0
     serves the shared names to consumer 0 alone."""
     owners = {"model.layers.1.w": (1,)}
@@ -200,7 +202,7 @@ def test_pool_covers_the_consumers_that_may_pull_from_the_rank():
             buffer_bytes=100,
             num_buffers=2,
         )
-        sizes.append(engine._pool_bytes())
+        sizes.append(engine._arena_bytes())
     assert sizes == [(2 * 1 + 1) * 116, (2 * 2 + 1) * 116]
 
 
@@ -275,7 +277,7 @@ def test_at_most_lookahead_plus_one_units_are_resident(cpu_ipc, lookahead):
     def consumer():
         for seq in range(len(pairs)):
             (t,) = server.bucket(0, seq, 0)
-            served.append(t.clone())
+            served.append(t.view(torch.float32).clone())
             for key in server.outstanding:
                 server._freed_bucket(*key, read=True)
             server.outstanding.clear()

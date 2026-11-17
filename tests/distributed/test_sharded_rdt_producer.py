@@ -152,7 +152,7 @@ _UNITS = {N: 0, M: 0, E: 1}
 class _Server(_RDTProducerServer):
     """Frees come from the test (`free`), not from Ray's object store."""
 
-    def _track_free(self, tensors, *key):
+    def _track_free(self, flat, *key):
         self.outstanding.append(key)
 
 
@@ -168,7 +168,7 @@ def server(monkeypatch):
     def make(cls=_Server, **kw):
         kw.setdefault("served", _SERVED)
         kw.setdefault("units", _UNITS)
-        kw.setdefault("pool_bytes", 1 << 20)
+        kw.setdefault("arena_bytes", 1 << 20)
         kw.setdefault("stall_timeout_s", 30)
         s = cls(**kw)
         s.outstanding = []
@@ -211,16 +211,22 @@ def _call(fn, *args, timeout=0.3):
     return future
 
 
+def _boxes(server, flat, consumer=0, seq=0):
+    return [flat_view(flat, p) for p in server._buckets[consumer][seq].layout]
+
+
 class TestServe:
-    def test_a_bucket_is_its_boxes_contiguous(self, server):
+    def test_a_bucket_packs_its_boxes_into_the_arena(self, server):
         s = server()
         s.register_consumer(0, [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]])
         s.begin_sync([0], 0)
         w = _weights()
         _publish(s, w, 0)
-        a, b = s.bucket(0, 0, 0)
-        assert a.is_contiguous() and torch.equal(a, w[N][2:6, 1:3])
-        assert torch.equal(b, w[M])
+        (flat,) = s.bucket(0, 0, 0)
+        assert flat.dtype == torch.uint8 and flat.numel() == 32
+        assert flat.untyped_storage().data_ptr() == s._arena.data_ptr()
+        a, b = _boxes(s, flat)
+        assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
 
     def test_a_pull_waits_for_its_unit(self, server):
         s = server()
@@ -232,7 +238,8 @@ class TestServe:
         _publish(s, w, 0)
         assert not future.done()
         _publish(s, w, 1)
-        assert torch.equal(future.result(timeout=5)[0], w[E])
+        (got,) = _boxes(s, future.result(timeout=5)[0])
+        assert torch.equal(got, w[E])
 
     def test_a_pull_for_the_next_sync_waits_for_it(self, server):
         """A worker can finish a sync and pull for the next before this rank
@@ -251,7 +258,8 @@ class TestServe:
         s.begin_sync([0], 1)
         new = _weights(1)
         _publish(s, new, 1)
-        assert torch.equal(future.result(timeout=5)[0], new[E])
+        (got,) = _boxes(s, future.result(timeout=5)[0])
+        assert torch.equal(got, new[E])
 
     def test_a_pull_for_a_past_sync_is_refused(self, server):
         s = server()
@@ -268,46 +276,11 @@ class TestServe:
         with pytest.raises(ValueError, match="never registered"):
             s.bucket(1, 0, 0)
 
-    def test_the_pool_admits_a_bucket_only_when_it_fits(self, server):
-        """Served, unfreed buckets hold the pool; a full one slows pulls
-        down instead of failing in Ray."""
-        s = server(pool_bytes=64)  # one 8x4 bf16 tensor (64 B) at a time
-        s.register_consumer(0, [[(N, [[0, 8], [0, 4]])], [(N, [[0, 8], [0, 4]])]])
-        s.begin_sync([0], 0)
-        _publish(s, _weights(), 0, 1)
-        s.bucket(0, 0, 0)
-        future = _call(s.bucket, 0, 1, 0)
-        assert not future.done()
-        free(s)
-        future.result(timeout=5)
-
-    def test_an_empty_pool_admits_an_oversized_bucket(self, server):
-        s = server(pool_bytes=16)
-        s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
-        s.begin_sync([0], 0)
-        _publish(s, _weights(), 0)
-        s.bucket(0, 0, 0)
-
-
-class TestFlat:
-    """`flat_buckets`: one byte tensor per bucket, carved from the arena."""
-
-    def test_a_flat_bucket_packs_its_boxes_into_the_arena(self, server):
-        s = server(flat_buckets=True)
-        boxes = [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]]
-        s.register_consumer(0, boxes)
-        s.begin_sync([0], 0)
-        w = _weights()
-        _publish(s, w, 0)
-        (flat,) = s.bucket(0, 0, 0)
-        assert flat.dtype == torch.uint8 and flat.numel() == 32
-        assert flat.untyped_storage().data_ptr() == s._arena.data_ptr()
-        a, b = (flat_view(flat, p) for p in s._buckets[0][0].layout)
-        assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
-
     def test_the_arena_admits_a_bucket_only_when_a_block_fits(self, server):
-        """Freed blocks are reused, first fit."""
-        s = server(flat_buckets=True, pool_bytes=128)
+        """Served, unfreed buckets hold their blocks; a full arena slows
+        pulls down instead of failing in Ray. Freed blocks are reused, first
+        fit."""
+        s = server(arena_bytes=128)
         whole = [(N, [[0, 8], [0, 4]])]  # 64 B
         s.register_consumer(0, [whole, whole, whole])
         s.begin_sync([0], 0)
@@ -321,18 +294,7 @@ class TestFlat:
         (flat,) = future.result(timeout=5)
         assert flat.data_ptr() == s._arena.data_ptr()
         free(s)
-        assert s._blocks == {} and s._pool_used == 0
-
-    def test_an_empty_arena_admits_an_oversized_bucket(self, server):
-        s = server(flat_buckets=True, pool_bytes=16)
-        s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
-        s.begin_sync([0], 0)
-        w = _weights()
-        _publish(s, w, 0)
-        (flat,) = s.bucket(0, 0, 0)
-        assert torch.equal(flat.view(torch.bfloat16).view(8, 4), w[N])
-        free(s)
-        assert s._blocks == {} and s._pool_used == 0
+        assert s._blocks == {}
 
 
 class TestRegister:
@@ -348,6 +310,10 @@ class TestRegister:
     def test_bad_buckets_are_refused(self, server, bucket, match):
         with pytest.raises(ValueError, match=match):
             server().register_consumer(0, [bucket])
+
+    def test_a_bucket_larger_than_the_arena_is_refused(self, server):
+        with pytest.raises(ValueError, match="larger than"):
+            server(arena_bytes=16).register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
 
     def test_publish_checks_the_metadata(self, server):
         s = server()
@@ -371,8 +337,8 @@ class TestRelease:
         assert s.wait_freed() == [0]
 
     def test_serving_is_not_freeing(self, server):
-        """Until Ray frees a served bucket its pool copy may still read the
-        unit, so a served unit stays gathered."""
+        """Until Ray frees a served bucket the consumer may still read its
+        arena block, so a served unit stays gathered."""
         s = server()
         s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
         s.begin_sync([0], 0)
@@ -417,7 +383,7 @@ class TestRelease:
         _publish(s, _weights(1), 0)
         s._freed_bucket(*stale, read=True)
         assert 0 in s._unit_names
-        assert s._pool_used == 0
+        assert s._blocks == {}
 
     def test_end_sync_waits_for_every_unit(self, server):
         s = server()
@@ -486,7 +452,7 @@ def test_a_bucket_is_freed_only_after_ray_stored_and_freed_it(server, monkeypatc
     (sent,) = s.bucket(0, 0, 0)
     assert s.wait_freed() == [0]
     assert store.calls == 3 and events == [sent]
-    assert s._pool_used == 0
+    assert s._blocks == {}
 
 
 # ------------------------------------------------------------ export ring

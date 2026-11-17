@@ -3,16 +3,16 @@
 """The sharded-RDT consumer on the load plan, on CPU.
 
 The engine runs for real against real producer servers through a loopback
-transport that does what Ray's receive without targets does: a pull lands in
-one fresh buffer, and the received tensors are views of it at their packed
-offsets (the producer sends only contiguous tensors). Dropping the pull frees
-it at the producer. Producers send one tensor per piece, or one flat byte
-tensor per bucket (`flat_buckets`). After two syncs every tensor of the model
-must equal a cold start on the same weights, byte for byte, at the same
-address.
+transport that does what Ray's receive into a target does: a pull's one flat
+byte tensor is copied into the slice of the receive arena the engine named,
+after the slice is poisoned. Getting the pull frees it at the producer.
+After two syncs every tensor of the model must equal a cold start on the
+same weights, byte for byte, at the same address.
 """
 
+import dataclasses
 import gc
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -33,11 +33,11 @@ from tests.model_executor.model_loader.test_load_plan import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
+    arena_bytes,
     flat_layout,
     flat_view,
     gather_units,
     piece_nbytes,
-    pool_bytes,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
@@ -56,7 +56,7 @@ BF16 = torch.bfloat16
 def _direct_mode(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setattr(lifecycle, "_weight_update_active", False)
-    monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda flat=False: None)
+    monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda: None)
     monkeypatch.setattr(
         torch.accelerator, "current_device_index", lambda *a, **kw: 0, raising=False
     )
@@ -69,13 +69,15 @@ def _direct_mode(monkeypatch):
 class _Server(_RDTProducerServer):
     """A real producer whose frees come from the loopback, not Ray's store."""
 
-    def _track_free(self, tensors, *key):
+    def _track_free(self, flat, *key):
         self.tracked = key
 
 
 class _Handle:
-    def __init__(self, server, tensors, key):
-        self.server, self.tensors, self.key = server, tensors, key
+    def __init__(self, server, sent, target, key):
+        # Ray keeps only a weak reference to a target
+        self.server, self.sent, self.key = server, sent, key
+        self.target = weakref.ref(target)
 
 
 class _Loopback:
@@ -84,6 +86,7 @@ class _Loopback:
     def __init__(self, servers, consumer_id):
         self.servers, self.consumer_id = servers, consumer_id
         self.pulls: list[_Bucket] = []
+        self.pinned: list[torch.Tensor] = []
 
     def hooks(self) -> _PullHooks:
         return _PullHooks(
@@ -91,39 +94,38 @@ class _Loopback:
             wait=lambda hs: list(hs),
             get=self.get,
             register=self.register,
+            pin=self.pinned.append,
+            unpin=lambda t: self.pinned.remove(t),
         )
 
     def register(self, per_producer):
         for server, buckets in zip(self.servers, per_producer):
             server.register_consumer(self.consumer_id, buckets)
 
-    def issue(self, bucket, sync_idx):
+    def issue(self, bucket, sync_idx, target):
+        assert any(
+            target.untyped_storage().data_ptr() == t.untyped_storage().data_ptr()
+            for t in self.pinned
+        ), "the target is not in the pinned arena"
         self.pulls.append(bucket)
         server = self.servers[bucket.producer]
-        tensors = server.bucket(self.consumer_id, bucket.seq, sync_idx)
-        assert all(t.is_contiguous() for t in tensors), "Ray sends contiguous only"
-        return _Handle(server, tensors, server.tracked)
+        (sent,) = server.bucket(self.consumer_id, bucket.seq, sync_idx)
+        assert sent.dtype == target.dtype and sent.shape == target.shape
+        return _Handle(server, sent, target, server.tracked)
 
     def get(self, handles):
+        """Ray's get: into the target while it lives, else into a buffer of
+        its own."""
         out = []
         for h in handles:
-            out.append(_receive(h.tensors))
+            target = h.target()
+            if target is None:
+                target = torch.empty_like(h.sent)
+            target.fill_(0xA5)
+            target.copy_(h.sent)
             h.server._freed_bucket(*h.key, read=True)
+            out.append([target])
         return out
-
-
-def _receive(sent: list[torch.Tensor]) -> list[torch.Tensor]:
-    """Ray's no-target receive: one fresh buffer, views at packed offsets."""
-    layout, offset = [], 0
-    for t in sent:
-        offset = -(-offset // t.element_size()) * t.element_size()
-        layout.append((offset, t.nbytes, t.dtype, tuple(t.shape)))
-        offset += t.nbytes
-    buf = torch.full((offset,), 0xA5, dtype=torch.uint8)
-    received = [flat_view(buf, piece) for piece in layout]
-    for got, t in zip(received, sent):
-        got.copy_(t)
-    return received
 
 
 # ------------------------------------------------------------ fleet
@@ -154,7 +156,6 @@ class _Fleet:
         num_buffers=2,
         consumer_id=0,
         num_consumers=1,
-        flat=False,
     ):
         owners = owners or {}
         owner_sets: list[list[int]] = []
@@ -175,9 +176,8 @@ class _Fleet:
                     if p in owner_sets[classes[i]]
                 },
                 units=units,
-                pool_bytes=1 << 22,
+                arena_bytes=1 << 22,
                 stall_timeout_s=5,
-                flat_buckets=flat,
             )
             for p in range(num_producers)
         ]
@@ -204,7 +204,6 @@ class _Fleet:
                 num_consumers=num_consumers,
                 buffer_bytes=buffer_bytes,
                 num_buffers=num_buffers,
-                flat_buckets=flat,
                 **_metas_info(shapes),
             )
         )
@@ -227,7 +226,7 @@ class _Fleet:
         for server in self.servers:
             server.end_sync()
             assert not server._cache, "a unit outlived the sync"
-            assert server._pool_used == 0 and not server._blocks
+            assert not server._blocks
         self.engine.finish_weight_update()
 
 
@@ -252,9 +251,8 @@ def _check_equals_cold_start(fleet, make, shapes):
 # ------------------------------------------------------------ byte equality
 
 
-@pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("buffer_bytes", [64, 1 << 20])
-def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes, flat):
+def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
     """Transpose (a strided copy), a tied alias (nothing to pull), a cast and
     a step slice (fallbacks), and an embedding; `router.bias` lives only on
     producer 1."""
@@ -265,7 +263,6 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes, flat):
         _TOY_SHAPES,
         owners={"router.bias": [1]},
         buffer_bytes=buffer_bytes,
-        flat=flat,
     )
     _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
     pulled = {name for b in fleet.loopback.pulls for name, _ in b.pieces}
@@ -284,11 +281,39 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes, flat):
     assert [j for j, _ in b.typed] == [i] and i not in b.byte_pieces
 
 
-@pytest.mark.parametrize("flat", [False, True])
+def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
+    """Ray falls back to its own buffer, silently, when it cannot use a
+    target; the engine must not copy the stale slot out."""
+    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
+    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES)
+    get = fleet.loopback.get
+    fleet.engine._hooks = dataclasses.replace(
+        fleet.engine._hooks,
+        get=lambda hs: [[t.clone() for t in ts] for ts in get(hs)],
+    )
+    with pytest.raises(RuntimeError, match="did not land"):
+        fleet.sync(_checkpoint(_TOY_SHAPES, seed=1), 1)
+
+
+def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
+    """One slot of the largest bucket per pull in flight, pinned at the first
+    plan, reused by every sync, and unpinned when the plan is dropped."""
+    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
+    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48, num_buffers=3)
+    for sync_idx in (1, 2):
+        fleet.sync(_checkpoint(_TOY_SHAPES, seed=sync_idx), sync_idx)
+        (arena,) = fleet.loopback.pinned
+        slot = max(b.nbytes for b in fleet.engine._buckets)
+        assert arena.numel() == 3 * slot and arena is fleet.engine._arena
+    hooks = fleet.engine._hooks
+    fleet.engine.shutdown()
+    assert not fleet.loopback.pinned and hooks is not None
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("buffer_bytes", [32, 1 << 20])
 def test_qkv_and_merged_column_under_tp(
-    default_vllm_config, monkeypatch, tp_rank, buffer_bytes, flat
+    default_vllm_config, monkeypatch, tp_rank, buffer_bytes
 ):
     from vllm.model_executor import parameter
     from vllm.model_executor.layers import linear
@@ -298,9 +323,7 @@ def test_qkv_and_merged_column_under_tp(
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
     make = _linear_model()
     model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
-    fleet = _Fleet(
-        monkeypatch, model, _LINEAR_SHAPES, buffer_bytes=buffer_bytes, flat=flat
-    )
+    fleet = _Fleet(monkeypatch, model, _LINEAR_SHAPES, buffer_bytes=buffer_bytes)
     _check_equals_cold_start(fleet, make, _LINEAR_SHAPES)
     # every destination is contiguous: one fused byte copy per pull
     assert all(not b.typed and not b.fallbacks for b in fleet.engine._buckets)
@@ -326,17 +349,14 @@ def test_experts_under_ep_owned_by_one_producer(monkeypatch, ep_rank):
             assert box[0] == (2 * ep_rank, 2 * ep_rank + 2)
 
 
-@pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("buffer_bytes", [16, 1 << 20])
-def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes, flat):
+def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes):
     """Gate and up rows are two boxes of one name, landing strided; with
     16 B budgets each piece is its own pull."""
     make = _experts_model(0, 1, tp_rank, 2)
     model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
-    fleet = _Fleet(
-        monkeypatch, model, _EXPERT_SHAPES, buffer_bytes=buffer_bytes, flat=flat
-    )
+    fleet = _Fleet(monkeypatch, model, _EXPERT_SHAPES, buffer_bytes=buffer_bytes)
     _check_equals_cold_start(fleet, make, _EXPERT_SHAPES)
     gate_up = [
         box
@@ -434,9 +454,7 @@ def test_plan_failure_leaves_a_note_and_retries(monkeypatch):
 
     hooks = fleet.engine._hooks
     assert hooks is not None
-    fleet.engine._hooks = _PullHooks(
-        issue=hooks.issue, wait=hooks.wait, get=hooks.get, register=boom
-    )
+    fleet.engine._hooks = dataclasses.replace(hooks, register=boom)
     with pytest.raises(RuntimeError, match="unreachable") as info:
         fleet.engine.start_weight_update()
     assert "mid-reload" in "".join(info.value.__notes__)
@@ -494,26 +512,19 @@ def test_flat_layout_puts_each_piece_on_16_bytes():
 
 
 @pytest.mark.parametrize(
-    "installed,flat,ok",
-    [
-        ("2.56.1", True, True),
-        ("2.56.1", None, True),
-        ("2.56.1", False, False),
-        ("2.60.0", False, True),
-        ("2.55.0", None, False),
-    ],
+    "installed,ok", [("2.56.0", True), ("2.60.0", True), ("2.55.1", False)]
 )
-def test_ray_version_floor_depends_on_flat_buckets(monkeypatch, installed, flat, ok):
+def test_ray_version_floor(monkeypatch, installed, ok):
     import importlib.metadata
 
     from vllm.distributed.weight_transfer import sharded_rdt_common
 
     monkeypatch.setattr(importlib.metadata, "version", lambda pkg: installed)
     if ok:
-        sharded_rdt_common.check_ray_rdt_version(flat)
+        sharded_rdt_common.check_ray_rdt_version()
     else:
         with pytest.raises(ValueError, match="requires Ray"):
-            sharded_rdt_common.check_ray_rdt_version(flat)
+            sharded_rdt_common.check_ray_rdt_version()
 
 
 def test_gather_units_cut_by_bytes():
@@ -527,15 +538,15 @@ def test_piece_bytes_count_block_alignment():
     assert piece_nbytes(((0, 8), (0, 2)), torch.float32) == 64
 
 
-def test_pool_holds_every_consumers_window_plus_slack():
+def test_arena_holds_every_consumers_window_plus_slack():
     assert (
-        pool_bytes(
+        arena_bytes(
             buffer_bytes=100, num_buffers=2, num_consumers=3, largest_tensor_bytes=50
         )
         == (2 * 3 + 1) * 116
     )
     assert (
-        pool_bytes(
+        arena_bytes(
             buffer_bytes=100, num_buffers=1, num_consumers=1, largest_tensor_bytes=400
         )
         == 2 * 416
