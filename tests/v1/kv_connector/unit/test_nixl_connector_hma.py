@@ -949,6 +949,69 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
 
 
 @pytest.mark.cpu_test
+def test_apply_prefix_caching_ssm_boundary_without_local_slot_reads_running_state():
+    """Without a reserved boundary slot, D reads only P's running state."""
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        [[10, 11, 12, 13], [99]],
+        [[20, 21, 22, 23], [40, 41]],
+        1,
+        1,
+    )
+
+    assert aligned_local == [[10, 11, 12, 13], [99]]
+    assert aligned_remote == [[20, 21, 22, 23], [41]]
+
+
+@pytest.mark.cpu_test
+def test_ssm_boundary_partial_read_failure_fails_whole_request():
+    """A failed boundary-state read must fail its request even after the
+    running-state read completes, and must not notify P or post-process KV."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker._recving_metadata = {
+        "request": MagicMock(local_block_ids=([1, 2, 3], [7, 8]))
+    }
+    worker._recving_transfers = defaultdict(list, {"request": [101, 102]})
+    worker._failed_recv_reqs = queue.Queue()
+    worker._recv_failures = set()
+    worker._invalid_block_ids = queue.Queue()
+    worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
+    worker._replicated_pcp_done_sending = set()
+    worker._failed_remote_engines = set()
+    worker._is_hma_required = True
+    worker.tp_rank = 0
+    worker._log_failure = MagicMock()  # type: ignore[method-assign]
+    worker._get_new_notifs = MagicMock(return_value=set())  # type: ignore[method-assign]
+    worker._sync_device_after_direct_recv = MagicMock()  # type: ignore[method-assign]
+    worker._reap_expired_send_leases = MagicMock()  # type: ignore[method-assign]
+    worker._cleanup_remote_engines = MagicMock()  # type: ignore[method-assign]
+    worker.post_process_device_kv_on_receive = MagicMock()  # type: ignore[method-assign]
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", "DONE"]
+
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == set()
+    assert worker._recving_transfers == {"request": [102]}
+
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
+    assert "request" not in worker._recving_metadata
+    assert "request" not in worker._pending_recv_notifs
+    worker.nixl_wrapper.send_notif.assert_not_called()
+    worker.post_process_device_kv_on_receive.assert_not_called()
+    assert worker._sync_device_after_direct_recv.call_args.args == (set(),)
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
     "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
