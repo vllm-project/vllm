@@ -685,6 +685,26 @@ def has_quark():
     return _has_module("quark")
 
 
+def has_llguidance() -> bool:
+    """Whether the optional `llguidance` package is available."""
+    return _has_module("llguidance")
+
+
+def ensure_llguidance_available() -> None:
+    """Raise an actionable ImportError if `llguidance` cannot be imported."""
+    if not has_llguidance():
+        raise ImportError(
+            "The 'guidance' structured output backend requires the "
+            "`llguidance` package, which is not installed or failed to import. "
+            "Install it with "
+            '`pip install "llguidance>=1.3.0,<1.8.0"` '
+            "(prebuilt Linux wheels for llguidance >= 1.7.0 require "
+            "glibc >= 2.31; on glibc 2.28 pass `--prefer-binary` / "
+            "`--only-binary llguidance`, pin `llguidance<1.7.0`, or build "
+            "from source)."
+        )
+
+
 def check_torchcodec_available():
     """Whether the optional `torchcodec` package is available."""
     try:

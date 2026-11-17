@@ -65,6 +65,10 @@ class StructuredOutputsConfig:
                 "disable_additional_properties is only supported "
                 "for the guidance backend."
             )
+        if self.backend == "guidance":
+            from vllm.utils.import_utils import ensure_llguidance_available
+
+            ensure_llguidance_available()
         if self.backend == "lm-format-enforcer":
             logger.warning_once(
                 "The lm-format-enforcer structured outputs backend is deprecated "

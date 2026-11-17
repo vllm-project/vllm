@@ -489,3 +489,94 @@ class TestValidateStructuredOutputs:
             xgrammar_factory.assert_called_once()
             xgrammar_backend.compile_grammar.assert_called_once()
             guidance_factory.assert_not_called()
+
+    class TestIssue66345OptionalLlguidance:
+        def test_imports_do_not_load_llguidance(self):
+            """Importing `backend_guidance` and `vllm.tokenizers.mistral` must
+            keep `llguidance` lazy so `from vllm import LLM` succeeds on hosts
+            where `llguidance` is absent or its native library cannot load."""
+            import subprocess
+            import sys
+
+            code = """
+import builtins, sys
+orig_import = builtins.__import__
+def block_llguidance(name, *args, **kwargs):
+    if name == "llguidance" or name.startswith("llguidance."):
+        raise ImportError("/lib64/libc.so.6: version `GLIBC_2.30' not found")
+    return orig_import(name, *args, **kwargs)
+builtins.__import__ = block_llguidance
+import vllm.tokenizers.mistral
+import vllm.v1.structured_output.backend_guidance
+assert "llguidance" not in sys.modules
+"""
+            subprocess.run([sys.executable, "-c", code], check=True)
+
+        def test_auto_backend_falls_back_when_llguidance_unavailable(self, monkeypatch):
+            monkeypatch.setattr(
+                "vllm.utils.import_utils._has_module",
+                lambda name: name != "llguidance",
+            )
+            tokenizer = object.__new__(TokenizersBackend)
+
+            # Schema rejected by xgrammar (`multipleOf`) falls back to outlines
+            # instead of crashing on missing llguidance.
+            params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(json=GUIDANCE_JSON_SCHEMA)
+            )
+            params._validate_structured_outputs(
+                _StubModelConfig(is_diffusion=False),
+                StructuredOutputsConfig(backend="auto"),
+                tokenizer=tokenizer,
+            )
+            assert params.structured_outputs is not None
+            assert params.structured_outputs._backend == "outlines"
+
+        def test_explicit_guidance_config_fails_without_llguidance(self, monkeypatch):
+            monkeypatch.setattr(
+                "vllm.utils.import_utils._has_module",
+                lambda name: name != "llguidance",
+            )
+            with pytest.raises(ImportError, match=r"pip install.*llguidance"):
+                StructuredOutputsConfig(backend="guidance")
+
+        def test_auto_backend_reports_missing_llguidance_when_outlines_rejects(
+            self, monkeypatch
+        ):
+            monkeypatch.setattr(
+                "vllm.utils.import_utils._has_module",
+                lambda name: name != "llguidance",
+            )
+            params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(
+                    grammar="start: <|special_token|>"
+                )
+            )
+            with pytest.raises(
+                VLLMValidationError,
+                match=r"XGrammar and Outlines rejected.*llguidance",
+            ):
+                params._validate_structured_outputs(
+                    _StubModelConfig(is_diffusion=False),
+                    StructuredOutputsConfig(backend="auto"),
+                    tokenizer=object.__new__(TokenizersBackend),
+                )
+
+        def test_mistral_lark_auto_backend_without_llguidance(self, monkeypatch):
+            monkeypatch.setattr(
+                "vllm.utils.import_utils._has_module",
+                lambda name: name != "llguidance",
+            )
+            tok = object.__new__(mistral_tokenizers.MistralTokenizer)
+            tok.is_tekken = True
+            assert tok.supports_grammar is False
+
+            params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(grammar='start: "hello"')
+            )
+            with pytest.raises(VLLMValidationError, match=r"pip install.*llguidance"):
+                params._validate_structured_outputs(
+                    _StubModelConfig(is_diffusion=False),
+                    StructuredOutputsConfig(backend="auto"),
+                    tokenizer=tok,
+                )
