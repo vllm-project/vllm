@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::sync::Once;
 
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -263,6 +264,14 @@ impl HfChatRenderer {
             && !effective_template.renders_tool_reference()
             && lowered.iter().any(|message| message.tool_references().next().is_some())
         {
+            static TOOL_REFERENCE_HINT_ONCE: Once = Once::new();
+            TOOL_REFERENCE_HINT_ONCE.call_once(|| {
+                warn!(
+                    "Rejected a request with tool_reference content (tool search results): the \
+                     chat template does not render it. Pass a chat template that does with \
+                     --chat-template to support tool search."
+                )
+            });
             return Err(Error::ToolReferenceNotRendered);
         }
         let mut messages =
@@ -1369,7 +1378,7 @@ mod tests {
         );
         let error = prompt(skips, ChatTemplateContentFormatOption::OpenAi).unwrap_err();
         assert!(error.is_request_validation_error());
-        expect!["This model's chat template does not render tool_reference content (tool search results). Use a chat template that renders it (--chat-template) or disable tool search in the client."]
+        expect!["This model's chat template does not support tool search results (tool_reference content). Disable tool search in the client; for Claude Code, set ENABLE_TOOL_SEARCH=false."]
             .assert_eq(&error.to_report_string());
     }
 
