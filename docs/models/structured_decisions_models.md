@@ -475,9 +475,11 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   `instructions` return 400, since the prompt is fixed. Other
   `chat_template_kwargs` reach the template, with thinking off.
 - The OpenAI-style `/v1/decisions` serves the model too, with the stock
-  question types (at most 26 options, the stock confidence). Their
-  options carry no descriptions, so the option lines render empty;
-  prefer `/v1/systemone` for the trained answer shapes.
+  question types (at most 26 options, the stock confidence). An option
+  line shows the option's value (a choice's JSON-encoded, a score's
+  label), then `: ` and its description when it has one; a predicate
+  reads `A. false` and `B. true`. Prefer `/v1/systemone` for the trained
+  answer shapes.
 
 ### Mammoth-1 and Elephant-1
 

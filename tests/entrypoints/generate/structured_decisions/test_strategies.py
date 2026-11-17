@@ -35,6 +35,7 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     parse_questions,
 )
 from vllm.entrypoints.openai.decisions import knowline
+from vllm.entrypoints.openai.decisions.adapters import make_read_question
 from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
 from vllm.entrypoints.openai.decisions.protocol import ChoiceAnswer, DecisionRequest
 from vllm.entrypoints.openai.decisions.question_types import (
@@ -1778,6 +1779,13 @@ def test_knowline_pins_the_trained_text():
             "Which?",
             "Question: Which?\nOptions:\nA. a: x\nB. b",
         ),
+        # An explicit empty description keeps its colon, as in the reference.
+        (
+            "choice",
+            {"a": "", "b": None},
+            "Which?",
+            "Question: Which?\nOptions:\nA. a: \nB. b",
+        ),
         (
             "choice",
             {"address": None, "delay": "the parcel was late"},
@@ -2629,5 +2637,48 @@ async def test_knowline_serves_the_decisions_endpoint():
         "billing",
         "shipping",
     }
-    # The rendering and usage assertions live with the systemone test.
+    # The trained prompt renders the stock questions too: options without a
+    # description show their values alone (a choice's JSON-encoded), and
+    # usage sums the reads.
     assert len(engine.generated) == 2
+    texts = [tokenizer.decode(p["prompt_token_ids"]) for p, _, _ in engine.generated]
+    for text in texts:
+        assert text.endswith(f"<assistant>{knowline.ANSWER}")
+    # The mock tokenizer splits on whitespace and decodes with spaces.
+    assert any("Options: A. false B. true" in text for text in texts)
+    assert any('Options: A. "billing" B. "shipping" ' in text for text in texts)
+    assert dump["usage"]["input_tokens"] == sum(
+        len(p["prompt_token_ids"]) for p, _, _ in engine.generated
+    )
+
+
+def test_knowline_renders_decisions_options_without_empty_descriptions():
+    request = DecisionRequest(
+        model="m",
+        input="x",
+        questions=[
+            {
+                "type": "choice",
+                "name": "team",
+                "instructions": "Which team?",
+                "choices": [
+                    {"value": "billing"},
+                    {"value": "shipping", "description": "parcels"},
+                ],
+            },
+            {
+                "type": "score",
+                "name": "urgency",
+                "instructions": "How urgent?",
+                "levels": [{"label": "low"}, {"label": "high", "description": "today"}],
+            },
+        ],
+    )
+    choice, score = (
+        knowline.question_block(make_read_question(i, q, 255))
+        for i, q in enumerate(request.questions)
+    )
+    assert choice == (
+        'Question: Which team?\nOptions:\nA. "billing"\nB. "shipping": parcels'
+    )
+    assert score == "Question: How urgent?\nOptions:\nA. low\nB. high: today"

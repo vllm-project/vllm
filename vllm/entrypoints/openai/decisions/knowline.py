@@ -149,8 +149,14 @@ def question_block(question: Question) -> str:
             for i, o in enumerate(question.options)
         ]
     else:
+        # The OpenAI decisions API defaults a missing description to "", so
+        # its options show the value alone. A KnowLine choice keeps an
+        # explicit "" as "name: ", as the reference server does.
+        foreign = not isinstance(question.type, KnowLineChoice)
         texts = [
-            o.name if o.description is None else f"{o.name}: {o.description}"
+            o.name
+            if o.description is None or (foreign and not o.description)
+            else f"{o.name}: {o.description}"
             for o in question.options
         ]
     lines = "".join(f"{label}. {text}\n" for label, text in zip(question.labels, texts))
