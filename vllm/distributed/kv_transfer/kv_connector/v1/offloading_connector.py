@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -65,19 +65,13 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return tuple(
             group_id
             for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
-            if group.kv_cache_spec.prefix_cacheable and group_id not in offloaded
+            if group.prefix_cacheable and group_id not in offloaded
         )
 
     @property
     def scheduler(self) -> OffloadingConnectorScheduler:
         assert self.connector_scheduler is not None
         return self.connector_scheduler
-
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: KVTransferConfig
-    ) -> bool:
-        return True
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -181,7 +175,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def _max_loadable_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> int | None:
-        """How far past ``num_computed_tokens`` a load may reach, if bounded.
+        """How far past `num_computed_tokens` a load may reach, if bounded.
 
         Bounded by the deepest prefix the groups this connector does not
         offload already hold, since nothing refills them beyond it.

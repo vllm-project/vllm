@@ -102,6 +102,11 @@ impl ChunkUsage {
 use crate::cli::BackendKind;
 use crate::error::Result;
 
+/// Error for a 200 stream that never carried a token, shared by the streaming
+/// backends so they report it the same way.
+pub(crate) const NO_VALID_CHUNK_ERROR: &str =
+    "Never received a valid chunk to calculate TTFT. This response will be marked as failed!";
+
 /// Input for a single benchmark request.
 #[derive(Debug, Clone)]
 pub struct RequestFuncInput {
@@ -152,6 +157,10 @@ pub struct RequestFuncOutput {
     pub server_queue_time: Option<f64>,
     pub server_ttft: Option<f64>,
     pub num_input_sequences: usize,
+    /// Seconds between the scheduled arrival and the send, i.e. time spent
+    /// waiting for a `--max-concurrency` slot.
+    #[serde(default)]
+    pub client_queue_time: f64,
 }
 
 impl Default for RequestFuncOutput {
@@ -170,6 +179,7 @@ impl Default for RequestFuncOutput {
             server_queue_time: None,
             server_ttft: None,
             num_input_sequences: 1,
+            client_queue_time: 0.0,
         }
     }
 }

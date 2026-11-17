@@ -6,11 +6,11 @@ NOTE: The reference implementation also offers a fused MLA preprocessing
 wrapper, which is not available here, so this port keeps the eager MLA path
 with an FP8 indexer cache. TODO: restore the fused preprocessing once the
 kernel lands. The HPC gated-MLA GEMM *is* wired up: it replaces the eager
-output gating when the hpc package is installed, ``VLLM_ENABLE_HPC_OPS=1``
+output gating when the hpc package is installed, `VLLM_ENABLE_HPC_OPS=1`
 and the elementwise/dtype/alignment constraints hold.
 
 The per-head learnable sink is supported through `.flashmla_sparse`, which
-subclasses the platform's sparse MLA backend to forward ``attn_sink``.
+subclasses the platform's sparse MLA backend to forward `attn_sink`.
 """
 
 from typing import cast
@@ -39,7 +39,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    fuse_indexer_wk_weights_proj,
+    init_indexer_wk_weights_proj,
+)
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.utils import compute_skip_topk_layers
@@ -117,16 +121,8 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcast to BF16 while loading to keep the fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
-        )
+        # wk + weights_proj run as one BF16 GEMM (wk_weights_proj)
+        init_indexer_wk_weights_proj(self, hidden_size, quant_config, prefix)
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
@@ -159,6 +155,9 @@ class Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
         )
+
+    def process_weights_after_loading(self) -> None:
+        fuse_indexer_wk_weights_proj(self)
 
     def forward(
         self,
@@ -231,7 +230,7 @@ class HYV4MLAAttention(nn.Module):
 
     Main reference: the DeepSeek-V2 paper and the FlashInfer implementation
     (https://arxiv.org/abs/2405.04434). HY V4 additionally supports an output
-    gate (``gated_mla``) and a per-head learnable attention sink.
+    gate (`gated_mla`) and a per-head learnable attention sink.
 
     The sink is applied by binding the sink-capable backend from
     `.flashmla_sparse`; if no backend on this platform can consume sinks, the
@@ -466,6 +465,7 @@ class HYV4MLAAttention(nn.Module):
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
+            shardq_eligible=not is_mtp_layer,
             indexer=self.indexer,
             topk_indices_buffer=topk_indices_buffer,
             attn_backend=sink_backend,
@@ -476,8 +476,8 @@ class HYV4MLAAttention(nn.Module):
     def topk_indices_buffer(self) -> torch.Tensor | None:
         """The sparse top-k index buffer this layer reads from.
 
-        The real consumer is ``mla_attn.impl``, an ``AttentionImpl`` rather than
-        an ``nn.Module``, so a plain ``named_modules()`` walk cannot reach it.
+        The real consumer is `mla_attn.impl`, an `AttentionImpl` rather than
+        an `nn.Module`, so a plain `named_modules()` walk cannot reach it.
         The MTP proposer rebinds the draft layers onto the target model's buffer
         through such a walk, so expose it here: without this the draft attention
         would keep reading its own buffer while the indices it needs are written
@@ -499,9 +499,9 @@ class HYV4MLAAttention(nn.Module):
 
         1. If the backend the selector would pick already advertises
            `supports_sink`, keep it — this also honours an explicit
-           ``--attention-backend`` choice.
-        2. Otherwise fall back to the sink-capable ``FLASHMLA_SPARSE`` subclass
-           in `.flashmla_sparse`, whose kernels accept ``attn_sink``, provided
+           `--attention-backend` choice.
+        2. Otherwise fall back to the sink-capable `FLASHMLA_SPARSE` subclass
+           in `.flashmla_sparse`, whose kernels accept `attn_sink`, provided
            it validates against the current runtime configuration.
         3. Otherwise give up on the bias rather than failing the load.
 
@@ -591,14 +591,14 @@ class HYV4MLAAttention(nn.Module):
     def _force_sparse_mqa(self) -> None:
         """Keep every token on the sink-capable sparse MQA path.
 
-        ``_resolve_sink_backend`` only binds the backend that serves decode.
-        ``MLAAttention`` additionally routes short prefills to a separate dense
-        MLA prefill backend, and none of those accept ``attn_sink``, so prefill
+        `_resolve_sink_backend` only binds the backend that serves decode.
+        `MLAAttention` additionally routes short prefills to a separate dense
+        MLA prefill backend, and none of those accept `attn_sink`, so prefill
         would silently drop the sink while decode applies it. Such a partially
         applied sink is not the trained architecture and corrupts the output, so
         opt out of the dense split instead.
 
-        Prefills up to ``index_topk`` keep every token inside the sparse top-k,
+        Prefills up to `index_topk` keep every token inside the sparse top-k,
         making the sparse path numerically equivalent to the dense one apart from
         also applying the sink.
         """
@@ -705,8 +705,8 @@ class HYV4MLAAttention(nn.Module):
         Both read per-batch attention metadata, so under the breakable cudagraph
         they must not be captured. Keeping them in a single break (instead of one
         break each) also means the attention inputs never have to survive a
-        capture-segment boundary. The nested ``sparse_attn_indexer`` and
-        ``unified_mla_attention_with_output`` breaks short-circuit here, since
+        capture-segment boundary. The nested `sparse_attn_indexer` and
+        `unified_mla_attention_with_output` breaks short-circuit here, since
         the capture is no longer active inside an eager segment.
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
