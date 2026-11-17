@@ -55,6 +55,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, Usa
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.parser.metrics import Endpoint
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.inputs.preprocess import (
@@ -239,6 +240,8 @@ class DisabledThinkingEffortResolver:
 
 class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests."""
+
+    parser_endpoint = Endpoint.ANTHROPIC_MESSAGES
 
     def __init__(
         self,

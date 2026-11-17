@@ -39,6 +39,11 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 )
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import (
+    Endpoint,
+    ParserMetrics,
+    ParserMode,
+)
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
 )
@@ -109,10 +114,18 @@ class TurnMetrics:
 class ConversationContext(ABC):
     response_parser: Parser | None = None
     request_metrics: "RequestStateStats | None" = None
+    # Parser time accumulated while generating. The subclass that parses owns
+    # it; `observe_parser_metrics` records it once per finished request.
+    parser_metrics: ParserMetrics | None = None
     # Built-in tools can trigger additional model generations. In that case,
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+
+    def observe_parser_metrics(self) -> None:
+        """Record the accumulated parser time for this request."""
+        if self.parser_metrics is not None:
+            self.parser_metrics.observe()
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -332,6 +345,11 @@ class ParsableContext(ConversationContext):
         )
         self.parser_cls = parser_cls
         self.request = request
+        self.parser_metrics = ParserMetrics(
+            ParserMode.STREAMING if request.stream else ParserMode.NON_STREAMING,
+            Endpoint.RESPONSES,
+            request_id=request.request_id,
+        )
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
@@ -362,12 +380,15 @@ class ParsableContext(ConversationContext):
         self.finish_reason = completion.finish_reason
 
         if self.response_parser is not None:
-            reasoning, content, tool_calls = self.response_parser.parse(
-                completion.text,
-                self.request,
-                enable_auto_tools=self.enable_auto_tools,
-                model_output_token_ids=completion.token_ids,
-            )
+            assert self.parser_metrics is not None
+            self.parser_metrics.finish_reason = self.finish_reason
+            with self.parser_metrics.time_call(tokens=len(completion.token_ids or ())):
+                reasoning, content, tool_calls = self.response_parser.parse(
+                    completion.text,
+                    self.request,
+                    enable_auto_tools=self.enable_auto_tools,
+                    model_output_token_ids=completion.token_ids,
+                )
             # Each round is a separate generation, so count it on its own ids.
             self.num_reasoning_tokens += self.response_parser.count_reasoning_tokens(
                 completion.token_ids or []
@@ -646,6 +667,16 @@ class HarmonyContext(ConversationContext):
         self._messages = messages
         self.request = request
         self.response_parser: HarmonyParser = response_parser
+        mode = (
+            ParserMode.STREAMING
+            if request is not None and request.stream
+            else ParserMode.NON_STREAMING
+        )
+        self.parser_metrics = ParserMetrics(
+            mode,
+            Endpoint.RESPONSES,
+            request_id=request.request_id if request is not None else None,
+        )
         self.finish_reason: str | None = None
         self.available_tools = available_tools
         self.function_tool_names = function_tool_names
@@ -683,7 +714,9 @@ class HarmonyContext(ConversationContext):
             self._update_prefill_token_usage(output)
 
         output_token_ids = output.outputs[0].token_ids
-        result = self.response_parser.process_chunk(output_token_ids)
+        assert self.parser_metrics is not None
+        with self.parser_metrics.time_call(tokens=len(output_token_ids)):
+            result = self.response_parser.process_chunk(output_token_ids)
         segments = result.segments
         self.num_reasoning_tokens += result.reasoning_token_count
 
@@ -696,7 +729,10 @@ class HarmonyContext(ConversationContext):
 
         if output.finished:
             self.finish_reason = output.outputs[0].finish_reason
-            flushed_segments = self.response_parser.flush()
+            assert self.parser_metrics is not None
+            self.parser_metrics.finish_reason = self.finish_reason
+            with self.parser_metrics.time_call():
+                flushed_segments = self.response_parser.flush()
             if flushed_segments:
                 segments.extend(flushed_segments)
             self.last_append_flush_status = len(flushed_segments) > 0

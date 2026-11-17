@@ -84,6 +84,11 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
+from vllm.parser.metrics import (
+    Endpoint,
+    ParserMetrics,
+    ParserMode,
+)
 from vllm.renderers import TokenizeParams
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -788,6 +793,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                     pass
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
+            finally:
+                if not request.stream:
+                    context.observe_parser_metrics()
 
         # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -1047,12 +1055,20 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         # Use parser to extract reasoning, content, and tool calls
         if parser:
-            reasoning, content, tool_calls = parser.parse(
-                final_output.text,
-                request,
-                enable_auto_tools=self.enable_auto_tools,
-                model_output_token_ids=final_output.token_ids,
+            parser_metrics = ParserMetrics(
+                ParserMode.NON_STREAMING,
+                Endpoint.RESPONSES,
+                request_id=request.request_id,
             )
+            parser_metrics.finish_reason = final_output.finish_reason
+            with parser_metrics.time_call(tokens=len(final_output.token_ids)):
+                reasoning, content, tool_calls = parser.parse(
+                    final_output.text,
+                    request,
+                    enable_auto_tools=self.enable_auto_tools,
+                    model_output_token_ids=final_output.token_ids,
+                )
+            parser_metrics.observe()
             if not request.include_reasoning:
                 reasoning = None
                 logprobs = None
@@ -1244,45 +1260,56 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
         finish_reason: str | None = None
-        async for ctx in result_generator:
-            assert isinstance(ctx, SimpleContext)
-            if ctx.last_output is None or not ctx.last_output.outputs:
-                continue
-
-            output = ctx.last_output.outputs[0]
-            self._raise_if_error(output.finish_reason, request.request_id)
-            finish_reason = output.finish_reason
-            delta_text = output.text
-            delta_token_ids = as_list(output.token_ids)
-
-            if ctx.response_parser:
-                delta_message = ctx.response_parser.parse_delta(
-                    delta_text=delta_text,
-                    delta_token_ids=delta_token_ids,
-                    request=request,
-                    prompt_token_ids=ctx.last_output.prompt_token_ids,
-                    finished=output.finish_reason is not None,
-                )
-            else:
-                delta_message = DeltaMessage(content=output.text)
-
-            if not delta_message:
-                continue
-            delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
-
-            for dm in split_delta(delta_message):
-                target_state, tool_call = processor.resolve_target_state(dm)
-                if target_state == _StateType.NONE:
+        parser_metrics = ParserMetrics(
+            ParserMode.STREAMING,
+            Endpoint.RESPONSES,
+            request_id=request.request_id,
+        )
+        try:
+            async for ctx in result_generator:
+                assert isinstance(ctx, SimpleContext)
+                if ctx.last_output is None or not ctx.last_output.outputs:
                     continue
 
-                if processor.needs_transition(target_state, tool_call):
-                    for event in processor.close_current():
-                        yield _increment_sequence_number_and_return(event)
-                    for event in processor.open(target_state, tool_call):
-                        yield _increment_sequence_number_and_return(event)
+                output = ctx.last_output.outputs[0]
+                self._raise_if_error(output.finish_reason, request.request_id)
+                finish_reason = output.finish_reason
+                if finish_reason is not None:
+                    parser_metrics.finish_reason = finish_reason
+                delta_text = output.text
+                delta_token_ids = as_list(output.token_ids)
 
-                for event in processor.emit_delta(dm, output, _get_logprobs):
-                    yield _increment_sequence_number_and_return(event)
+                if ctx.response_parser:
+                    with parser_metrics.time_call(tokens=len(delta_token_ids)):
+                        delta_message = ctx.response_parser.parse_delta(
+                            delta_text=delta_text,
+                            delta_token_ids=delta_token_ids,
+                            request=request,
+                            prompt_token_ids=ctx.last_output.prompt_token_ids,
+                            finished=output.finish_reason is not None,
+                        )
+                else:
+                    delta_message = DeltaMessage(content=output.text)
+
+                if not delta_message:
+                    continue
+                delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
+
+                for dm in split_delta(delta_message):
+                    target_state, tool_call = processor.resolve_target_state(dm)
+                    if target_state == _StateType.NONE:
+                        continue
+
+                    if processor.needs_transition(target_state, tool_call):
+                        for event in processor.close_current():
+                            yield _increment_sequence_number_and_return(event)
+                        for event in processor.open(target_state, tool_call):
+                            yield _increment_sequence_number_and_return(event)
+
+                    for event in processor.emit_delta(dm, output, _get_logprobs):
+                        yield _increment_sequence_number_and_return(event)
+        finally:
+            parser_metrics.observe()
 
         for event in processor.close_current(response_item_status(finish_reason)):
             yield _increment_sequence_number_and_return(event)
@@ -1306,39 +1333,46 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
 
-        async for ctx in result_generator:
-            assert isinstance(ctx, HarmonyContext)
+        try:
+            async for ctx in result_generator:
+                assert isinstance(ctx, HarmonyContext)
 
-            # finish_reason='error' indicates a retryable error
-            self._raise_if_error(ctx.finish_reason, request.request_id)
+                # finish_reason='error' indicates a retryable error
+                self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            for segment in ctx.last_append_segments:
-                if segment.delta:
-                    for event in emit_content_delta_events(
-                        segment, state, ctx.function_tool_names
-                    ):
-                        yield _increment_sequence_number_and_return(event)
+                for segment in ctx.last_append_segments:
+                    if segment.delta:
+                        for event in emit_content_delta_events(
+                            segment, state, ctx.function_tool_names
+                        ):
+                            yield _increment_sequence_number_and_return(event)
 
-                elif completed_message := segment.completed_message:
-                    done_items: list[ResponseOutputItem] = []
-                    # TODO: Fix browser emitted as MCP calls
-                    for event in emit_previous_item_done_events(
-                        completed_message, state, ctx.function_tool_names
-                    ):
-                        if isinstance(event, ResponseOutputItemDoneEvent):
-                            done_items.append(event.item)
-                        yield _increment_sequence_number_and_return(event)
+                    elif completed_message := segment.completed_message:
+                        done_items: list[ResponseOutputItem] = []
+                        # TODO: Fix browser emitted as MCP calls
+                        for event in emit_previous_item_done_events(
+                            completed_message, state, ctx.function_tool_names
+                        ):
+                            if isinstance(event, ResponseOutputItemDoneEvent):
+                                done_items.append(event.item)
+                            yield _increment_sequence_number_and_return(event)
 
-                    for event in emit_tool_action_events(
-                        completed_message, state, self.tool_server
-                    ):
-                        if isinstance(event, ResponseOutputItemDoneEvent):
-                            done_items.append(event.item)
-                        yield _increment_sequence_number_and_return(event)
-                    ctx.streamed_items_by_message.append(
-                        (completed_message, done_items)
-                    )
-                    state.reset_for_new_item()
+                        for event in emit_tool_action_events(
+                            completed_message, state, self.tool_server
+                        ):
+                            if isinstance(event, ResponseOutputItemDoneEvent):
+                                done_items.append(event.item)
+                            yield _increment_sequence_number_and_return(event)
+                        ctx.streamed_items_by_message.append(
+                            (completed_message, done_items)
+                        )
+                        state.reset_for_new_item()
+        finally:
+            # Record on every path so a cancelled or errored stream, which
+            # never reaches `responses_full_generator`, is not lost. The
+            # full generator skips streaming requests, so this is the only
+            # observation for a streamed Harmony request.
+            context.observe_parser_metrics()
 
     async def responses_stream_generator(
         self,

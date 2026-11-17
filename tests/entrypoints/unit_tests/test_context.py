@@ -5,14 +5,25 @@ from unittest.mock import patch
 
 import pytest
 from openai_harmony import Author, Message, Role, TextContent
+from prometheus_client import REGISTRY
 
+from tests.parser.metrics_utils import reset_parser_metrics
 from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
     SimpleContext,
     TurnMetrics,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import metrics
 from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
+from vllm.parser.metrics import (
+    _PARSER_DURATION_SECONDS,
+    _REQUEST_PARSER_DURATION_SECONDS,
+    Endpoint,
+    ParserMode,
+    init_parser_metrics,
+)
 
 
 def create_mock_request_output(
@@ -107,7 +118,10 @@ class FakeHarmonyParser(HarmonyParser):
 
 
 def make_harmony_context(
-    messages=None, available_tools=None, function_tool_names=None
+    messages=None,
+    available_tools=None,
+    function_tool_names=None,
+    request=None,
 ) -> tuple[HarmonyContext, FakeHarmonyParser]:
     fake_parser = FakeHarmonyParser()
     context = HarmonyContext(
@@ -115,6 +129,7 @@ def make_harmony_context(
         available_tools=[] if available_tools is None else available_tools,
         function_tool_names=function_tool_names,
         response_parser=fake_parser,
+        request=request,
     )
     return context, fake_parser
 
@@ -938,3 +953,80 @@ def test_simple_context_output_messages_no_mutation():
     assert len(msgs3) == 1
     assert msgs3[0].message == "hello world"
     assert msgs3[0].tokens == [1, 2]
+
+
+METRICS_MODEL = "model"
+METRICS_PARSER = "hermes"
+_INVOCATION = _PARSER_DURATION_SECONDS
+_REQUEST = _REQUEST_PARSER_DURATION_SECONDS
+
+
+@pytest.fixture
+def parser_metrics(monkeypatch):
+    """Register a clean parser-metrics set for one test."""
+    monkeypatch.setattr(metrics.envs, "VLLM_PARSER_SLOW_LOG", False)
+    reset_parser_metrics()
+    yield
+    reset_parser_metrics()
+
+
+def _register_parser_metrics() -> None:
+    init_parser_metrics(
+        model_name=METRICS_MODEL,
+        tool_parser=METRICS_PARSER,
+        enable_auto_tool_choice=True,
+    )
+
+
+def _sample(name: str, suffix: str, mode: ParserMode) -> float | None:
+    return REGISTRY.get_sample_value(
+        f"{name}{suffix}",
+        {
+            "model_name": METRICS_MODEL,
+            "parser": METRICS_PARSER,
+            "mode": mode.value,
+            "endpoint": Endpoint.RESPONSES.value,
+        },
+    )
+
+
+def test_harmony_append_output_records_parser_metrics(parser_metrics, monkeypatch):
+    """process_chunk and flush are timed and accumulated on the context."""
+    _register_parser_metrics()
+    times = iter([0.0, 0.5, 10.0, 10.25])
+    monkeypatch.setattr(metrics, "_clock", lambda: next(times))
+
+    context, _ = make_harmony_context()
+    assert context.parser_metrics is not None
+    assert context.parser_metrics.mode is ParserMode.NON_STREAMING
+
+    context.append_output(create_mock_request_output(output_token_ids=[1, 2]))
+
+    assert context.parser_metrics.calls == 2
+    assert context.parser_metrics.seconds == pytest.approx(0.75)
+    assert _sample(_INVOCATION, "_count", ParserMode.NON_STREAMING) == 2.0
+    assert _sample(_INVOCATION, "_sum", ParserMode.NON_STREAMING) == pytest.approx(0.75)
+
+    context.observe_parser_metrics()
+    assert _sample(_REQUEST, "_count", ParserMode.NON_STREAMING) == 1.0
+    assert _sample(_REQUEST, "_sum", ParserMode.NON_STREAMING) == pytest.approx(0.75)
+
+
+def test_harmony_streaming_records_streaming_mode(parser_metrics, monkeypatch):
+    """A streaming request labels its samples with the streaming mode."""
+    _register_parser_metrics()
+    monkeypatch.setattr(metrics, "_clock", lambda: 0.0)
+
+    request = ResponsesRequest(model=METRICS_MODEL, input="hi", stream=True)
+    context, _ = make_harmony_context(request=request)
+    assert context.parser_metrics is not None
+    assert context.parser_metrics.mode is ParserMode.STREAMING
+
+    context.append_output(
+        create_mock_request_output(output_token_ids=[1], finished=False)
+    )
+
+    assert context.parser_metrics.calls == 1
+    assert _sample(_INVOCATION, "_count", ParserMode.STREAMING) == 1.0
+    # The streaming parse did not bind the non-streaming series.
+    assert _sample(_INVOCATION, "_count", ParserMode.NON_STREAMING) is None

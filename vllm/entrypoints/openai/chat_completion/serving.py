@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import Any, Final, cast
+from typing import Any, ClassVar, Final, cast
 
 from fastapi import Request
 
@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.stream_processor import (
     ChatStreamProcessor,
+    observe_stream_processors,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -64,6 +65,11 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import (
+    Endpoint,
+    ParserMetrics,
+    ParserMode,
+)
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -124,6 +130,10 @@ def _make_completion_tokens_details(
 
 
 class OpenAIServingChat(GenerateBaseServing):
+    #: API surface this handler serves, for parser metrics. Subclasses that
+    #: expose the same machinery under a different API override it.
+    parser_endpoint: ClassVar[Endpoint] = Endpoint.CHAT_COMPLETIONS
+
     def __init__(
         self,
         engine_client: EngineClient,
@@ -561,6 +571,8 @@ class OpenAIServingChat(GenerateBaseServing):
                         self._make_parser(request, tokenizer, chat_template_kwargs),
                         enable_auto_tools=self.enable_auto_tools,
                         parser_cls=self.parser_cls,
+                        endpoint=self.parser_endpoint,
+                        request_id=request_id,
                     )
                     for _ in range(num_choices)
                 ]
@@ -571,6 +583,8 @@ class OpenAIServingChat(GenerateBaseServing):
                         None,
                         enable_auto_tools=self.enable_auto_tools,
                         parser_cls=None,
+                        endpoint=self.parser_endpoint,
+                        request_id=request_id,
                     )
                     for _ in range(num_choices)
                 ]
@@ -966,6 +980,8 @@ class OpenAIServingChat(GenerateBaseServing):
         except Exception as e:
             logger.exception("Error in chat completion stream generator.")
             yield self.create_error_response(e)
+        finally:
+            observe_stream_processors(processors)
 
     async def chat_completion_full_generator(
         self,
@@ -999,10 +1015,17 @@ class OpenAIServingChat(GenerateBaseServing):
         total_reasoning_tokens = 0
 
         role = self.get_chat_request_role(request)
-        for i, output in enumerate(final_res.outputs):
-            # check for error finish reason and raise GenerationError
-            # finish_reason='error' indicates a retryable request-level internal error
+        parser_metrics = ParserMetrics(
+            ParserMode.NON_STREAMING,
+            self.parser_endpoint,
+            request_id=request_id,
+        )
+        # finish_reason='error' indicates a retryable request-level internal
+        # error. Check every output before parsing any, so an error on a later
+        # choice does not waste work on the earlier ones.
+        for output in final_res.outputs:
             self._raise_if_error(output.finish_reason, request_id)
+        for i, output in enumerate(final_res.outputs):
             if i > 0 and parser is not None:
                 # Parsers are stateful: like streaming, use one per choice.
                 parser = self._make_parser(
@@ -1027,12 +1050,14 @@ class OpenAIServingChat(GenerateBaseServing):
                 logprobs = None
 
             if parser is not None:
-                reasoning, content, tool_calls = parser.parse(
-                    output.text,
-                    request,
-                    enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=token_ids,
-                )
+                parser_metrics.finish_reason = output.finish_reason
+                with parser_metrics.time_call(tokens=len(token_ids)):
+                    reasoning, content, tool_calls = parser.parse(
+                        output.text,
+                        request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=token_ids,
+                    )
                 suppress_metadata = not request.include_reasoning and parser is not None
                 total_reasoning_tokens += parser.count_reasoning_tokens(token_ids)
                 if suppress_metadata:
@@ -1091,6 +1116,8 @@ class OpenAIServingChat(GenerateBaseServing):
             )
 
             choices.append(choice_data)
+
+        parser_metrics.observe()
 
         if request.echo:
             last_msg_content = get_echo_content(conversation, role)
