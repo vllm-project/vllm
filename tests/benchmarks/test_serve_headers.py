@@ -12,7 +12,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from vllm.benchmarks.serve import add_cli_args, main_async
+from vllm.benchmarks.datasets import SampleRequest
+from vllm.benchmarks.serve import (
+    _align_prompts_to_server_tokenizer,
+    add_cli_args,
+    main_async,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -29,6 +34,7 @@ def test_benchmark_preserves_decode_metrics_with_headers(
     """Protected metrics must be collected using the same headers as inference."""
     dataset = tmp_path / "prompts.jsonl"
     dataset.write_text(json.dumps({"prompt": "hello"}) + "\n", encoding="utf-8")
+    alignment_calls: list[str] = []
     expected_headers = {"X-Benchmark-Tenant": "test-tenant"} if with_headers else {}
 
     async def run(upstream_url: str | None):
@@ -38,6 +44,8 @@ def test_benchmark_preserves_decode_metrics_with_headers(
             nonlocal completed
             if any(request.headers.get(k) != v for k, v in expected_headers.items()):
                 raise web.HTTPUnauthorized()
+            if request.path in ("/tokenize", "/detokenize"):
+                alignment_calls.append(request.path)
             if request.path == "/metrics":
                 # The gateway exposes deterministic counters for its own traffic.
                 return web.Response(
@@ -54,10 +62,13 @@ def test_benchmark_preserves_decode_metrics_with_headers(
                         }.items()
                     )
                 )
-            completed += 1
+            if request.path == "/v1/completions":
+                completed += 1
             if upstream_url is not None:
                 async with client.post(
-                    upstream_url, json=await request.json()
+                    upstream_url.removesuffix("v1/completions")
+                    + request.path.lstrip("/"),
+                    json=await request.json(),
                 ) as response:
                     return web.Response(
                         status=response.status,
@@ -74,6 +85,8 @@ def test_benchmark_preserves_decode_metrics_with_headers(
         app = web.Application()
         app.router.add_get("/metrics", handler)
         app.router.add_post("/v1/completions", handler)
+        app.router.add_post("/tokenize", handler)
+        app.router.add_post("/detokenize", handler)
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as client,
             TestServer(app) as server,
@@ -85,11 +98,26 @@ def test_benchmark_preserves_decode_metrics_with_headers(
                 str(server.make_url("")).rstrip("/"),
                 "--model",
                 "test-model",
-                "--dataset-name",
-                "custom",
-                "--dataset-path",
-                str(dataset),
-                "--skip-tokenizer-init",
+                *(
+                    [
+                        "--dataset-name",
+                        "random",
+                        "--tokenizer",
+                        "HuggingFaceTB/SmolLM2-135M-Instruct",
+                        "--random-input-len",
+                        "8",
+                        "--random-output-len",
+                        "1",
+                    ]
+                    if live_model
+                    else [
+                        "--dataset-name",
+                        "custom",
+                        "--dataset-path",
+                        str(dataset),
+                        "--skip-tokenizer-init",
+                    ]
+                ),
                 "--num-prompts",
                 "1",
                 "--disable-tqdm",
@@ -125,6 +153,8 @@ def test_benchmark_preserves_decode_metrics_with_headers(
             )
             upstream_url = upstream.url_for("v1", "completions")
         result = asyncio.run(run(upstream_url))
+    if live_model:
+        assert "/tokenize" in alignment_calls
     assert result["completed"] == 1
     assert result["spec_decode_accepted_tokens"] == 1
     assert result["spec_decode_acceptance_rate"] == 50.0
@@ -133,9 +163,6 @@ def test_benchmark_preserves_decode_metrics_with_headers(
 
 def test_tokenizer_alignment_sends_headers() -> None:
     """random/prefix_repetition prompt alignment must pass --header too."""
-    from vllm.benchmarks.datasets import SampleRequest
-    from vllm.benchmarks.serve import _align_prompts_to_server_tokenizer
-
     headers = {"X-Benchmark-Tenant": "test-tenant"}
     calls: list[str] = []
 
@@ -145,14 +172,25 @@ def test_tokenizer_alignment_sends_headers() -> None:
         calls.append(request.path)
         return web.json_response({"tokens": [1, 2, 3]})
 
+    async def detokenize(request: web.Request) -> web.Response:
+        if request.headers.get("X-Benchmark-Tenant") != "test-tenant":
+            raise web.HTTPUnauthorized()
+        calls.append(request.path)
+        assert (await request.json())["tokens"] == [1, 2]
+        return web.json_response({"prompt": "aligned"})
+
     async def run() -> list[SampleRequest]:
         app = web.Application()
         app.router.add_post("/tokenize", tokenize)
+        app.router.add_post("/detokenize", detokenize)
         async with TestServer(app) as server:
             base_url = str(server.make_url("")).rstrip("/")
-            reqs = [SampleRequest(prompt="hello", prompt_len=3)]
+            reqs = [SampleRequest(prompt="hello", prompt_len=2, expected_output_len=1)]
             return await _align_prompts_to_server_tokenizer(
                 base_url, "test-model", reqs, headers=headers
             )
 
-    assert asyncio.run(run())[0].prompt == "hello"
+    result = asyncio.run(run())
+    assert result[0].prompt == "aligned"
+    assert result[0].prompt_len == 2
+    assert calls == ["/tokenize", "/tokenize", "/detokenize"]
