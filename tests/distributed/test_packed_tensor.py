@@ -6,8 +6,6 @@ Unit tests for packed_nccl_broadcast_producer and packed_nccl_broadcast_consumer
 These utilities enable efficient batched tensor transfer over NCCL.
 """
 
-from unittest.mock import patch
-
 import pytest
 import torch
 
@@ -17,8 +15,6 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     Chunk,
     PackedIpcConsumer,
     Piece,
-    _get_streams,
-    _nbytes,
     chunks,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
@@ -264,7 +260,7 @@ class SentinelBroadcastGroup:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestPackedBroadcastDeferredConsumer:
     """Consumers that keep unpacked tensors and read them from a later pack's
-    callback, as layerwise reload does, on a different slot stream."""
+    callback, as layerwise reload does."""
 
     def test_deferred_read_is_ordered_after_receive(self):
         numel = 4
@@ -359,7 +355,7 @@ class TestPackedBroadcastDeferredConsumer:
         torch.accelerator.synchronize()
 
         assert group.calls == num_packs
-        # Receives before the host next waits on the replay's slot stream.
+        # Receives before the host next waits for the replay.
         window = range(packs_per_layer, packs_per_layer + num_buffers - 1)
         assert all(group.pending_at_receive[i] for i in window), (
             "the replay finished before every receive in the window was issued"
@@ -918,45 +914,30 @@ class TestChunkedRoundtrip:
         group = roundtrip(params, buffer_size_bytes=16, num_buffers=num_buffers)
         assert [t.numel() for t in group.broadcasted_tensors] == [16, 16]
 
-    def test_split_tensor_waits_for_bytes_copied_on_another_slot(self):
-        """A tensor split across chunks on two slots: the callback that gets
-        it (second slot) runs after the first slot's copies, even when those
-        are slow."""
+    def test_unpack_waits_for_each_receive(self):
+        """Chunks are unpacked on another stream than they are received on,
+        each only once its receive ends, even a slow one: here the second,
+        which completes a tensor split across both."""
         big = torch.randn(8, 64, device="cuda")  # 2048 B: chunks of 1024, 1024
-        producer_group = MockCommunicationGroup()
-        packed_nccl_broadcast_producer(
-            iterator=iter([("big", big)]),
-            group=producer_group,
+        group = _ChunkGroup(_packed_chunks([big], 1024), delay=1)
+        got: list[torch.Tensor] = []
+        fill_pending: list[bool] = []
+
+        def post_unpack_func(items):
+            fill_pending.append(not group.filled.query())
+            got.extend(t.clone() for _, t in items)
+
+        torch.accelerator.synchronize()
+        packed_nccl_broadcast_consumer(
+            iterator=iter([("big", ([8, 64], torch.float32))]),
+            group=group,
             src=0,
-            post_iter_func=lambda x: x[1],
+            post_unpack_func=post_unpack_func,
             buffer_size_bytes=1024,
         )
-        # two chunks, so the tensor completes on the second slot
-        assert len(producer_group.broadcasted_tensors) == 2
-        group = MockConsumerCommunicationGroup(producer_group.broadcasted_tensors)
-        got: list[torch.Tensor] = []
-        first_slot = _get_streams(torch.accelerator.current_device_index(), 2)[0]
-        slept: list[bool] = []
-
-        def slow_first_slot(shape, dtype):
-            # queued on the first slot after its receive, before its copies
-            if not slept and torch.cuda.current_stream() == first_slot:
-                slept.append(True)
-                torch.cuda._sleep(SLEEP_CYCLES)
-            return _nbytes(shape, dtype)
-
-        with patch(
-            "vllm.distributed.weight_transfer.packed_tensor._nbytes", slow_first_slot
-        ):
-            packed_nccl_broadcast_consumer(
-                iterator=iter([("big", ([8, 64], torch.float32))]),
-                group=group,
-                src=0,
-                post_unpack_func=lambda items: got.extend(t.clone() for _, t in items),
-                buffer_size_bytes=1024,
-            )
         torch.accelerator.synchronize()
-        assert slept and len(got) == 1 and torch.equal(got[0], big)
+        assert fill_pending == [True], "the receive ended before the unpack"
+        assert len(got) == 1 and torch.equal(got[0], big)
 
     def test_split_tensor_is_joined_without_a_second_copy(self):
         """The consumer writes a split tensor's bytes into one tensor of its
@@ -994,15 +975,19 @@ class TestChunkedRoundtrip:
 
 class _ChunkGroup:
     """Fills each receive with the next pre-packed chunk, on the current
-    stream; optionally the first one only after a GPU sleep."""
+    stream; optionally the one at index `delay` only after a GPU sleep,
+    recording `filled` once it lands."""
 
-    def __init__(self, chunks: list[torch.Tensor], delay_first: bool = False):
-        self.chunks, self.delay_first, self.calls = chunks, delay_first, 0
+    def __init__(self, chunks: list[torch.Tensor], delay: int | None = None):
+        self.chunks, self.delay, self.calls = chunks, delay, 0
+        self.filled = torch.Event()
 
     def broadcast(self, tensor, src):
-        if self.calls == 0 and self.delay_first:
+        if self.calls == self.delay:
             torch.cuda._sleep(SLEEP_CYCLES)
         tensor.copy_(self.chunks[self.calls])
+        if self.calls == self.delay:
+            self.filled.record()
         self.calls += 1
 
 
@@ -1022,22 +1007,30 @@ class TestConsumerStreamOrdering:
         runs before the loads, so it can't erase them."""
         weight = torch.randn(1024, device="cuda")
         param = torch.empty(1024, device="cuda")
-        group = _ChunkGroup(_packed_chunks([weight], 1 << 16))
-        torch.accelerator.synchronize()
+        # The first run loads the kernels: loading one waits for the device
+        # to go idle, which would end the caller's sleep before the receive.
+        for run in range(2):
+            group = _ChunkGroup(_packed_chunks([weight], 1 << 16))
+            torch.accelerator.synchronize()
+            zeroed = torch.Event()
+            zero_pending: list[bool] = []
 
-        def post_unpack_func(items):
-            [(_, t)] = items
-            param.copy_(t)
+            def post_unpack_func(items, zeroed=zeroed, zero_pending=zero_pending):
+                [(_, t)] = items
+                zero_pending.append(not zeroed.query())
+                param.copy_(t)
 
-        with torch.cuda.stream(torch.cuda.Stream()):
-            torch.cuda._sleep(SLEEP_CYCLES)
-            param.zero_()
-            packed_nccl_broadcast_consumer(
-                iterator=iter([("w", ([1024], torch.float32))]),
-                group=group,
-                src=0,
-                post_unpack_func=post_unpack_func,
-                buffer_size_bytes=1 << 16,
-            )
-        torch.accelerator.synchronize()
-        assert torch.equal(param, weight)
+            with torch.cuda.stream(torch.cuda.Stream()):
+                torch.cuda._sleep(SLEEP_CYCLES if run else 1)
+                param.zero_()
+                zeroed.record()
+                packed_nccl_broadcast_consumer(
+                    iterator=iter([("w", ([1024], torch.float32))]),
+                    group=group,
+                    src=0,
+                    post_unpack_func=post_unpack_func,
+                    buffer_size_bytes=1 << 16,
+                )
+            torch.accelerator.synchronize()
+            assert torch.equal(param, weight)
+        assert zero_pending == [True], "the caller's work ended before the load"

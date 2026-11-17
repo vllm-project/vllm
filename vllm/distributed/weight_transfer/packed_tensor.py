@@ -219,37 +219,40 @@ def packed_nccl_broadcast_consumer(
     for name, spec in iterator:
         names.append(name)
         specs.append(spec)
-    streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
+    *recv_streams, unpack_stream = _get_streams(
+        torch.accelerator.current_device_index(), num_buffers + 1
+    )
     caller_stream = torch.accelerator.current_stream()
-    for stream in streams:
-        stream.wait_stream(caller_stream)
-    prev_unpacked: torch.Event | None = None  # the previous chunk's copies
-    slot_done: list[torch.Event | None] = [None] * num_buffers
+    # Chunks are received on their slot's stream, and all unpacking and
+    # callbacks run on the unpack stream, in chunk order: after the work the
+    # caller queued before this call, and each after its chunk's receive. So
+    # a callback may keep tensors and read them from a later callback, and a
+    # split tensor's copies are ordered.
+    unpack_stream.wait_stream(caller_stream)
+    unpacked: list[torch.Event | None] = [None] * num_buffers  # per slot
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
     for k, (chunk_nbytes, pieces) in enumerate(chunks(specs, buffer_size_bytes)):
         slot = k % num_buffers
-        # Wait for this slot's previous pack. Not streams[slot].synchronize():
-        # on ROCm, streams can share a hardware queue, and synchronizing one
+        # At most `num_buffers` chunks in flight: wait for this slot's
+        # previous chunk to be unpacked. Not a stream's synchronize(): on
+        # ROCm, streams can share a hardware queue, and synchronizing one
         # stream then also waits for work queued later on the others.
-        done = slot_done[slot]
+        done = unpacked[slot]
         if done is not None:
             done.synchronize()
-        with torch.cuda.stream(streams[slot]):
+        with torch.cuda.stream(recv_streams[slot]):
             packed = torch.empty(chunk_nbytes, dtype=torch.uint8, device=device)
             if chunk_nbytes:  # a chunk of only empty tensors is not sent
                 group.broadcast(packed, src=src)
-            # post_unpack_func may keep the unpacked tensors and read them
-            # from a later chunk's callback, on another slot stream, and a
-            # split tensor's earlier bytes are copied on another slot. Waiting
-            # for the previous chunk's unpack (its receive and copies) orders
-            # every later unpack and callback after them, and record_stream
-            # keeps the allocator from reissuing this buffer once it is freed
-            # while the broadcast or such a read is still pending.
-            if prev_unpacked is not None:
-                streams[slot].wait_event(prev_unpacked)
-            for stream in (*streams, caller_stream):
-                packed.record_stream(stream)
+            received = torch.Event()
+            received.record()
+        # Read on the unpack stream, and on the caller's after return: once
+        # freed, not reissued before those reads end.
+        packed.record_stream(unpack_stream)
+        packed.record_stream(caller_stream)
+        with torch.cuda.stream(unpack_stream):
+            unpack_stream.wait_event(received)
             out = []
             for p in pieces:
                 shape, dtype = specs[p.position]
@@ -267,22 +270,15 @@ def packed_nccl_broadcast_consumer(
                     if p.end < nbytes:
                         continue
                     tensor = joined.pop(p.position)
-                    # read like the packed buffer: keep it alive on every
-                    # stream that may still read it once it is freed
-                    for stream in (*streams, caller_stream):
-                        tensor.record_stream(stream)
+                    tensor.record_stream(caller_stream)  # as `packed`
                 out.append((names[p.position], tensor))
-            prev_unpacked = torch.Event()
-            prev_unpacked.record(streams[slot])
             if out:
                 post_unpack_func(out)
             event = torch.Event()
-            event.record(streams[slot])
-            slot_done[slot] = event
+            event.record()
+            unpacked[slot] = event
 
-    # Drain every slot before returning.
-    for stream in streams:
-        stream.synchronize()
+    unpack_stream.synchronize()
 
 
 # ── IPC packed transfer ────────────────────────────────────────────────
