@@ -7,11 +7,13 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.utils import multi_gpu_test
 from vllm.distributed.device_communicators import cuda_communicator
 from vllm.distributed.device_communicators import (
     flashinfer_pcie_ipc_all_reduce as pcie_ipc,
 )
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
+from vllm.v1.worker.gpu_worker import Worker
 
 
 def _uninitialized_comm() -> pcie_ipc.FlashInferPcieIpcAllReduce:
@@ -144,3 +146,63 @@ def test_group_destroy_releases_communicator_before_process_groups(monkeypatch):
     coordinator.destroy()
 
     assert events == ["communicator", "process_group", "process_group"]
+
+
+class _PcieIpcProfilingWorker(Worker):
+    def determine_available_memory(self) -> int:
+        available = super().determine_available_memory()
+        comm = get_tp_group().device_communicator.fi_pcie_ipc_ar_comm
+        assert comm is not None and comm.initialized, (
+            "PCIe IPC workspace must exist before KV cache sizing"
+        )
+        self.profiled_pcie_workspace = comm.workspace
+        from flashinfer.comm.pcie_ipc_ar import get_pcie_ipc_comm_module
+
+        workspace = comm.workspace
+        slab_bytes = get_pcie_ipc_comm_module().workspace_size(
+            comm.world_size,
+            workspace.max_numel,
+            workspace.elem_size,
+            workspace.max_blocks,
+        )
+        assert self.total_consumed >= (
+            int(self.model_runner.model_memory_usage) + slab_bytes
+        ), "The IPC slab must be included in the profiled non-KV memory"
+        return available
+
+    def pcie_workspace_was_reused(self) -> bool:
+        comm = get_tp_group().device_communicator.fi_pcie_ipc_ar_comm
+        return comm.initialized and comm.workspace is self.profiled_pcie_workspace
+
+
+@pytest.mark.parametrize("extensible", [False, True])
+@multi_gpu_test(num_gpus=2)
+def test_workspace_is_profiled_before_kv_cache_sizing(
+    monkeypatch, vllm_runner, extensible
+):
+    """KV sizing includes the IPC slab and capture reuses that same workspace."""
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "1")
+    monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "0")
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        dtype="bfloat16",
+        tensor_parallel_size=2,
+        distributed_executor_backend="mp",
+        worker_cls=f"{__name__}._PcieIpcProfilingWorker",
+        max_model_len=128,
+        max_num_seqs=4,
+        max_num_batched_tokens=128,
+        gpu_memory_utilization=0.3,
+        enable_extensible_kv_cache=extensible,
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128]},
+    ) as runner:
+        assert runner.llm.collective_rpc("pcie_workspace_was_reused") == [True, True]
+        outputs = runner.llm.generate(
+            ["The capital of France is"],
+            SamplingParams(temperature=0, max_tokens=4, ignore_eos=True),
+        )
+        assert len(outputs) == 1
+        assert outputs[0].finished
+        assert len(outputs[0].outputs[0].token_ids) == 4

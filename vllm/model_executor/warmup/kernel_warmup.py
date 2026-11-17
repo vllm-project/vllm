@@ -382,8 +382,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
         minimax_m3_msa_warmup(worker)
 
-    # Allocate the exact decode-sized workspace, autotune cache misses, and
-    # resolve every CUDA Graph bucket before capture begins.
+    # Workers that profile memory have already initialized this workspace.
+    # Also initialize it here for workers that skip profiling.
     # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
     # which initializes CUDA at import time and must not run at module scope.
     if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
