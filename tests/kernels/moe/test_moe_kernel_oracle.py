@@ -6,8 +6,9 @@
 Backend policy (platform gates, env vars, activation preferences) and the
 explicit-backend mapping of INT8/MXFP4/MXFP8/b12x-NVFP4/AITER-unquantized are
 covered in the per-oracle tests; only the uncovered cases are exercised here.
-No MoE kernel is launched and nothing is platform specific: kernel probing and
-prepare/finalize construction are stubbed out.
+No MoE kernel is launched: policy tests stub kernel probing and prepare/finalize
+construction, while the AITER activation-bound regressions exercise ROCm weight
+conversion.
 """
 
 import os
@@ -59,12 +60,10 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    _ALWAYS_BF16_BOUND,
     Mxfp4MoeBackend,
     Mxfp4MoEKernelOracle,
     _filter_by_activation,
     _serves_requested_activation,
-    _set_aiter_bf16_fp8_moe_bound,
     make_mxfp4_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
@@ -760,14 +759,15 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
     assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
 
 
-_NO_ACTIVATION_BOUND = _ALWAYS_BF16_BOUND
+_NO_ACTIVATION_BOUND = rocm_aiter_ops._ALWAYS_BF16_BOUND
 
 
 @pytest.fixture(autouse=True)
 def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
-    """The oracle sets AITER_BF16_FP8_MOE_BOUND, a process-wide variable, at backend
-    selection: start every test from AITER's default and restore it afterwards."""
-    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+    """Unset the process-wide bound and restore its original value afterwards."""
+    monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
+    yield
+    os.environ.pop("AITER_BF16_FP8_MOE_BOUND", None)
 
 
 _MXFP8_MOE = {"moe": {"weight": "mxfp4", "activation": "mxfp8"}}
@@ -815,7 +815,7 @@ def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
     default_vllm_config.model_config.quantization_config = quant_config_args(**config)
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
     with layer_target_spec_scope(layer_spec):
-        _set_aiter_bf16_fp8_moe_bound()
+        rocm_aiter_ops.set_bf16_fp8_moe_bound()
     assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 
 
@@ -829,30 +829,40 @@ def test_aiter_activation_bound_keeps_a_bf16_request(monkeypatch) -> None:
     ):
         spec = QuantSpec(weight=kMxfp4Static, activation=activation)
         with layer_target_spec_scope(spec):
-            _set_aiter_bf16_fp8_moe_bound()
+            rocm_aiter_ops.set_bf16_fp8_moe_bound()
         assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER")
 @pytest.mark.parametrize(
-    "backend, expected_bound",
+    "convert",
     [
-        pytest.param(Mxfp4MoeBackend.AITER_MXFP4_BF16, "0", id="aiter_mxfp4_bf16"),
-        pytest.param(Mxfp4MoeBackend.TRITON, "256", id="other_backend"),
+        mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
+        mxfp4_oracle.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     ],
+    ids=["general", "gpt-oss"],
 )
-@pytest.mark.skip_global_cleanup
-def test_deepseek_v4_selection_sets_the_aiter_activation_bound(
-    backend, expected_bound, monkeypatch
-) -> None:
-    """The DeepSeek-V4 selector does not go through `select_mxfp4_moe_backend`: it
-    must set the AITER_MXFP4_BF16 activation bound itself."""
-    monkeypatch.setattr(
-        mxfp4_oracle,
-        "_select_deepseek_v4_mxfp4_moe_backend",
-        lambda config: (backend, None),
+@pytest.mark.parametrize("activation", [kMxfp8Dynamic, None], ids=["mxfp8", "bf16"])
+def test_aiter_weight_conversion_sets_the_activation_bound(convert, activation):
+    """Both AITER BF16 weight-conversion paths apply the requested activation."""
+    spec = QuantSpec(weight=kMxfp4Static, activation=activation)
+    with torch.device(current_platform.device_type):
+        w13 = torch.zeros(4, 512, 128, dtype=torch.uint8)
+        w2 = torch.zeros(4, 256, 128, dtype=torch.uint8)
+        w13_scale = torch.full((4, 512, 8), 127, dtype=torch.uint8)
+        w2_scale = torch.full((4, 256, 8), 127, dtype=torch.uint8)
+    with layer_target_spec_scope(spec):
+        convert(
+            mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            layer=torch.nn.Module(),
+            w13_weight=w13,
+            w2_weight=w2,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+        )
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
+        "0" if activation == kMxfp8Dynamic else _NO_ACTIVATION_BOUND
     )
-    mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(None)
-    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")

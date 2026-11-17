@@ -2268,6 +2268,46 @@ class rocm_aiter_ops:
     """
 
     _MOE_DISPATCH_POLICY: int | None = None
+    # `AITER_BF16_FP8_MOE_BOUND` value for BF16 at every token count.
+    _ALWAYS_BF16_BOUND = str(2**31 - 1)
+
+    @classmethod
+    def set_bf16_fp8_moe_bound(cls) -> None:
+        """Select the activation dtype of the interleaved AITER MXFP4 kernels.
+
+        AITER computes with BF16 activations below `AITER_BF16_FP8_MOE_BOUND`
+        tokens and with MXFP8 (per-1x32 e8m0) activations otherwise (gfx950,
+        gate_mode INTERLEAVE). The process-wide bound follows the layer's
+        resolved `targets` spec, else `quantization_config.moe`.
+        """
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.config.quantization import user_activation_override
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kMxfp8Dynamic,
+        )
+
+        requested_activation_key, requested = user_activation_override(
+            "moe", get_current_vllm_config_or_none()
+        )
+        if requested_activation_key == kMxfp8Dynamic:
+            # MXFP8 activations for every token count.
+            bound = "0"
+        elif requested_activation_key is None and requested:
+            # `activation: null`: BF16 activations for every token count.
+            bound = cls._ALWAYS_BF16_BOUND
+        elif envs.VLLM_STRICT_QUANT_SCHEME:
+            # Adding activation quantization to a weight-only request is forbidden.
+            bound = cls._ALWAYS_BF16_BOUND
+        else:
+            # TODO: This silently overrides the model-requested activation key.
+            bound = "0"
+        if (
+            os.environ.get("AITER_BF16_FP8_MOE_BOUND") == cls._ALWAYS_BF16_BOUND
+            and bound != cls._ALWAYS_BF16_BOUND
+        ):
+            # Once a layer requested BF16, later layers do not take that back.
+            return
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = bound
 
     @classmethod
     @if_aiter_supported

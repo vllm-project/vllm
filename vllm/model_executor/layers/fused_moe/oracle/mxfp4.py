@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from enum import Enum
 from typing import TYPE_CHECKING, Union
 
@@ -521,7 +520,7 @@ def _serves_requested_activation(
     """Whether `backend`, whose own activation key is BF16, can compute with the
     requested one: the interleaved AITER_MXFP4_BF16 kernels run MXFP8 activations
     on gfx950 (AITER picks bf16 or fp8 per token count, see
-    `_set_aiter_bf16_fp8_moe_bound`)."""
+    `rocm_aiter_ops.set_bf16_fp8_moe_bound`)."""
     if (
         backend != Mxfp4MoeBackend.AITER_MXFP4_BF16
         or requested_activation_key != kMxfp8Dynamic
@@ -533,45 +532,6 @@ def _serves_requested_activation(
     # AITER's BF16/MXFP8 activation switch is gated to gfx950:
     # https://github.com/ROCm/aiter/blob/a0c4b69c146d94e393984bbe553b704e8c89a5e4/aiter/fused_moe.py#L1128-L1132
     return on_gfx950()
-
-
-# `AITER_BF16_FP8_MOE_BOUND` value for bf16 activations at every token count.
-_ALWAYS_BF16_BOUND = str(2**31 - 1)
-
-
-def _set_aiter_bf16_fp8_moe_bound() -> None:
-    """Select the activation dtype of the interleaved AITER_MXFP4_BF16 kernels.
-
-    AITER computes with bf16 activations for fewer than
-    `AITER_BF16_FP8_MOE_BOUND` tokens and with MXFP8 (per-1x32 e8m0) activations
-    otherwise (gfx950, gate_mode INTERLEAVE). The variable is process-wide. It
-    follows the activation requested for the layer being built (its `targets`
-    spec, else `quantization_config.moe`), so it is set at backend selection.
-    """
-    requested_activation_key, requested = user_activation_override(
-        "moe", get_current_vllm_config_or_none()
-    )
-    if requested_activation_key == kMxfp8Dynamic:
-        # MXFP8 activations for every token count.
-        bound = "0"
-    elif requested_activation_key is None and requested:
-        # `activation: null`: bf16 activations for every token count.
-        bound = _ALWAYS_BF16_BOUND
-    elif envs.VLLM_STRICT_QUANT_SCHEME:
-        # Adding activation quantization to a weight-only request is forbidden.
-        bound = _ALWAYS_BF16_BOUND
-    else:
-        # TODO: This should be cleaned up - this is silently overriding
-        # model-requested activation quant key.
-        bound = "0"
-    if (
-        os.environ.get("AITER_BF16_FP8_MOE_BOUND") == _ALWAYS_BF16_BOUND
-        and bound != _ALWAYS_BF16_BOUND
-    ):
-        # The variable is process-wide: once a layer asked for bf16 activations,
-        # later layers do not take that back.
-        return
-    os.environ["AITER_BF16_FP8_MOE_BOUND"] = bound
 
 
 def _user_moe_activation_override() -> QuantKey | None:
@@ -748,17 +708,6 @@ def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Select the primary MXFP4 MoE backend (see `_select_mxfp4_moe_backend`)."""
-    backend, experts_cls = _select_mxfp4_moe_backend(config, activation_key)
-    if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        _set_aiter_bf16_fp8_moe_bound()
-    return backend, experts_cls
-
-
-def _select_mxfp4_moe_backend(
-    config: FusedMoEConfig,
-    activation_key: QuantKey | None = None,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary MXFP4 MoE backend.
 
     Args:
@@ -869,16 +818,6 @@ def _select_mxfp4_moe_backend(
 
 
 def select_deepseek_v4_mxfp4_moe_backend(
-    config: FusedMoEConfig,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Select the MXFP4 MoE backend (see `_select_deepseek_v4_mxfp4_moe_backend`)."""
-    backend, experts_cls = _select_deepseek_v4_mxfp4_moe_backend(config)
-    if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        _set_aiter_bf16_fp8_moe_bound()
-    return backend, experts_cls
-
-
-def _select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
@@ -1441,6 +1380,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        rocm_aiter_ops.set_bf16_fp8_moe_bound()
+
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
@@ -1939,6 +1880,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.set_bf16_fp8_moe_bound()
 
         # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
         # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
