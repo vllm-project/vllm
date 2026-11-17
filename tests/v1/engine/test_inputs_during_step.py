@@ -139,7 +139,7 @@ def test_blocks_for_output_after_spin_period():
     assert handled == [(ADD, "a")]
 
 
-def test_wait_for_new_request_stops_at_first_add():
+def test_stop_on_add_returns_at_first_add():
     """With a free batch-queue slot, the wait returns as soon as a request is added
     (aborts don't stop it), leaving the step's output to be collected later."""
     engine, handled = make_engine()
@@ -152,11 +152,13 @@ def test_wait_for_new_request_stops_at_first_add():
             engine.input_queue.put((ADD, "b"))
 
     future = PollableFuture(ready_after=1000, on_poll=on_poll)
-    assert engine._wait_for_new_request(future)
+    assert engine._handle_inputs_while_waiting(future, stop_on_add=True)
     assert not future.done()
     assert handled == [(ABORT, ["x"]), (ADD, "a")]
     assert engine.input_queue.qsize() == 1
 
     # Output ready before any request arrives.
     engine, handled = make_engine()
-    assert not engine._wait_for_new_request(PollableFuture(ready_after=3))
+    assert not engine._handle_inputs_while_waiting(
+        PollableFuture(ready_after=3), stop_on_add=True
+    )
