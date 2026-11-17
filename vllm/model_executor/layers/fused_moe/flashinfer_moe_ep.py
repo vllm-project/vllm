@@ -52,13 +52,13 @@ _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
 # FP4 weights run on the Blackwell megakernels (NVFP4 also on SM107). Block FP8
 # and MXFP4 weights run on the Hopper pull-style CuTeDSL megakernels with FP8
 # activations.
-_SM90 = (9, 0)
+_SM90_CAPABILITY = (9, 0)
 _BLACKWELL_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 _SM107_CAPABILITY = (10, 7)
 _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int]]] = {
     "nvfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY},
-    "mxfp4": _BLACKWELL_CAPABILITIES | {_SM90},
-    "fp8_block": frozenset({_SM90}),
+    "mxfp4": _BLACKWELL_CAPABILITIES | {_SM90_CAPABILITY},
+    "fp8_block": frozenset({_SM90_CAPABILITY}),
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
 _SM107_ROUTE_CHECK_ENV = "FLASHINFER_SM107_MEGA_CHECK_ROUTES"
@@ -81,7 +81,7 @@ def is_sm107_device() -> bool:
 
 def sm90_weight_format(quant_config: FusedMoEQuantConfig) -> Sm90WeightFormat | None:
     """Weight format for the current Hopper device, if supported."""
-    if _current_capability() != _SM90:
+    if _current_capability() != _SM90_CAPABILITY:
         return None
     if quant_config.use_fp8_w8a8 and quant_config.is_block_quantized:
         return "fp8_block"
@@ -182,7 +182,7 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append(f"{weight_format.upper()} weights")
     elif capability not in _FORMAT_CAPABILITIES[weight_format]:
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
-    elif spec.kernel == "deep_gemm" and capability == _SM90:
+    elif spec.kernel == "deep_gemm" and capability == _SM90_CAPABILITY:
         unsupported.append("FlashInfer DeepGEMM kernel on Hopper")
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
@@ -210,7 +210,8 @@ def flashinfer_moe_ep_unsupported_reasons(
     # FlashInfer keeps a per-expert scale of the Hopper MXFP4 weights outside
     # the layer parameters, where EPLB cannot move it.
     if vllm_config.parallel_config.enable_eplb and (
-        spec.kernel == "deep_gemm" or (weight_format == "mxfp4" and capability == _SM90)
+        spec.kernel == "deep_gemm"
+        or (weight_format == "mxfp4" and capability == _SM90_CAPABILITY)
     ):
         unsupported.append("EPLB")
     elif is_sm107_device() and vllm_config.parallel_config.enable_eplb:
@@ -287,7 +288,7 @@ def mxfp4_moe_ep_weights(
     w2_scale: torch.Tensor,
 ) -> FlashInferMoeEpWeights:
     spec = flashinfer_moe_ep_backend_spec(moe_backend)
-    if spec.kernel == "deep_gemm" or _current_capability() == _SM90:
+    if spec.kernel == "deep_gemm" or _current_capability() == _SM90_CAPABILITY:
         return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
     return FlashInferMoeEpWeights(
         w13=_dequant_mxfp4_experts(w13, w13_scale),
@@ -360,6 +361,7 @@ class _FlashInferMoeEpApi:
                 MoEWeightPack,
                 Nvfp4CutedslMegaMoeConfig,
                 PrequantizedMoEWeights,
+                Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig,
                 Sm90PullFp8MegaMoeConfig,
                 Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig,
             )
@@ -368,12 +370,6 @@ class _FlashInferMoeEpApi:
                 "FlashInfer MoE-EP requires the public API shipped with "
                 "FlashInfer 0.7.3 or newer"
             ) from err
-        try:
-            from flashinfer.moe_ep import (
-                Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig as Sm90Mxfp4MegaMoeConfig,
-            )
-        except ImportError:
-            Sm90Mxfp4MegaMoeConfig = None
 
         self.BootstrapConfig = BootstrapConfig
         self.DeepGemmMegaMoeConfig = DeepGemmMegaMoeConfig
@@ -385,7 +381,7 @@ class _FlashInferMoeEpApi:
         self.Nvfp4CutedslMegaMoeConfig = Nvfp4CutedslMegaMoeConfig
         self.PrequantizedMoEWeights = PrequantizedMoEWeights
         self.Sm90PullFp8MegaMoeConfig = Sm90PullFp8MegaMoeConfig
-        self.Sm90Mxfp4MegaMoeConfig = Sm90Mxfp4MegaMoeConfig
+        self.Sm90Mxfp4MegaMoeConfig = Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig
         self.Sm107Nvfp4MegaMoeConfig = Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
 
 
@@ -416,12 +412,6 @@ class FlashInferMoeEp:
         if spec.kernel == "deep_gemm":
             _expose_deep_gemm_to_flashinfer()
         api = _load_flashinfer_moe_ep_api()
-        if sm90_format == "mxfp4" and api.Sm90Mxfp4MegaMoeConfig is None:
-            raise RuntimeError(
-                "FlashInfer MoE-EP with MXFP4 weights on Hopper requires "
-                "FlashInfer 0.7.3 or newer with the SM90 MXFP4 MegaMoE "
-                "(flashinfer-ai/flashinfer#4843)"
-            )
         if epilogue is None:
             epilogue = FlashInferMoeEpEpilogue()
         ep_group = get_ep_group()

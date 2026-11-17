@@ -784,12 +784,8 @@ def test_sm107_nvfp4_init_warmup_forward_is_exact_on_grid_inputs(
 def test_sm90_init_warmup_forward_is_exact_on_grid_inputs(
     world_size: int, sm90_format: str, geometry: Geometry
 ):
-    moe_ep = pytest.importorskip("flashinfer.moe_ep")
+    pytest.importorskip("flashinfer.moe_ep")
     pytest.importorskip("nvshmem.core")
-    if sm90_format == "mxfp4" and not hasattr(
-        moe_ep, "Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig"
-    ):
-        pytest.skip("FlashInfer has no SM90 MXFP4 megakernel")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs")
     distributed_run(
@@ -957,9 +953,7 @@ def test_sm90_mxfp4_adapter_hands_packed_weights_to_flashinfer(
 ):
     """Pass packed E2M1/E8M0 checkpoint weights into the SM90 MXFP4 config."""
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
-    config_cls = getattr(moe_ep, "Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig", None)
-    if config_cls is None:
-        pytest.skip("FlashInfer has no SM90 MXFP4 megakernel")
+    config_cls = moe_ep.Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig
     workspace_capacities: list[int] = []
     layer_args = _fake_mega_layer(monkeypatch, moe_ep, workspace_capacities)
     moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, TINY_SM90)
