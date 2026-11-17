@@ -1564,13 +1564,13 @@ class TestCpuTopkTopp:
         Uses torch.allclose with rtol=1e-5, atol=1e-7 because FP64
         reduction order may differ between the two code paths.
         """
-        from vllm._custom_ops import (
+        from vllm._cpu_ops import (
             cpu_topk_sampling as _cpu_topk_sampling_op,
         )
-        from vllm._custom_ops import (
+        from vllm._cpu_ops import (
             cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
         )
-        from vllm._custom_ops import (
+        from vllm._cpu_ops import (
             cpu_topp_sampling as _cpu_topp_sampling_op,
         )
 

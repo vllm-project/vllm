@@ -21,11 +21,11 @@ if HAS_TRITON:
         apply_top_k_top_p_triton,
     )
 
-from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
-from vllm._custom_ops import (
+from vllm._cpu_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+from vllm._cpu_ops import (
     cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
 )
-from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+from vllm._cpu_ops import cpu_topp_sampling as _cpu_topp_sampling_op
 
 logger = init_logger(__name__)
 
