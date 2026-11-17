@@ -7958,3 +7958,359 @@ def test_reachable_store_mask_skips_eagle_peek_with_lookahead_hashes():
     assert mask(group, 0) != mask(plain_group, 0)
     # With lookahead the mask matches the non-EAGLE one.
     assert mask(group, 8) == mask(plain_group, 8)
+
+
+def _make_put_scheduler(
+    batch=2, capacity=8, reserve=0, block_sizes=(16,), window=None, pool=None
+):
+    from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
+    from vllm.v1.kv_offload.tiering.manager import (
+        CPUPrimaryTierOffloadingManager,
+        TieringOffloadingManager,
+    )
+
+    config = _make_vllm_config(
+        extra_config={
+            "put_batch_chunks": batch,
+            "put_max_inflight_chunks": capacity,
+            "put_get_reserve_chunks": reserve,
+        }
+    )
+    config.speculative_config = None
+    spec_kwargs = {"num_kv_heads": 1, "head_size": 1, "dtype": torch.float32}
+    groups = [
+        make_kv_cache_group(
+            [f"layer{i}"], AttentionSpec(block_size=size, **spec_kwargs)
+        )
+        for i, size in enumerate(block_sizes)
+    ]
+    if window is not None:
+        groups[-1] = make_kv_cache_group(
+            ["swa"],
+            sliding_window_layer(
+                block_size=block_sizes[-1], sliding_window=window, **spec_kwargs
+            ),
+        )
+    kv_config = KVCacheConfig(
+        num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups
+    )
+    pool = pool or capacity
+    primary = CPUPrimaryTierOffloadingManager(pool, _mock_mmap_region(pool))
+    spec = MockOffloadingSpec(build_offloading_config(config, kv_config))
+    spec.manager = TieringOffloadingManager(primary)
+    return OffloadingConnectorScheduler(spec, config, kv_config)
+
+
+def _put_request(scheduler, req_id="put", tokens=128):
+    init_none_hash(sha256)
+    request = Request(
+        request_id=req_id,
+        prompt_token_ids=list(range(ord(req_id[0]), ord(req_id[0]) + tokens)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    scheduler.on_new_request(request)
+    state = scheduler._req_status[req_id]
+    state.update_offload_keys()
+    for i, (config, group) in enumerate(
+        zip(scheduler.config.kv_group_configs, state.group_states)
+    ):
+        group.block_ids.extend(
+            range(100 * i + 1, 100 * i + 1 + tokens // config.tokens_per_block)
+        )
+    return request, state
+
+
+def _handler(scheduler):
+    return scheduler._store_handlers[StoreTrigger.ON_COMPUTE]
+
+
+def _build(scheduler, output):
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    _handler(scheduler).build_store_jobs(output, scheduler._req_status, sink)
+    return sink.jobs
+
+
+def _next(scheduler, state):
+    return _handler(scheduler)._next_idxs(state)
+
+
+def _put_output(**scheduled):
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = scheduled
+    return output
+
+
+def _finish(request, output, tokens=128):
+    request.num_computed_tokens = tokens
+    request.status = RequestStatus.FINISHED_STOPPED
+    output.finished_req_ids = {request.request_id}
+
+
+def _complete(scheduler, *job_ids):
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs=dict.fromkeys(job_ids, 1)
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("batch,budget", [(1, 3), (3, 6)])
+def test_put_batches_share_aligned_frontier(batch, budget):
+    scheduler = _make_put_scheduler(
+        batch=batch, capacity=max(batch, budget), block_sizes=(16, 32)
+    )
+    _, state = _put_request(scheduler)
+    [job] = _build(scheduler, _put_output(put=128)).values()
+    assert job.src_spec.block_ids.tolist() == [1, 2, 101]
+    assert _next(scheduler, state) == [2, 1]
+
+
+@pytest.mark.parametrize(
+    "capacity,reserve,pool", [(2, 0, None), (3, 1, None), (8, 8, None), (3, 0, 2)]
+)
+def test_put_rejects_limits_that_never_admit_a_unit(capacity, reserve, pool):
+    # Two full-attention groups (16, 32 tokens/chunk) align into 3-key units.
+    with pytest.raises(ValueError, match="aligned unit needs"):
+        _make_put_scheduler(
+            batch=1,
+            capacity=capacity,
+            reserve=reserve,
+            block_sizes=(16, 32),
+            pool=pool,
+        )
+
+
+def _pin_one_primary_chunk(scheduler):
+    """Hold one primary chunk with a GET reader, shrinking real capacity."""
+    primary = scheduler.manager.primary_tier
+    keys = to_keys([999])
+    ctx = ReqContext("get")
+    assert primary.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    primary.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+    primary.prepare_load(keys, ctx)
+    return lambda: primary.complete_load(keys, ctx)
+
+
+@pytest.mark.parametrize("missing_first", [False, True])
+def test_put_duplicate_uses_eligible_source_occurrence(missing_first):
+    scheduler = _make_put_scheduler()
+    request, state = _put_request(scheduler)
+    # Identical hash at an unavailable occurrence must not steal the GPU source.
+    request.block_hashes[0] = request.block_hashes[1]
+    state.group_states[0].offload_keys.clear()
+    state.update_offload_keys()
+    if missing_first:
+        state.group_states[0].block_ids[0] = 0
+    [job] = _build(scheduler, _put_output(put=128)).values()
+    assert job.src_spec.block_ids.tolist() == [2 if missing_first else 1, 3]
+    assert _next(scheduler, state)[0] == 3
+
+
+def test_put_oversized_offer_progresses_and_preserves_get_reserve():
+    scheduler = _make_put_scheduler(batch=2, capacity=4, reserve=1)
+    _, state = _put_request(scheduler)
+    output = _put_output(put=128)
+    [first] = _build(scheduler, output).values()
+    assert first.src_spec.block_ids.tolist() == [1, 2]
+    [second] = _build(scheduler, output).values()
+    assert second.src_spec.block_ids.tolist() == [3]
+    assert _build(scheduler, output) == {}
+    assert _next(scheduler, state)[0] == 3
+    assert scheduler.manager.primary_tier._get_num_free_chunks() == 1
+
+
+def test_put_retries_rotate_after_capacity_returns():
+    scheduler = _make_put_scheduler(batch=2, capacity=2)
+    _put_request(scheduler, "a")
+    _put_request(scheduler, "b")
+    output = _put_output(a=128, b=128)
+    [first_id] = _build(scheduler, output)
+    assert scheduler._job_statuses[first_id].req_id == "a"
+    _complete(scheduler, first_id)
+    [second_id] = _build(scheduler, output)
+    assert scheduler._job_statuses[second_id].req_id == "b"
+
+
+def test_put_blocked_alignment_has_bounded_periodic_retry(monkeypatch):
+    scheduler = _make_put_scheduler(batch=1, capacity=3, block_sizes=(16, 32))
+    _pin_one_primary_chunk(scheduler)
+    _put_request(scheduler)
+    calls = []
+    original = _handler(scheduler)._clip_put_frontier
+
+    def clip(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(_handler(scheduler), "_clip_put_frontier", clip)
+    output = _put_output(put=128)
+    for _ in range(16):
+        assert _build(scheduler, output) == {}
+    assert len(calls) == 1
+    assert _build(scheduler, output) == {}
+    assert len(calls) == 2
+
+
+def test_put_finished_preempted_does_not_read_reused_gpu_blocks():
+    scheduler = _make_put_scheduler()
+    request, state = _put_request(scheduler)
+    output = _put_output(put=0)
+    _finish(request, output)
+    output.preempted_req_ids = {"put"}
+    assert _build(scheduler, output) == {}
+    assert _next(scheduler, state)[0] == 0
+
+
+def test_put_blocked_request_does_not_starve_smaller_offer():
+    scheduler = _make_put_scheduler(batch=1, capacity=3, block_sizes=(16, 32))
+    _pin_one_primary_chunk(scheduler)
+    _put_request(scheduler, "a")
+    _, smaller = _put_request(scheduler, "b")
+    smaller.group_states[0].block_ids[0] = 0
+    [job_id] = _build(scheduler, _put_output(a=128, b=128))
+    assert scheduler._job_statuses[job_id].req_id == "b"
+    assert len(scheduler._job_statuses[job_id].keys) == 2
+
+
+def test_put_capacity_change_retries_without_periodic_delay():
+    scheduler = _make_put_scheduler(batch=1, capacity=3, block_sizes=(16, 32))
+    _put_request(scheduler)
+    release = _pin_one_primary_chunk(scheduler)
+    output = _put_output(put=128)
+    assert _build(scheduler, output) == {}
+    release()
+    [job] = _build(scheduler, output).values()
+    assert job.src_spec.block_ids.tolist() == [1, 2, 101]
+
+
+def test_put_finish_flushes_reallocated_source_and_resolves_tail():
+    scheduler = _make_put_scheduler(batch=2)
+    request, state = _put_request(scheduler)
+    output = _put_output(put=128)
+    _build(scheduler, output)
+    _finish(request, output)
+    # A freed block reallocated this step is stored, and its job flushed
+    # before the new owner writes it, exactly as without PUT batching.
+    scheduler._current_batch_allocated_block_ids.add(4)
+    [(job_id, job)] = _build(scheduler, output).items()
+    assert job.src_spec.block_ids.tolist() == [3, 4, 5, 6, 7, 8]
+    assert job_id in scheduler._current_batch_jobs_to_flush
+    assert _next(scheduler, state)[0] == 8
+
+
+def test_put_clipping_preserves_original_swa_eligibility():
+    scheduler = _make_put_scheduler(
+        batch=1, capacity=2, block_sizes=(64, 16), window=16
+    )
+    request, state = _put_request(scheduler)
+    # The original 128-token horizon only permits SWA chunks 3 and 7.
+    # Duplicate hash at unreachable chunk 0 must not become its source.
+    request.block_hashes[0] = request.block_hashes[3]
+    for group in state.group_states:
+        group.offload_keys.clear()
+    state.update_offload_keys()
+    [job] = _build(scheduler, _put_output(put=128)).values()
+    assert job.src_spec.block_ids.tolist() == [1, 104]
+    assert _next(scheduler, state) == [1, 4]
+
+
+def test_put_preemption_clears_admission_priority():
+    scheduler = _make_put_scheduler()
+    _put_request(scheduler)
+    output = _put_output(put=128)
+    assert _build(scheduler, output)
+    assert _handler(scheduler)._put_retry_after == "put"
+    output.preempted_req_ids = {"put"}
+    meta = scheduler.build_connector_meta(output)
+    assert meta.store_jobs == {}
+    assert _handler(scheduler)._put_retry_after is None
+
+
+@pytest.mark.parametrize("pool,stored", [(8, [3, 4, 5, 6, 7, 8]), (4, [3, 4])])
+def test_put_finished_tail_beyond_credit_is_clipped_to_allocator(pool, stored):
+    # Credits are exhausted by the running batch, but a finished request's
+    # blocks are freed after this step: offer what the allocator can admit
+    # (prepare_store is all-or-nothing), not an oversized tail it would reject.
+    scheduler = _make_put_scheduler(batch=2, capacity=2, pool=pool)
+    request, state = _put_request(scheduler)
+    output = _put_output(put=128)
+    [first] = _build(scheduler, output).values()
+    assert first.src_spec.block_ids.tolist() == [1, 2]
+    assert scheduler.manager.get_put_admission_budget() == 0
+    _finish(request, output)
+    [tail] = _build(scheduler, output).values()
+    assert tail.src_spec.block_ids.tolist() == stored
+    assert _next(scheduler, state)[0] == stored[-1]
+
+
+def test_put_deferred_swa_prompt_tail_survives_decode():
+    scheduler = _make_put_scheduler(
+        batch=1, capacity=3, block_sizes=(64, 16), window=16
+    )
+    scheduler.config = scheduler.config._replace(offload_prompt_only=False)
+    request, state = _put_request(scheduler, tokens=112)
+    # The 112-token prompt ends mid-segment: SWA chunk 6 is reachable only as
+    # the prompt's final tail, and the batch defers it past this step.
+    [(first_id, first)] = _build(scheduler, _put_output(put=112)).items()
+    assert first.src_spec.block_ids.tolist() == [1, 104]
+    _complete(scheduler, first_id)
+    request.append_output_token_ids(list(range(16)))
+    request.num_computed_tokens = 112
+    state.update_offload_keys()
+    state.group_states[0].block_ids.append(2)
+    state.group_states[1].block_ids.append(108)
+    # Decoding past the prompt must not mask the deferred prompt tail.
+    [second] = _build(scheduler, _put_output(put=16)).values()
+    assert second.src_spec.block_ids.tolist() == [2, 107, 108]
+    assert _next(scheduler, state) == [2, 8]
+
+
+def test_put_admission_state_is_read_once_per_step_plus_per_store(monkeypatch):
+    scheduler = _make_put_scheduler(batch=1, capacity=2)
+    names = "abcdef"
+    for name in names:
+        _put_request(scheduler, name)
+    calls = []
+    original = scheduler.manager.get_put_admission_state
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(scheduler.manager, "get_put_admission_state", counted)
+    jobs = _build(scheduler, _put_output(**dict.fromkeys(names, 128)))
+    # Two requests take the two credits; the other four are skipped without
+    # re-reading the manager's admission state.
+    assert len(jobs) == 2
+    assert len(calls) == 3
+
+
+def test_put_resident_prefix_does_not_consume_batch_or_credit():
+    scheduler = _make_put_scheduler(batch=1, capacity=2, pool=8)
+    _, state = _put_request(scheduler)
+    # Another request already stored this request's first six chunks.
+    shared = state.group_states[0].offload_keys[:6]
+    primary = scheduler.manager.primary_tier
+    ctx = ReqContext("other")
+    assert (
+        primary.prepare_store(shared, ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
+    primary.complete_store(shared, ctx, trigger=StoreTrigger.ON_COMPUTE)
+    [job] = _build(scheduler, _put_output(put=128)).values()
+    assert job.src_spec.block_ids.tolist() == [7]
+    assert _next(scheduler, state)[0] == 7
+
+
+def test_put_finished_requests_claim_capacity_before_running_ones():
+    scheduler = _make_put_scheduler(batch=8, capacity=8)
+    _put_request(scheduler, "a")
+    finished, _ = _put_request(scheduler, "f")
+    output = _put_output(a=128)
+    _finish(finished, output)
+    # The pool fits one request; the finished one has no later chance.
+    [job_id] = _build(scheduler, output)
+    assert scheduler._job_statuses[job_id].req_id == "f"

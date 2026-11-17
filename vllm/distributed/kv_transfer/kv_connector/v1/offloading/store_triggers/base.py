@@ -34,9 +34,30 @@ class StoreJobSink(Protocol):
     """
 
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        expected_failure: bool = False,
     ) -> PrepareStoreOutput | None:
-        """Offer keys to the manager, with the trigger of this handler."""
+        """Offer keys to the manager, with the trigger of this handler.
+
+        A failure the caller expects and retries is not an allocation failure.
+        """
+        ...
+
+    def put_admission_state(self) -> tuple[int, ...]:
+        """The manager's PUT admission state; its first item is the credit budget."""
+        ...
+
+    def keys_needing_put_credit(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> set[OffloadKey]:
+        """The keys whose store would allocate and so need a PUT credit."""
+        ...
+
+    def num_admissible_chunks(self) -> int:
+        """How many chunks the primary allocator can admit now."""
         ...
 
     def add_job(
