@@ -8,6 +8,9 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    ROCmFP8ScaledMMLinearKernel,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_rdna4
 from vllm.utils.platform_utils import num_compute_units
@@ -464,6 +467,10 @@ def test_rocm_swmmac_gemm_kernel(n, k, m, bias_mode, dtype, seed):
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_fp8()),
     reason="only test for rocm fp8",
+)
+@pytest.mark.skipif(
+    not ROCmFP8ScaledMMLinearKernel.is_supported()[0],
+    reason=f"wvSplitKQ: {ROCmFP8ScaledMMLinearKernel.is_supported()[1]}",
 )
 def test_rocm_wvsplitk_fp8_kernel(
     n, k, m, dtype, padded_a, padded_b, biased, xnorm, seed
