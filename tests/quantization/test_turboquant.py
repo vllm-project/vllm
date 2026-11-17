@@ -784,9 +784,19 @@ class TestStoreDecodeRoundTrip:
             )
 
     @pytest.mark.parametrize(
-        ("kv_group_size", "head_dim"), [(4, 128), (6, 256), (8, 128), (24, 128)]
+        ("kv_group_size", "head_dim", "dtype", "atol"),
+        [
+            (4, 128, torch.float16, 1e-3),
+            (6, 256, torch.float16, 1e-3),
+            (8, 128, torch.float16, 1e-3),
+            (24, 128, torch.float16, 1e-3),
+            # Outputs are near 6e4, where bf16 steps are 256 to 512.
+            (4, 128, torch.bfloat16, 1024.0),
+        ],
     )
-    def test_k8v4_gqa_decode_matches_per_head_decode(self, kv_group_size, head_dim):
+    def test_k8v4_gqa_decode_matches_per_head_decode(
+        self, kv_group_size, head_dim, dtype, atol
+    ):
         """GQA decode must match decoding each query head on its own.
 
         With `Hq == Hk` the launcher uses the per-head kernel, so slicing one
@@ -809,9 +819,12 @@ class TestStoreDecodeRoundTrip:
         midpoints = (centroids[:-1] + centroids[1:]) / 2
 
         torch.manual_seed(0)
-        keys = torch.randn(seq_len, Hk, D, device=device, dtype=torch.float16)
-        values = torch.randn(seq_len, Hk, D, device=device, dtype=torch.float16)
-        query = torch.randn(B, Hq, D, device=device, dtype=torch.float16)
+        keys = torch.randn(seq_len, Hk, D, device=device, dtype=dtype)
+        values = torch.randn(seq_len, Hk, D, device=device, dtype=dtype)
+        if dtype == torch.bfloat16:
+            # Values past the fp16 maximum, which a bf16 model must keep.
+            values = values * 1e4 + 6e4
+        query = torch.randn(B, Hq, D, device=device, dtype=dtype)
         kv_cache = torch.zeros(
             num_blocks,
             block_size,
@@ -857,5 +870,5 @@ class TestStoreDecodeRoundTrip:
         for g in range(kv_group_size):
             heads = slice(g, Hq, kv_group_size)
             torch.testing.assert_close(
-                out[:, heads], decode(query[:, heads]), rtol=0, atol=1e-3
+                out[:, heads], decode(query[:, heads]), rtol=0, atol=atol
             )

@@ -346,6 +346,7 @@ def _tq_grouped_decode_stage1(
     BLOCK_D: tl.constexpr,
     BLOCK_KV: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    DOT_DTYPE: tl.constexpr,
     FP8_E4B15: tl.constexpr = 0,
 ):
     """GQA-grouped TQ decode stage1 for the FP8 key path (k8v4).
@@ -421,7 +422,7 @@ def _tq_grouped_decode_stage1(
             k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
 
         # [BLOCK_H, BLOCK_KV]
-        scores = tl.dot(q_rot.to(tl.float16), tl.trans(k_float.to(tl.float16)))
+        scores = tl.dot(q_rot.to(DOT_DTYPE), tl.trans(k_float.to(DOT_DTYPE)))
         scores = (scores * ATTN_SCALE).to(tl.float32)
         scores = tl.where(mask_h[:, None] & kv_mask[None, :], scores, -float("inf"))
 
@@ -459,7 +460,7 @@ def _tq_grouped_decode_stage1(
         values = v_idx * v_scales[:, None] + v_zeros[:, None]
 
         acc = acc * re_scale[:, None] + tl.dot(
-            p.to(tl.float16), values.to(tl.float16)
+            p.to(DOT_DTYPE), values.to(DOT_DTYPE)
         ).to(tl.float32)
         l_prev = l_prev * re_scale + tl.sum(p, 1)
         m_prev = n_e_max
@@ -751,6 +752,8 @@ def triton_turboquant_decode_attention(
             BLOCK_D=cfg["BLOCK_D"],
             BLOCK_KV=16,
             BLOCK_H=BLOCK_H,
+            # bf16 models keep the bf16 range; fp16 would overflow at 65504.
+            DOT_DTYPE=tl.bfloat16 if query.dtype == torch.bfloat16 else tl.float16,
             FP8_E4B15=fp8_e4b15,
             num_warps=4,
             num_stages=2,
