@@ -44,7 +44,7 @@ curl http://localhost:8000/hash \
 
 The response contains hexadecimal `prompts[].block_hashes`, token counts, and
 the engine's hash algorithm, block size, lookahead and cache-group geometry.
-Only complete blocks with sufficient lookahead are returned. Use KV events to
+Only complete blocks with sufficient lookahead are returned. Use [KV events](../../../examples/features/kv_events/kv_events_subscriber.py) to
 track which prefixes are cached and when they are evicted.
 
 ## Get Responses prompt token IDs
