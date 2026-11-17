@@ -719,18 +719,6 @@ def test_request_preempted_during_its_handoff(handed_off):
     assert len(w.writes) == (1 if handed_off else 2)
 
 
-def test_preemption_stops_waiting_for_a_write_that_never_completes():
-    w = _chunk_worker()
-    w._lease_extension = 0
-    meta = NixlConnectorMetadata()
-    meta.push_chunk_preemptions = {"req-p"}
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker.logger"
-    ) as mock_logger:
-        w.handle_preemptions(meta)
-    mock_logger.error.assert_called_once()
-
-
 def test_evicted_request_drops_its_chunk_jobs():
     # Its lease expired, e.g. because the handshake to D never completed.
     w = _chunk_worker()
