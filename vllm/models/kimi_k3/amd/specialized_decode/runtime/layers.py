@@ -12,6 +12,9 @@ prefix_delta)`.
   combine, W_UV and the gate), then K2.
 - `MlaOpsLayer` (MLA layers M1 cannot serve, `m1_reasons`): vLLM's AttnRes
   and MLA attention ops, then K2.
+- `dsa.DsaM1Layer` (Kimi-K3.1's DSA layers at DCP1, `VLLM_KIMI_SD_DSA`): the
+  DSA prologue (vLLM's ops or `dsa_front`), then K2 running the split sparse
+  attention and merging its slices (W_UV and the gate in its M1b).
 
 Weights are views of the loaded parameters, taken at every launch.
 """
@@ -45,8 +48,11 @@ def _k1_metadata(m: Any, runner: MonoRunner):
     )
 
 
-def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False):
-    """`m1b`: an MLA layer's K2 that runs its M1b first (`runner.fuse_m1b`)."""
+def _k2_key(
+    layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False, dsa=None
+):
+    """`m1b`: an MLA layer's K2 that runs its M1b first (`runner.fuse_m1b`);
+    `dsa`: a DSA layer's `DsaAttnBuild`, run first in the same launch."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m = layer.mlp
@@ -61,7 +67,17 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
         if m1b
         else {}
     )
-    return k2.K2Build(
+    if dsa is not None:
+        assert m1b and runner.dcp == 1
+        fused.update(
+            m1b_splits=dsa.splits,
+            m1c=False,
+            dsa=2,
+            dsa_p=dsa.splits,
+            dsa_fold=dsa.fold,
+            uv_bf16=True,
+        )
+    key = k2.K2Build(
         tokens=tokens,
         nblocks=layer.prev_valid_blocks + (1 if reset else 0),
         reset=reset,
@@ -71,6 +87,8 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
         **fused,
         **runner.fault,
     )
+    assert dsa is None or k2.dsa_build(key) == dsa, (k2.dsa_build(key), dsa)
+    return key
 
 
 def m1c_at(runner: MonoRunner, width: int) -> bool:
@@ -104,11 +122,14 @@ def _k2(
     reset=False,
     m1b_in=None,
     m1c_in=None,
+    dsa=None,
+    dsa_in=None,
 ):
     """K2 from `core` (o_proj's input): `prefix` updated in place (written,
     when `reset`), the MoE output returned. `m1b_in`: `mla_post`'s inputs,
     when this launch runs M1b and writes `core` itself; `m1c_in`: M1c's
-    (`mla_attn.host_args`'s), when it runs M1c before."""
+    (`mla_attn.host_args`'s), when it runs M1c before; `dsa` / `dsa_in`: a DSA
+    layer's `DsaAttnBuild` and its inputs, the attention run first."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
@@ -120,7 +141,7 @@ def _k2(
         w_up = w_up.narrow(0, runner.rank * moe.UP_N, moe.UP_N)
     out = torch.empty_like(prefix)
     k2.k2_launch(
-        _k2_key(layer, runner, core.size(0), reset, m1b_in is not None),
+        _k2_key(layer, runner, core.size(0), reset, m1b_in is not None, dsa),
         core=core,
         w_o=layer.self_attn.o_proj.weight,
         prefix=prefix,
@@ -143,6 +164,7 @@ def _k2(
         layer=128 + layer.layer_idx,
         m1b_in=m1b_in,
         m1c_in=m1c_in,
+        dsa_in=dsa_in,
         **runner.launch_args(),
         **runner.peer_args(),
     )
@@ -151,18 +173,20 @@ def _k2(
 
 def compile_build(key) -> None:
     """Compiles one launch's kernel (a `K2Build`, `KdaPreBuild`,
-    `MlaPreBuild` or `MlaPostBuild`) without running it: FlyDSL's
-    compile-only mode returns before the launch."""
+    `MlaPreBuild`, `MlaPostBuild` or `DsaFrontBuild`) without running it:
+    FlyDSL's compile-only mode returns before the launch."""
     import os
 
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        dsa_front,
         kda,
         mla,
         mla_back,
     )
 
     mod = {
+        dsa_front.DsaFrontBuild: dsa_front,
         kda.KdaPreBuild: kda,
         k2.K2Build: k2,
         mla.MlaPreBuild: mla,

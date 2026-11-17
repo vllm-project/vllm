@@ -92,7 +92,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "decode step as stock; use FULL decode graphs"
         )
     m1 = m1_reasons(vllm_config)
-    if m1:
+    if m1 and not dsa_model(vllm_config.model_config.hf_text_config):
         logger.info(
             "Kimi-K3 specialized decode: the MLA layers run vLLM's attention ops, "
             "then K2 (M1 needs %s)",
@@ -107,6 +107,14 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     )
 
 
+DSA_LAYERS = "Kimi-K3.1's DSA layers (M1 runs dense MLA)"
+
+
+def dsa_model(text) -> bool:
+    """Kimi-K3.1: its full-attention layers are DSA (`runtime.dsa`), not M1's."""
+    return getattr(text, "dsa_config", None) is not None
+
+
 def m1_reasons(vllm_config) -> list[str]:
     """Why the MLA layers cannot run M1 (empty: they can). Not a refusal for
     ordinary decode or at DCP8: those layers run vLLM's attention ops, then K2.
@@ -117,6 +125,7 @@ def m1_reasons(vllm_config) -> list[str]:
     cc = vllm_config.cache_config
     backend = vllm_config.attention_config.backend
     checks = (
+        (dsa_model(vllm_config.model_config.hf_text_config), DSA_LAYERS),
         # M1 reads AITER MLA's decode metadata (max_qo_len, paged_kv_*,
         # asm_decode_num_heads); the loaded layers' backend is checked too
         # (``guards.mla_weight_reasons``)
@@ -273,6 +282,13 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     if vllm_config.parallel_config.decode_context_parallel_size != 1:
         return []
     m1 = m1_reasons(vllm_config)
+    if dsa_model(vllm_config.model_config.hf_text_config):
+        from vllm.models.kimi_k3.amd.specialized_decode.runtime import dsa
+
+        why = dsa.spec_reasons(vllm_config, q, seqs, check_m1c)
+        if not why:
+            return []
+        return ["DCP1 without M1 (" + "; ".join([DSA_LAYERS, *why]) + ")"]
     if m1:
         return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
     if check_m1c and not m1c_serves(q, seqs):

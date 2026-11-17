@@ -1552,8 +1552,12 @@ def test_stalled_rank_fails_the_step_without_a_hang(
 
 @needs_gfx950
 def test_warmup_compiles_without_launching() -> None:
-    """The JIT warm-up compiles K1, K2, M1a and M1b before capture without running them:
-    a launch on its null arguments would fault."""
+    """The JIT warm-up compiles K1, K2, M1a and M1b, and a DSA layer's K2 (DSA stage,
+    bf16-W_UV M1b) and `dsa_front` at either delta, before capture without running
+    them: a launch on its null arguments would fault."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_front import (
+        DsaFrontBuild,
+    )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         KdaPreBuild,
     )
@@ -1573,4 +1577,334 @@ def test_warmup_compiles_without_launching() -> None:
         compile_build(K2Build(tokens=s, nblocks=4))
         compile_build(MlaPreBuild(tokens=s, nblocks=4, delta=True))
         compile_build(MlaPostBuild(tokens=s, qlen=q))
+    compile_build(
+        K2Build(
+            tokens=8,
+            nblocks=4,
+            m1b_qlen=8,
+            m1b_splits=16,
+            dsa=2,
+            dsa_p=16,
+            dsa_fold=True,
+            uv_bf16=True,
+        )
+    )
+    for delta in (True, False):
+        compile_build(
+            DsaFrontBuild(
+                tokens=8,
+                nblocks=4,
+                delta=delta,
+                eps=1e-6,
+                out_eps=1e-6,
+                q_eps=1e-6,
+                kv_eps=1e-6,
+                k_eps=1e-6,
+                wscale=0.0110485,
+            )
+        )
     torch.accelerator.synchronize()
+
+
+# ---------------------------------------------------------------- DSA
+
+
+def _dsa_cache(g, ctx: int, S: int, bs: int = 64):
+    """A paged fp8_ds_mla KV cache and MXFP4 indexer cache (merged pages, as
+    a block row) holding `ctx` written tokens, a block table and the next
+    S tokens' slots and row bounds."""
+    from vllm.models.kimi_k3.amd.ops import fp4_indexer
+
+    page = 72 * 656
+    nblk = (ctx + S + bs - 1) // bs + 1
+    pool_blocks = nblk + 3
+    bt = (torch.randperm(pool_blocks - 1, generator=g, device="cuda")[:nblk] + 1).int()
+    pool = torch.zeros(pool_blocks, page, dtype=torch.uint8, device="cuda")
+    kv = pool.as_strided((pool_blocks, 64, 656), (page, 656, 1), 0)
+    idx = pool.as_strided((pool_blocks, 64, 68), (page, 68, 1), 64 * 656)
+    pos = torch.arange(ctx, device="cuda")
+    cslots = bt[pos // bs].long() * bs + pos % bs
+    torch.ops._C_cache_ops.concat_and_cache_mla(
+        _randn(g, ctx, 512, scale=2.0),
+        _randn(g, ctx, 64),
+        kv,
+        cslots,
+        "fp8_ds_mla",
+        torch.ones(1, device="cuda"),
+    )
+    fp4_indexer.store_keys(_randn(g, ctx, 128, scale=1.3), idx, cslots)
+    new = torch.arange(ctx, ctx + S, device="cuda")
+    slots = (bt[new // bs].long() * bs + new % bs).contiguous()
+    return pool, kv, idx, bt.view(1, -1).contiguous(), slots, (new + 1).int()
+
+
+def _dsa_partials(g, ctx: int, S: int = 8):
+    """K2-DSA's split-K partials (its own launch) on a top-k as vLLM's indexer
+    leaves it: each row's `min(seq_len, 2048)` slots (the sparse backend's
+    `paged_kv_indptr`) hold -1 holes, and a whole slice of the last row is -1;
+    and the stock FlyDSL sparse MLA on the valid entries only."""
+    from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla import (
+        flydsl_sparse_mla_fp8ds_fwd,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+
+    _, kv, _, bt, _, ends = _dsa_cache(g, ctx, S)
+    n_t = ends.clamp(max=2048).int()
+    topk = torch.full((S, 2048), -1, dtype=torch.int32, device="cuda")
+    for t in range(S):
+        n = min(int(n_t[t]), int(ends[t]) - S)
+        topk[t, :n] = torch.randperm(int(ends[t]) - S, generator=g, device="cuda")[:n]
+    holes = torch.rand(S, 2048, generator=g, device="cuda") < 0.1
+    topk[holes] = -1
+    topk[-1, 128:256] = -1
+    iptr = torch.cat([n_t.new_zeros(1), n_t.cumsum(0).int()]).int()
+    q = _randn(g, S, 12, 576)
+    scale = 0.0625
+    key = dsa_attn.DsaAttnBuild(tokens=S, splits=16, chunk=128, fold=True)
+    so, sl = dsa_attn.partial_shapes(key)
+    po = torch.zeros(so, dtype=bf, device="cuda")
+    pl = torch.empty(sl, dtype=torch.float32, device="cuda")
+    rows, pitch = dsa_attn.kv_rows(kv, 64)
+    dsa_attn.dsa_attn_launch(
+        key,
+        part_o=po,
+        part_lse=pl,
+        q=q,
+        kv=rows,
+        iptr=iptr,
+        scale=scale,
+        topk=topk,
+        bt=bt[0],
+        bsr=pitch,
+        bs=64,
+    )
+    valid = topk >= 0
+    phys = bt[0].long()[topk.clamp_min(0).long() // 64] * pitch + topk.long() % 64
+    flat = torch.cat([phys[t][valid[t]] for t in range(S)]).int()
+    n_ok = valid.sum(1).int()
+    ref_iptr = torch.cat([n_ok.new_zeros(1), n_ok.cumsum(0).int()]).int()
+    ref, ref_lse = flydsl_sparse_mla_fp8ds_fwd(
+        q, rows, ref_iptr, flat, scale, return_lse=True
+    )
+    return po, pl, ends, ref, ref_lse
+
+
+@needs_gfx950
+@pytest.mark.parametrize("ctx", [1000, 5000])
+def test_dsa_attn_and_m1b_match_stock_sparse_mla(ctx: int) -> None:
+    """K2-DSA's attention against the stock FlyDSL sparse MLA on the same top-k,
+    with -1 entries (scattered, and a whole slice) attending to nothing: its 16
+    split-major partials merged by their natural-log LSEs, then through M1b's
+    DSA combine and bf16 W_UV (`mla_post`, src="dsa", uv="bf16") against stock
+    sparse MLA, W_UV and the gate in torch. The fused K2 launch (its ardy
+    polls) needs TP8."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla_back import (
+        MlaPostBuild,
+        mla_post,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
+
+    S = 8
+    g = torch.Generator(device="cuda").manual_seed(ctx + 2)
+    po, pl, ends, ref, ref_lse = _dsa_partials(g, ctx, S)
+    merged = (torch.softmax(pl, dim=0).unsqueeze(-1) * po.float()).sum(0)
+    assert _rel_l2(merged, ref) < 1e-2, _rel_l2(merged, ref)
+    assert torch.allclose(torch.logsumexp(pl, 0), ref_lse, atol=1e-4)
+    w_v = _randn(g, 12, 128, 512, scale=0.05)
+    gate = torch.rand(S, GROWS, generator=g, device="cuda").to(bf)
+    want = torch.einsum("thk,hvk->thv", ref.float(), w_v.float())
+    want = want.reshape(S, GROWS) * gate.float()
+    health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+    flags = torch.zeros(1, dtype=torch.int32, device="cuda")
+    core = torch.zeros(S, GROWS, dtype=bf, device="cuda")
+    mla_post(
+        MlaPostBuild(tokens=S, qlen=S, ranks=1, splits=16, src="dsa", uv="bf16"),
+        o=po[0],
+        lse=pl[0],
+        seq_lens=ends[-1:].int(),
+        qsl=torch.tensor([0, S], dtype=torch.int32, device="cuda"),
+        w_v=w_v,
+        w_v_scale=None,
+        gate=gate,
+        core=core,
+        peers=None,
+        rank=0,
+        layer=5,
+        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        health=health,
+        alarm=flags.data_ptr(),
+    )
+    torch.accelerator.synchronize()
+    assert not health.any() and not flags.any()
+    err = _rel_l2(core, want)
+    assert err < 1e-2 and _cos(core, want) > COS_MIN, err
+
+
+def _front_launch(g, ctx: int, S: int = 8):
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_front
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
+
+    nb, H = 4, 7168
+    pool, kv, idx, bt, slots, ends = _dsa_cache(g, ctx, S)
+    w = {
+        "prefix": _randn(g, S, H, scale=2.0),
+        "delta": _randn(g, S, H, scale=0.5),
+        "blocks": _randn(g, S, 8, H, scale=2.0),
+        "ares_nw": (1 + _randn(g, H, scale=0.1, dtype=torch.float32)).to(bf),
+        "ares_qk": _randn(g, H, scale=0.05),
+        "in_nw": (1 + _randn(g, H, scale=0.1, dtype=torch.float32)).to(bf),
+        "w_qkv": _randn(g, 2112, H, scale=0.02),
+        "w_g": _randn(g, 1536, H, scale=0.02),
+        "w_wk": _randn(g, 128, H, scale=0.02),
+        "w_wv": _randn(g, 32, H, scale=0.02),
+        "q_nw": (1 + _randn(g, 1536, scale=0.1, dtype=torch.float32)).to(bf),
+        "kv_nw": (1 + _randn(g, 512, scale=0.1, dtype=torch.float32)).to(bf),
+        "w_qb": _randn(g, 2304, 1536, scale=0.03),
+        "w_iq": _randn(g, 4096, 1536, scale=0.03),
+        "w_uk_t": _randn(g, 12, 128, 512, scale=0.05),
+        "ln_w": (1 + _randn(g, 128, scale=0.1, dtype=torch.float32)).to(bf),
+        "ln_b": _randn(g, 128, scale=0.1),
+    }
+    pages = -(-(ctx + S) // 8192) * 128
+    key = dsa_front.DsaFrontBuild(tokens=S, nblocks=nb, delta=True, max_pages=pages)
+    scratch = torch.zeros(
+        dsa_front.scratch_bytes(key), dtype=torch.uint8, device="cuda"
+    )
+    o = {
+        "q": torch.zeros(S, 12, 576, dtype=bf, device="cuda"),
+        "gate": torch.zeros(S, 1536, dtype=bf, device="cuda"),
+        "pay": torch.zeros(S, 32, 64, dtype=torch.uint8, device="cuda"),
+        "sc": torch.zeros(S, 256, dtype=torch.uint8, device="cuda"),
+        "iw": torch.zeros(S, 32, dtype=torch.float32, device="cuda"),
+        "topk": torch.full((S, 2048), -7, dtype=torch.int32, device="cuda"),
+        "scores": torch.full((S * pages * 64 + 16384,), float("nan"), device="cuda")[
+            : S * pages * 64
+        ].view(S, pages * 64),
+    }
+    health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+    flags = torch.zeros(1, dtype=torch.int32, device="cuda")
+    prefix = w["prefix"].clone()
+    pool0 = pool.clone()
+    dsa_front.dsa_front(
+        key,
+        prefix=prefix,
+        delta=w["delta"],
+        blocks=w["blocks"],
+        ares_nw=w["ares_nw"],
+        ares_qk=w["ares_qk"],
+        in_nw=w["in_nw"],
+        w_qkv=w["w_qkv"],
+        w_g=w["w_g"],
+        w_wk=w["w_wk"],
+        w_wv=w["w_wv"],
+        q_nw=w["q_nw"],
+        kv_nw=w["kv_nw"],
+        w_qb=w["w_qb"],
+        w_iq=w["w_iq"],
+        w_uk=w["w_uk_t"].transpose(1, 2).contiguous(),
+        ln_w=w["ln_w"],
+        ln_b=w["ln_b"],
+        kv_cache=kv,
+        idx_cache=idx,
+        slots=slots,
+        islots=slots,
+        gate_out=o["gate"],
+        q_out=o["q"],
+        iq_pay=o["pay"],
+        iq_sc=o["sc"],
+        iq_w=o["iw"],
+        idx_bt=bt[0],
+        row_ends=ends,
+        scores=o["scores"],
+        topk_out=o["topk"],
+        scratch=scratch,
+        layer=3,
+        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        health=health,
+        alarm=flags.data_ptr(),
+    )
+    torch.accelerator.synchronize()
+    assert not health.any() and not flags.any()
+    lay = dsa_front.scratch_layout(key)
+
+    def plain(name, shape):
+        a, n = lay[name]
+        return scratch[a : a + n].view(bf).view(shape)
+
+    def pairs(name, shape):
+        a, n = lay[name]
+        words = scratch[a : a + n].view(torch.int32).view(-1, 2)[:, 0].contiguous()
+        return words.view(bf)[: torch.Size(shape).numel()].view(shape)
+
+    mid = {
+        "x": plain("x", (S, H)),
+        "qa": pairs("qa", (S, 2112)),
+        "qc": plain("qc", (S, 1536)),
+        "qn": pairs("qn", (S, 12, 128)),
+        "ik": pairs("ik", (S, 128)),
+        "iw": pairs("iw", (S, 32)),
+        "iq": pairs("iq", (S, 4096)),
+    }
+    return w, o, mid, (pool, pool0, bt, slots, ends), prefix
+
+
+def _stock_topk(scores_or_logits, ends):
+    from vllm.models.kimi_k3.amd import dsa as amd_dsa
+
+    out = torch.full((ends.numel(), 2048), -1, dtype=torch.int32, device="cuda")
+    amd_dsa._select(scores_or_logits, ends, out)
+    return out
+
+
+@needs_gfx950
+@pytest.mark.parametrize("ctx", [1000, 5000, 33000])
+def test_dsa_front_matches_stock_ops(ctx: int) -> None:
+    """The DSA front against vLLM's ops on its own stage inputs: the KV record
+    and the MXFP4 index key / query byte for byte, the query and gate within
+    GEMV sum order, the indexer scores bit for bit against AITER's scorer and
+    the top-k as AITER's top-k's set."""
+    from vllm.models.kimi_k3.amd.ops import fp4_indexer
+
+    S = 8
+    g = torch.Generator(device="cuda").manual_seed(ctx)
+    w, o, mid, (pool, ref, bt, slots, ends), _ = _front_launch(g, ctx, S)
+    import aiter
+
+    page = pool.stride(0)
+    kv = ref.as_strided((ref.size(0), 64, 656), (page, 656, 1), 0)
+    idx = ref.as_strided((ref.size(0), 64, 68), (page, 68, 1), 64 * 656)
+    qa = mid["qa"]
+    gate = torch.sigmoid(F.linear(mid["x"], w["w_g"]))
+    assert _rel_l2(o["gate"], gate) < 1e-3
+    qb = F.linear(mid["qc"], w["w_qb"]).view(S, 12, 192)
+    assert _rel_l2(o["q"][..., 512:], qb[..., 128:]) < 1e-3
+    lat = torch.bmm(mid["qn"].transpose(0, 1), w["w_uk_t"]).transpose(0, 1)
+    assert torch.equal(o["q"][..., :512], lat.to(bf))
+    kvn = aiter.rms_norm(qa[:, 1536:2048].contiguous(), w["kv_nw"], 1e-5)
+    torch.ops._C_cache_ops.concat_and_cache_mla(
+        kvn,
+        qa[:, 2048:].contiguous(),
+        kv,
+        slots,
+        "fp8_ds_mla",
+        torch.ones(1, device="cuda"),
+    )
+    kn = F.layer_norm(mid["ik"], (128,), w["ln_w"], w["ln_b"], 1e-5)
+    fp4_indexer.store_keys(kn, idx, slots)
+    assert torch.equal(pool, ref)
+    pay, sc = fp4_indexer.quantize_queries(mid["iq"].view(S, 32, 128).contiguous())
+    assert torch.equal(o["pay"], pay) and torch.equal(o["sc"], sc.view(S, 256))
+    ref_w = mid["iw"].float() * ((32**-0.5) * (128**-0.5))
+    assert torch.equal(o["iw"], ref_w)
+    starts = torch.tensor([0, S], dtype=torch.int32, device="cuda")
+    logits = fp4_indexer.score_paged(
+        mid["iq"].view(S, 32, 128).contiguous(), idx, o["iw"], bt, starts, ends, S
+    )
+    torch.accelerator.synchronize()
+    for t in range(S):
+        e = int(ends[t])
+        if e > 2048:
+            assert torch.equal(o["scores"][t, :e], logits[t, :e])
+    ref = _stock_topk(logits, ends)
+    assert torch.equal(o["topk"].sort(1).values, ref.sort(1).values)

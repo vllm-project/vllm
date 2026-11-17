@@ -32,6 +32,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64
 
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import back as k2a
+from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn as dsa
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn as m1c
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_back as m1b
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
@@ -164,6 +165,11 @@ class K2Build:
     # partials stored device-scope, a flag a CTA (``ardy``) the combine polls
     m1c: bool = False
     m1c_wide: bool = False  # M1c's ``wide`` (its KV pool over 4 GiB, ``k2_launch``)
+    dsa: int = 0
+    dsa_p: int = 0
+    dsa_fold: bool = False
+    dsa_tile: int = 128
+    uv_bf16: bool = False
     # the OPT_* bits
     opt: int = K2_OPT
 
@@ -292,6 +298,9 @@ ABI = KernelAbi(
         "m1c_indptr",
         "m1c_scale",
         "m1c_vscale",
+        "dsa_bt",
+        "dsa_bsr",
+        "dsa_bsm",
         "w_o",
         "prefix",
         "blocks",
@@ -353,6 +362,32 @@ def scratch_layout(key: K2Build) -> dict:
     return lay
 
 
+def m1b_post(key: K2Build) -> m1b.MlaPostBuild:
+    return m1b.MlaPostBuild(
+        tokens=key.tokens,
+        qlen=max(key.m1b_qlen, 1),
+        ranks=key.m1b_ranks,
+        splits=key.m1b_splits,
+        src="dsa" if key.dsa else "m1c",
+        uv="bf16" if key.uv_bf16 else "fp4",
+    )
+
+
+def dsa_build(key: K2Build) -> dsa.DsaAttnBuild:
+    return dsa.DsaAttnBuild(
+        tokens=key.tokens,
+        splits=key.dsa_p,
+        chunk=dsa.TOPK // max(key.dsa_p, 1),
+        fold=key.dsa_fold,
+        standalone=False,
+    )
+
+
+def dsa_stage(c: dict, dk, item, tid, lds, args) -> None:
+    dsa.cta({"tid": tid, "lds": lds, "args": args}, dk, item)
+    publish(c["put"], c["ardy"], item, 1, tid == 0)
+
+
 def m1b_ctok(key: K2Build) -> int:
     """The fused M1b's tokens a combine task (over its NA CTAs)."""
     if not key.m1b_qlen:
@@ -409,11 +444,17 @@ def build(key: K2Build):
     assert 1 <= s <= k2b.MAX_S
     fused = key.m1b_qlen > 0
     assert not fused or (s % key.m1b_qlen == 0 and key.m1b_ranks in (1, TP_))
-    assert not key.m1c or (fused and key.m1b_ranks == 1 and key.m1b_splits)
+    assert not (key.m1c or key.dsa) or (fused and key.m1b_ranks == 1 and key.m1b_splits)
     assert key.m1c or not key.m1c_wide
+    assert not (key.m1c and key.dsa) and key.dsa in (0, 2)
     if key.m1c:
         m1c.check(s, key.m1b_qlen)
         assert key.m1b_splits == m1c.splits(key.m1b_qlen)
+    if key.dsa:
+        assert key.m1b_splits == key.dsa_p and key.dsa_tile == dsa.TILE
+        assert s == key.m1b_qlen and s * key.dsa_p <= BLOCKS
+        dsa.check(dsa_build(key))
+    assert key.dsa or not (key.dsa_p or key.dsa_fold)
     # the AttnRes stages' delta tile beside their slices
     vextra = s * COLS * 4
     lay = scratch_layout(key)
@@ -490,6 +531,12 @@ def build(key: K2Build):
 
     M1cLds = m1c.smem(key.m1b_qlen) if key.m1c else NoLds
 
+    @fx.struct
+    class DsaLds:
+        raw: fx.Array[fx.Uint8, dsa.lds_bytes(dsa_build(key)), 16]
+
+    DsaAttnLds = DsaLds if key.dsa == 2 else NoLds
+
     @fx.union
     class StageLds:
         early: EarlyLds
@@ -510,6 +557,7 @@ def build(key: K2Build):
     class MainLds:
         k2: K2Lds
         m1c: M1cLds  # type: ignore[valid-type]
+        dsa: DsaAttnLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:
@@ -530,6 +578,9 @@ def build(key: K2Build):
         name += f"_sp{key.m1b_splits}" if key.m1b_splits else ""
         name += "_c" if key.m1c else ""
         name += "w" if key.m1c_wide else ""
+        name += f"_d{key.dsa}" if key.dsa else ""
+        name += "f" if key.dsa_fold else ""
+        name += m1b.suffix(m1b_post(key))
     if key.opt:
         name += f"_o{key.opt}"
     if key.fault_rank >= 0:
@@ -562,6 +613,9 @@ def build(key: K2Build):
         m1c_indptr: Int64,
         m1c_scale: Int32,
         m1c_vscale: Int32,
+        dsa_bt: Int64,
+        dsa_bsr: Int32,
+        dsa_bsm: Int64,
         w_o: Int64,
         prefix: Int64,
         blocks: Int64,
@@ -749,6 +803,8 @@ def build(key: K2Build):
                 Q=key.m1b_qlen,
                 R=R,
                 splits=key.m1b_splits,
+                src=m1b_post(key).src,
+                uv=m1b_post(key).uv,
                 TC=m1b_ctok(key),
                 lat=st.m1b.peek().lat.ptr,
                 cw=st.m1b.peek().cw.ptr,
@@ -812,6 +868,30 @@ def build(key: K2Build):
                 # M1c's LDS is the stages' (``MainLds``): its last DMAs (a
                 # block past its end, prefetched) landed, every wave done
                 m1c.wait_dma()
+            if const_expr(key.dsa == 2):
+                c["ardy"] = sreg(scratch, lay["ardy"][0], "ardy")
+                dk = dsa_build(key)
+                _, cta0 = dsa.geometry(dk)
+                dlds = main.dsa.peek().raw.ptr
+                dargs = {
+                    "q": m1c_q,
+                    "stride_q": dsa.NH * dsa.ENTRY,
+                    "stride_qh": dsa.ENTRY,
+                    "kv": m1c_kv,
+                    "idx": m1c_pages,
+                    "iptr": m1c_indptr,
+                    "topk": m1c_pages,
+                    "topk_st": dsa.TOPK,
+                    "bt": dsa_bt,
+                    "part_o": o,
+                    "part_lse": lse,
+                    "c_log2": m1c_scale,
+                    "idx_bytes": m1c_vscale,
+                    "bsr": dsa_bsr,
+                    "bsm": dsa_bsm,
+                }
+                if bid >= cta0:
+                    dsa_stage(c, dk, bid - cta0, tid, dlds, dargs)
             if const_expr(R > 1):
                 m1b.stage_push(c)
             stamp(on, tls, tid, 14)
@@ -951,6 +1031,9 @@ def build(key: K2Build):
         m1c_indptr: Int64,
         m1c_scale: Int32,
         m1c_vscale: Int32,
+        dsa_bt: Int64,
+        dsa_bsr: Int32,
+        dsa_bsm: Int64,
         w_o: Int64,
         prefix: Int64,
         blocks: Int64,
@@ -1006,6 +1089,9 @@ def build(key: K2Build):
             m1c_indptr,
             m1c_scale,
             m1c_vscale,
+            dsa_bt,
+            dsa_bsr,
+            dsa_bsm,
             w_o,
             prefix,
             blocks,
@@ -1048,6 +1134,23 @@ def ptr(t):
     return 0 if t is None else t.data_ptr()
 
 
+def dsa_args(key: K2Build, m1b_in, dsa_in) -> list:
+    if dsa_in is None:
+        return [0] * 9
+    dk = dsa_build(key)
+    a = dsa.host_args(dk, **dsa_in)
+    q = dsa_in["q"]
+    assert q.stride(0) == dsa.NH * dsa.ENTRY and q.stride(1) == dsa.ENTRY
+    assert not key.dsa_fold or a["topk_st"] == dsa.TOPK
+    so, sl = dsa.partial_shapes(dk)
+    o, lse = m1b_in["o"], m1b_in["lse"]
+    assert o.stride(0) == so[2] * so[3] and lse.stride(0) == sl[2]
+    assert lse.dtype == torch.float32
+    pages = a["topk"] if key.dsa_fold else a["idx"]
+    head = [a["q"], a["kv"], pages, a["iptr"], a["c_log2"], a["idx_bytes"]]
+    return [*head, a["bt"], a["bsr"], a["bsm"]]
+
+
 def k2_launch(
     key: K2Build,
     *,
@@ -1080,6 +1183,7 @@ def k2_launch(
     tl=None,
     m1b_in=None,
     m1c_in=None,
+    dsa_in=None,
 ):
     """Host launcher: `core` [S, 1536] (o_proj's input), `prefix` updated in
     place, `out` the MoE output [S, 7168]; MoE weights as `moe`. With
@@ -1089,6 +1193,7 @@ def k2_launch(
     scale, kv_scale), its partials M1b's o / lse (split 0's views)."""
     assert (m1b_in is not None) == (key.m1b_qlen > 0)
     assert (m1c_in is not None) == key.m1c
+    assert (dsa_in is not None) == (key.dsa == 2)
     # the regions the OPT_* bits use exist
     assert SENT_READY or not (k2_sent(key) or k2_rlogp(key)), (
         "OPT_SENTS / OPT_RLOG_PARTS without the runner's peer regions"
@@ -1103,7 +1208,11 @@ def k2_launch(
         f,
         core.data_ptr(),
         *(m1b.host_args(key.m1b_ranks, **m1b_in) if m1b_in is not None else [0] * 16),
-        *(m1c.host_args(**m1c_in) if m1c_in is not None else [0] * 6),
+        *(
+            [*m1c.host_args(**m1c_in), 0, 0, 0]
+            if m1c_in is not None
+            else dsa_args(key, m1b_in, dsa_in)
+        ),
         w_o.data_ptr(),
         prefix.data_ptr(),
         blocks.data_ptr(),

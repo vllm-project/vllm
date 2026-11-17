@@ -485,6 +485,115 @@ def test_dcp1_without_m1_is_refused(on_mi355x):
     )
 
 
+_DSA_DCP1 = {
+    "parallel_config.decode_context_parallel_size": 1,
+    "cache_config.cache_dtype": "fp8_ds_mla",
+    "model_config.hf_text_config.dsa_config": SimpleNamespace(index_topk=2048),
+    "model_config.hf_text_config.num_attention_heads": 96,
+    "model_config.hf_text_config.kv_lora_rank": 512,
+    "model_config.hf_text_config.qk_rope_head_dim": 64,
+    "model_config.hf_text_config.qk_nope_head_dim": 128,
+    "model_config.hf_text_config.v_head_dim": 128,
+}
+
+
+@pytest.fixture
+def bf16_w_uv(monkeypatch):
+    """Kimi-K3.1's DSA layers run bf16 W_UV: AITER's MLA bmms off."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "0")
+
+
+_NOT_BF16_W_UV = "AITER's FP4 / FP8 MLA bmms (W_UV not bf16)"
+
+
+@pytest.mark.parametrize(
+    "over, env, why",
+    [
+        ({}, {}, None),
+        (
+            {
+                "scheduler_config.max_num_seqs": 2,
+                "speculative_config.num_speculative_tokens": 3,
+            },
+            {},
+            "max_num_seqs 2 (one request a step: max_num_seqs 1)",
+        ),
+        ({}, {"VLLM_KIMI_SD_DSA": "off"}, "VLLM_KIMI_SD_DSA=off"),
+        (
+            {"cache_config.cache_dtype": "auto"},
+            {},
+            "KV cache dtype auto (fp8_ds_mla only)",
+        ),
+        ({}, {"VLLM_ROCM_USE_AITER_FP4BMM": "1"}, _NOT_BF16_W_UV),
+        ({}, {"VLLM_ROCM_USE_AITER_FP8BMM": "1"}, _NOT_BF16_W_UV),
+        (
+            {"attention_config.backend": AttentionBackendEnum.ROCM_AITER_MLA},
+            {},
+            "the ROCM_AITER_MLA_SPARSE attention backend",
+        ),
+        (
+            {"model_config.hf_text_config.dsa_config": SimpleNamespace(index_topk=8)},
+            {},
+            "DSA shapes other than (12, 512, 64, 128, 128, 2048)",
+        ),
+    ],
+)
+def test_dsa_model_at_dcp1_is_served_or_refused(
+    on_mi355x, bf16_w_uv, monkeypatch, over, env, why
+):
+    """Kimi-K3.1 (DSA, fp8_ds_mla) at DCP1 is served without M1 (its MLA
+    layers are DSA's) only when the DSA path runs every step width; otherwise
+    it is refused like any DCP1 without M1, at config time: the DSA layers'
+    deployment checks (KV cache dtype, bf16 W_UV, the sparse backend, the
+    shapes) are made before the model is built."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    cfg = _vllm_config(**{**_DSA_DCP1, **over})
+    reasons = runtime.unsupported(cfg)
+    if why is None:
+        assert reasons == [], reasons
+        dc = specialized_decode_config(cfg)
+        assert dc is not None and dc.m1 is False
+    else:
+        assert reasons == [f"DCP1 without M1 ({runtime.DSA_LAYERS}; {why})"], reasons
+
+
+@pytest.mark.parametrize(
+    "over, why",
+    [
+        ({}, None),
+        ({"requires_padding": True}, "padded decode rows"),
+        ({"width": 40}, "a block table past max_model_len"),
+        ({"rows": 4}, "indexer rows other than the step's decode rows"),
+    ],
+)
+def test_dsa_front_steps_fall_back_to_vllm_ops(over, why):
+    """A step the front cannot serve runs vLLM's prologue (fixed at capture)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.dsa import DsaFront
+
+    s = 8
+    front = object.__new__(DsaFront)
+    front.pages = 32
+    dec = SimpleNamespace(
+        query_start_loc=torch.tensor([0, s], dtype=torch.int32),
+        requires_padding=over.get("requires_padding", False),
+        seq_lens=torch.arange(s, dtype=torch.int32),
+    )
+    im = SimpleNamespace(
+        decode=dec,
+        block_table=torch.zeros(1, over.get("width", 32), dtype=torch.int32),
+        num_prefills=0,
+        num_decode_tokens=over.get("rows", s),
+        slot_mapping=torch.zeros(s, dtype=torch.int64),
+    )
+    ix = SimpleNamespace(
+        k_cache=SimpleNamespace(kv_cache=torch.zeros(4, 64, 68, dtype=torch.uint8))
+    )
+    kv = torch.zeros(4, 64, 656, dtype=torch.uint8)
+    got = front.step_reasons(ix, im, kv, s)
+    assert got == ([] if why is None else [why])
+
+
 def test_every_refusal_is_reported_at_once(monkeypatch):
     monkeypatch.setattr(
         runtime, "platform_reasons", lambda: ["this GPU (gfx950 / MI355X only)"]

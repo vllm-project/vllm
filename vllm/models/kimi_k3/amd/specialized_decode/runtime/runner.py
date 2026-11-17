@@ -101,6 +101,7 @@ class MonoRunner:
         self.mla_prefix = ""  # an M1 layer's name: its decode metadata
         self.interleave = 1  # the DCP KV cache interleave
         self.num_spec = 0  # speculative tokens a request
+        self.dsa_front: dict | None = None  # `dsa.DsaFront`'s step buffers
 
     @property
     def m1c(self) -> bool:
