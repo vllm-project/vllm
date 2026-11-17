@@ -8,7 +8,12 @@ import numpy.typing as npt
 
 from vllm.logger import init_logger
 
-from .base import VideoSourceMetadata, VideoTargetMetadata, check_frame_pixel_limit
+from .base import (
+    VideoSourceMetadata,
+    VideoTargetMetadata,
+    charge_sampled_frames,
+    check_frame_pixel_limit,
+)
 
 logger = init_logger(__name__)
 
@@ -32,6 +37,7 @@ def decode_deepstream(
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
+    charge_sampled_frames(len(frame_idx), _width, _height)
     frames, valid = DeepStreamVideoBackendMixin.decode_indices(
         data,
         frame_idx,
