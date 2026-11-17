@@ -5150,7 +5150,7 @@ fn multimodal_render_app() -> axum::Router {
     }))
 }
 
-/// Startup options must affect rendered tensors and cache keys, including UUID inputs.
+/// Startup options must affect rendered tensors and placeholders.
 #[tokio::test]
 async fn render_startup_mm_processor_kwargs_control_engine_features() {
     let mut results = Vec::new();
@@ -5191,7 +5191,6 @@ async fn render_startup_mm_processor_kwargs_control_engine_features() {
     "#]]
     .assert_debug_eq(&lengths);
     assert_ne!(features[0]["kwargs_data"], features[1]["kwargs_data"]);
-    assert_ne!(features[0]["mm_hashes"], features[1]["mm_hashes"]);
 }
 
 async fn render_image_chat(mm_payload: Option<&str>, uuid: Option<&str>) -> axum::body::Bytes {

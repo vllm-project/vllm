@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Startup processor configuration and cache identities.
+//! Startup processor configuration.
 
 use std::collections::HashMap;
 
 use llm_multimodal::{Modality, PreProcessorConfig};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
-use super::MultimodalModelInfo;
 use crate::error::{Result, bail_multimodal, multimodal};
 
 const SCOPES: [&str; 4] = [
@@ -68,19 +66,6 @@ fn merge(config: &mut Value, overrides: &Value) {
         }
     } else {
         *config = overrides.clone();
-    }
-}
-
-impl MultimodalModelInfo {
-    /// Keep renderers with different startup settings out of each other's caches.
-    pub(super) fn processor_cache_key(&self, modality: Modality, key: String) -> String {
-        let Some(kwargs) = self.mm_processor_kwargs.get(&modality) else {
-            return key;
-        };
-        let mut input = serde_json::json!([self.context.model_id, modality, key, kwargs]);
-        input.sort_all_objects();
-        let bytes = serde_json::to_vec(&input).expect("cache identity serializes");
-        format!("content:{:x}", Sha256::digest(bytes))
     }
 }
 

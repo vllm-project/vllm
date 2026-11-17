@@ -66,7 +66,6 @@ pub struct MultimodalModelInfo {
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
-    mm_processor_kwargs: HashMap<Modality, serde_json::Value>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -443,7 +442,6 @@ impl MultimodalModelInfo {
                 mm_processor_kwargs.get(&Modality::Audio),
             )?,
             limit_mm_per_prompt,
-            mm_processor_kwargs,
         )
     }
 
@@ -455,7 +453,6 @@ impl MultimodalModelInfo {
         video_preprocessor_config: PreProcessorConfig,
         audio_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
-        mm_processor_kwargs: HashMap<Modality, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let (image, video) =
             Self::resolve_vision_lanes(&context, preprocessor_config, video_preprocessor_config)?;
@@ -497,7 +494,6 @@ impl MultimodalModelInfo {
             audio,
             media_connector,
             limit_mm_per_prompt,
-            mm_processor_kwargs,
         }))
     }
 
@@ -1000,7 +996,6 @@ impl MultimodalModelInfo {
                     Some(uuid) => format!("uuid:{uuid}"),
                     None => format!("content:{}", item.hash),
                 };
-                let cache_key = self.processor_cache_key(media.modality, cache_key);
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -1246,7 +1241,6 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             limit_mm_per_prompt,
-            HashMap::new(),
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
@@ -1326,7 +1320,6 @@ mod tests {
             PreProcessorConfig::default(),
             video_config,
             PreProcessorConfig::default(),
-            HashMap::new(),
             HashMap::new(),
         )
         .unwrap()
@@ -1561,7 +1554,6 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
-            HashMap::new(),
             HashMap::new(),
         )
         .unwrap()
@@ -1985,7 +1977,6 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
-            HashMap::new(),
             HashMap::new(),
         )
         .expect("resolution should not error");
