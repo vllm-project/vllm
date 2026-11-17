@@ -253,7 +253,6 @@ class OfflineEncodeInputsContext(OfflineInputsContext):
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     pooling_params: PoolingParams
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
 
     def to_encode_context(
         self,
@@ -316,6 +315,7 @@ class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
     chat_template: str | None
+    chat_template_content_format: ChatTemplateContentFormatOption
     chat_template_kwargs: NotRequired[dict[str, Any] | None]
     max_tokens_per_query: int
     max_tokens_per_doc: int

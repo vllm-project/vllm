@@ -76,7 +76,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         cache_salt: str | None = None,
@@ -113,8 +113,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template: Override the model's default chat template.
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
-            chat_template_content_format: How to render chat message content.
-                Defaults to the engine-level configuration.
+            chat_template_content_format: The format of message content passed
+                to the scoring template: "string" for plain text, "openai" for
+                structured content blocks, or "auto" to detect from the
+                template. Defaults to "auto".
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
                 keyed by modality.
             mm_processor_kwargs: Additional kwargs forwarded to the HF
@@ -133,6 +135,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             )
         self._verify_pooling_task(pooling_task)
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
+        if chat_template_content_format not in ("auto", "string", "openai"):
+            raise ValueError(
+                "chat_template_content_format must be 'auto', 'string', or 'openai'."
+            )
 
         io_processor = self.pooling_io_processors[pooling_task]
 
@@ -148,9 +154,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             add_special_tokens=add_special_tokens,
             chat_template=chat_template,
             chat_template_kwargs=chat_template_kwargs,
-            chat_template_content_format=self._resolve_content_format(
-                chat_template_content_format
-            ),
+            chat_template_content_format=chat_template_content_format,
             media_io_kwargs=media_io_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
             cache_salt=cache_salt,
@@ -251,7 +255,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         cache_salt: str | None = None,
@@ -286,8 +290,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template: Override the model's default chat template.
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
-            chat_template_content_format: How to render chat message content.
-                Defaults to the engine-level configuration.
+            chat_template_content_format: The format of message content passed
+                to the scoring template: "string" for plain text, "openai" for
+                structured content blocks, or "auto" to detect from the
+                template. Defaults to "auto".
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
                 keyed by modality.
             mm_processor_kwargs: Additional kwargs forwarded to the HF
@@ -340,7 +346,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         cache_salt: str | None = None,
@@ -375,8 +381,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template: Override the model's default chat template.
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
-            chat_template_content_format: How to render chat message content.
-                Defaults to the engine-level configuration.
+            chat_template_content_format: The format of message content passed
+                to the scoring template: "string" for plain text, "openai" for
+                structured content blocks, or "auto" to detect from the
+                template. Defaults to "auto".
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
                 keyed by modality.
             mm_processor_kwargs: Additional kwargs forwarded to the HF
@@ -424,7 +432,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         cache_salt: str | None = None,
@@ -475,7 +483,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
             chat_template_content_format: How to render chat message content.
-                Defaults to the engine-level configuration.
             media_io_kwargs: Extra kwargs forwarded to media IO connectors,
                 keyed by modality.
             mm_processor_kwargs: Additional kwargs forwarded to the HF
@@ -543,9 +550,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             add_special_tokens=add_special_tokens,
             chat_template=chat_template,
             chat_template_kwargs=chat_template_kwargs,
-            chat_template_content_format=self._resolve_content_format(
-                chat_template_content_format
-            ),
+            chat_template_content_format=chat_template_content_format,
             media_io_kwargs=media_io_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
             cache_salt=cache_salt,
@@ -561,15 +566,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
-
-    def _resolve_content_format(
-        self,
-        chat_template_content_format: ChatTemplateContentFormatOption | None,
-    ) -> ChatTemplateContentFormatOption:
-        """Fallback to the engine-level content format when unset."""
-        if chat_template_content_format is not None:
-            return chat_template_content_format
-        return self.chat_template_config.chat_template_content_format
 
     def _run_tiling_engine(
         self,
