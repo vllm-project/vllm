@@ -238,6 +238,9 @@ class EngineCoreClient(ABC):
     def set_weight_version(self, weight_version: str) -> None:
         raise NotImplementedError
 
+    def release_unreturned_aux_outputs(self, keys: dict[str, list[str]]) -> None:
+        raise NotImplementedError
+
     def get_weight_version(self) -> str:
         raise NotImplementedError
 
@@ -494,6 +497,9 @@ class InprocClient(EngineCoreClient):
 
     def set_weight_version(self, weight_version: str) -> None:
         self.engine_core.set_weight_version(weight_version)
+
+    def release_unreturned_aux_outputs(self, keys: dict[str, list[str]]) -> None:
+        self.engine_core.release_unreturned_aux_outputs(keys)
 
     def get_weight_version(self) -> str:
         return self.engine_core.get_weight_version()
@@ -1163,6 +1169,14 @@ class SyncMPClient(MPClient):
     def set_weight_version(self, weight_version: str) -> None:
         self.call_utility("set_weight_version", weight_version)
 
+    def release_unreturned_aux_outputs(self, keys: dict[str, list[str]]) -> None:
+        call_id = uuid.uuid1().int >> 64
+        self.utility_results[call_id] = Future()
+        self._send_input(
+            EngineCoreRequestType.UTILITY,
+            (0, call_id, "release_unreturned_aux_outputs", (keys,)),
+        )
+
     def get_weight_version(self) -> str:
         return self.call_utility("get_weight_version")
 
@@ -1367,6 +1381,16 @@ class AsyncMPClient(MPClient):
         await self._send_input_message(message, engine)
         self._ensure_output_queue_task()
         return await future
+
+    def release_unreturned_aux_outputs(self, keys: dict[str, list[str]]) -> None:
+        for engine in self.core_engines:
+            call_id = uuid.uuid1().int >> 64
+            self.utility_results[call_id] = asyncio.get_running_loop().create_future()
+            self._send_input(
+                EngineCoreRequestType.UTILITY,
+                (self.client_index, call_id, "release_unreturned_aux_outputs", (keys,)),
+                engine,
+            )
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")

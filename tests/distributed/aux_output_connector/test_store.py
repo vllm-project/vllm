@@ -41,6 +41,7 @@ from vllm.distributed.aux_output_connector.object_store import (
 )
 from vllm.distributed.aux_output_connector.session_objects import (
     SessionObjectWriter,
+    aux_owned_keys,
 )
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
@@ -3579,3 +3580,20 @@ def test_worker_without_capture_skips_steps_without_session_rows():
     assert worker.prepare_output(batch, torch.zeros(3, 2)) is None
     assert worker._pending_outputs == []
     worker.close()
+
+
+@pytest.mark.parametrize(
+    "segments,owned",
+    [
+        ([(0, "r@v1"), (64, None)], "abcdt"),
+        ([(0, "p@v1"), (32, "r@v2"), (48, "r@v3"), (64, None)], "cdt"),
+        ([(0, "p@v1"), (40, "r@v2"), (64, None)], "dt"),
+        ([(0, "p@v1"), (64, None)], "t"),
+    ],
+    ids=["all-own", "own-from-an-object", "own-inside-an-object", "all-hit"],
+)
+def test_aux_owned_keys(segments, owned):
+    keys = ["j/s/a", "j/s/b", "j/s/c", "j/s/d", "j/s/tail/t"]
+    assert aux_owned_keys("r", keys, segments) == [
+        key for key in keys if key[-1] in owned
+    ]

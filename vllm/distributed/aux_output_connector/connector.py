@@ -626,6 +626,12 @@ class AuxOutputSchedulerConnector:
         if orphans:
             self._orphans[request.request_id] = orphans
 
+    def release_unreturned(self, keys: dict[str, list[str]]) -> None:
+        """Remove objects of session requests whose responses no client
+        received."""
+        for request_id, request_keys in keys.items():
+            self._orphans.setdefault(request_id, []).extend(request_keys)
+
     def reset(self) -> None:
         """Start a new auxiliary output namespace after a prefix-cache reset."""
         # The worker drops temporary state on generation changes; resend hashes.

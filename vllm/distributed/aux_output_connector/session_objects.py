@@ -149,6 +149,23 @@ def salt_aux_session(
     request.block_hashes = None
 
 
+def aux_owned_keys(
+    request_id: str,
+    keys: Sequence[str],
+    segments: Sequence[Sequence],
+) -> list[str]:
+    """The keys of a session response whose objects its request `request_id`
+    wrote: the full objects from its first own segment on, and the tail."""
+    full = [key for key in keys if "/tail/" not in key]
+    end = segments[-1][0]
+    own = f"{request_id}@"
+    start = next(
+        (begin for begin, salt in segments if salt and salt.startswith(own)), end
+    )
+    first = -(-start * len(full) // end) if full else 0
+    return full[first:] + list(keys[len(full) :])
+
+
 def aux_object_key(key_prefix: str, session: str, block_hash_hex: str) -> str:
     """Key of the object that ends with the hash block `block_hash_hex`."""
     return f"{key_prefix}/{session}/{block_hash_hex}"

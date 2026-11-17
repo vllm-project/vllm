@@ -724,7 +724,7 @@ class AuxOutputWorkerConnector:
         for request_id, keys in metadata.session_orphans.items():
             assert self._object_writer is not None
             if request_id in self._requests:
-                self._requests[request_id].orphans = keys
+                self._requests[request_id].orphans.extend(keys)
             else:
                 self._object_writer.remove(keys)
         assert not metadata.requests.keys() & metadata.finished_requests, (

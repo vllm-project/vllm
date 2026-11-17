@@ -1254,6 +1254,11 @@ class EngineCore:
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
+    def release_unreturned_aux_outputs(self, keys: dict[str, list[str]]) -> None:
+        connector = getattr(self.scheduler, "aux_output_connector", None)
+        if connector is not None:
+            connector.release_unreturned(keys)
+
     def set_weight_version(self, weight_version: str) -> None:
         connector = getattr(self.scheduler, "aux_output_connector", None)
         if connector is not None:

@@ -4,12 +4,13 @@
 import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
 
+from vllm.distributed.aux_output_connector.session_objects import aux_owned_keys
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -165,6 +166,7 @@ class StreamingInputOutputCollector(RequestOutputCollector):
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
+    unreturned_aux_keys: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -767,10 +769,18 @@ class OutputProcessor:
         """
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
+        unreturned_aux_keys: dict[str, list[str]] = {}
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
             if req_state is None:
+                if engine_core_output.aux_output_keys:
+                    assert engine_core_output.aux_version_segments is not None
+                    unreturned_aux_keys[req_id] = aux_owned_keys(
+                        req_id,
+                        engine_core_output.aux_output_keys,
+                        engine_core_output.aux_version_segments,
+                    )
                 # Ignore output for already-aborted request.
                 continue
 
@@ -911,6 +921,7 @@ class OutputProcessor:
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
+            unreturned_aux_keys=unreturned_aux_keys,
         )
 
     @staticmethod

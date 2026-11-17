@@ -922,6 +922,10 @@ class AsyncLLM(EngineClient):
                             iteration_stats,
                             weight_version=outputs.weight_version,
                         )
+                        if processed_outputs.unreturned_aux_keys:
+                            engine_core.release_unreturned_aux_outputs(
+                                processed_outputs.unreturned_aux_keys
+                            )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
 

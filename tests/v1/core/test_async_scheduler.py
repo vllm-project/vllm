@@ -48,6 +48,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine import CheckpointState
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.kv_offload.base import OffloadingSpec, get_offload_block_hash
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -1734,6 +1735,24 @@ def test_released_samples_leave_no_objects():
     assert set(engine.client.objects) == set(group.owned)
     assert release_aux_keys(engine.store, group.owned, timeout_s=0) == []
     assert not engine.client.objects
+
+
+@pytest.mark.parametrize("max_tokens", [1, 9], ids=["tail", "no-tail"])
+def test_session_responses_the_frontend_dropped_leave_no_objects(max_tokens):
+    engine = _tier_engine()
+    _run_turn(engine, 1, "first")
+    outputs = _run_turn(
+        engine, 2, "second", 72, max_tokens, segments=engine.segments["first"]
+    )
+    engine._stopped = [entry for entry in engine._stopped if entry[0] != "second"]
+    processed = OutputProcessor(None, log_stats=False).process_outputs(
+        [outputs["second"]]
+    )
+    assert not processed.request_outputs
+    engine.connector.release_unreturned(processed.unreturned_aux_keys)
+    engine.close()
+    assert set(engine.keys["first"][:2]) < set(engine.keys["second"])
+    assert set(engine.client.objects) == set(engine.keys["first"])
 
 
 def test_pause_writes_every_object_of_the_stopped_session_requests():

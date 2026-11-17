@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import gc
 import math
+import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -41,6 +44,10 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core_client import AsyncMPClient, SyncMPClient
+from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
@@ -2145,3 +2152,140 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+@pytest.mark.asyncio
+async def test_output_handler_sends_the_release_before_it_yields_and_never_waits(
+    monkeypatch,
+):
+    monkeypatch.setenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "1")
+    outputs: asyncio.Queue = asyncio.Queue()
+    events = []
+    errors: list[Exception] = []
+
+    class EngineCore:
+        resources = SimpleNamespace(stop_requested=False)
+
+        async def get_output_async(self):
+            output = await outputs.get()
+            if isinstance(output, Exception):
+                raise output
+            return output
+
+        async def call_utility_async(self, method, keys):
+            events.append(method)
+            await asyncio.Event().wait()
+
+        def release_unreturned_aux_outputs(self, keys):
+            events.append(("release", keys))
+
+        def shutdown(self, timeout=None):
+            pass
+
+    def process_outputs(*args, **kwargs):
+        events.append("processed")
+        keys = {"r": ["k"]} if events.count("processed") == 1 else {}
+        return SimpleNamespace(
+            request_outputs=[], reqs_to_abort=[], unreturned_aux_keys=keys
+        )
+
+    async def other_task():
+        while "processed" not in events:
+            await asyncio.sleep(0)
+        events.append("other")
+
+    engine = object.__new__(AsyncLLM)
+    engine.output_handler = None
+    engine.engine_core = EngineCore()
+    engine.output_processor = SimpleNamespace(
+        process_outputs=process_outputs,
+        update_scheduler_stats=lambda stats: None,
+        propagate_error=errors.append,
+    )
+    engine.log_stats = False
+    engine.logger_manager = None
+    engine.renderer = SimpleNamespace(mm_processor_cache=None, shutdown=lambda: None)
+    other = asyncio.create_task(other_task())
+    await asyncio.sleep(0)
+    engine._run_output_handler()
+    outputs.put_nowait(
+        SimpleNamespace(
+            outputs=[object(), object()],
+            timestamp=0.0,
+            weight_version=None,
+            scheduler_stats=None,
+            engine_index=0,
+        )
+    )
+    outputs.put_nowait(EngineDeadError())
+    await asyncio.wait_for(engine.output_handler, timeout=5)
+    await other
+    assert events == ["processed", ("release", {"r": ["k"]}), "other", "processed"]
+    assert [type(error) for error in errors] == [EngineDeadError]
+
+
+def test_llm_engine_step_returns_its_outputs_when_a_release_fails():
+    output = Mock()
+
+    def release(keys):
+        raise RuntimeError("engine refused the call")
+
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.dp_group = None
+    engine.log_stats = False
+    engine.logger_manager = None
+    engine.renderer = SimpleNamespace(mm_processor_cache=None)
+    engine.engine_core = SimpleNamespace(
+        get_output=lambda: SimpleNamespace(
+            outputs=[object()],
+            timestamp=0.0,
+            weight_version=None,
+            scheduler_stats=None,
+        ),
+        abort_requests=lambda request_ids: None,
+        release_unreturned_aux_outputs=release,
+    )
+    engine.output_processor = SimpleNamespace(
+        process_outputs=lambda *args, **kwargs: SimpleNamespace(
+            request_outputs=[output],
+            reqs_to_abort=[],
+            unreturned_aux_keys={"r": ["k"]},
+        ),
+        update_scheduler_stats=lambda stats: None,
+    )
+    assert engine.step() == [output]
+
+
+def test_sync_client_does_not_wait_for_the_engine_to_release_dropped_responses():
+    sent = []
+    client = object.__new__(SyncMPClient)
+    client.utility_results = {}
+    client._send_input = lambda request_type, request: sent.append(request)
+    done = threading.Event()
+
+    def release():
+        client.release_unreturned_aux_outputs({"r": ["k"]})
+        done.set()
+
+    threading.Thread(target=release, daemon=True).start()
+    assert done.wait(5)
+    ((_, call_id, method, args),) = sent
+    assert method == "release_unreturned_aux_outputs" and args == ({"r": ["k"]},)
+    assert call_id in client.utility_results
+
+
+@pytest.mark.asyncio
+async def test_async_client_sends_the_release_to_every_engine_without_waiting():
+    sent = []
+    client = object.__new__(AsyncMPClient)
+    client.core_engines = [b"e0", b"e1"]
+    client.client_index = 0
+    client.utility_results = {}
+    client.encoder = SimpleNamespace(encode=lambda request: (request,))
+    client._send_input_message = lambda message, engine: sent.append((engine, message))
+    client.release_unreturned_aux_outputs({"r": ["k"]})
+    assert [engine for engine, _ in sent] == [b"e0", b"e1"]
+    for _, (_, (_, call_id, method, args)) in sent:
+        assert method == "release_unreturned_aux_outputs" and args == ({"r": ["k"]},)
+        assert call_id in client.utility_results
