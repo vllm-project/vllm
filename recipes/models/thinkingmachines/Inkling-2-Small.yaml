@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, attention residuals, relative-bias attention, short convolutions, and a bundled DSpark speculator."
   date_added: 2026-11-12
-  date_updated: 2026-11-12
+  date_updated: 2026-11-17
   difficulty: intermediate
   tasks:
     - multimodal
@@ -18,7 +18,8 @@ meta:
 
 model:
   model_id: "thinkingmachines/Inkling-2-Small"
-  min_vllm_version: "nightly"
+  # Inkling2ForConditionalGeneration is not in v0.34.0; the next release at the earliest.
+  min_vllm_version: "0.35.0"
   nightly_required: true
   docker_image: "vllm/vllm-openai:inkling-2-small"
   install:
