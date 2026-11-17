@@ -392,6 +392,31 @@ def test_external_elastic_ep_auto_bootstrap_preserves_executor_launch_arguments(
     assert args.enable_fault_tolerance is enable_fault_tolerance
 
 
+@pytest.mark.parametrize("initial_size", [2, 4])
+def test_external_elastic_ep_packed_fault_tolerance_requires_separate_support(
+    initial_size, tmp_path, monkeypatch
+):
+    """Packed bootstrap cannot enable a first-engine-only recovery client."""
+    Qwen3MoeConfig(architectures=["Qwen3MoeForCausalLM"]).save_pretrained(tmp_path)
+    monkeypatch.setenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0")
+    args = EngineArgs(
+        model=str(tmp_path),
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=initial_size,
+        elastic_ep_max_dp_size=4,
+        data_parallel_rank=0,
+        data_parallel_size_local=2,
+        enable_elastic_ep=True,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config={"use_async": False},
+        enable_fault_tolerance=True,
+        all2all_backend="nixl_ep",
+    )
+    with pytest.raises(ValueError, match="Fault tolerance requires external"):
+        args.create_engine_config()
+
+
 @pytest.mark.asyncio
 async def test_external_elastic_ep_local_range_routes_after_old_size_stats():
     """Incomplete global snapshots cannot replace a joiner's local load state."""
@@ -697,11 +722,12 @@ class ExternalLBServerManager:
 
         env_dict = {
             "VLLM_SERVER_DEV_MODE": "1",
-            current_platform.device_control_env_var: ",".join(
+        }
+        if not current_platform.is_xpu():
+            env_dict[current_platform.device_control_env_var] = ",".join(
                 str(current_platform.device_id_to_physical_device_id(i))
                 for i in range(rank * self.tp_size, (rank + 1) * self.tp_size)
-            ),
-        }
+            )
         if elastic_ep_scale_up_launch:
             env_dict["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "1"
 
@@ -1121,7 +1147,7 @@ async def test_external_lb_single_completion(
     num_requests_per_server = 25  # Total 50 requests across 2 servers
     all_tasks = []
 
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
@@ -1133,7 +1159,7 @@ async def test_external_lb_single_completion(
 
     # Second burst of requests
     all_tasks = []
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
@@ -1212,7 +1238,7 @@ async def test_external_lb_completion_streaming(
     num_requests_per_server = 25  # Total 50 requests across 2 servers
     all_tasks = []
 
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_streaming_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
@@ -1224,7 +1250,7 @@ async def test_external_lb_completion_streaming(
 
     # Second burst of streaming requests
     all_tasks = []
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_streaming_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 

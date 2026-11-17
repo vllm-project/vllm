@@ -198,6 +198,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
+            self._seen_exclusive_actions: dict[_ArgumentGroup, Action] = {}
             namespace, args = super().parse_known_args(args, namespace)
             for action in self._deprecated:
                 if (
@@ -206,6 +207,21 @@ class FlexibleArgumentParser(ArgumentParser):
                 ):
                     logger.warning_once("argument '%s' is deprecated", dest)
             return namespace, args
+
+        def _get_values(self, action: Action, arg_strings: list[str]) -> Any:
+            values = super()._get_values(action, arg_strings)
+            # Match Python 3.13's conflict check for explicit default values.
+            if action.option_strings or arg_strings:
+                for group in self._mutually_exclusive_groups:
+                    if action not in group._group_actions:
+                        continue
+                    previous = self._seen_exclusive_actions.setdefault(group, action)
+                    if previous is not action:
+                        name = "/".join(previous.option_strings) or previous.dest
+                        raise argparse.ArgumentError(
+                            action, f"not allowed with argument {name}"
+                        )
+            return values
 
     def add_argument(self, *args, **kwargs):
         # Python 3.13+ handles the deprecated kwarg natively
@@ -514,7 +530,7 @@ class FlexibleArgumentParser(ArgumentParser):
         return value
 
     def _pull_args_from_config(self, args: list[str]) -> list[str]:
-        """Method to pull arguments specified in the config file
+        r"""Method to pull arguments specified in the config file
         into the command-line args variable.
 
         The arguments in config file will be inserted between

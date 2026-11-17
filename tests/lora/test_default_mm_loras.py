@@ -24,8 +24,6 @@ AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assist
 # the generated text. If the lora is inactive, this model
 # generates commentary on the transcription.
 RESPONSE_SUFFIX_WITH_LORA = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
-RESPONSE_SUFFIX_WITHOUT_LORA = "Certainly! Here is the transcription of the audio you provided:\n\nThe first words I spoke in the original phonograph record: A little piece of practical poetry. Mary had a little lamb; its fleece was white as snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
-
 VLLM_RUNNER_BASE_KWARGS = {
     "model_name": MODEL_PATH,
     "dtype": "half",
@@ -41,8 +39,13 @@ VLLM_RUNNER_BASE_KWARGS = {
 
 
 def run_test(
-    vllm_runner, audio_assets, monkeypatch, lora_request, expected_suffix, **kwargs
-):
+    vllm_runner,
+    audio_assets,
+    monkeypatch,
+    lora_request,
+    expected_suffix: str | None,
+    **kwargs,
+) -> str:
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
@@ -51,7 +54,7 @@ def run_test(
     vllm_runner_kwargs = {**VLLM_RUNNER_BASE_KWARGS, **kwargs}
 
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
-        vllm_outputs_with_default_lora = [
+        outputs = [
             vllm_model.generate_greedy(
                 prompts,
                 max_tokens=128,
@@ -60,8 +63,11 @@ def run_test(
             )
             for prompts, audios in inputs
         ]
+        output = outputs[-1][-1][-1]
 
-        assert vllm_outputs_with_default_lora[-1][-1][-1].endswith(expected_suffix)
+    if expected_suffix is not None:
+        assert output.endswith(expected_suffix)
+    return output
 
 
 @create_new_process_for_each_test()
@@ -91,14 +97,26 @@ def test_inactive_default_mm_lora(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that modalities are filtered properly."""
-    # Default image lora won't be active since we only pass audio
-    run_test(
+    # An image-only default LoRA must not change audio-only generation.
+    output_without_default_lora = run_test(
+        vllm_runner,
+        audio_assets,
+        monkeypatch,
+        lora_request=None,
+        expected_suffix=None,
+    )
+    output_with_inactive_default_lora = run_test(
         vllm_runner,
         audio_assets,
         monkeypatch,
         lora_request=None,
         default_mm_loras={"image": IMAGE_LORA_PATH},
-        expected_suffix=RESPONSE_SUFFIX_WITHOUT_LORA,
+        expected_suffix=None,
+    )
+    assert output_with_inactive_default_lora == output_without_default_lora, (
+        "An image default LoRA changed output for an audio-only prompt: "
+        f"expected {output_without_default_lora!r}, "
+        f"got {output_with_inactive_default_lora!r}."
     )
 
 

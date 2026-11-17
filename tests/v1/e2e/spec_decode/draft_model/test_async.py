@@ -14,8 +14,8 @@ SPEC_DECODE_CONFIGS = [
         id="eagle3-llama",
     ),
     pytest.param(
-        "eagle618/deepseek-v3-random",
-        "eagle618/eagle-deepseek-v3-random",
+        "vllm-project/deepseek-v3-random",
+        "vllm-project/eagle-deepseek-v3-random",
         "eagle",
         2,
         id="eagle-mla-deepseek",

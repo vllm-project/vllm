@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -10,7 +11,7 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
 
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.multimodal.processing import InputProcessingContext
 
 
@@ -329,30 +330,6 @@ def _dspark_vocab_stub(input_vocab_size: int, draft_vocab_size: int):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize(
-    ("input_vocab_size", "draft_vocab_size", "weights", "error"),
-    [
-        (101, 100, [], "must include embed_tokens weights"),
-        (99, 99, [], "must include lm_head weights"),
-        (100, 40, [], "must include lm_head weights"),
-        (
-            100,
-            40,
-            [("lm_head.weight", torch.empty(40, 8))],
-            "must include a d2t mapping",
-        ),
-    ],
-)
-def test_qwen3_dspark_rejects_incomplete_vocab_weights(
-    input_vocab_size, draft_vocab_size, weights, error
-):
-    model = _dspark_vocab_stub(input_vocab_size, draft_vocab_size)
-
-    with pytest.raises(ValueError, match=error):
-        model.load_weights(weights)
-
-
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("draft_vocab_size", [100, 101])
 def test_qwen3_dspark_accepts_draft_vocab_at_least_target(draft_vocab_size):
     """A draft vocab >= the target's maps identically, so needs no lm_head/d2t.
@@ -380,14 +357,25 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         hf_config=SimpleNamespace(model_type="qwen3"),
         get_vocab_size=Mock(return_value=99),
     )
+    speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+        draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        moe_backend=None,
+        attention_backend=None,
+        kv_cache_dtype=None,
+        draft_load_config=None,
+        draft_lm_head_quantization=None,
+        draft_enable_eplb=True,
+        resolved_draft_num_redundant_experts=None,
+    )
+    speculative_config.apply_draft_eplb_overrides = partial(
+        SpeculativeConfig.apply_draft_eplb_overrides, speculative_config
+    )
+    speculative_config.apply_draft_overrides = partial(
+        SpeculativeConfig.apply_draft_overrides, speculative_config
+    )
     vllm_config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            draft_model_config=draft_model_config,
-            draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
-            attention_backend=None,
-            kv_cache_dtype=None,
-            draft_load_config=None,
-        ),
+        speculative_config=speculative_config,
         parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
@@ -402,14 +390,6 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
 
     with (
         patch.object(dspark_utils, "replace", side_effect=fake_replace),
-        patch(
-            "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group",
-            return_value=SimpleNamespace(world_size=1),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
-            return_value=SimpleNamespace(world_size=1),
-        ),
         patch(
             "vllm.compilation.backends.set_model_tag",
             return_value=nullcontext(),

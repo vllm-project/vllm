@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3.6 dense multimodal model (27B) with gated delta networks hybrid attention, MTP, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-10-12
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -16,8 +16,6 @@ meta:
     rtx_pro_6000: verified
     dgx_station_gb300: verified
     rtx_5090: verified
-    ascend_950dt: verified
-    ascend_910c: verified
     arc_pro_b60: verified
     arc_pro_b70: verified
     mi300x: verified
@@ -102,39 +100,11 @@ variants:
     precision: bf16
     vram_minimum_gb: 65
     description: "Full precision BF16 — fits on 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70, or an Ascend A3 node (TP2+DP8)"
-    tp:
-      ascend_910c: 2
     hardware_overrides:
       rtx_pro_6000:
         extra_args:
           - "--max-num-seqs"
           - "8"
-      ascend_910c:
-        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
-        extra_args:
-          - "--data-parallel-size"
-          - "8"
-          - "--served-model-name"
-          - "qwen3.6"
-          - "--max-num-seqs"
-          - "32"
-          - "--max-model-len"
-          - "133000"
-          - "--max-num-batched-tokens"
-          - "16384"
-          - "--gpu-memory-utilization"
-          - "0.90"
-          - "--no-enable-prefix-caching"
-          - "--compilation-config"
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - "--async-scheduling"
-        extra_env:
-          VLLM_USE_MODELSCOPE: "True"
-          PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-          HCCL_BUFFSIZE: "512"
-          OMP_PROC_BIND: "false"
-          OMP_NUM_THREADS: "1"
-          TASK_QUEUE_ENABLE: "1"
   fp8:
     model_id: "Qwen/Qwen3.6-27B-FP8"
     precision: fp8
@@ -157,7 +127,6 @@ variants:
     tp: 1
     # SM120 GPUs only reach FlashInfer's XQA decode kernel from 0.28.0.
     min_vllm_version: "0.28.0"
-    nightly_required: true
     description: "NVIDIA ModelOpt NVFP4 checkpoint — MLP linears quantized to NVFP4, attention linears and KV cache in FP8. Single Blackwell GPU, including DGX Spark."
     hardware_overrides:
       dgx_station_gb300:
@@ -166,8 +135,6 @@ variants:
           - "fp8"
           - "--attention-backend"
           - "flashinfer"
-          - "--gpu-memory-utilization"
-          - "0.92"
           - "--max-model-len"
           - "262144"
           - "--max-num-batched-tokens"
@@ -203,8 +170,6 @@ variants:
           - "fp8"
           - "--attention-backend"
           - "flashinfer"
-          - "--gpu-memory-utilization"
-          - "0.9"
           - "--max-model-len"
           - "262144"
           - "--max-num-seqs"
@@ -224,8 +189,6 @@ variants:
           - "FLASHINFER"
           - "--attention-config"
           - '{"use_trtllm_attention": true}'
-          - "--gpu-memory-utilization"
-          - "0.93"
           # 32 GB leaves ~9 GB for KV cache after the NVFP4 weights.
           - "--max-model-len"
           - "36608"
@@ -233,8 +196,6 @@ variants:
           - "8"
           - "--max-num-batched-tokens"
           - "4096"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--enable-chunked-prefill"
           - "--enable-prefix-caching"
           - "--async-scheduling"
@@ -247,90 +208,6 @@ variants:
     label: "FP8 (RedHat)"
     vram_minimum_gb: 33
     description: "RedHatAI FP8 dynamic quantization"
-  ascend_w8a8_mxfp8:
-    model_id: "Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
-    precision: mxfp8
-    label: "W8A8 (Ascend)"
-    vram_minimum_gb: 34
-    supported_hardware: [ascend_950dt]
-    tp: 1
-    min_vllm_version: "0.23.0"
-    default_modes:
-      spec_decoding: qwen3_5_mtp
-    extra_args:
-      - "--distributed-executor-backend"
-      - "mp"
-      - "--data-parallel-size"
-      - "8"
-      - "--quantization"
-      - "ascend"
-      - "--served-model-name"
-      - "qwen3.6"
-      - "--max-num-seqs"
-      - "32"
-      - "--max-model-len"
-      - "262144"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--gpu-memory-utilization"
-      - "0.90"
-      - "--no-enable-prefix-caching"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    extra_env:
-      VLLM_USE_MODELSCOPE: "True"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-    hardware_overrides:
-      ascend_950dt:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-  ascend_w8a8:
-    model_id: "Eco-Tech/Qwen3.6-27B-w8a8"
-    precision: int8
-    label: "W8A8 (Ascend A3)"
-    vram_minimum_gb: 33
-    supported_hardware: [ascend_910c]
-    tp: 2
-    min_vllm_version: "0.23.0"
-    default_modes:
-      spec_decoding: qwen3_5_mtp
-    extra_args:
-      - "--data-parallel-size"
-      - "8"
-      - "--quantization"
-      - "ascend"
-      - "--served-model-name"
-      - "qwen3.6"
-      - "--max-num-seqs"
-      - "32"
-      - "--max-model-len"
-      - "133000"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--gpu-memory-utilization"
-      - "0.90"
-      - "--no-enable-prefix-caching"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--async-scheduling"
-    extra_env:
-      VLLM_USE_MODELSCOPE: "True"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-    hardware_overrides:
-      ascend_910c:
-        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
-    description: "ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C), using TP2+DP8. Requires --quantization ascend."
 
 compatible_strategies:
   - single_node_tp
@@ -368,7 +245,7 @@ guide: |
   ## Prerequisites
 
   - **vLLM version:** >= 0.17.0
-  - **NVFP4 vLLM version:** >= 0.28.0 (currently nightly). 0.24.0 loads the
+  - **NVFP4 vLLM version:** >= 0.28.0. 0.24.0 loads the
     checkpoint, but FlashInfer only selects its XQA decode kernel on SM120
     GPUs from 0.28.0.
   - **Hardware (BF16):** 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70
@@ -433,7 +310,7 @@ guide: |
   (W4A16) while the attention linears and KV cache stay FP8, so the ~22 GB
   weights fit a single Blackwell GPU. vLLM auto-detects the ModelOpt
   quantization from the checkpoint, so no `--quantization` flag is needed, but
-  it does need vLLM 0.28.0+ (currently nightly) for FlashInfer's XQA decode path
+  it does need vLLM 0.28.0+ for FlashInfer's XQA decode path
   on SM120. NVIDIA reports near-lossless accuracy versus the FP8 baseline.
 
   Select the NVFP4 variant in the command builder above and switch the hardware

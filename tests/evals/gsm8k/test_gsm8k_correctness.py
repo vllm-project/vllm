@@ -87,6 +87,28 @@ def get_acceptance_length(server_url: str) -> float:
     return 1.0 + num_accepted / num_drafts
 
 
+def check_prefix_cache_hits(server_url: str, expected: bool) -> None:
+    """Check that the evaluated requests exercised the configured cache mode."""
+    response = requests.get(f"{server_url.rstrip('/').removesuffix('/v1')}/metrics")
+    response.raise_for_status()
+    hits = []
+    for line in response.text.splitlines():
+        name, _, value = line.rpartition(" ")
+        if name.split("{")[0] == "vllm:prefix_cache_hits_total":
+            hits.append(float(value))
+    assert hits, "prefix-cache hit metric is missing"
+    total_hits = sum(hits)
+    print(f"  Prefix-cache hit tokens: {total_hits:g}")
+    if expected:
+        assert total_hits > 0, (
+            "prefix caching was enabled but no cached tokens were reused"
+        )
+    else:
+        assert total_hits == 0, (
+            "prefix caching was disabled but cached tokens were reused"
+        )
+
+
 def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
@@ -189,6 +211,8 @@ def test_gsm8k_correctness(config_filename):
             assert results and not any(results), f"{method} failed: {results}"
 
         results = run_gsm8k_eval(eval_config, server_url)
+        if "expect_prefix_cache_hits" in eval_config:
+            check_prefix_cache_hits(server_url, eval_config["expect_prefix_cache_hits"])
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]
