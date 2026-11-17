@@ -95,3 +95,5 @@ The `dbo_yield` method puts the current thread to sleep and wakes up the other U
 * `all-reduce-overlap` makes each TP all-reduce a hand-off, in `GroupCoordinator._all_reduce_out_place`: the all-reduce runs on the comm stream while the other microbatch computes. It needs tensor parallelism on one DP rank without expert parallelism.
 
 Under `all-reduce-overlap` there is no DP handshake: the runner decides per step by the thresholds alone, and a split step runs eagerly. No all-to-all backend is needed, and multimodal models are supported, since the vision encoder runs outside the split.
+
+On ROCm at TP2, `VLLM_DBO_TP_DMA_AR=1` runs a microbatch's all-reduce as a one-shot INT4 all-reduce over the SDMA copy engines instead of a CU kernel, so it can hide under the other microbatch's GEMMs. It is lossy (INT4, one fp16 scale per 32 values) and off by default, it applies only inside a split step, and it is ignored with a warning on other platforms or at other TP sizes.
