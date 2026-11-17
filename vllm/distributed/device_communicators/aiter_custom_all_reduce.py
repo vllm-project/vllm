@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM-owned wrapper over AITER's ``CustomAllreduce``.
+"""vLLM-owned wrapper over AITER's `CustomAllreduce`.
 
-vLLM's ``CudaCommunicator`` stores one of these as ``aiter_ar_comm`` (when
-``VLLM_ROCM_USE_AITER_CUSTOM_AR`` is set) so the plain allreduce and
+vLLM's `CudaCommunicator` stores one of these as `aiter_ar_comm` (when
+`VLLM_ROCM_USE_AITER_CUSTOM_AR` is set) so the plain allreduce and
 the fused allreduce+RMSNorm path share a single AITER instance with its IPC buffers.
 
 """
@@ -44,6 +44,7 @@ class AiterCustomAllreduce:
         if not register_graph_buffers:
             kwargs["enable_register_for_capturing"] = False
         self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
+        self._register_graph_buffers = register_graph_buffers
 
     @property
     def aiter_ca(self):
@@ -52,6 +53,19 @@ class AiterCustomAllreduce:
     @property
     def disabled(self) -> bool:
         return self._impl.disabled
+
+    @property
+    def registers_graph_buffers(self) -> bool:
+        """Whether graph capture registers its inputs once expandable segments
+        are off, which AITER decides when capture begins from v0.1.26."""
+        from vllm.platforms.rocm import on_gfx1250
+
+        return (
+            self._register_graph_buffers
+            and not self.disabled
+            and not on_gfx1250()
+            and getattr(type(self._impl), "defers_capture_registration", False)
+        )
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
         return self._impl.should_custom_ar(inp)
@@ -68,6 +82,9 @@ class AiterCustomAllreduce:
     def custom_all_gather(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor | None:
         return self._impl.custom_all_gather(inp, dim=dim)
 
+    def all_gather_unreg(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor:
+        return self._impl.all_gather_unreg(inp, dim=dim)
+
     def custom_reduce_scatter(
         self, inp: torch.Tensor, out: torch.Tensor, dim: int = 0
     ) -> torch.Tensor | None:
@@ -76,12 +93,12 @@ class AiterCustomAllreduce:
     def use_1stage_fused_ar_rms(self, inp: torch.Tensor) -> bool:
         """Whether AITER's fused allreduce+RMSNorm runs as its one-stage kernel.
 
-        Mirrors the launcher contract of aiter's ``fused_allreduce_rmsnorm``
+        Mirrors the launcher contract of aiter's `fused_allreduce_rmsnorm`
         (csrc/include/custom_all_reduce.cuh): rows of 16-byte packs, at most
         1024 packs per row, at most 80 tokens, and the byte cap of the
         one-stage custom allreduce for this TP size and topology. Outside it
         the fused op runs the two-stage variant (cross-device reduce-scatter
-        + local norm), which is slower than an explicit ``all_reduce`` + norm,
+        + local norm), which is slower than an explicit `all_reduce` + norm,
         so callers that can fall back should require this. Capture-static:
         depends only on shape, dtype, TP size and topology.
         """
@@ -130,7 +147,7 @@ class AiterCustomAllreduce:
         """True if the running AITER build exposes the per-group AR+RMS+quant
         kernel (added in ROCm/aiter PR #2823).
 
-        The pattern registration in ``RocmAiterAllReduceFusionPass`` keys off
+        The pattern registration in `RocmAiterAllReduceFusionPass` keys off
         this so vLLM degrades to the AR+RMS-only fusion when run against an
         older aiter that lacks the per-group launcher.
         """

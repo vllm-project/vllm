@@ -8,6 +8,7 @@ use thiserror::Error;
 use thiserror_ext::Macro;
 
 use crate::protocol::utility::UtilityCallId;
+use crate::transport::EngineId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -38,6 +39,8 @@ pub enum Error {
     ZmqRuntimeTask(#[from] tokio::task::JoinError),
     #[error("engine core reported fatal failure")]
     EngineCoreDead,
+    #[error("engine core {engine_id:?} disconnected")]
+    EngineDisconnected { engine_id: EngineId },
     #[error("startup handshake timed out while waiting for {stage} after {timeout:?}")]
     HandshakeTimeout {
         stage: &'static str,
@@ -55,8 +58,6 @@ pub enum Error {
     UnexpectedCoordinatorOutput { message: String },
     #[error("unexpected output on main dispatcher path: {message}")]
     UnexpectedDispatcherOutput { message: String },
-    #[error("coordinator requires a Python-compatible two-byte engine id, got {engine_id:?}")]
-    UnsupportedCoordinatorEngineId { engine_id: Vec<u8> },
     #[error("unsupported auxiliary frame(s): expected 1 frame, got {frame_count}")]
     UnsupportedAuxFrames { frame_count: usize },
     #[error("external coordinator mode is not implemented yet")]
@@ -66,8 +67,6 @@ pub enum Error {
         context: &'static str,
         field: &'static str,
     },
-    #[error("engine control channel closed unexpectedly: {message}")]
-    ControlClosed { message: String },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
     #[error(
