@@ -61,7 +61,8 @@ Release:
 Arena: each producer registers an arena of `arena_bytes(...)` at startup and
 admits a bucket only while a block for it can be carved from the arena next
 to the served, unfreed ones, so a full arena slows pulls down instead of
-failing them.
+failing them. A bucket over `buffer_bytes` (one piece) is served outside the
+arena, from a temporary copy for that pull.
 """
 
 import itertools
@@ -341,16 +342,10 @@ class RdtRouter:
                 )
 
 
-def arena_bytes(
-    *,
-    buffer_bytes: int,
-    num_buffers: int,
-    num_consumers: int,
-    largest_tensor_bytes: int,
-) -> int:
-    """The NIXL arena one producer registers: `num_buffers` buckets for each
-    consumer that may pull from it, plus one bucket of slack for a free still
-    on its way and for fragmentation. A bucket is at most `buffer_bytes`, or
-    one tensor larger than that."""
-    bucket = max(buffer_bytes, largest_tensor_bytes) + _PIECE_ALIGNMENT
+def arena_bytes(*, buffer_bytes: int, num_buffers: int, num_consumers: int) -> int:
+    """The NIXL arena one producer registers: `num_buffers` buckets of at most
+    `buffer_bytes` for each consumer that may pull from it, plus one of slack
+    for a free still on its way and for fragmentation. A bucket larger than
+    that, one piece over `buffer_bytes`, is served outside the arena."""
+    bucket = buffer_bytes + _PIECE_ALIGNMENT
     return (num_buffers * max(1, num_consumers) + 1) * bucket

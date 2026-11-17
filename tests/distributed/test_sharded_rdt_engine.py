@@ -182,6 +182,7 @@ class _Fleet:
                 },
                 units=units,
                 arena_bytes=1 << 22,
+                bucket_bytes=buffer_bytes,  # oversize pieces bypass the arena
                 stall_timeout_s=5,
             )
             for p in range(num_producers)
@@ -569,18 +570,12 @@ def test_piece_bytes_count_block_alignment():
 
 
 def test_arena_holds_every_consumers_window_plus_slack():
+    """Slots of `buffer_bytes`, however large the largest tensor."""
     assert (
-        arena_bytes(
-            buffer_bytes=100, num_buffers=2, num_consumers=3, largest_tensor_bytes=50
-        )
+        arena_bytes(buffer_bytes=100, num_buffers=2, num_consumers=3)
         == (2 * 3 + 1) * 116
     )
-    assert (
-        arena_bytes(
-            buffer_bytes=100, num_buffers=1, num_consumers=1, largest_tensor_bytes=400
-        )
-        == 2 * 416
-    )
+    assert arena_bytes(buffer_bytes=100, num_buffers=1, num_consumers=1) == 2 * 116
 
 
 class TestRouter:

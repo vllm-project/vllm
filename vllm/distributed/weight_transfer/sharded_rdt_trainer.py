@@ -161,6 +161,7 @@ class _RDTProducerServer:
         served: dict[str, tuple[str, tuple[int, ...]]],
         units: dict[str, int],
         arena_bytes: int,
+        bucket_bytes: int | None = None,
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
     ) -> None:
         self._device_index = torch.accelerator.current_device_index()
@@ -170,6 +171,9 @@ class _RDTProducerServer:
         }
         self._unit_of = dict(units)
         self._arena_bytes = int(arena_bytes)
+        # A bucket over this (one piece over `buffer_bytes`) is not packed
+        # into the arena: see `_serve_oversize`.
+        self._bucket_bytes = int(bucket_bytes or arena_bytes)
         self._stall_timeout = float(stall_timeout_s)
 
         self._cond = threading.Condition()
@@ -400,11 +404,12 @@ class _RDTProducerServer:
                 raise ValueError(
                     f"consumer {consumer_id} bucket {i} spans units {sorted(units)}"
                 )
-            if nbytes > self._arena_bytes:
+            if nbytes > self._bucket_bytes and len(pieces) > 1:
                 raise ValueError(
-                    f"consumer {consumer_id} bucket {i} is {nbytes} B, larger "
-                    f"than the {self._arena_bytes} B arena: the consumer cut "
-                    "its buckets with a larger buffer_bytes"
+                    f"consumer {consumer_id} bucket {i} is {nbytes} B in "
+                    f"{len(pieces)} pieces, over the {self._bucket_bytes} B "
+                    "bucket: the consumer cut its buckets with a larger "
+                    "buffer_bytes"
                 )
             layout = flat_layout(boxes, dtypes)
             ends = [start for start, *_ in layout[1:]] + [nbytes]
@@ -443,6 +448,7 @@ class _RDTProducerServer:
                 f"consumer {consumer_id} pulled bucket {seq}, which it never "
                 "registered here"
             ) from None
+        oversize = spec.nbytes > self._bucket_bytes
         t0 = time.perf_counter()
         with self._cond:
             if sync_idx < self._sync_idx:
@@ -451,11 +457,11 @@ class _RDTProducerServer:
                 lambda: (
                     self._sync_idx != sync_idx
                     or spec.unit not in self._unit_names
-                    or self._carve(spec.nbytes, dry_run=True) < 0
+                    or (not oversize and self._carve(spec.nbytes, dry_run=True) < 0)
                 ),
                 f"unit {spec.unit} of sync {sync_idx} and arena room",
             )
-            offset = self._carve(spec.nbytes)
+            offset = -1 if oversize else self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
             gen = self._unit_gen[spec.unit]
@@ -473,13 +479,28 @@ class _RDTProducerServer:
                     gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
                 )
                 del tensors
-            flat = self._pack(sources, spec, offset)
+            if oversize:
+                flat = self._serve_oversize(sources, spec)
+            else:
+                flat = self._pack(sources, spec, offset)
         if flat.is_cuda:
             # Ray synchronizes the device under its cache lock; do it here so
             # its wait is empty.
             torch.cuda.current_stream(flat.device).synchronize()
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
+
+    @staticmethod
+    def _serve_oversize(sources: _Sources, spec: _ServedBucket) -> torch.Tensor:
+        """A bucket over `bucket_bytes`, one piece, outside the arena: copied
+        into a temporary that Ray registers for the pull. Not the source
+        itself: it is CUDA-IPC memory from the trainer, which NIXL cannot
+        register. The finalizer frees it like any bucket, so the unit stays
+        held until Ray drops it."""
+        (src,) = sources.byte_srcs or sources.typed_srcs
+        flat = torch.empty(spec.layout[0][1], dtype=torch.uint8, device=src.device)
+        flat.view(src.dtype).view(src.shape).copy_(src)
+        return flat
 
     def _carve(self, nbytes: int, *, dry_run: bool = False) -> int:
         """First fit for `nbytes` in the arena: its offset, or -1 (no room).
@@ -791,15 +812,10 @@ class ShardedRDTTrainerWeightTransferEngine(
             [m.name for m in self._meta],
             workers_per_replica=ii.workers_per_replica,
         )
-        largest = max(
-            (_nbytes(m) for m in self._meta if m.name in self._owned_names),
-            default=0,
-        )
         return arena_bytes(
             buffer_bytes=ii.buffer_bytes,
             num_buffers=ii.num_buffers,
             num_consumers=len(router.consumers_of(self.rank)),
-            largest_tensor_bytes=largest,
         )
 
     def _spawn_server(self) -> None:
@@ -856,6 +872,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             served=served,
             units=units,
             arena_bytes=self._arena_bytes(),
+            bucket_bytes=ii.buffer_bytes,
             stall_timeout_s=ii.stall_timeout_s,
         )
         ray.get(self._server.ping.remote())
@@ -891,9 +908,25 @@ class ShardedRDTTrainerWeightTransferEngine(
         with ThreadPoolExecutor(max_workers=1) as exe:
             # the workers pull inside update_weights, alongside the gathers
             future = exe.submit(self.client.update_weights, update)
+            future.add_done_callback(self._fail_producers_on_error)
             self._run_gather_loop(future, live)
             future.result()
         self.client.finish_weight_update()
+
+    def _fail_producers_on_error(self, update_future) -> None:
+        """A failed `update_weights` (a worker's pull failed) fails the sync
+        on every producer at once, so no rank waits out the stall watchdog
+        for releases that will not come."""
+        error = update_future.exception()
+        if error is None:
+            return
+        message = f"update_weights failed: {error!r}"
+        for name in self._server_names or []:
+            with contextlib.suppress(Exception):
+                actor = ray.get_actor(
+                    name, namespace=self._init_info.trainer_actor_namespace
+                )
+                actor.set_gather_error.remote(message)
 
     def _run_gather_loop(self, update_future, live: list[int]) -> None:
         """Gather and publish this rank's units in order, holding at most
