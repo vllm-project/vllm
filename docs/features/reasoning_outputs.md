@@ -40,7 +40,7 @@ vLLM currently supports the following reasoning models:
 | Mistral Magistral series | `mistral` | `json`, `regex` | ✅ |
 | [Muse Spark Open](tool_calling.md#muse-models-muse) | `muse` | ❌ | ✅ |
 | [Muse Glimmer](tool_calling.md#muse-models-muse) | `muse_glimmer` | ❌ | ✅ |
-| [Nemotron 3 series](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) | `nemotron_v3` | `json`, `regex` | ✅ |
+| [Nemotron 3 series](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) | `nemotron_v3` | `json`, `regex` | ✅ (`qwen3_coder`) |
 | [Olmo 3 series](tool_calling.md#olmo-3-models-olmo3) | `olmo3` | `json`, `regex` | ✅ |
 | [OpenAI OSS models](tool_calling.md#openai-oss-models-openai) | `openai_gptoss` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
@@ -54,7 +54,11 @@ vLLM currently supports the following reasoning models:
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
     IBM Granite 4.2 reasoning is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
-    DeepSeek-V4, DeepSeek-V4.1, and Kimi-K3 reasoning is enabled by default. To disable it, pass `thinking=False` or `enable_thinking=False` in your `chat_template_kwargs` (or `reasoning_effort="none"` for DeepSeek-V4 / V4.1).
+    DeepSeek-V4 reasoning is enabled by default, with an implicit `reasoning_effort` of `high`. To disable it, pass `thinking=False` or `enable_thinking=False` in your `chat_template_kwargs`, or set `reasoning_effort="none"`. To keep thinking on without an effort prompt prefix, pass `reasoning_effort="low"` explicitly — omitting the field is not equivalent.
+    DeepSeek-V4.1 and Kimi-K3 reasoning is enabled by default. To disable it, pass `thinking=False` or `enable_thinking=False` in your `chat_template_kwargs`. `reasoning_effort="none"` also disables DeepSeek-V4.1 thinking. V4.1 does not use DeepSeek-V4's `low` / `minimal` / `medium` → `low` map.
+    `minimax_m2` puts text before `</think>` in `reasoning` (MiniMax-M2 does not emit the opening `<think>`). `minimax_m2_append_think` leaves `reasoning` empty and prepends `<think>` to `content`.
+    MiniMax-M3 reasoning starts inside a prefilled `<mm:think>` block only when `chat_template_kwargs` sets `thinking_mode="enabled"`. Without that kwarg, the prefilled block is returned as `content`.
+    Nemotron 3 tool calls are Qwen3 XML. Use `--tool-call-parser qwen3_coder` with `--reasoning-parser nemotron_v3`. There is no `nemotron_v3` tool parser.
     Gemma 4 reasoning is disabled by default; to enable it, pass `enable_thinking=True` in your `chat_template_kwargs` or set `reasoning_effort` (which enables it automatically).
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
@@ -358,7 +362,7 @@ for output in outputs:
 
 ## Automatic `enable_thinking` Activation
 
-Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
+Some models (such as Gemma 4 and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
 
 When you set `reasoning_effort` in a Chat Completions request (or `reasoning.effort` in a Responses API request), vLLM automatically injects `enable_thinking` into the chat template kwargs:
 

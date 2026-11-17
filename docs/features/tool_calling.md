@@ -489,7 +489,7 @@ Flags: `--enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser 
 
 vLLM selects `--tokenizer-mode kimi_k3` automatically for `KimiK3ForConditionalGeneration` and `KimiK31ForConditionalGeneration`.
 Kimi-K3 emits XTML channels (`<|open|>think<|sep|>`, `<|open|>response<|sep|>`, and `<|open|>tools<|sep|>`) and uses `structural_tag_model = "kimi_k3"`.
-Required and named `tool_choice` require strict-tool structural-tag enforcement (enabled by default via `VLLM_ENFORCE_STRICT_TOOL_CALLING=true`) and are rejected when it is disabled.
+Named `tool_choice` requires the XTML structural tag, which strict tool calling attaches by default (`VLLM_ENFORCE_STRICT_TOOL_CALLING=true`). Without that tag, named choice raises `VLLMValidationError`; the error tells callers to set `tool_choice` to `"auto"`, `"required"`, or `"none"`. `tool_choice="required"` is not rejected: it stays on the native XTML parser and sets `skip_special_tokens=False`.
 Thinking is enabled by default and can be disabled with `chat_template_kwargs={"thinking": False}` or `{"enable_thinking": False}`.
 
 ### Kolibri 1 Models (`hf`)
@@ -591,7 +591,7 @@ Supported models:
 Flags: `--enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4`
 
 Use the checkpoint's chat template, or `--chat-template examples/tool_chat_template_gemma4.jinja` ([examples/tool_chat_template_gemma4.jinja](../../examples/tool_chat_template_gemma4.jinja)).
-Gemma 4 emits `<|channel>thought\n...<channel|>` reasoning and native `<|tool_call>call:func_name{...}<tool_call|>` tool calls (`supports_required_and_named = False`; `required` and named `tool_choice` skip forced JSON guided decoding and keep `skip_special_tokens=False` so the model emits native syntax).
+Gemma 4 emits `<|channel>thought\n...<channel|>` reasoning and native `<|tool_call>call:func_name{...}<tool_call|>` tool calls (`supports_required_and_named = False`). For `required` and named `tool_choice`, the parser returns before `ToolParser.adjust_request`, which skips JSON guided decoding so the model can emit that native syntax. `skip_special_tokens=False` only keeps those special tokens in the detokenized text the parser reads.
 Reasoning is disabled by default; enable it with `chat_template_kwargs={"enable_thinking": True}` or by setting `reasoning_effort`.
 
 ### Qwen3-Coder Models (`qwen3_coder` / `qwen3_xml`)
@@ -732,7 +732,7 @@ Supported models:
 Flags: `--enable-auto-tool-choice --tool-call-parser minimax_m3 --reasoning-parser minimax_m3`
 
 MiniMax-M3 prefixes tool-call XML elements with `]<]minimax[>[` (`]<]minimax[>[<tool_call>...`), supports schema-guided nested objects and arrays (`<item>`), and emits each call's arguments once its `<invoke>` completes.
-`supports_required_and_named = False` (required and named `tool_choice` parse native M3 syntax rather than forcing JSON). Reasoning uses `<mm:think>...</mm:think>`.
+`supports_required_and_named = False` (required and named `tool_choice` parse native M3 syntax rather than forcing JSON). Reasoning uses `<mm:think>...</mm:think>`. The chat template prefills `<mm:think>` when `thinking_mode="enabled"`, and the completion then omits that opener. Pass `chat_template_kwargs={"thinking_mode": "enabled"}` on the request as well: the parser reads that same kwarg, starts inside the open block, and splits on `</mm:think>`. `enable_thinking` does not select this path. Without `thinking_mode="enabled"`, a prefilled block is returned as `content` and `reasoning` is empty. An explicit `<mm:think>` in the completion still parses.
 
 ### Phi-4-mini Models (`phi4_mini_json`)
 
@@ -759,10 +759,11 @@ Uses the Qwen3 `<function=...><parameter=...>` XML grammar wrapped in `<seed:too
 
 Supported models:
 
-* `LiquidAI/LFM2-1.2B`
+* `LiquidAI/LFM2-1.2B-Tool` (tool-tuned; the base `LiquidAI/LFM2-1.2B` card also ships the tool tokens)
 * `LiquidAI/LFM2-2.6B`
 * `LiquidAI/LFM2.5-1.2B-Instruct`
-* `LiquidAI/LFM2-8B-A1B-preview`
+* `LiquidAI/LFM2-8B-A1B`
+* `LiquidAI/LFM2.5-8B-A1B`
 
 Flags: `--enable-auto-tool-choice --tool-call-parser lfm2`
 
