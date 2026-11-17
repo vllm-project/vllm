@@ -80,19 +80,17 @@ A complete and tested version of this example is in-repo as `tests/plugins/vllm_
 
 An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins.interface.SupportsStart], [`SupportsStop`][vllm.plugins.endpoint_plugins.interface.SupportsStop], or both. These capabilities are independent of `EndpointPlugin`; existing plugins need no new methods.
 
-The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. A failed or cancelled startup exits the process with status 3. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
+The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. On Uvicorn 0.50 and later a failed or cancelled plugin startup exits the process with status 3; on earlier versions it exits with status 0. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
 
-SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative.
+SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative: a `start` hook that ignores it can keep the process alive until a process manager kills it.
 
-`start` and `stop` are reserved hook names on endpoint plugins. Optional `start` and `stop` hooks must be async functions. The plugin loader rejects synchronous hooks with an error naming the plugin and hook before attaching routes or initializing state.
+`start` and `stop` are reserved hook names on endpoint plugins. An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. The plugin loader refuses any other value, such as a synchronous function or an object with an `async def __call__`, with an error naming the plugin and hook before attaching routes or initializing state.
 
-On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work.
+On shutdown, the server calls each eligible `stop(state)` once, in reverse order, while the time limit lasts, before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work.
 
-Each stop hook has a deadline of `VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS` seconds (default 5; must be positive), which also applies to stops run after a failed startup. On expiry the server cancels the hook, logs a warning naming the plugin, stops waiting for it and continues with earlier plugins and native serving cleanup. With N stop hooks, cleanup can take up to N times the deadline plus native cleanup. The deadline is cooperative: a hook that ignores cancellation may keep running, overlap later cleanup and still hang the final event-loop teardown (a repeated signal still exits a standalone server), and a hook that blocks the event loop synchronously cannot be bounded.
+All stop hooks share one time limit, set by `--endpoint-plugin-stop-timeout` (default 5 seconds; must be positive), which also applies to stops run after a failed startup. The limit bounds the wait for stop hooks, not process exit. When it expires the server cancels the running hook, stops waiting for it, does not call the remaining stop hooks, logs one warning naming the abandoned and skipped plugins, and continues with native serving cleanup. The limit is cooperative: a hook that ignores cancellation may keep running, overlap later cleanup and keep the process alive until a process manager kills it, and a hook that blocks the event loop synchronously cannot be bounded.
 
-Once the engine has stopped, or the shutdown sequence has otherwise ended, a repeated SIGINT or SIGTERM exits the process immediately with status 128 plus the signal number and skips the remaining cleanup; a startup hook that ignores cancellation is handled the same way. A signal is repeated when the process has already received the same signal number, so SIGINT followed by SIGTERM does not exit, and neither does the first signal after `request_shutdown()`. Signals that arrive while the engine is still shutting down only request shutdown. Repeated `request_shutdown()` calls remain idempotent.
-
-API servers started by a parent vLLM process (multi-API-server workers and data parallel servers) do not exit on a repeated signal during HTTP and plugin cleanup, because the parent signals them itself and bounds their shutdown. The multi-API-server parent sends each worker SIGTERM whichever signal it received, and the data parallel supervisor forwards the signal it received. In multi-API-server mode the parent force-kills its workers after `--shutdown-timeout` (default 0, meaning immediately), so worker stop hooks are only attempted when that timeout is positive; when the parent exits for a reason other than a signal it waits 5 seconds instead.
+In multi-API-server mode the parent process force-kills its API server workers after `--shutdown-timeout` (default 0, meaning immediately), so worker stop hooks are only attempted when that timeout is positive; when the parent exits for a reason other than a signal it waits 5 seconds instead.
 
 The server stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** Use the optional drain capability below to settle accepted plugin work before engine shutdown. The API server's `/health` behavior is unchanged.
 
@@ -124,6 +122,8 @@ The assignments let a static type checker validate the hook signatures. Runtime 
 
 `serve_http` exposes the synchronous callback `state.request_shutdown()` before startup hooks run. Call it on the server's event loop to request the same process-local shutdown as SIGINT or SIGTERM. Repeated calls are idempotent. It is available to hooks and route handlers, but not during `init_state`; it does not request deployment-wide shutdown. A startup hook that calls it must still finish or release its partial resources and raise.
 
+`--api-key` does not cover plugin routes such as `/plugins/<plugin-name>/...`. Because `state.request_shutdown()` requests process-local shutdown, a plugin that calls it from a route handler must authenticate that route; otherwise any client that reaches the port can stop the server. See [Endpoint Plugins security posture](../usage/security.md#endpoint-plugins).
+
 ## Optional readiness and draining
 
 [`SupportsReady`][vllm.plugins.endpoint_plugins.interface.SupportsReady] and [`SupportsDrain`][vllm.plugins.endpoint_plugins.interface.SupportsDrain] are independent capabilities. A plugin can implement either, both, or neither, independently of `start` and `stop`:
@@ -154,7 +154,7 @@ The server runs eligible plugins' `drain(state, timeout)` hooks concurrently bef
 
 The engine receives the deadline's remaining allowance, which may be zero if plugin drains consume it. There is no reserved engine allowance. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
 
-`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. Drains are cooperative, so the drain deadline is **not a hard process-exit bound**. A drain that ignores cancellation holds shutdown before engine shutdown, and further SIGINT or SIGTERM signals only request shutdown, so a process manager's SIGKILL ends such a process.
+`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. The `--endpoint-plugin-stop-timeout` limit starts once the shutdown sequence, including drains and engine shutdown, has ended. Drains are cooperative, so the drain deadline is **not a hard process-exit bound**. A drain that ignores cancellation holds shutdown before engine shutdown, and SIGINT or SIGTERM only request shutdown, so the process stays alive until a process manager kills it.
 
 ## Registering the entry point
 
@@ -216,3 +216,7 @@ There is currently no rejection of route conflicts (tracked as a follow-up to RF
 ## Compatibility
 
 `state`/serving handler internals (e.g. the shape of in-tree `OpenAIServing*` classes) are not a stable public contract yet. Treat them as use-at-your-own-risk and expect them to change between vLLM versions. `FastAPI`, `EngineClient` and the `EndpointPlugin` protocol itself are the supported surface.
+
+### Upgrading existing plugins
+
+An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. A plugin with a synchronous `start` or `stop`, or any other non-`None` attribute with those names, no longer loads. Make the attribute `async def`, or rename it if it is not a lifecycle hook.
