@@ -252,6 +252,10 @@ async fn generate_streams_outputs() {
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
+                            EngineCoreOutput {
+                                remaining_prefill_tokens: Some(1),
+                                ..request_output(&request.request_id, vec![], None)
+                            },
                             request_output_with_logprobs(
                                 &request.request_id,
                                 vec![1, 2],
@@ -280,6 +284,11 @@ async fn generate_streams_outputs() {
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
     let mut stream = llm.generate(sample_generate_request("req-delta", 3)).await.unwrap();
     let internal_id = stream.request_id().to_string();
+
+    let progress = stream.next().await.unwrap().unwrap();
+    assert!(progress.remaining_prefill_tokens.is_some());
+    assert!(progress.prompt_info.is_none());
+    assert!(progress.token_ids.is_empty());
 
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.request_id, internal_id);
@@ -608,6 +617,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         spec_decode_metrics: None,
         weight_versions: WeightVersions::new(None, 2),
         routed_experts: Default::default(),
+        remaining_prefill_tokens: None,
         timestamps: Default::default(),
     };
 

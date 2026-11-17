@@ -140,6 +140,7 @@ class EngineCoreOutput(
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
     watermarking: bool | None = None
+    remaining_prefill_tokens: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -298,6 +299,7 @@ outputs = EngineCoreOutputs(
             finish_reason=FinishReason.ERROR,
             error=RequestError("engine_paused", "Generation is paused.", True),
             watermarking=True,
+            remaining_prefill_tokens=4,
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],

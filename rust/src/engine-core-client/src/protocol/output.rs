@@ -154,6 +154,8 @@ pub struct EngineCoreOutput {
     /// engine has a `watermark_config`.
     #[serde(default)]
     pub watermarking: Option<bool>,
+    #[serde(default)]
+    pub remaining_prefill_tokens: Option<u64>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -658,6 +660,7 @@ mod tests {
                             prompt_token_id_logprobs: None,
                             error: None,
                             watermarking: None,
+                            remaining_prefill_tokens: None,
                         },
                     ],
                     scheduler_stats: None,
