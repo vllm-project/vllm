@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Disk I/O backend for GPU<->NVMe block transfers via pinned staging buffers.
+"""Hybrid DRAM/SSD backend for GPU KV transfers via pinned staging buffers.
 
 Uses separate IO threads for store and load so that loads (latency-critical)
 never block behind stores (background work). Each thread owns its own pinned
@@ -49,14 +49,16 @@ def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
     return raw[offset : offset + nbytes].view(num_slots, bpb)
 
 
-class DiskBackend:
+class HybridBackend:
     """Async disk offload with bounded staging and an optional DRAM hot cache.
 
     Architecture:
     - Separate store/load queues, coordinator threads, and staging pools
     - Overlap GPU DMA on one staging slot with disk I/O on another
     - O_DIRECT by default; page cache is opt-in via `use_page_cache`
-    - Support hybrid mode and pure disk mode
+    - Consume ready SSD reads out of order; fill read gaps with hot H2D
+    - Borrow unpinned hot rows to expand the bounded read window
+    - With zero hot rows, use only the fixed staging pools
 
     Shares the `DmaCopyBackend` task/completion interface; `launch_copy` also
     accepts `hot_blocks` to select stores eligible for a DRAM copy.
@@ -103,9 +105,7 @@ class DiskBackend:
         use_page_cache: bool = False,
         num_hot_slots: int = 0,
         max_load_slots: int | None = None,
-        hybrid_mode: bool = False,
     ) -> None:
-        self._hybrid_mode = hybrid_mode
         self._load_stream = load_stream
         self._store_stream = store_stream
         self._total_block_bytes = total_block_bytes
@@ -181,10 +181,9 @@ class DiskBackend:
                 load_stream,
                 src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
             )
-        if hybrid_mode:
-            self._read_executor = ThreadPoolExecutor(
-                max_workers=self._max_load_slots, thread_name_prefix="kv_read"
-            )
+        self._read_executor = ThreadPoolExecutor(
+            max_workers=self._max_load_slots, thread_name_prefix="kv_read"
+        )
 
         os.makedirs(os.path.dirname(disk_path) or ".", exist_ok=True)
         # Slot contents never outlive the process, so unlink then O_EXCL rather
@@ -202,7 +201,7 @@ class DiskBackend:
         os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
 
         logger.info(
-            "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
+            "HybridBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
             " (page_cache=%s)",
             disk_path,
             num_disk_slots,
@@ -380,8 +379,6 @@ class DiskBackend:
                 stream.wait_event(fence)
             if is_store:
                 self._do_store(src, dst, stream, set(hot_blocks or ()))
-            elif self._hybrid_mode:
-                self._do_hybrid_load(src, dst, stream)
             else:
                 self._do_load(src, dst, stream)
             event = torch.Event()
@@ -442,9 +439,9 @@ class DiskBackend:
                 f"wrote {written}"
             )
 
-    # Load path: scheduling, transfer strategies, then file I/O.
+    # Load path: hot/cold scheduling, parallel reads, then file I/O.
 
-    def _do_hybrid_load(
+    def _do_load(
         self, disk_blocks: list[int], gpu_blocks: list[int], stream: torch.cuda.Stream
     ) -> None:
         """Coordinate hot/cold restores and bounded staging leases."""
@@ -559,38 +556,6 @@ class DiskBackend:
             for future in pending:
                 future.cancel()
             wait(pending)
-
-    def _do_load(
-        self,
-        disk_slots: list[int],
-        gpu_blocks: list[int],
-        stream: torch.cuda.Stream,
-    ) -> None:
-        """Restore through fixed slots, overlapping SSD reads with preceding H2D."""
-        assert self._load_params is not None
-        n = self._num_buffer_slots
-        prev_dma_events: list[torch.Event | None] = [None] * n
-
-        for i, (disk_slot, gpu_blk) in enumerate(zip(disk_slots, gpu_blocks)):
-            buf_slot = i % n
-            prev = prev_dma_events[buf_slot]
-            if prev is not None:
-                prev.synchronize()
-
-            offset = disk_slot * self._total_block_bytes
-            self._readv_slot(buf_slot, offset)
-
-            copy_blocks([buf_slot], [gpu_blk], self._load_params)
-            ev = torch.Event()
-            ev.record(stream)
-            prev_dma_events[buf_slot] = ev
-
-        for ev in prev_dma_events:
-            if ev is not None:
-                ev.synchronize()
-
-    def _readv_slot(self, buf_slot: int, file_offset: int) -> None:
-        self._read_into(self._load_slot_views[buf_slot], file_offset)
 
     def _read_into(self, views: list[memoryview], file_offset: int) -> None:
         bytes_read = os.preadv(self._fd, views, file_offset)
