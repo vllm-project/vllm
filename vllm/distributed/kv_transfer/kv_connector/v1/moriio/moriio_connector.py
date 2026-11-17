@@ -1040,8 +1040,11 @@ class MoRIIOConnectorScheduler:
         if dp_local > 0 and pod_idx < len(hosts):
             remote_host = hosts[pod_idx]
         local_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
-        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
+        peer_tp_size = get_moriio_peer_tp_size(params, self.tp_size)
+        for tp_index in range(peer_tp_size):
+            target_port = remote_notify_port + get_port_offset(
+                local_dp_rank, tp_index, peer_tp_size
+            )
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1358,9 +1361,10 @@ class MoRIIOConnectorScheduler:
                             _notify_host = _remote_hosts[_pod_idx]
                     # Every prefill TP rank needs the allocation; ports past
                     # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
+                    peer_tp_size = get_moriio_peer_tp_size(_kvp, self.tp_size)
+                    for tp_index in range(peer_tp_size):
                         target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
+                            _remote_dp_rank_for_port, tp_index, peer_tp_size
                         )
 
                         self.send_notify_block(
