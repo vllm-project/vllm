@@ -731,9 +731,16 @@ class TestPackedIpcRoundtrip:
 
 # --- Chunk layout and wire segments ---
 
+from types import SimpleNamespace  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 from vllm.distributed.weight_transfer import packed_tensor as pt  # noqa: E402
+from vllm.distributed.weight_transfer.nccl_engine import (  # noqa: E402
+    NCCLWeightTransferEngine,
+    NCCLWeightTransferUpdateInfo,
+    _coalesce,
+    _pairs,
+)
 
 
 def _layout_bytes(layout: pt.ChunkLayout, tensors: list[torch.Tensor]) -> list[bytes]:
@@ -838,6 +845,57 @@ class TestChunkLayout:
             assert pt.wire_segments([3, 1000], torch.float32, 1000) is None
         warn.assert_called_once()
 
+    def test_layout_keeps_full_specs(self):
+        layout = pt.chunk_layout([((4, 5), torch.float16)], 8, segments=True)
+        assert layout.specs == [((4, 5), torch.float16)]
+
+
+def _box(*ranges):
+    return tuple(slice(a, b) for a, b in ranges)
+
+
+class TestPlannedHelpers:
+    def test_pairs_whole_tensor(self):
+        view = torch.arange(12.0).view(3, 4)
+        dst = torch.empty(2, 4)
+        [(d, s)] = _pairs([(_box((1, 3), (0, 4)), dst)], None, view)
+        assert d is dst
+        torch.testing.assert_close(s, view[1:3])
+
+    def test_pairs_segment_rows_onto_boxes(self):
+        full = torch.arange(40.0).view(10, 4)
+        dsts = [torch.empty(5, 4), torch.empty(5, 4)]  # two ranks' rows
+        ops = [(_box((0, 5), (0, 4)), dsts[0]), (_box((5, 10), (0, 4)), dsts[1])]
+        for lo, hi in [(0, 3), (3, 7), (7, 10)]:  # segments crossing the boxes
+            for d, s in _pairs(ops, (lo, hi), full[lo:hi]):
+                d.copy_(s)
+        torch.testing.assert_close(torch.cat(dsts), full)
+
+    def test_pairs_reshaped_write_needs_the_whole_tensor(self):
+        full = torch.arange(24.0).view(6, 4)
+        dst = torch.empty(4, 6)  # box (6, 4) written as (4, 6)
+        assert _pairs([(_box((0, 6), (0, 4)), dst)], (0, 3), full[:3]) is None
+
+    def test_coalesce_merges_evenly_spaced_and_keeps_w1_w3_apart(self):
+        experts, n, k = 6, 4, 8
+        src = torch.randn(experts, 2, n, k)  # (expert, w1|w3, n, k) as received
+        w13 = torch.zeros(experts, 2 * n, k)
+        dsts, srcs, roles = [], [], []
+        for e in range(experts):
+            for j, role in enumerate(("w1", "w3")):
+                dsts.append(w13[e, j * n : (j + 1) * n])
+                srcs.append(src[e, j])
+                roles.append(f"experts.#.{role}")
+        md, ms = _coalesce(dsts, srcs, roles)
+        assert len(md) == 2  # one strided copy per role
+        for d, s in zip(md, ms):
+            d.copy_(s)
+        torch.testing.assert_close(w13, src.reshape(experts, 2 * n, k))
+
+
+class SLOT_KEY:  # noqa: N801
+    """Stands for a communicator: any weakly referenceable object."""
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestSegmentedRoundtrip:
@@ -922,6 +980,31 @@ class TestSegmentedRoundtrip:
         growth = torch.cuda.max_memory_allocated() - base
         assert growth < big.nbytes + 8 * limit, growth / mib
 
+    def test_planned_producer_checks_the_layout(self):
+        t = torch.randn(4, 4, device="cuda")
+        layout = pt.chunk_layout([((4, 4), torch.float32)], 1024)
+        with pytest.raises(ValueError, match="layout it is sent with expects"):
+            packed_nccl_broadcast_producer(
+                iterator=iter([("x", t.half())]),
+                group=MockCommunicationGroup(),
+                src=0,
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=1024,
+                layout=layout,
+            )
+
+    def test_slot_buffers_release_and_regrow_keep_views(self):
+        key = SLOT_KEY()
+        bufs = pt.slot_buffers(2, 1024, key)
+        view = bufs[0][:16].view(torch.float32)
+        pt.release_slot_buffers(key)
+        assert bufs[0].untyped_storage().nbytes() == 0
+        again = pt.slot_buffers(2, 512, key)
+        assert again is bufs and bufs[0].untyped_storage().nbytes() == 1024
+        view.fill_(3.0)  # the old view writes the regrown storage
+        assert bufs[0][:16].view(torch.float32).eq(3.0).all()
+        assert pt.slot_buffers(2, 512, SLOT_KEY()) is not bufs  # per group
+
 
 class _ChunkGroup:
     """Fills each receive with the next pre-packed chunk, on the current
@@ -935,6 +1018,36 @@ class _ChunkGroup:
             torch.cuda._sleep(SLEEP_CYCLES)
         tensor.copy_(self.chunks[self.calls])
         self.calls += 1
+
+
+class _Plan:
+    def __init__(self, dests):
+        self.dests = dests
+
+    def get_dest(self, name):
+        return self.dests.get(name)
+
+
+def _planned_engine(group, limit, model=None, segments=True):
+    return SimpleNamespace(
+        packed_num_buffers=2,
+        packed_buffer_size_bytes=limit,
+        packed_wire_segments=segments,
+        model_update_group=group,
+        model=model,
+        device=torch.device("cuda"),
+    )
+
+
+def _receive_planned(engine, names, tensors, plan):
+    info = NCCLWeightTransferUpdateInfo(
+        names=names,
+        dtype_names=[str(t.dtype).removeprefix("torch.") for t in tensors],
+        shapes=[list(t.shape) for t in tensors],
+    )
+    for name in ("_planned_layout", "_receive_planned_chunks"):
+        setattr(engine, name, getattr(NCCLWeightTransferEngine, name).__get__(engine))
+    NCCLWeightTransferEngine._receive_planned(engine, info, 0, plan)
 
 
 def _packed_chunks(tensors, limit, segments=True):
@@ -970,5 +1083,66 @@ class TestConsumerStreamOrdering:
                 post_unpack_func=post_unpack_func,
                 buffer_size_bytes=1 << 16,
             )
+        torch.accelerator.synchronize()
+        assert torch.equal(param, weight)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestPlannedReceive:
+    def test_copies_split_misaligned_cast_and_fallbacks(self):
+        limit = 4096
+        g = torch.Generator().manual_seed(3)
+        tag = torch.randint(0, 255, (3,), dtype=torch.uint8, generator=g)
+        experts = torch.randn(16, 8, 32, generator=g)  # 16 KiB: split
+        bias = torch.randn(10, generator=g)  # misaligned after `tag`
+        w = torch.randn(512, 16, generator=g)  # 32 KiB, split, reshaped: joined
+        fb_small = torch.randn(5, generator=g)
+        names = ["tag", "experts", "bias", "w", "fb"]
+        tensors = [t.cuda() for t in (tag, experts, bias, w, fb_small)]
+
+        local = torch.zeros(8, 8, 32, device="cuda")  # experts 4..12 on this rank
+        bias_dst = torch.zeros(10, device="cuda", dtype=torch.bfloat16)  # a cast
+        w_dst = torch.zeros(16, 512, device="cuda")  # written as (16, 512)
+        tag_dst = torch.zeros(3, device="cuda", dtype=torch.uint8)
+        plan = _Plan(
+            {
+                "tag": [(((0, 3),), tag_dst)],
+                "experts": [(((4, 12), (0, 8), (0, 32)), local)],
+                "bias": [(((0, 10),), bias_dst)],
+                "w": [(((0, 512), (0, 16)), w_dst)],
+            }
+        )
+        loaded: list[tuple[str, torch.Tensor]] = []
+        model = SimpleNamespace(load_weights=lambda ws: loaded.extend(ws))
+        group = _ChunkGroup(_packed_chunks(tensors, limit))
+        _receive_planned(_planned_engine(group, limit, model), names, tensors, plan)
+        torch.accelerator.synchronize()
+        assert torch.equal(tag_dst, tensors[0])
+        assert torch.equal(local, tensors[1][4:12])
+        torch.testing.assert_close(bias_dst, tensors[2].to(torch.bfloat16))
+        assert torch.equal(w_dst, tensors[3].reshape(16, 512))
+        assert [n for n, _ in loaded] == ["fb"]
+        assert torch.equal(loaded[0][1], tensors[4])
+
+    def test_copies_wait_for_the_callers_queued_work(self):
+        """Work the caller queued before the receive (begin's padding fill)
+        runs before the copies into the model, so it can't erase them."""
+        limit = 1 << 16
+        weight = torch.randn(1024, device="cuda")
+        param = torch.empty(1024, device="cuda")
+        plan = _Plan({"w": [(((0, 1024),), param)]})
+        group = _ChunkGroup(_packed_chunks([weight], limit))
+        engine = _planned_engine(group, limit)
+        # A first update sizes the shared buffers: growing them later would
+        # synchronize the caller's stream and hide a missing wait.
+        _receive_planned(engine, ["w"], [weight], plan)
+        group.calls = 0
+        torch.accelerator.synchronize()
+        # a side stream, as a worker's current stream is: the legacy default
+        # stream would order everything implicitly
+        with torch.cuda.stream(torch.cuda.Stream()):
+            torch.cuda._sleep(SLEEP_CYCLES)
+            param.zero_()  # the fill, queued behind the sleep
+            _receive_planned(engine, ["w"], [weight], plan)
         torch.accelerator.synchronize()
         assert torch.equal(param, weight)
