@@ -8,6 +8,7 @@ import torch
 
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import calc_diff
 
 if not current_platform.is_rocm() or not is_aiter_found_and_supported():
     pytest.skip(
@@ -94,7 +95,7 @@ def test_aiter_mqa_logits_matches_triton_call(monkeypatch, seq_len, seq_len_kv):
 
         cols = torch.arange(seq_len_kv, device="cuda")
         valid = (cols >= ks[:, None]) & (cols < ke[:, None])
-        torch.testing.assert_close(out[valid], ref[valid], rtol=1e-5, atol=1e-4)
+        assert calc_diff(out[valid], ref[valid]) < 1e-6
     finally:
         monkeypatch.undo()
         rocm_aiter_ops.refresh_env_variables()

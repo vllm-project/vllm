@@ -970,8 +970,7 @@ def mqa_logits_module():
 
 @functools.lru_cache
 def _aiter_mqa_logits() -> Callable | None:
-    # AITER's shape-dispatched entry point (ROCm/aiter#6185): it picks the
-    # Triton/Gluon or FlyDSL kernel from its tuned table.
+    # Picks the kernel per shape.
     try:
         from aiter.mqa_logits import mqa_logits
     except ImportError:
