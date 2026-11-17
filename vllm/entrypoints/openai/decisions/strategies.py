@@ -71,7 +71,7 @@ def common_prefix_len(prompts: Sequence[Sequence[int]]) -> int:
     return len(shortest)
 
 
-@dataclass
+@dataclass(slots=True)
 class ReadContext:
     engine_client: EngineClient
     online_renderer: OnlineRenderer
@@ -80,7 +80,7 @@ class ReadContext:
     default_chat_template_kwargs: dict[str, Any]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecisionLimits:
     max_questions: int
     max_options: int
@@ -89,14 +89,14 @@ class DecisionLimits:
     labeled: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JointSlot:
     canvas: int
     width: int
     position: int
 
 
-@dataclass
+@dataclass(slots=True)
 class QuestionRead:
     probs: list[float]
     label_mass: float

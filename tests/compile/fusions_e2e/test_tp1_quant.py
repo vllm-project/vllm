@@ -227,7 +227,7 @@ def _check_mixed_precision_mlp_fusion(worker) -> list[str]:
         get_input_quant_key,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
-    from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+    from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 
     class CountNvfp4Fusion(TorchDispatchMode):
         def __init__(self):
@@ -246,7 +246,7 @@ def _check_mixed_precision_mlp_fusion(worker) -> list[str]:
     generator = torch.Generator(device="cuda").manual_seed(0)
     with set_current_vllm_config(config), torch.inference_mode():
         for name, mlp in worker.get_model().named_modules():
-            if not isinstance(mlp, Qwen2MoeMLP):
+            if not isinstance(mlp, Qwen3MoeMLP):
                 continue
             assert get_input_quant_key(mlp.down_proj) == kNvfp4Dynamic, name
             for num_tokens in (1, 17):
@@ -308,6 +308,8 @@ class Nvfp4FusionTestWorkerExtension:
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
+# Compares fused vs. unfused NVFP4 MLP outputs with an absolute tolerance.
+@pytest.mark.usefixtures("narrow_dummy_fp8_weights")
 def test_tp1_fp4_mixed_precision_act_fusion(
     model_name: str,
     matches_fn: Callable[[int], Matches],

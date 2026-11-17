@@ -17,7 +17,6 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -56,6 +55,7 @@ from .model import (
     DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
     DeepseekV4MoE,
+    _use_mega_gate,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
@@ -98,9 +98,7 @@ class DSparkDeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
-        self.use_native_mega_moe = (
-            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.num_dspark_layers = getattr(config, "n_mtp_layers", None) or 3
@@ -241,7 +239,7 @@ class DSparkDeepseekV4Model(nn.Module):
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=False,
@@ -526,6 +524,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                     and loaded_weight.dtype == torch.float8_e8m0fnu
                 ):
                     loaded_weight = loaded_weight.view(torch.uint8)
+                # A checkpoint expert can map to multiple local physical replicas.
+                # Load every local slot or the remaining replicas stay uninitialized.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
@@ -541,7 +541,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                     )
                     if success:
                         loaded_params.add(name_mapped)
-                        break
                 continue
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params

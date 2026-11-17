@@ -191,12 +191,14 @@ _LINEAR_SHAPES = {
 }
 
 
-def _linear_model():
+def _linear_model(padding_size=0):
     def make():
         model = _Toy()
         kw = dict(bias=False, params_dtype=BF16)
         model.qkv_proj = QKVParallelLinear(8, 2, 4, 2, **kw)
-        model.gate_up_proj = MergedColumnParallelLinear(8, [6, 6], **kw)
+        model.gate_up_proj = MergedColumnParallelLinear(
+            8, [6, 6], padding_size=padding_size, **kw
+        )
         model.down_proj = RowParallelLinear(6, 8, **kw)
         model.stacked = {
             "q_proj.weight": ("qkv_proj.weight", "q"),
@@ -208,6 +210,29 @@ def _linear_model():
         return model
 
     return make
+
+
+def test_padded_merged_reuses_load_plan_without_preserving_stale_padding(
+    default_vllm_config, dist_init
+):
+    make = _linear_model(padding_size=3)
+    model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
+    address = model.gate_up_proj.weight.data_ptr()
+    plan = None
+    for seed in (1, 2):
+        with torch.no_grad():
+            model.gate_up_proj.weight[-3:].fill_(float("nan"))
+        start_reload(model)
+        if plan is None:
+            plan = _plan(model, _LINEAR_SHAPES)
+            assert plan.get_dest("gate_proj.weight") is not None
+        weights = _checkpoint(_LINEAR_SHAPES, seed=seed)
+        _planned_reload(model, plan, weights)
+        expected = _cold_start(make, weights)
+        torch.testing.assert_close(
+            model.gate_up_proj.weight, expected.gate_up_proj.weight, rtol=0, atol=0
+        )
+        assert model.gate_up_proj.weight.data_ptr() == address
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])

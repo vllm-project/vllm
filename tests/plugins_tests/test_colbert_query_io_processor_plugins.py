@@ -165,6 +165,9 @@ def test_colbert_query_plugin_offline(vllm_runner, input_type: str):
         io_processor_plugin=model_config["plugin"],
         hf_overrides=json.loads(model_config["hf_overrides"]),
         default_torch_num_threads=1,
+        # The model is ~1 GiB. The default 0.92 left almost no slack, so the
+        # engine refused to start whenever ~2 GiB of the GPU was still in use.
+        gpu_memory_utilization=0.5,
     ) as llm_runner:
         llm = llm_runner.get_llm()
         pooler_output = llm.encode(prompt, pooling_task="plugin")
@@ -205,6 +208,9 @@ def test_colbert_query_plugin_offline_multiple_inputs(vllm_runner):
         io_processor_plugin=model_config["plugin"],
         hf_overrides=json.loads(model_config["hf_overrides"]),
         default_torch_num_threads=1,
+        # The model is ~1 GiB. The default 0.92 left almost no slack, so the
+        # engine refused to start whenever ~2 GiB of the GPU was still in use.
+        gpu_memory_utilization=0.5,
     ) as llm_runner:
         llm = llm_runner.get_llm()
         pooler_output = llm.encode(prompts, pooling_task="plugin")

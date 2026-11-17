@@ -98,7 +98,7 @@ class MiniMaxM3IndexerNvfp4Backend(MiniMaxM3IndexerBackend):
         return MiniMaxM3IndexerNvfp4MetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class MiniMaxM3IndexerNvfp4DecodeMetadata:
     wrapper: Any  # planned CUDA-graph wrapper, None when decode CP is on
     num_reqs: int  # includes zero-length full-CUDA-graph padding requests
@@ -107,7 +107,7 @@ class MiniMaxM3IndexerNvfp4DecodeMetadata:
     cp_plan: Nvfp4DecodeCPPlan | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class MiniMaxM3IndexerNvfp4PrefillChunk:
     wrapper: Any  # planned BatchPrefillIndexerQ8KV8Wrapper
     # Token range within the prefill region (offsets from num_decode_tokens).
