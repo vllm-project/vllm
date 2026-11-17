@@ -11,8 +11,6 @@ the width once at startup by encoding a dummy item per modality.
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-import torch
-
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -21,39 +19,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@torch.inference_mode()
 def _measure_on_worker(worker: Any) -> dict[str, int]:
-    """Encode one dummy item per modality; runs on every worker.
+    """Measure encoder output widths on a worker."""
+    from vllm.multimodal.encoder_budget import measure_encoder_output_layouts
 
-    Returns {} on ranks that hold no encoder.
-    """
-    from vllm.distributed.parallel_state import get_pp_group
-    from vllm.multimodal import MULTIMODAL_REGISTRY
-    from vllm.multimodal.encoder_budget import MultiModalBudget
-    from vllm.multimodal.utils import group_and_batch_mm_kwargs
-    from vllm.utils.torch_utils import PIN_MEMORY
-
-    runner = worker.model_runner
-    if not runner.supports_mm_inputs or not get_pp_group().is_first_rank:
-        return {}
-    budget = MultiModalBudget(
-        worker.vllm_config, MULTIMODAL_REGISTRY, enable_cache=False
-    )
-    model = runner.get_model()
-    widths: dict[str, int] = {}
-    for modality in budget.mm_max_toks_per_item:
-        items = budget.get_dummy_encoder_profile_inputs(modality, 1)
-        if not items:
-            continue
-        _, _, mm_kwargs = next(
-            group_and_batch_mm_kwargs(
-                items, device=runner.device, pin_memory=PIN_MEMORY
-            )
-        )
-        outputs = model.embed_multimodal(**mm_kwargs)
-        widths[modality] = int(outputs[0].shape[-1])
-        del outputs
-    return widths
+    return {
+        modality: width
+        for modality, (width, _) in measure_encoder_output_layouts(worker).items()
+    }
 
 
 def measure_encoder_output_widths(

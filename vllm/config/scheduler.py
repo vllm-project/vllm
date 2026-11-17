@@ -205,7 +205,8 @@ class SchedulerConfig:
     modalities and ranks). Mutually exclusive with `encoder_cache_size`.
     The budget is not raised to fit an oversized item: startup fails if one
     legal multimodal item does not fit. It limits logical cached embedding
-    bytes, not allocator reserved memory or encoder activations.
+    bytes, not allocator reserved memory or encoder activations. Requires a
+    local encoder tower and does not support external multimodal embeddings.
 
     Example: `vllm serve MODEL --encoder-cache-bytes 2G`."""
 

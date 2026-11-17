@@ -517,7 +517,6 @@ def test_residency_reservation_tolerates_no_dummy_outputs():
 def test_measure_encoder_output_layouts(monkeypatch, first_pp_rank, supports_mm):
     from vllm.distributed import parallel_state
     from vllm.multimodal import encoder_budget, utils
-    from vllm.v1.worker.worker_base import WorkerBase
 
     outputs = {
         "image": torch.zeros(3, 64, dtype=torch.bfloat16),
@@ -548,6 +547,6 @@ def test_measure_encoder_output_layouts(monkeypatch, first_pp_rank, supports_mm)
     )
     worker = SimpleNamespace(model_runner=runner, vllm_config=None)
     expected = {"image": (64, 2), "audio": (16, 4)}
-    assert WorkerBase.measure_encoder_output_layouts(worker) == (
+    assert encoder_budget.measure_encoder_output_layouts(worker) == (
         expected if first_pp_rank and supports_mm else {}
     )

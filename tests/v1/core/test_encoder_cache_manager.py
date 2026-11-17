@@ -595,17 +595,25 @@ def test_byte_budget_resolves_and_updates_workers(budget_bytes, reports, expecte
     )
     EngineCore._resolve_encoder_cache_budget(core)
     assert config.encoder_cache_size == expected
-    core.collective_rpc.assert_any_call("measure_encoder_output_layouts")
+    from vllm.multimodal.encoder_budget import measure_encoder_output_layouts
+
+    core.collective_rpc.assert_any_call(measure_encoder_output_layouts)
     core.collective_rpc.assert_called_with(
         "update_encoder_cache_budget", args=(expected,)
     )
 
 
 @pytest.mark.parametrize(
-    "ec_transfer, skip_profile, match",
-    [(True, False, "EC transfer"), (False, True, "skip-mm-profiling")],
+    "ec_transfer, skip_profile, enable_mm_embeds, match",
+    [
+        (True, False, False, "EC transfer"),
+        (False, True, False, "skip-mm-profiling"),
+        (False, False, True, "enable-mm-embeds"),
+    ],
 )
-def test_byte_budget_rejects_unsupported_modes(ec_transfer, skip_profile, match):
+def test_byte_budget_rejects_unsupported_modes(
+    ec_transfer, skip_profile, enable_mm_embeds, match
+):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -620,7 +628,9 @@ def test_byte_budget_rejects_unsupported_modes(ec_transfer, skip_profile, match)
             if ec_transfer
             else None,
             model_config=SimpleNamespace(
-                multimodal_config=SimpleNamespace(skip_mm_profiling=skip_profile)
+                multimodal_config=SimpleNamespace(
+                    skip_mm_profiling=skip_profile, enable_mm_embeds=enable_mm_embeds
+                )
             ),
         ),
         collective_rpc=Mock(),

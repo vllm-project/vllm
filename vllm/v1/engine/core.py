@@ -299,7 +299,14 @@ class EngineCore:
                 "--encoder-cache-bytes cannot be combined with --skip-mm-profiling."
             )
 
-        reports = self.collective_rpc("measure_encoder_output_layouts")
+        if mm_config is not None and mm_config.enable_mm_embeds:
+            raise ValueError(
+                "--encoder-cache-bytes cannot be combined with --enable-mm-embeds."
+            )
+
+        from vllm.multimodal.encoder_budget import measure_encoder_output_layouts
+
+        reports = self.collective_rpc(measure_encoder_output_layouts)
         bytes_per_embedding = max(
             (
                 width * element_size

@@ -121,46 +121,6 @@ class WorkerBase:
             cp_kv_cache_interleave_size
         )
 
-    @torch.inference_mode()
-    def measure_encoder_output_layouts(self) -> dict[str, tuple[int, int]]:
-        """Measure one encoder output per modality as (width, element_size)."""
-        from vllm.distributed.parallel_state import get_pp_group
-        from vllm.multimodal import MULTIMODAL_REGISTRY
-        from vllm.multimodal.encoder_budget import MultiModalBudget
-        from vllm.multimodal.utils import group_and_batch_mm_kwargs
-        from vllm.utils.torch_utils import PIN_MEMORY
-
-        runner: Any = self.model_runner
-        if runner is None or not runner.supports_mm_inputs:
-            return {}
-        if not get_pp_group().is_first_rank:
-            return {}
-
-        budget = MultiModalBudget(
-            self.vllm_config, MULTIMODAL_REGISTRY, enable_cache=False
-        )
-        model = runner.get_model()
-        layouts: dict[str, tuple[int, int]] = {}
-        for modality in budget.mm_max_toks_per_item:
-            items = budget.get_dummy_encoder_profile_inputs(modality, 1)
-            if not items:
-                continue
-            _, _, mm_kwargs = next(
-                group_and_batch_mm_kwargs(
-                    items, device=runner.device, pin_memory=PIN_MEMORY
-                )
-            )
-            outputs = model.embed_multimodal(**mm_kwargs)
-            output = outputs[0]
-            if output.ndim != 2 or output.shape[-1] <= 0:
-                raise ValueError(
-                    f"Expected a 2D encoder output for {modality!r}, "
-                    f"got shape {tuple(output.shape)}."
-                )
-            layouts[modality] = (int(output.shape[-1]), output.element_size())
-            del output, outputs, mm_kwargs
-        return layouts
-
     def update_encoder_cache_budget(self, encoder_cache_size: int) -> None:
         """Install the token capacity resolved from `--encoder-cache-bytes`.
 
