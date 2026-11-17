@@ -1094,9 +1094,11 @@ if has_flashinfer():
         backend: str,
         block_size: int = 16,
         use_nvfp4: bool = True,
+        batch_invariant: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
+        kwargs = {"batch_invariant": True} if batch_invariant else {}
         return flashinfer_mm_fp4_(
             A,
             B,
@@ -1108,6 +1110,7 @@ if has_flashinfer():
             use_8x4_sf_layout=use_8x4_sf_layout,
             use_nvfp4=use_nvfp4,
             backend=backend,
+            **kwargs,
         )
 
     def flashinfer_mm_fp4_fake(
@@ -1121,6 +1124,7 @@ if has_flashinfer():
         backend: str,
         block_size: int = 16,
         use_nvfp4: bool = True,
+        batch_invariant: bool = False,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
 
@@ -1345,7 +1349,10 @@ def flashinfer_scaled_fp4_mm(
     backend: str,
     block_size: int = 16,
     use_nvfp4: bool = True,
+    batch_invariant: bool = False,
 ) -> torch.Tensor:
+    """`batch_invariant=True` runs FlashInfer's batch-invariant fp4 class (it
+    takes `backend="auto"` and the swizzled 128x4 scale layout)."""
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
@@ -1354,7 +1361,9 @@ def flashinfer_scaled_fp4_mm(
     if alpha is None:
         alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
-    if backend in ("cutlass", "cudnn"):
+    if batch_invariant:
+        backend = "auto"
+    if backend in ("cutlass", "cudnn", "auto"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
@@ -1371,6 +1380,7 @@ def flashinfer_scaled_fp4_mm(
         backend=backend,
         block_size=block_size,
         use_nvfp4=use_nvfp4,
+        batch_invariant=batch_invariant,
     )
 
 
