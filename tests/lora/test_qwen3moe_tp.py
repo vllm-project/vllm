@@ -75,7 +75,6 @@ def test_qwen3moe_lora(qwen3moe_lora_files):
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_mixed_moe_lora_format=True,
     )
@@ -93,7 +92,6 @@ def test_qwen3moe_lora_tp2(ep, qwen3moe_lora_files, enable_mixed_moe_lora_format
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         enable_expert_parallel=ep,
         tensor_parallel_size=2,
         enable_mixed_moe_lora_format=enable_mixed_moe_lora_format,
@@ -112,7 +110,6 @@ def test_qwen3moe_lora_tp4(ep, qwen3moe_lora_files, enable_mixed_moe_lora_format
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         enable_expert_parallel=ep,
         tensor_parallel_size=4,
         enable_mixed_moe_lora_format=enable_mixed_moe_lora_format,
