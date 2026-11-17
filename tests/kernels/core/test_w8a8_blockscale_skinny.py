@@ -7,11 +7,11 @@ import torch
 
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.kernels.linear import (
+    RocmGfx1151SkinnyFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-    RocmGfx1151SkinnyFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
@@ -184,7 +184,7 @@ def test_gfx1151_skinny_blockscale_can_implement_validated_shapes(n: int):
     "config,match",
     [
         (_make_block_config(n=512), "validated skinny projection shape"),
-        (_make_block_config(k=8192), "aiter Triton blockscale tuned list"),
+        (_make_block_config(k=8192), "validated skinny projection shape"),
         (_make_block_config(out_dtype=torch.float16), "bfloat16 output"),
         (
             _make_block_config(weight_group_shape=GroupShape(64, 128)),

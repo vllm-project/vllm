@@ -240,6 +240,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.rocm_gfx1151 import (
     RocmGfx1151SkinnyFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
