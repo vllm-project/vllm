@@ -156,7 +156,6 @@ presets:
     hardware: h200
     strategy: single_node_dep
     variants: [default]
-    default: true
     description: "Routed and shared FP8 experts in DeepGEMM Mega MoE. Needs TP1 (DP + EP). Text only."
     source: { label: "vLLM #66812", href: "https://github.com/vllm-project/vllm/pull/66812" }
     args:
@@ -286,7 +285,7 @@ guide: |
   `--moe-backend deep_gemm_mega_moe` runs the FP8 checkpoint's routed and shared experts in
   one DeepGEMM Mega MoE kernel on H200 ([vLLM #66812](https://github.com/vllm-project/vllm/pull/66812)),
   using the checkpoint's 128x128 block scales as they are. It needs data + expert parallelism
-  with TP1; on H200 the builder's **Data + Expert Parallel** strategy adds it through the
+  with TP1; on H200 the builder's **Data + Expert Parallel** strategy offers it as the opt-in
   **Mega MoE** preset. The BF16 checkpoint has no Hopper Mega MoE kernel. On 8×H200 it served
   22-44% more output tokens/s than the default MoE backend on random 1K/1K and 8K/256 prompts
   at concurrency 1 to 256.
