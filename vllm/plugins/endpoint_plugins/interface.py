@@ -154,9 +154,8 @@ class SupportsDrain(Protocol):
         server does not track plugin sessions or provide an abort hook.
 
         Hooks run concurrently under a shared deadline. Cancellation cleanup
-        remains cooperative; a repeated signal after the deadline abandons it
-        and exits after engine shutdown without running `stop`. Otherwise
-        `stop` runs after it settles.
+        remains cooperative: a hook that ignores it holds shutdown before
+        engine shutdown. `stop` runs after it settles.
         """
         ...
 

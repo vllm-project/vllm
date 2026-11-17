@@ -216,8 +216,7 @@ async def serve_http(
 
     `exit_on_repeated_cleanup_signal` is False for a server whose parent
     process signals it and bounds its shutdown, so that a signal delivered
-    twice does not skip HTTP and plugin cleanup. Such a server still exits on
-    a repeated signal once it has abandoned a plugin drain.
+    twice does not skip HTTP and plugin cleanup.
     """
     logger.info("Available routes are:")
     # post endpoints
@@ -282,55 +281,22 @@ async def serve_http(
 
     engine_client = app.state.engine_client
     engine_stopped = False
-    # A pending plugin drain that a repeated signal abandons after its deadline.
-    drain_task: asyncio.Task[None] | None = None
-    drain_deadline = 0.0
-    drain_abandoned: asyncio.Future[int] = loop.create_future()
     received_signals: set[int] = set()
-
-    def abandon_drain(signum: int) -> None:
-        try:
-            if engine_client is not None:
-                engine_client.shutdown(timeout=0)
-        except Exception:
-            logger.exception("[shutdown] API server: engine shutdown failed")
-        finally:
-            os._exit(128 + signum)
 
     def handle_signal(signum: int) -> None:
         repeated = signum in received_signals
         received_signals.add(signum)
-        if (
-            repeated
-            and drain_task is not None
-            and not drain_task.done()
-            and time.monotonic() >= drain_deadline
-            and not drain_abandoned.done()
-        ):
-            logger.warning(
-                "[shutdown] API server: received %s after the drain deadline; "
-                "abandoning plugin drains and exiting after engine shutdown",
-                signal.Signals(signum).name,
-            )
-            drain_abandoned.set_result(signum)
-            return
-        cleanup_only = (
-            engine_stopped
-            or drain_abandoned.done()
-            or (shutdown_task is not None and shutdown_task.done())
+        cleanup_only = engine_stopped or (
+            shutdown_task is not None and shutdown_task.done()
         )
-        # A supervised server's parent bounds its HTTP and plugin cleanup, but
-        # not an abandoned drain's engine shutdown.
-        may_exit = exit_on_repeated_cleanup_signal or drain_abandoned.done()
-        if not (repeated and cleanup_only and may_exit):
+        if not (repeated and cleanup_only and exit_on_repeated_cleanup_signal):
             request_shutdown()
             return
-        # Only HTTP and plugin cleanup, or engine shutdown after an abandoned
-        # drain, remain. A repeated signal must not wait for a hook or engine
-        # shutdown that never returns. Exit directly: as a container's PID 1,
+        # Only HTTP and plugin cleanup remain. A repeated signal must not wait
+        # for a hook that never returns. Exit directly: as a container's PID 1,
         # the process ignores a signal whose action is the default.
         logger.warning(
-            "[shutdown] API server: received %s during shutdown; exiting",
+            "[shutdown] API server: received %s during cleanup; exiting",
             signal.Signals(signum).name,
         )
         os._exit(128 + signum)
@@ -357,7 +323,7 @@ async def serve_http(
         pass
 
     async def handle_shutdown() -> None:
-        nonlocal engine_stopped, drain_task, drain_deadline
+        nonlocal engine_stopped
         await shutdown_event.wait()
 
         vllm_config = (
@@ -367,33 +333,19 @@ async def serve_http(
         )
         timeout = vllm_config.shutdown_timeout if vllm_config is not None else 0
         deadline = time.monotonic() + timeout
-        if timeout <= 0:
-            # Drain hooks are skipped, so there is no drain to abandon.
-            await drain_endpoint_plugins(app.state, deadline)
-        else:
-            drain = loop.create_task(drain_endpoint_plugins(app.state, deadline))
-            drain_task, drain_deadline = drain, deadline
-            settled = (drain, drain_abandoned)
-            cancelled = False
-            # Like a TaskGroup, defer repeated cancellation until the drain settles.
-            while not (drain.done() or drain_abandoned.done()):
-                try:
-                    await asyncio.wait(settled, return_when=asyncio.FIRST_COMPLETED)
-                except asyncio.CancelledError:
-                    if not cancelled:
-                        drain.cancel()
-                    cancelled = True
-            if drain_abandoned.done():
-                # Neither cancellation nor an engine error may skip the exit, and
-                # `stop` must not run beside the abandoned drain.
-                signum = drain_abandoned.result()
-                exiting = loop.run_in_executor(None, abandon_drain, signum)
-                while True:
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.wait((exiting,))
-            if cancelled:
-                raise asyncio.CancelledError
-            drain.result()
+        drain = loop.create_task(drain_endpoint_plugins(app.state, deadline))
+        cancelled = False
+        # Like a TaskGroup, defer repeated cancellation until the drain settles.
+        while not drain.done():
+            try:
+                await asyncio.wait((drain,))
+            except asyncio.CancelledError:
+                if not cancelled:
+                    drain.cancel()
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        drain.result()
 
         if engine_client is not None:
             remaining = max(0.0, deadline - time.monotonic())
