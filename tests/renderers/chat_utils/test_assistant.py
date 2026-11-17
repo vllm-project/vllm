@@ -5,11 +5,17 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+from openai.types.chat import ChatCompletionMessage
 
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
-from vllm.renderers.chat_utils import ConversationMessage, parse_chat_message_content
+from vllm.renderers.chat_utils import (
+    ConversationMessage,
+    parse_chat_message_content,
+    parse_chat_messages,
+)
 from vllm.renderers.chat_utils.item_tracker import MultiModalItemTracker
 
 MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
@@ -77,6 +83,48 @@ def test_non_assistant_reasoning_is_not_mirrored():
 
     assert "reasoning" not in conv_msg
     assert "reasoning_content" not in conv_msg
+
+
+@pytest.fixture
+def sdk_refusal_history():
+    """Replay an SDK refusal before asking about its suggested alternative."""
+    refused_turn = ChatCompletionMessage(
+        role="assistant",
+        content=None,
+        refusal="I cannot provide private details, but can suggest public sources.",
+    )
+    # The default dump includes tool_calls=None, which request validation rejects.
+    return [
+        {"role": "user", "content": "Can you share private details?"},
+        refused_turn.model_dump(exclude_none=True),
+        {"role": "user", "content": "What alternative did you suggest?"},
+    ]
+
+
+@pytest.mark.parametrize("request_cls", [ChatCompletionRequest, TokenizeChatRequest])
+@pytest.mark.parametrize("content_format", ["string", "openai"])
+def test_assistant_refusal_replays_sdk_history(
+    refusal_model_config, sdk_refusal_history, request_cls, content_format
+):
+    """Continuing a conversation preserves the SDK refusal and both user turns."""
+    request = request_cls(model=MODEL_NAME, messages=sdk_refusal_history)
+    conversation, _, _ = parse_chat_messages(
+        request.messages, refusal_model_config, content_format=content_format
+    )
+    expected = [
+        sdk_refusal_history[0],
+        {"role": "assistant", "content": sdk_refusal_history[1]["refusal"]},
+        sdk_refusal_history[2],
+    ]
+    if content_format == "openai":
+        expected = [
+            {
+                "role": message["role"],
+                "content": [{"type": "text", "text": message["content"]}],
+            }
+            for message in expected
+        ]
+    assert conversation == expected
 
 
 def _parse_refusal_message(
@@ -169,6 +217,24 @@ def test_tokenize_chat_preserves_assistant_refusal(server, content):
                     {"role": "user", "content": "What alternative did you suggest?"},
                 ],
             },
+        )
+        response.raise_for_status()
+        results.append(response.json())
+
+    assert results[0] == results[1]
+
+
+def test_tokenize_chat_replays_sdk_refusal(server, sdk_refusal_history):
+    """An SDK refusal produces the same prompt tokens as explicit assistant text."""
+    expected = [
+        sdk_refusal_history[0],
+        {"role": "assistant", "content": sdk_refusal_history[1]["refusal"]},
+        sdk_refusal_history[2],
+    ]
+    results = []
+    for messages in (sdk_refusal_history, expected):
+        response = requests.post(
+            server.url_for("tokenize"), json={"model": MODEL_NAME, "messages": messages}
         )
         response.raise_for_status()
         results.append(response.json())
