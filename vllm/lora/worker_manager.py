@@ -124,10 +124,12 @@ class WorkerLoRAManager:
         module = name.split(".lora_")[0]
         if module in self._module_names:
             return True
-        prefix, _, leaf = module.rpartition(".")
+        # Sub-module names can be dotted, e.g. MoE experts' `experts.0.w1`
         return any(
-            leaf in subs and f"{prefix}.{packed}" in self._module_names
+            module.endswith(f".{sub}")
+            and f"{module.removesuffix(sub)}{packed}" in self._module_names
             for packed, subs in self._adapter_manager.packed_modules_mapping.items()
+            for sub in subs
         )
 
     def create_lora_manager(
