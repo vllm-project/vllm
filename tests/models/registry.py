@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -32,6 +33,9 @@ class _HfExamplesInfo:
     The default model to use for testing this architecture, which is only used
     for speculative decoding.
     """
+
+    speculative_model_subfolder: str | None = None
+    """Subfolder containing the speculative model inside its repository."""
 
     speculative_method: str | None = None
     """
@@ -124,6 +128,28 @@ class _HfExamplesInfo:
     If True, use the original number of layers from the model config
     instead of minimal layers for testing.
     """
+
+    def get_speculative_model(self) -> str | None:
+        """Resolve the draft path, downloading only its config for dummy loading."""
+        model = self.speculative_model
+        subfolder = self.speculative_model_subfolder
+        if model is None or subfolder is None:
+            return model
+        if Path(model).is_dir():
+            return str(Path(model) / subfolder)
+
+        from huggingface_hub.constants import HF_HUB_OFFLINE
+
+        from vllm.transformers_utils.repo_utils import hf_api
+
+        config_path = hf_api().hf_hub_download(
+            repo_id=model,
+            filename="config.json",
+            subfolder=subfolder,
+            revision=self.revision,
+            local_files_only=HF_HUB_OFFLINE,
+        )
+        return str(Path(config_path).parent)
 
     def check_transformers_version(
         self,
@@ -1536,6 +1562,24 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3.8-27B",
         speculative_model="z-lab/Qwen3.8-27B-DFlash2",
         is_available_online=False,
+        use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
+    ),
+    "GigaChat4DFlash2DraftModel": _HfExamplesInfo(
+        "ai-sage/GigaChat4-708B-A41B",
+        speculative_model="ai-sage/GigaChat4-708B-A41B",
+        speculative_model_subfolder="dflash_draft",
+        speculative_method="dflash",
+        use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
+    ),
+    "DFlashGigaChat4DFlash2DraftModel": _HfExamplesInfo(
+        "ai-sage/GigaChat4-708B-A41B",
+        speculative_model="ai-sage/GigaChat4-708B-A41B",
+        speculative_model_subfolder="dflash_draft",
+        speculative_method="dflash",
         use_original_num_layers=True,
         max_model_len=8192,
         max_num_seqs=32,
