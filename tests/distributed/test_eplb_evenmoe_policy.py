@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.eplb.policy import EPLB_POLICIES, DefaultEplbPolicy
+from vllm.distributed.eplb.policy import EPLB_POLICIES, DefaultEplbPolicy, EplbStats
 
 pytest.importorskip("evenmoe")
 
@@ -24,6 +24,15 @@ NUM_LOGICAL = 256
 NUM_RANKS = 8
 NUM_REPLICAS = NUM_LOGICAL + 32
 NUM_GROUPS = 8
+
+
+def _stats(weight: torch.Tensor, num_groups: int = NUM_GROUPS) -> EplbStats:
+    """The planning snapshot vLLM hands a policy, for the geometry above, one node."""
+    return EplbStats(weight, NUM_REPLICAS, num_groups, 1, NUM_RANKS)
+
+
+def _plan(weight: torch.Tensor, num_groups: int = NUM_GROUPS, **kwargs) -> torch.Tensor:
+    return EvenMoeEplbPolicy().rebalance_experts(_stats(weight, num_groups), **kwargs)
 
 
 def _skewed_load(seed: int = 0) -> torch.Tensor:
@@ -75,16 +84,14 @@ def test_evenmoe_policy_is_registered():
 
 def test_evenmoe_placement_is_valid():
     weight = _skewed_load()
-    phy2log = EvenMoeEplbPolicy.rebalance_experts(
-        weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS
-    )
+    phy2log = _plan(weight)
     _assert_valid_placement(phy2log)
 
 
 def test_evenmoe_placement_is_deterministic():
     weight = _skewed_load()
-    a = EvenMoeEplbPolicy.rebalance_experts(weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS)
-    b = EvenMoeEplbPolicy.rebalance_experts(weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS)
+    a = _plan(weight)
+    b = _plan(weight)
     assert torch.equal(a, b), "placement must be reproducible across EP ranks"
 
 
@@ -92,12 +99,8 @@ def test_evenmoe_balances_at_least_as_well_as_default():
     """EvenMoE's DeepSeek EPLB and vLLM's are ports of the same algorithm, so the
     balance quality should be equivalent -- not merely 'not much worse'."""
     weight = _skewed_load()
-    evenmoe = EvenMoeEplbPolicy.rebalance_experts(
-        weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS
-    )
-    default = DefaultEplbPolicy.rebalance_experts(
-        weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS
-    )
+    evenmoe = _plan(weight)
+    default = DefaultEplbPolicy().rebalance_experts(_stats(weight))
     evenmoe_imb = _imbalance(evenmoe, weight)
     default_imb = _imbalance(default, weight)
     assert evenmoe_imb <= default_imb * 1.02, (
@@ -111,17 +114,11 @@ def test_slot_preservation_reduces_weight_movement():
     EvenMoE's L1 policies do not consume a previous placement, so the glue applies
     the same pass; without it, a re-plan churns far more slots."""
     weight = _skewed_load(seed=0)
-    first = EvenMoeEplbPolicy.rebalance_experts(
-        weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS
-    )
+    first = _plan(weight)
 
     drifted = _skewed_load(seed=1) * 0.25 + weight * 0.75
-    without = EvenMoeEplbPolicy.rebalance_experts(
-        drifted, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS
-    )
-    with_preserve = EvenMoeEplbPolicy.rebalance_experts(
-        drifted, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS, old_global_expert_indices=first
-    )
+    without = _plan(drifted)
+    with_preserve = _plan(drifted, old_global_expert_indices=first)
 
     _assert_valid_placement(with_preserve)
     moved_without = int((without != first).sum())
@@ -147,16 +144,14 @@ def test_slot_preservation_reduces_weight_movement():
 def test_evenmoe_algorithms_selectable(monkeypatch, algorithm):
     monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", algorithm)
     weight = _skewed_load()
-    phy2log = EvenMoeEplbPolicy.rebalance_experts(
-        weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS
-    )
+    phy2log = _plan(weight)
     _assert_valid_placement(phy2log)
 
 
 def test_no_expert_groups():
     """VLLM passes num_groups=0 for models without expert groups."""
     weight = _skewed_load()
-    phy2log = EvenMoeEplbPolicy.rebalance_experts(weight, NUM_REPLICAS, 0, 1, NUM_RANKS)
+    phy2log = _plan(weight, num_groups=0)
     _assert_valid_placement(phy2log)
 
 
@@ -175,9 +170,7 @@ def test_ep_rank_reaches_the_placement_request(monkeypatch):
 
     monkeypatch.setattr(evenmoe_runtime, "placement_request", spy)
     weight = _skewed_load()
-    EvenMoeEplbPolicy.rebalance_experts(
-        weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS, ep_rank=5
-    )
+    _plan(weight, ep_rank=5)
     assert captured["ep_rank"] == 5
 
 

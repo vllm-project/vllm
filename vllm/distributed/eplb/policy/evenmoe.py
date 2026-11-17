@@ -40,7 +40,7 @@ from __future__ import annotations
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.eplb.policy.abstract import AbstractEplbPolicy
+from vllm.distributed.eplb.policy.abstract import AbstractEplbPolicy, EplbStats
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
 from vllm.logger import init_logger
 
@@ -113,18 +113,18 @@ class EvenMoeEplbPolicy(AbstractEplbPolicy):
         )
         return phy2log.cpu().to(torch.int64)
 
-    @classmethod
     def rebalance_experts(
-        cls,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
+        self,
+        stats: EplbStats,
         old_global_expert_indices: torch.Tensor | None = None,
         per_rank_weight: torch.Tensor | None = None,
         ep_rank: int | None = None,
     ) -> torch.Tensor:
+        weight = stats.global_expert_load_window
+        num_replicas = stats.num_replicas
+        num_groups = stats.num_groups
+        num_nodes = stats.num_nodes
+        num_ranks = stats.num_gpus
         try:
             from vllm.distributed.eplb.evenmoe_runtime import (
                 placement_request,

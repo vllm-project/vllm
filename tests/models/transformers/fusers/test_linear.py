@@ -21,6 +21,7 @@ from vllm.model_executor.models.transformers.fusers import (
     packed_qkv,
     qkv,
 )
+from vllm.model_executor.models.transformers.fusers.glu import ActAndMulQuant
 from vllm.model_executor.models.transformers.fx_utils import (
     bypass_existence_guard,
     trace,
@@ -746,7 +747,10 @@ def _apply_glu_fuser_with_stubs(module: nn.Module, fuser: GLUFuser):
         if gate.bias is not None:
             merged.bias.copy_(torch.cat([gate.bias, up.bias], dim=0))
     setattr(module, fuser.merged_name, merged)
-    setattr(module, fuser.act_name, SiluAndMulStub())
+    act = SiluAndMulStub()
+    setattr(
+        module, fuser.act_name, ActAndMulQuant(act) if fuser.fuses_act_quant else act
+    )
     delattr(module, fuser.gate_name)
     delattr(module, fuser.up_name)
     module.forward = MethodType(fuser.fused_forward, module)
@@ -805,6 +809,8 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     names = fuser.fused_forward.__code__.co_names
     assert "gate_up_proj" in names and "act_fn" in names and "down_proj" in names
     assert not {"gate_proj", "up_proj"} & set(names)
+    # The activation can fuse with the down projection's input quantization
+    assert fuser.fuses_act_quant
 
     # Numerics: the fused forward must match the original on a real instance.
     real = mlp_cls(bias=bias)

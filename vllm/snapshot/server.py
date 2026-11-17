@@ -27,13 +27,13 @@ class SnapshotBarrierError(RuntimeError):
     """The controller supplied an invalid snapshot release marker."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ListenerConfig:
     host: str | None
     port: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ControlArgs:
     ready_file: Path
     release_file: Path
