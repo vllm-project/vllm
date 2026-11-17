@@ -349,3 +349,41 @@ def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
         name_0="h100_ref",
         name_1="output",
     )
+
+
+@pytest.mark.core_model
+def test_lightonocr_request_processor_kwargs(vllm_runner):
+    """Generate with a request override and verify the processed image span."""
+    from PIL import Image
+
+    from vllm import SamplingParams
+
+    model_id = "lightonai/LightOnOCR-1B-1025"
+    with vllm_runner(
+        model_id,
+        enforce_eager=True,
+        max_model_len=4096,
+        max_num_batched_tokens=4096,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=1 << 29,
+        attention_config={"backend": "TRITON_ATTN"},
+        mm_encoder_attn_backend="TORCH_SDPA",
+        limit_mm_per_prompt={"image": 1},
+        config_format="hf",
+    ) as runner:
+        result = runner.llm.generate(
+            {
+                "prompt": "<|image_pad|>",
+                "multi_modal_data": {"image": Image.new("RGB", (1600, 1200))},
+                "mm_processor_kwargs": {"size": {"longest_edge": 448}},
+            },
+            SamplingParams(temperature=0, max_tokens=1, ignore_eos=True),
+        )[0]
+        assert result.outputs[0].finish_reason == "length"
+        assert len(result.outputs[0].token_ids) == 1
+        expected_tokens = 192
+        image_token_id = runner.llm.get_tokenizer().convert_tokens_to_ids(
+            "<|image_pad|>"
+        )
+        assert result.prompt_token_ids.count(image_token_id) == expected_tokens
