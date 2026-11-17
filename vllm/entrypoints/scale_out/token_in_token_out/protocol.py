@@ -10,6 +10,7 @@ from pydantic import (
     JsonValue,
     NonNegativeInt,
     PrivateAttr,
+    SerializeAsAny,
     Tag,
     field_serializer,
     field_validator,
@@ -78,6 +79,16 @@ class ParseContext(BaseModel):
     without the API server only entries a handler keeps out of the engine."""
     history_tool_call_cnt: int = Field(default=0, ge=0)
     """Tool calls already in the rendered conversation, for sequential IDs."""
+    parser_state: dict[str, JsonValue] | None = Field(
+        default=None, exclude_if=lambda v: not v
+    )
+    """Opaque JSON-only parser/vendor private state for derender.
+
+    Omitted when unset so older generate nodes only reject requests that
+    actually carry it (unknown-field 400), not every derender request.
+    Example: grounded Cohere non-streaming render puts
+    `{"citation_sources": [{"bucket", "idx", "source"}, ...]}` here.
+    """
 
     def to_chat_request(self) -> ChatCompletionRequest:
         """Build the message less chat request the parser reads.
@@ -616,7 +627,8 @@ class GenerateDerenderStreamResponse(GenerateStreamResponseBase):
 
 
 class GenerateDerenderChoice(GenerateChoiceBase):
-    message: ChatMessage
+    # ``SerializeAsAny`` keeps subclass fields such as Cohere ``citations``.
+    message: SerializeAsAny[ChatMessage]
     """Assistant message parsed from the output text."""
 
     logprobs: ChatCompletionLogProbs | None = None

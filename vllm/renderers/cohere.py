@@ -774,6 +774,22 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
             return self._melody.render_cmd3(config_dict)
         return self._melody.render_cmd4(config_dict)
 
+    def finalize_message(self, parser: Any, message: Any) -> Any:
+        """Attach grounding citations from the Cohere parser onto the message."""
+        citations = getattr(parser, "last_unary_citations", None)
+        if not citations:
+            return message
+        # Lazy import: keep the renderer free of an entrypoints cycle.
+        from vllm.entrypoints.cohere.cohere_chat_message import CohereChatMessage
+
+        return CohereChatMessage(
+            role=message.role,
+            content=message.content,
+            reasoning=message.reasoning,
+            tool_calls=message.tool_calls,
+            citations=citations,
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],

@@ -91,7 +91,7 @@ print(response["choices"][0]["token_ids"])
 
 ### Derender
 
-`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, `return_tokens_as_token_ids`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
+`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, `return_tokens_as_token_ids`, resolved JSON only `chat_template_kwargs`, the history tool call count, and optional opaque `parser_state` (for grounded Cohere non-streaming render, `parser_state.citation_sources`). A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
 
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
@@ -100,7 +100,7 @@ print(response["choices"][0]["token_ids"])
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
 - With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
 - The message `role` is the generate server's `--response-role`. `parse_context` doesn't carry `messages`, `add_generation_prompt` or `echo`, so the last message's role and `echo` aren't applied. Use [`/derender`](derenderer.md) for those.
-- Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
+- Cohere grounding citations are returned on `message.citations` when `/cohere/v2/chat/render` fills `parse_context.parser_state.citation_sources` and the generate node runs `--tokenizer-mode cohere` with the Cohere parser. Non-streaming only. Older generate nodes that don't know `parser_state` return 400 for those grounded requests. Standalone `/derender` has no `parse_context`, so its citations come back without resolved sources.
 
 A streamed tool call looks like this, with the usage chunk and `data: [DONE]` framed as at the other levels:
 
