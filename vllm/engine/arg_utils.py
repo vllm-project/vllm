@@ -1984,9 +1984,9 @@ class EngineArgs:
             type=int,
             default=0,
             help="Shutdown timeout in seconds. 0 = abort, >0 = wait. "
-            "Endpoint plugin drains share this deadline; the engine gets the "
-            "time that remains. A drain that ignores cancellation can delay "
-            "engine shutdown until a repeated signal.",
+            "Endpoint plugin drains are cancelled at half of this time; the "
+            "engine gets the time that remains. A drain that ignores "
+            "cancellation can delay engine shutdown until the process is killed.",
         )
 
         parser.add_argument(

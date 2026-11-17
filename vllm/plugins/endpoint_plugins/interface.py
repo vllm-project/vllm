@@ -142,8 +142,8 @@ class SupportsReady(Protocol):
     def ready(self, state: State) -> bool:
         """Return whether this process can accept new plugin work owners.
 
-        Called on the event loop for every `/ready` probe, so it must return a
-        `bool` quickly, without blocking or I/O.
+        Called on the event loop while a `/ready` probe is handled, so it must
+        return a `bool` quickly, without blocking or I/O.
         """
         ...
 
