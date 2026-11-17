@@ -59,7 +59,7 @@ aiter/ops/flydsl/kernels/mega_moe_gfx1250/
 
 ### Pro 专属：small_m / large_m（更少 kernel）
 
-仅 **DeepSeek-V4-Pro 形状**：`H=7168, I=3072, E=384, topk=6, EP8, a8w4, silu, swiglu_limit=10`，且无 `fanout_masks`。Flash（5120×2304）**进不了**。
+仅 **DeepSeek-V4-Pro 形状**：`H=7168, I=3072, E=384, topk=6, EP8, a8w4, silu, swiglu_limit=10`，且无 `fanout_masks`。Flash（5120×2304）在 aiter 0.1.29 原版里**进不了** small_m；打上 [patches/aiter-0.1.29-mega_moe-small_m-dsv41-flash.patch](./patches/aiter-0.1.29-mega_moe-small_m-dsv41-flash.patch) 后可用，vLLM 接线和实测见 [megamoe_single_kernel_dsv41f.md](./megamoe_single_kernel_dsv41f.md)。
 
 | 路径 | 开关 | 条件补充 | Kernel 数 |
 |---|---|---|---|
@@ -85,7 +85,7 @@ aiter/ops/flydsl/kernels/mega_moe_gfx1250/
 ### DeepSeek-V4.1-Flash
 
 - 形状：H=5120，I=2304，E=384，topk=6；EP2 → epr=192，EP8 → epr=48。
-- 走默认多段（prepare/stage1/stage2）；**无** small_m/large_m。
+- prefill 走默认多段（prepare/stage1/stage2）。decode（每卡 ≤512 tok）在 aiter ≥ 0.1.29 并打上补丁后走 small_m 单 kernel（[megamoe_single_kernel_dsv41f.md](./megamoe_single_kernel_dsv41f.md)）；large_m 仍不可用。
 - 相关 aiter PR：[aiter #6154](https://github.com/ROCm/aiter/pull/6154)（full-expert Flash MegaMoE tuning，draft）；vLLM 接线见 [#59685](https://github.com/vllm-project/vllm/pull/59685) 等。更广的 Flash PR 表见同目录 [dsv4.1f.md](./dsv4.1f.md)。
 
 ## 调参

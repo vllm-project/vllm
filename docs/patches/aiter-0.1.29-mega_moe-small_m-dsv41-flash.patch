@@ -1,0 +1,47 @@
+Subject: [PATCH] mega_moe: single-kernel small-M path for DeepSeek-V4.1-Flash (5120 / 2304)
+
+- small_m_eligible: admit model_dim 5120 / inter_dim 2304 besides 7168 / 3072.
+- small_m_config: buckets <= 8 pick tile_n 256, which gives V4.1 18 GEMM1 n-tiles; the XCD split needs
+  a multiple of 4, so fall back to tile_n 128 (36 n-tiles, as every larger bucket uses).
+Base: amd-aiter 0.1.29 as shipped in vllm/vllm-openai-rocm:nightly 54bc7a906a24.
+---
+diff --git a/aiter/ops/flydsl/kernels/mega_moe/mega_moe_v2.py b/aiter/ops/flydsl/kernels/mega_moe/mega_moe_v2.py
+--- a/aiter/ops/flydsl/kernels/mega_moe/mega_moe_v2.py
++++ b/aiter/ops/flydsl/kernels/mega_moe/mega_moe_v2.py
+@@ -91,18 +91,19 @@
+     fanout_masks: tuple[int, ...] = (),
+     act: str = "silu",
+ ) -> bool:
+-    """Whether the small-input path supports this layout (EP8 DeepSeek-V4 a8w4).
++    """Whether the small-input path supports this layout (EP8 DeepSeek-V4 / V4.1-Flash a8w4).
+ 
+     The kernel splits its work across 8 XCDs by XCC id, so it needs the 8-XCD
+     (256-CU) gfx950 parts; a 4-XCD part would leave half the work unclaimed.
++    V4.1-Flash (5120 / 2304) uses the default small-input config unchanged; it
++    was checked against an FP32 reference and against the main path on 8x MI355X.
+     """
+     return (
+         enabled
+         and arch.split(":", 1)[0] == "gfx950"
+         and num_cu == 256
+         and world_size == 8
+-        and model_dim == 7168
+-        and inter_dim == 3072
++        and (model_dim, inter_dim) in ((7168, 3072), (5120, 2304))
+         and experts == 384
+         and topk == 6
+         and quant == "a8w4"
+diff --git a/aiter/ops/flydsl/kernels/mega_moe/mega_moe_small_m.py b/aiter/ops/flydsl/kernels/mega_moe/mega_moe_small_m.py
+--- a/aiter/ops/flydsl/kernels/mega_moe/mega_moe_small_m.py
++++ b/aiter/ops/flydsl/kernels/mega_moe/mega_moe_small_m.py
+@@ -1447,6 +1447,10 @@
+             stage1=replace(config.stage1, sort_block_m=64),
+             stage2=replace(config.stage2, block_m=64),
+         )
++    if (2 * inter_dim // config.stage1.tile_n) % 4:
++        # The XCD split needs whole groups of 4 GEMM1 n-tiles. The tile_n 256 of buckets <= 8 gives
++        # V4.1-Flash (inter_dim 2304) 18 n-tiles; 128 gives 36, as every larger bucket uses.
++        config = replace(config, stage1=replace(config.stage1, tile_n=128))
+     return config
+ 
+ 
