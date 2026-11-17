@@ -104,10 +104,11 @@ attention module. `"attn"` is chosen deliberately to match the mappings generate
 `maybe_remap_kv_scale_name`."""
 
 
-class PPMissingEmbedding(PPMissingLayer):
-    """Stands in for a lookup (e.g. learned positions) that the decoder applies before
-    its layers. Its input is not hidden states, so `PPMissingLayer` would return the
-    wrong shape. The value is discarded by `Base._restore_stage_input`."""
+class PPMissingScalar(PPMissingLayer):
+    """A `PPMissingLayer` that returns a scalar zero instead of its input.
+
+    For layers whose input is not hidden states (e.g. learned position embeddings),
+    where passing the input through would give the wrong shape."""
 
     def __init__(self):
         super().__init__()
@@ -221,18 +222,18 @@ class Base(
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
-        self._stage_input: torch.Tensor | None = None
+        self._intermediate_hidden_states: torch.Tensor | None = None
         if not self.pp_group.is_first_rank and (layers := self._decoder_layers):
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             hidden_size = self.text_config.hidden_size
-            # Piecewise CUDA graphs require a stable address for the saved input.
+            # Piecewise CUDA graphs require a stable address for the saved input
             self.register_buffer(
                 "pp_hidden_states",
                 torch.zeros(1, max_tokens, hidden_size),
                 persistent=False,
             )
             layers[self.start_layer].register_forward_pre_hook(
-                self._restore_stage_input, with_kwargs=True
+                self._inject_intermediate_hidden_states, with_kwargs=True
             )
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
@@ -470,7 +471,7 @@ class Base(
             if is_input_embedding and keep_input_embeddings:
                 continue
             missing = (
-                PPMissingEmbedding()
+                PPMissingScalar()
                 if isinstance(child, nn.Embedding) and not is_input_embedding
                 else PPMissingLayer()
             )
@@ -520,6 +521,18 @@ class Base(
         # Some models have multiple attention layers per entry
         layers = module_lists[0]
         return layers if len(layers) == self.text_config.num_hidden_layers else None
+
+    def _inject_intermediate_hidden_states(self, module, args, kwargs):
+        """Pass the hidden states from the previous pipeline rank to this rank's first
+        layer unchanged.
+
+        The decoder still runs its pre-layer code for masks and rotary embeddings, but
+        anything it does to the hidden states was already done on the first rank."""
+        if (hidden_states := self._intermediate_hidden_states) is None:
+            return None
+        if args:
+            return (hidden_states, *args[1:]), kwargs
+        return args, kwargs | {"hidden_states": hidden_states}
 
     def _offloader(self) -> BaseOffloader:
         """The offloader for the decoder layers."""
@@ -893,7 +906,10 @@ class Base(
         if not self.pp_group.is_first_rank:
             assert intermediate_tensors is not None
             input_ids = None
-            inputs_embeds = intermediate_tensors["hidden_states"]
+            inputs_embeds = intermediate_tensors["hidden_states"][None, ...]
+            # Copied so that decoders which modify their input in place can't alter it
+            buffer = self.pp_hidden_states[:, : inputs_embeds.shape[1]]
+            self._intermediate_hidden_states = buffer.copy_(inputs_embeds)
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -914,13 +930,6 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
-        if not self.pp_group.is_first_rank:
-            assert inputs_embeds is not None
-            # Unset after the forward, so modules which call the layers directly
-            # (i.e. MTP) skip the hook
-            # Preserve the received values if the decoder modifies its input in place.
-            self._stage_input = self.pp_hidden_states
-            self._stage_input[:, : inputs_embeds.shape[1]].copy_(inputs_embeds)
         self._aux_hidden_states.clear()
         outputs = self.model(
             input_ids=input_ids,
@@ -930,7 +939,8 @@ class Base(
             return_dict=False,
             **kwargs,
         )
-        self._stage_input = None
+        # Unset so modules which call the layers directly (e.g. MTP) skip the hook
+        self._intermediate_hidden_states = None
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
@@ -979,20 +989,6 @@ class Base(
                 )
             else:
                 module.register_forward_hook(self._record_layer_output)
-
-    def _restore_stage_input(self, module, args, kwargs):
-        """Feed the received hidden states to this rank's first layer unchanged.
-
-        Later ranks still run the decoder before its layers, for masks and rotary
-        embeddings, but anything it does to the hidden states (scaling, learned
-        positions, ...) was already done on the first rank."""
-        if (received := self._stage_input) is None:
-            return None
-        hidden_states = args[0] if args else kwargs["hidden_states"]
-        received = received[:, : hidden_states.shape[1]]
-        if args:
-            return (received, *args[1:]), kwargs
-        return args, kwargs | {"hidden_states": received}
 
     def _record_layer_input(self, module, args, kwargs) -> None:
         hidden_states = args[0] if args else kwargs["hidden_states"]
