@@ -33,6 +33,7 @@ from vllm.entrypoints.pooling.types import (
     OfflineScoringInputsContext,
     ScoringRenderParams,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
@@ -480,3 +481,168 @@ def test_scoring_detects_structured_content_with_saved_template(
         "a", "bc", {}, chat_template_content_format="auto"
     )
     assert prompt == "query:adocument:bc"
+
+
+class TestMergeTemplateKwargs:
+    """Unit tests for `ScoringIOProcessor._merge_chat_template_kwargs`."""
+
+    @pytest.fixture
+    def processor(self):
+        return CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
+
+    def test_ignores_none_flags(self, processor):
+        merged = processor._merge_chat_template_kwargs(
+            None,
+            add_generation_prompt=None,
+            continue_final_message=None,
+        )
+        assert merged == {}
+
+    def test_keeps_existing_kwargs_when_no_flag_is_set(self, processor):
+        merged = processor._merge_chat_template_kwargs(
+            {"existing": 1},
+            add_generation_prompt=None,
+            continue_final_message=None,
+        )
+        assert merged == {"existing": 1}
+
+    @pytest.mark.parametrize(
+        ("flag_name", "kwargs"),
+        [
+            ("add_generation_prompt", {"existing": 1}),
+            ("continue_final_message", {"existing": 1}),
+            ("add_generation_prompt", None),
+            ("continue_final_message", None),
+        ],
+    )
+    def test_injects_present_flag(self, processor, flag_name, kwargs):
+        merged = processor._merge_chat_template_kwargs(
+            kwargs,
+            add_generation_prompt=True
+            if flag_name == "add_generation_prompt"
+            else None,
+            continue_final_message=True
+            if flag_name == "continue_final_message"
+            else None,
+        )
+        expected = dict(kwargs or {})
+        expected[flag_name] = True
+        assert merged == expected
+
+    def test_explicit_kwargs_take_precedence_over_top_level_flags(self, processor):
+        merged = processor._merge_chat_template_kwargs(
+            {"add_generation_prompt": False, "continue_final_message": False},
+            add_generation_prompt=True,
+            continue_final_message=True,
+        )
+        assert merged == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+
+    def test_rejects_mutually_exclusive_top_level_flags(self, processor):
+        with pytest.raises(VLLMValidationError, match="Cannot set both"):
+            processor._merge_chat_template_kwargs(
+                None,
+                add_generation_prompt=True,
+                continue_final_message=True,
+            )
+
+    def test_rejects_mutually_exclusive_flags_across_layers(self, processor):
+        """A top-level flag must still conflict with the same flag set in
+        `chat_template_kwargs`."""
+        with pytest.raises(VLLMValidationError, match="Cannot set both"):
+            processor._merge_chat_template_kwargs(
+                {"continue_final_message": True},
+                add_generation_prompt=True,
+                continue_final_message=None,
+            )
+
+
+class TestOfflineScoringTemplateKwargs:
+    """Integration tests: offline chat template kwargs reach the rendered request."""
+
+    @pytest.fixture
+    def processor(self, llm_reranker_processor: CrossEncoderIOProcessor):
+        # Replace the renderer with the minimal surface used by the offline
+        # factory, mirroring `test_offline_scoring_uses_default_template_*`.
+        llm_reranker_processor.renderer = SimpleNamespace(
+            default_cmpl_tok_params=TokenizeParams(max_total_tokens=32)
+        )
+        return llm_reranker_processor
+
+    def _make_ctx(self, **kwargs) -> OfflineScoringInputsContext:
+        defaults: dict = dict(
+            pooling_task="classify",
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            chat_template=None,
+            pooling_params=PoolingParams(),
+        )
+        defaults.update(kwargs)
+        return OfflineScoringInputsContext(**defaults)
+
+    @pytest.mark.parametrize(
+        "flag_name",
+        ["add_generation_prompt", "continue_final_message"],
+    )
+    def test_flag_reaches_chat_template_kwargs(self, processor, flag_name):
+        ctx = self._make_ctx(**{flag_name: True})
+
+        factory, num_requests = processor.get_request_factory_offline(ctx)
+        assert num_requests == 1
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"] == {flag_name: True}
+
+    def test_no_flags_leaves_chat_template_kwargs_empty(self, processor):
+        ctx = self._make_ctx()
+
+        factory, _ = processor.get_request_factory_offline(ctx)
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"] == {}
+
+    def test_legacy_extra_kwargs_still_lose_to_explicit_kwargs(self, processor):
+        """`pooling_params.extra_kwargs["chat_template_kwargs"]` must keep its
+        existing precedence when a generation flag is also set."""
+        ctx = self._make_ctx(
+            chat_template_kwargs={"existing": "explicit"},
+            pooling_params=PoolingParams(
+                extra_kwargs={
+                    "chat_template_kwargs": {"existing": "legacy", "from_extra": 1}
+                }
+            ),
+            add_generation_prompt=True,
+        )
+
+        factory, _ = processor.get_request_factory_offline(ctx)
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"] == {
+            "existing": "explicit",
+            "from_extra": 1,
+            "add_generation_prompt": True,
+        }
+
+    def test_explicit_chat_template_kwargs_win_over_top_level_flag(self, processor):
+        ctx = self._make_ctx(
+            chat_template_kwargs={"add_generation_prompt": False},
+            add_generation_prompt=True,
+        )
+
+        factory, _ = processor.get_request_factory_offline(ctx)
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"]["add_generation_prompt"] is False
+
+    def test_rejects_mutually_exclusive_flags(self, processor):
+        """Mutually exclusive flags must be rejected before rendering."""
+        with pytest.raises(VLLMValidationError, match="Cannot set both"):
+            ctx = self._make_ctx(
+                add_generation_prompt=True,
+                continue_final_message=True,
+            )
+            processor.get_request_factory_offline(ctx)

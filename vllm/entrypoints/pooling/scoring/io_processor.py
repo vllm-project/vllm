@@ -120,6 +120,27 @@ class ScoringIOProcessor(PoolingIOProcessor):
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
 
+    def _merge_chat_template_kwargs(
+        self,
+        chat_template_kwargs: dict[str, Any] | None,
+        add_generation_prompt: bool | None,
+        continue_final_message: bool | None,
+    ) -> dict[str, Any]:
+        merged = dict(chat_template_kwargs or {})
+
+        if add_generation_prompt:
+            merged.setdefault("add_generation_prompt", True)
+        if continue_final_message:
+            merged.setdefault("continue_final_message", True)
+
+        if merged.get("add_generation_prompt") and merged.get("continue_final_message"):
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True."
+            )
+
+        return merged
+
     def _validate_token_limit(self, value: int, name: str) -> None:
         if value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
@@ -552,8 +573,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        chat_template_kwargs = (
-            ctx.prompt_extras.get("chat_template_kwargs") if ctx.prompt_extras else None
+        chat_template_kwargs = self._merge_chat_template_kwargs(
+            ctx.prompt_extras.get("chat_template_kwargs")
+            if ctx.prompt_extras
+            else None,
+            getattr(request, "add_generation_prompt", None),
+            getattr(request, "continue_final_message", None),
         )
 
         requests = [
@@ -616,9 +641,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 prompt_extras_dict[key] = extra_kwargs[key]
         prompt_extras: dict[str, Any] | None = prompt_extras_dict or None
 
-        merged_chat_template_kwargs = merge_kwargs(
-            extra_kwargs.get("chat_template_kwargs"),
-            ctx.chat_template_kwargs,
+        merged_chat_template_kwargs = self._merge_chat_template_kwargs(
+            merge_kwargs(
+                extra_kwargs.get("chat_template_kwargs"),
+                ctx.chat_template_kwargs,
+            ),
+            getattr(ctx, "add_generation_prompt", None),
+            getattr(ctx, "continue_final_message", None),
         )
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
