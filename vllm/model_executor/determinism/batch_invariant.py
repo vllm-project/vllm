@@ -1414,9 +1414,12 @@ def enable_batch_invariant_mode():
             _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
         else:
-            # Hopper (SM90) and Blackwell (SM100): the only source of batch
-            # variance is split-k, which we disable via the cuBLAS workspace
-            # config.
+            # Hopper (SM90) and Blackwell (SM100): aten matmuls are not
+            # overridden here; the cuBLAS workspace config below disables
+            # split-k. That alone does not make cuBLAS batch invariant for
+            # every shape (e.g. narrow MoE router projections), so unquantized
+            # Linear layers use the Triton linear_batch_invariant on every
+            # CUDA device (see #35404).
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
