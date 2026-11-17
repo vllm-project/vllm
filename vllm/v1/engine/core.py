@@ -288,11 +288,12 @@ class EngineCore:
         if budget_bytes is None:
             return
 
+        if not config.model_config.supports_multimodal_inputs:
+            raise ValueError("--encoder-cache-bytes requires a multimodal model.")
+
         ec_config = config.ec_transfer_config
         if ec_config is not None and ec_config.is_ec_transfer_instance:
-            raise ValueError(
-                "--encoder-cache-bytes does not yet support EC transfer."
-            )
+            raise ValueError("--encoder-cache-bytes does not yet support EC transfer.")
         mm_config = config.model_config.multimodal_config
         if mm_config is not None and mm_config.skip_mm_profiling:
             raise ValueError(

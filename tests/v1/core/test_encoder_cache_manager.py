@@ -589,7 +589,9 @@ def test_byte_budget_resolves_and_updates_workers(budget_bytes, reports, expecte
         vllm_config=SimpleNamespace(
             scheduler_config=config,
             ec_transfer_config=None,
-            model_config=SimpleNamespace(multimodal_config=None),
+            model_config=SimpleNamespace(
+                multimodal_config=None, supports_multimodal_inputs=True
+            ),
         ),
         collective_rpc=Mock(side_effect=[reports, []]),
     )
@@ -636,12 +638,36 @@ def test_byte_budget_rejects_unsupported_modes(
             model_config=SimpleNamespace(
                 multimodal_config=SimpleNamespace(
                     skip_mm_profiling=skip_profile, enable_mm_embeds=enable_mm_embeds
-                )
+                ),
+                supports_multimodal_inputs=True,
             ),
         ),
         collective_rpc=Mock(),
     )
     with pytest.raises(ValueError, match=match):
+        EngineCore._resolve_encoder_cache_budget(core)
+    core.collective_rpc.assert_not_called()
+
+
+def test_byte_budget_rejects_non_multimodal_models():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.v1.engine.core import EngineCore
+
+    core = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            scheduler_config=_scheduler_config(
+                max_num_batched_tokens=16384, encoder_cache_bytes=2 << 30
+            ),
+            ec_transfer_config=None,
+            model_config=SimpleNamespace(
+                multimodal_config=None, supports_multimodal_inputs=False
+            ),
+        ),
+        collective_rpc=Mock(),
+    )
+    with pytest.raises(ValueError, match="multimodal"):
         EngineCore._resolve_encoder_cache_budget(core)
     core.collective_rpc.assert_not_called()
 
