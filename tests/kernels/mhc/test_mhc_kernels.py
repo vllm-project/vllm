@@ -84,6 +84,15 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    # The TP4 fusion is SM100's; SM90 at TP8 is in the model's own tests.
+    monkeypatch.setattr(
+        mhc,
+        "current_platform",
+        SimpleNamespace(
+            is_device_capability=lambda capability: False,
+            is_device_capability_family=lambda family: family == 100,
+        ),
+    )
     assert mhc.supports_mhc_all_reduce(config) is expected
 
 
@@ -175,6 +184,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     draft = SimpleNamespace(
         use_mega_gate=False,
         use_sequence_parallel=False,
+        fuse_mhc_all_reduce=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
     )
@@ -574,6 +584,9 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.fuse_mhc_all_reduce = False
     decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
+    # The stock mHC boundaries, not the SM80/SM90 CuTe DSL ones.
+    decoder.ampere_mhc = False
+    decoder.mhc_overlap_max_tokens = MHC_OVERLAP_MAX_TOKENS
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
 
@@ -707,6 +720,8 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     inputs -- and Engram must not be folded into it, since the injection
     happens after the aux consumers read the stream.
     """
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
+
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -719,6 +734,9 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.fuse_mhc_all_reduce = False
     decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
+    # The stock mHC boundaries, not the SM80/SM90 CuTe DSL ones.
+    decoder.ampere_mhc = False
+    decoder.mhc_overlap_max_tokens = MHC_OVERLAP_MAX_TOKENS
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
 
