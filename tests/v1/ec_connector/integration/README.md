@@ -13,7 +13,7 @@ The test ensures that disaggregated encoding produces **identical** outputs to t
 
 Note that currently PD disaggregation set up may give slightly different results from a single instance. Therefore, we need the result from 1P+1D as the baseline for 1E+1P+1D
 
-Please refer to [Disaggregated Encoder Feature](../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
+Please refer to [Disaggregated Encoder Feature](../../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
 
 ## Files
 
@@ -57,6 +57,68 @@ EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash ./tests/v1/ec_connector/integrati
 ```
 
 ## How It Works
+
+### NIXL EC failure isolation (1E + 1PD)
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0,1 \
+  .venv/bin/python -m pytest \
+  tests/v1/ec_connector/integration/test_nixl_failure.py -v -s
+```
+
+Requires two CUDA GPUs and NIXL. `MODEL` overrides the default
+`Qwen/Qwen2.5-VL-3B-Instruct`. The test starts real E/PD servers with CUDA
+graphs enabled and uses the proxy's rewrite helper. Only the failing request's
+control endpoint is replaced: a ZMQ peer returns `NACK_MISSING` and verifies
+that the consumer actually requested the encoding.
+
+Metadata-only requests must return a request-level error; requests retaining
+the image must succeed through local fallback. After each case, a fresh
+metadata-only image request must succeed through the real NIXL transfer path.
+No server restart, proxy retry, cache hit, or timeout race can mask the result.
+This is a correctness test, not a throughput benchmark.
+
+### Mooncake EC (1E + 1PD)
+
+```bash
+PYTHON_BIN="$PWD/.venv/bin/python" \
+  bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
+```
+
+Requires two GPUs and Mooncake TransferEngine. TCP is the default transport;
+no RDMA-capable network hardware is required.
+The script sets `MC_FORCE_TCP=1` in TCP mode so Mooncake cannot auto-select RDMA.
+The baseline runs first on GPU 0, followed by E on GPU 0 and PD on GPU 1.
+`MOONCAKE_EC_PROTOCOL=rdma` selects RDMA instead; host-specific transport
+environment variables should be set by the caller.
+
+Three black-box cases check fixed short answers and compare with the baseline:
+
+- One image: read the STOP sign.
+- Two different images (including a local file): identify flowers and birds.
+- The same image twice: read both STOP signs.
+
+By default, all three requests run concurrently for two rounds, exercising
+shared hashes across requests and reuse after completion. Every response is
+compared, not just the final round. Set `CONCURRENCY` and `REPEAT` to override.
+Prefix caching is disabled and CUDA graphs remain enabled. This is a small
+correctness suite, not a performance benchmark or failure-injection suite.
+
+`LOG_PATH` and `BASELINE_FILE` select the log directory and reference output.
+`SKIP_BASELINE=1` reuses a reference generated with the same model and test
+configuration. `USE_MM_PROMPTS=0` only checks text routing, not EC transfer.
+
+Buildkite runs this script as `mooncake-ec-tcp-e2e-2-gpus` on two L4 GPUs.
+The job is defined in `.buildkite/test_areas/disaggregated_mooncake.yaml` and
+selected for changes to EC, multimodal processing, scheduler/model-runner
+integration, the proxy, or these tests (subject to normal PR CI approval).
+It reuses the CI image's Python packages through a system-site-packages venv
+and installs the CUDA-compatible Mooncake wheel. It uses loopback networking
+and TCP only, without RDMA devices or peer-memory setup.
+
+The job fails on startup errors, request errors, or answer mismatches. On
+failure, the script prints the last 100 lines of each server/proxy log to
+the CI job log; full files remain under `LOG_PATH` while the container exists.
 
 ### Step 1: Baseline
 
@@ -122,7 +184,7 @@ Quick sanity check:
 - Encoder cache should enable exact output reproduction
 - Test cleans up all instances and cache files after completion
 - Safe to run multiple times (idempotent)
-- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/online_serving/disaggregated_encoder/README.md`
+- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/disaggregated/disaggregated_encoder/README.md`
 
 ## Requirements
 

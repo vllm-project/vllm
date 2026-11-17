@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test the piecewise compilation with a simple model, comparing the output
+"""Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
 
 This is a tractable model, the weights and computation are specially designed
@@ -17,7 +16,6 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
@@ -26,6 +24,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import get_compile_factors
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -35,7 +34,7 @@ from ...utils import create_new_process_for_each_test
 from .. import silly_attention  # noqa: F401
 
 
-@dataclass
+@dataclass(slots=True)
 class LlamaConfig:
     hidden_size: int = 128
     mlp_size: int = 256
@@ -45,16 +44,9 @@ class LlamaConfig:
     tractable_init: bool = False
     random_seed: int = 0
 
-    def compute_hash(self) -> str:
-        factors: list[Any] = []
-        for k, v in self.__dict__.items():
-            if k == "random_seed":
-                continue
-            factors.append((k, v))
-        factors.sort()
-        import hashlib
-
-        return hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+    def compile_factors(self) -> dict[str, Any]:
+        ignored = {"random_seed"}
+        return get_compile_factors(self, ignored)
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
@@ -340,6 +332,8 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
 def test_toy_llama(
     backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
 ):
+    from vllm.compilation.counter import compilation_counter
+
     # We disable the vLLM compile cache into a new tmp dir for 1 reason:
     # 1. To make sure we can properly track the number of Inductor compilations.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")

@@ -11,13 +11,13 @@ import pytest
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -27,16 +27,17 @@ BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 MOCK_RESOLVER_NAME = "mock_test_resolver"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     """Minimal mock ModelConfig for testing."""
 
     model: str = MODEL_NAME
+    served_model_name: str = MODEL_NAME
     runner_type = "generate"
     tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False
@@ -54,18 +55,19 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -144,16 +146,15 @@ def mock_serving_setup():
         base_model_paths=BASE_MODEL_PATHS,
     )
 
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
     )
     serving_completion = OpenAIServingCompletion(
-        mock_engine, models, openai_serving_render=serving_render, request_logger=None
+        mock_engine, models, online_renderer=online_renderer, request_logger=None
     )
 
     return mock_engine, serving_completion

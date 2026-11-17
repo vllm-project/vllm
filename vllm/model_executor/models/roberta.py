@@ -41,8 +41,8 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding
-from .interfaces_base import default_pooling_type
+from .interfaces import SupportsCrossEncoding, SupportsLoRA
+from .interfaces_base import attn_type, default_pooling_type
 
 
 class RobertaEmbedding(nn.Module):
@@ -53,13 +53,11 @@ class RobertaEmbedding(nn.Module):
             config.vocab_size, config.hidden_size
         )
         self.padding_idx = config.pad_token_id
-        self.position_embeddings = nn.Embedding(
-            config.max_position_embeddings,
-            config.hidden_size,
-            padding_idx=self.padding_idx,
+        self.position_embeddings = VocabParallelEmbedding(
+            config.max_position_embeddings, config.hidden_size
         )
 
-        self.token_type_embeddings = nn.Embedding(
+        self.token_type_embeddings = VocabParallelEmbedding(
             config.type_vocab_size, config.hidden_size
         )
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -119,6 +117,8 @@ class RobertaClassificationHead(nn.Module):
 class RobertaEmbeddingModel(BertEmbeddingModel):
     """A model that uses Roberta to provide embedding functionalities."""
 
+    embedding_class: type[nn.Module] = RobertaEmbedding
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
@@ -141,27 +141,32 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         self, vllm_config: VllmConfig, prefix: str = ""
     ) -> BertModel | BertWithRope:
         hf_config = vllm_config.model_config.hf_config
-        kwargs = dict(vllm_config=vllm_config, prefix=prefix)
         if getattr(hf_config, "position_embedding_type", "absolute") == "absolute":
-            return BertModel(**kwargs, embedding_class=RobertaEmbedding)
+            return BertModel(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                embedding_class=self.embedding_class,
+            )
         else:
-            return JinaRobertaModel(**kwargs)
+            return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
+        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
         has_roberta_prefix = any(
             name.startswith("roberta.") for name, _ in weights_list
         )
         if has_roberta_prefix:
             # For models with the `roberta.` prefix e.g.
             # `FacebookAI/roberta-base`
-            mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
+            orig_to_new_prefix["roberta."] = "model."
         else:
             # For models without the `roberta.` prefix e.g.
             # `sentence-transformers/stsb-roberta-base-v2`
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+            orig_to_new_prefix[""] = "model."
+        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights_list, mapper=mapper)
 
 
@@ -203,7 +208,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         self.secondary_weights = [
             DefaultModelLoader.Source(
                 model_or_path=vllm_config.model_config.model,
-                revision=None,
+                revision=vllm_config.model_config.revision,
                 prefix=prefix,
                 allow_patterns_overrides=[filename],
             )
@@ -263,7 +268,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsLoRA):
     """A model that uses Roberta to provide embedding functionalities.
 
     This class encapsulates the BertModel and provides an interface for
@@ -272,9 +277,11 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     Attributes:
         roberta: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "emb_ln": "embeddings.LayerNorm",
@@ -288,16 +295,19 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         }
     )
 
+    embedding_class: type[nn.Module] = RobertaEmbedding
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
+        self.config = config
+        self.padding_idx: int = config.pad_token_id
 
         self.num_labels = config.num_labels
         self.roberta = BertModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=RobertaEmbedding,
+            embedding_class=self.embedding_class,
         )
         self.classifier = RobertaClassificationHead(vllm_config.model_config)
 
@@ -334,3 +344,68 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
         )
+
+
+@attn_type("encoder_only")
+@default_pooling_type(tok_pooling_type="ALL")
+class RobertaForTokenClassification(nn.Module):
+    """A model that uses Roberta to provide token classification.
+
+    Mirrors BertForTokenClassification, swapping in RobertaEmbedding for the
+    RoBERTa/XLM-RoBERTa position-embedding offset and weight layout.
+
+    Also registered as XLMRobertaForTokenClassification since XLM-RoBERTa
+    checkpoints share RoBERTa's architecture and `roberta.*` weight prefix.
+    """
+
+    is_pooling_model = True
+    embedding_class: type[nn.Module] = RobertaEmbedding
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.head_dtype = vllm_config.model_config.head_dtype
+        self.num_labels = config.num_labels
+        self.roberta = BertModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "roberta"),
+            embedding_class=self.embedding_class,
+        )
+        self.classifier = nn.Linear(
+            config.hidden_size, config.num_labels, dtype=self.head_dtype
+        )
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = pooler_for_token_classify(pooler_config)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.roberta.embed_input_ids(input_ids)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if token_type_ids is not None:
+            assert self.roberta.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
+            assert input_ids is not None
+            _encode_token_type_ids(input_ids, token_type_ids)
+
+        hidden_states = self.roberta(
+            input_ids=input_ids,
+            positions=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors,
+        )
+
+        hidden_states = hidden_states.to(self.head_dtype)
+        return self.classifier(hidden_states)

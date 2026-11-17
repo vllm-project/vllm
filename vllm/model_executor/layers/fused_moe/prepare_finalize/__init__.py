@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.model_executor.layers.fused_moe.prepare_finalize.alltoall_batched import (
+    AllToAllBatchedPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
     MoEPrepareAndFinalizeNaiveDPEPModular,
     MoEPrepareAndFinalizeNaiveDPEPMonolithic,
@@ -13,6 +19,8 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
 )
 
 __all__ = [
+    "BatchedPrepareAndFinalize",
+    "AllToAllBatchedPrepareAndFinalize",
     "MoEPrepareAndFinalizeNaiveDPEPMonolithic",
     "MoEPrepareAndFinalizeNaiveDPEPModular",
     "make_moe_prepare_and_finalize_naive_dp_ep",

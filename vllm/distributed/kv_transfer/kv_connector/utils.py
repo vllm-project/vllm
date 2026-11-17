@@ -1,27 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-KV cache helper for store.
-"""
+"""KV cache helper for store."""
 
+import time
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-    from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -31,20 +36,44 @@ EngineId = str
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
-def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
+def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
+    """Drop speculative scratch slots and keep only the running-state slot."""
+    if not blocks:
+        return blocks
+    # Keep at least the running-state slot, even before scratch allocation.
+    if num_scratch := min(num_spec_blocks, len(blocks) - 1):
+        blocks = blocks[:-num_scratch]
+    return blocks[-1:]
+
+
+def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout is
     # used for faster transfer.
-    vllm_config = get_current_vllm_config()
+    if vllm_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None:
         connector_cls = KVConnectorFactory.get_connector_class(kv_config)
         required_kvcache_layout = connector_cls.get_required_kvcache_layout(vllm_config)
         if required_kvcache_layout is not None:
             return required_kvcache_layout
-        logger.info_once(
-            "Connectors do not specify a kv cache layout, defaulting to NHD."
-        )
-    return "NHD"
+    return None
+
+
+def kv_connector_may_load_foreign_kv(vllm_config: VllmConfig) -> bool:
+    """Whether the configured KV connector may load bytes that vLLM's own
+    cache writer did not produce for this KV cache layout.
+
+    Attention backends whose fast paths assume no foreign bytes (e.g. NaNs in
+    unwritten slots) reach the KV cache keep them only when this is False.
+    """
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is None:
+        return False
+    connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+    return not connector_cls.only_restores_canonical_kv(kv_config)
 
 
 class KVOutputAggregator:
@@ -56,7 +85,10 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
+        self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
+
+        self._salvaged_outputs: list[KVConnectorOutput] = []
 
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
@@ -90,9 +122,17 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
-        for model_runner_output in outputs:
-            assert model_runner_output is not None
-            kv_output = model_runner_output.kv_connector_output
+
+        salvaged, self._salvaged_outputs = self._salvaged_outputs, []
+
+        kv_outputs: list[KVConnectorOutput | None] = []
+        for o in outputs:
+            assert o is not None
+            kv_outputs.append(o.kv_connector_output)
+
+        # Salvaged outputs from failed workers join this round so their
+        # transfer progress isn't lost.
+        for kv_output in chain(salvaged, kv_outputs):
             if not kv_output:
                 continue
             # Allow the worker to dynamically update the expected number of
@@ -120,15 +160,12 @@ class KVOutputAggregator:
                 # Use the first worker's kv_connector_stats as accumulator.
                 aggregated_kv_connector_stats = kv_output.kv_connector_stats
             elif kv_connector_stats := kv_output.kv_connector_stats:
-                if aggregated_kv_connector_stats is None:
-                    aggregated_kv_connector_stats = kv_connector_stats
-                else:
-                    assert isinstance(
-                        aggregated_kv_connector_stats, type(kv_connector_stats)
-                    )
-                    aggregated_kv_connector_stats = (
-                        aggregated_kv_connector_stats.aggregate(kv_connector_stats)
-                    )
+                assert isinstance(
+                    aggregated_kv_connector_stats, type(kv_connector_stats)
+                )
+                aggregated_kv_connector_stats = aggregated_kv_connector_stats.aggregate(
+                    kv_connector_stats
+                )
 
             # Aggregate kv_connector_worker_meta from all workers.
             if aggregated_kv_connector_worker_meta is None:
@@ -155,6 +192,10 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
+            self._failed_recving_pending |= kv_output.failed_recving
+
+        failed_recving = self._failed_recving_pending & finished_recving
+        self._failed_recving_pending -= failed_recving
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -167,10 +208,25 @@ class KVOutputAggregator:
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
+            failed_recving=failed_recving,
             expected_finished_count=self._expected_finished_count,
         )
 
         return output
+
+    def ft_defer_kv_connector_outputs(
+        self, kv_connector_outputs: list[KVConnectorOutput | None]
+    ) -> None:
+        """Stash KV connector outputs from failed workers for replay at the
+        next aggregate().
+
+        kv_cache_events are dropped: replaying them could break the live
+        workers' event quorum, and a missed event only costs a cache miss.
+        """
+        for o in kv_connector_outputs:
+            if o is not None:
+                o.kv_cache_events = None
+        self._salvaged_outputs.extend(o for o in kv_connector_outputs if o)
 
 
 def _make_src_and_dst_indices(
@@ -179,9 +235,13 @@ def _make_src_and_dst_indices(
     src_device: torch.device | str,
     dst_device: torch.device | str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    src_indices = torch.tensor(src_block_ids, device=src_device, dtype=torch.int64)
-    dst_indices = torch.tensor(dst_block_ids, device=dst_device, dtype=torch.int64)
-    return src_indices, dst_indices
+    def _to(block_ids: list[int], device: torch.device | str) -> torch.Tensor:
+        device = torch.device(device) if isinstance(device, str) else device
+        if device.type == "cpu":
+            return torch.tensor(block_ids, dtype=torch.int64, device=device)
+        return async_tensor_h2d(block_ids, dtype=torch.int64, device=device)
+
+    return _to(src_block_ids, src_device), _to(dst_block_ids, dst_device)
 
 
 def copy_kv_blocks(
@@ -222,11 +282,10 @@ def copy_kv_blocks(
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache blocks to the local block_size.
+    """Transforms the layout of received KV cache blocks to the local block_size.
     (Only works for local blocksize > remote blocksize)
 
-    example:
+    Example:
     local blocksize = 16 tokens, remote blocksize = 4 tokens
     local block[0] = remote block[0, 1, 2, 3]
     remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
@@ -235,10 +294,9 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
     1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
     2. permute => (H, nblocks, remoteN, D)
     3. flatten => (H, localN, D)
+
     """
     blocks_to_update = cache.index_select(0, indices)
-    # use physical order
-    blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
     n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -248,53 +306,28 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
         .permute(0, 2, 1, 3, 4)
         .flatten(2, 3)
     )
-    permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
-    cache.index_copy_(0, indices, permuted_blocks)
-
-
-def kv_postprocess_layout_on_receive(cache, indices):
-    """Transforms the layout of received KV cache blocks to the local format.
-
-    This method corrects layout mismatches from direct memory copies by
-    permuting the tensor dimensions.
-
-    - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
-
-    Implementation:
-    - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
-    - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
-    - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
-
-    """
-    blocks_to_update = cache.index_select(0, indices)
-    target_shape = list(blocks_to_update.shape)
-    target_shape[0] = -1
-    inv_order = [0, 2, 1, 3]
-    src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
-    permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
     cache.index_copy_(0, indices, permuted_blocks)
 
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache to the local block_size and HND.
-    (Only works for local blocksize > remote blocksize)
+    """Transforms the layout of received KV cache to the local block_size and LBHNC.
+    (Only works for local blocksize >= remote blocksize)
 
-    prefill is HND, smaller block_size
-    decode(local) is NHD, larger block_size
+    prefill is LBHNC, smaller block_size
+    decode(local) is LBNHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 
-    block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
+    n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
 
+    # View the received bytes in memory order as the remote head-major blocks.
     permuted_blocks = (
-        blocks_to_update.reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
-        .permute(0, 1, 3, 2, 4)
-        .flatten(1, 2)
+        blocks_to_update.transpose(1, 2)
+        .reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
+        .permute(0, 2, 1, 3, 4)
+        .flatten(2, 3)
     )
     cache.index_copy_(0, indices, permuted_blocks)
 
@@ -302,550 +335,21 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
 def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
-    """
-    Yields:
-        (req_id, new_block_id_groups, preempted)
+    """Yields:
+    (req_id, block_id_groups, is_full_table)
+
+    `is_full_table` is True when `block_id_groups` is the request's whole
+    block table (new and resumed requests, which are both in
+    `scheduled_new_reqs`) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
-        yield req_data.req_id, req_data.block_ids, False
+        yield req_data.req_id, req_data.block_ids, True
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs
-    yield from zip(
-        cached_reqs.req_ids,
-        cached_reqs.new_block_ids,
-        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
-    )
-
-
-@dataclass
-class TpKVTopology:
-    """
-    Helper class for tensor parallel and KV topology information for
-    mapping between local and remote TP workers.
-    """
-
-    tp_rank: int
-    remote_tp_size: dict[EngineId, int]
-    is_mla: bool
-    total_num_kv_heads: int
-    attn_backends: list[type[AttentionBackend]]
-    engine_id: EngineId
-    remote_block_size: dict[EngineId, int]
-    tensor_shape: torch.Size | None = None
-    is_mamba: bool = False
-
-    def __post_init__(self):
-        # Figure out whether the first dimension of the cache is K/V
-        # or num_blocks. This is used to register the memory regions correctly.
-        attn_backend = self.attn_backends[0]
-        if not self.is_mamba:
-            _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
-            )
-            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
-        # we just mock num_blocks to 1 for the dimension check below.
-        # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        )
-
-        self._cross_layers_blocks = False
-        if self.tensor_shape is not None:
-            self._cross_layers_blocks = (
-                len(self.tensor_shape) == len(kv_cache_shape) + 1
-            )
-            self.tensor_shape: torch.Size
-
-        if self._cross_layers_blocks:
-            logger.debug("Using cross-layer KV cache")
-            # prepend layers dimension
-            _MOCK_NUM_LAYERS = 80
-            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
-                )
-            except (AttributeError, NotImplementedError):
-                assert self.tensor_shape is not None
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
-
-            # In case of cross layers permute kv_cache_shape according to
-            # stride_order to retrieve physical position of block_size
-            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-
-    @property
-    def is_kv_layout_blocks_first(self) -> bool:
-        return self._is_kv_layout_blocks_first
-
-    @property
-    def split_k_and_v(self) -> bool:
-        # Whether to register regions for K and V separately (when present).
-        return not (
-            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
-        )
-
-    @property
-    def tp_size(self) -> int:
-        return self.remote_tp_size[self.engine_id]
-
-    @property
-    def block_size(self) -> int:
-        return self.remote_block_size[self.engine_id]
-
-    @property
-    def cross_layers_blocks(self) -> bool:
-        return self._cross_layers_blocks
-
-    def tp_ratio(
-        self,
-        remote_tp_size: int,
-    ) -> int:
-        """
-        Calculate the tensor parallel ratio between local and remote TP.
-        We can think of it as the number of local TP workers-per-remote TP
-        workers. Local workers will read from the same remote TP worker in
-        groups of size `tp_ratio`.If remote tp_size > local tp_size, the
-        ratio is flipped (remote_size/local_size) and the returned value is
-        negative.
-        """
-        if self.tp_size >= remote_tp_size:
-            assert self.tp_size % remote_tp_size == 0, (
-                f"Local tensor parallel size {self.tp_size} is not divisible "
-                f"by remote tensor parallel size {remote_tp_size}."
-            )
-            return self.tp_size // remote_tp_size
-
-        assert remote_tp_size % self.tp_size == 0, (
-            f"Remote tensor parallel size {remote_tp_size} is not divisible "
-            f"by local tensor parallel size {self.tp_size}."
-        )
-        # P TP > D TP case, return the ratio as negative
-        return -remote_tp_size // self.tp_size
-
-    def block_size_ratio(
-        self,
-        remote_block_size: int,
-    ) -> int:
-        """
-        Calculate the block size ratio between local and remote TP.
-        """
-        assert self.block_size % remote_block_size == 0, (
-            f"Local block size {self.block_size} is not divisible "
-            f"by remote block size {remote_block_size} or vice versa."
-        )
-        return self.block_size // remote_block_size
-
-    def tp_ratio_from_engine_id(
-        self,
-        remote_engine_id: EngineId,
-    ) -> int:
-        remote_tp_size = self.remote_tp_size[remote_engine_id]
-        return self.tp_ratio(remote_tp_size)
-
-    def block_size_ratio_from_engine_id(
-        self,
-        remote_engine_id: EngineId,
-    ) -> int:
-        remote_block_size = self.remote_block_size[remote_engine_id]
-        return self.block_size_ratio(remote_block_size)
-
-    def is_kv_replicated(self, engine_id: EngineId) -> bool:
-        """
-        Whether the KV cache is replicated across TP workers due to the
-        number of TP workers being greater than the number of KV heads.
-        When they are equal, each TP rank still owns one distinct KV head,
-        so this is not considered replication.
-        """
-        tp_size = self.remote_tp_size[engine_id]
-        return tp_size > self.total_num_kv_heads
-
-    def replicates_kv_cache(self, remote_engine_id: EngineId) -> bool:
-        # MLA is always replicated as the hidden dim can't be split.
-        return self.is_mla or self.is_kv_replicated(remote_engine_id)
-
-    def get_target_remote_ranks(
-        self,
-        remote_tp_size: int,
-    ) -> list[int]:
-        """
-        Get the remote TP rank (on P) that the current local TP rank
-        (on D) will read from. When remote tp_size > local tp_size, we
-        read from multiple remote ranks.
-        """
-        tp_ratio = self.tp_ratio(remote_tp_size)
-        if tp_ratio > 0:
-            return [self.tp_rank // tp_ratio]
-
-        # P TP > D TP case, D reads from |tp_ratio| remote workers.
-        tp_ratio = -tp_ratio
-        return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
-
-    def get_target_remote_ranks_from_engine_id(
-        self,
-        remote_engine_id: EngineId,
-    ) -> list[int]:
-        remote_tp_size = self.remote_tp_size[remote_engine_id]
-        return self.get_target_remote_ranks(remote_tp_size)
-
-    def get_transfer_cache_regions(
-        self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
-    ) -> list[torch.Tensor] | torch.Tensor:
-        """Return the cache tensor(s) to register as NIXL memory regions,
-        also accounting for hybrid SSM models specificities.
-        """
-        if isinstance(layer_spec, MambaSpec):
-            # Register the whole kv cache shared tensor, including SSM/Conv. This is
-            # similar to FI with the difference that SSM/Conv have different sizes
-            conv, ssm = cache
-            return [conv]
-
-        # Check may be hacky but it's matching `_update_hybrid_attention_mamba_layout`.
-        if self.is_mamba and cache.shape[0] == 2:
-            # When MAMBA is present, all backends are blocks first, so that blocks
-            # can be shared between attention layers and mamba layers. Runner
-            # `_update_hybrid_attention_mamba_layout` already adjusted strides
-            # for FlashAttn-like backends so its num_blocks first.
-            # Swap [2<>num_blocks] dims to get required layout for hybrid SSM.
-            cache = cache.transpose(0, 1)
-
-        # Regular case: backends like FA register K/V in separate regions
-        return cache if self.split_k_and_v else [cache]
-
-
-# ---- Mamba-HMA hetero-TP transfer config ----
-#
-# Key insight: with hetero-TP (P_TP > D_TP), FA KV cache may be
-# replicated across P ranks (when P_TP > num_kv_heads), but Mamba
-# conv/SSM state is almost always uniquely sharded per P rank.  So the
-# number of P ranks D must read from can differ between FA and Mamba,
-# and they must be handled separately.
-
-
-def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
-    """Physical KV head range stored in a rank's KV cache tensor.
-
-    When ``tp_size <= num_heads``: sharded, K/TP contiguous heads per rank.
-    When ``tp_size > num_heads``: 1 physical head per rank.  Heads are
-    distributed **contiguously** (matching vLLM's GQA weight partitioning):
-    consecutive ranks share a head before moving to the next one.
-    """
-    if tp_size <= num_heads:
-        assert num_heads % tp_size == 0
-        per_rank = num_heads // tp_size
-        return range(rank * per_rank, (rank + 1) * per_rank)
-    else:
-        h = rank * num_heads // tp_size
-        return range(h, h + 1)
-
-
-def _range_overlap(a: range, b: range) -> range:
-    start = max(a.start, b.start)
-    stop = min(a.stop, b.stop)
-    return range(start, max(start, stop))
-
-
-@dataclass
-class HeteroTPTransferConfig:
-    """Precomputed transfer plan for one (D rank, P engine) pair.
-
-    Currently only instantiated for Mamba-HMA (hybrid SSM+Attention) models
-    where FA and mamba require different splitting factors.  Could be extended
-    to other model types that need non-uniform hetero-TP transfer sizing.
-
-    All descriptor sizes are computed here.  The guarantee is:
-        local_entry_size == remote_entry_size   (for NIXL)
-
-    Attributes that start with ``fa_`` concern FlashAttention KV cache.
-    Attributes that start with ``mamba_`` concern Mamba conv/SSM state.
-    """
-
-    # ---- Input parameters (from handshake) ----
-    tp_ratio: int
-    K: int  # total_num_kv_heads (before TP sharding)
-    d_tp: int  # D engine's tensor_parallel_size
-    p_tp: int  # P engine's tensor_parallel_size
-    d_rank: int  # this D worker's TP rank
-    use_mla: bool
-
-    # Per-layer block lengths (bytes, K+V combined for blocks_first).
-    # Uniform across layers for current models.
-    d_block_len: int  # D's block_len_per_layer (representative)
-    p_block_len: int  # P's block_len_per_layer (from handshake)
-    is_blocks_first: bool  # kv_topo.is_kv_layout_blocks_first
-
-    # ---- Derived: computed in __post_init__ ----
-    #
-    # Physical heads per rank (what the KV tensor actually stores)
-    d_physical_heads: int = field(init=False)
-    p_physical_heads: int = field(init=False)
-
-    # How many distinct P ranks D needs for FA data
-    physical_fa_num_reads: int = field(init=False)
-
-    # Which P ranks contribute unique FA heads (ordered by head index)
-    fa_read_targets: list[int] = field(init=False)
-
-    # All P ranks needed for mamba (always abs_tp for tp_ratio < 0)
-    mamba_num_reads: int = field(init=False)
-
-    # All P ranks this D rank communicates with (FA ∪ mamba)
-    transfer_targets: list[int] = field(init=False)
-
-    # FA descriptor entry size (K or V side, for blocks_first layout)
-    # Guaranteed: fa_entry_size is the SAME for local handle AND remote desc.
-    fa_entry_size: int = field(init=False)
-
-    # Replication flags
-    is_d_replicated: bool = field(init=False)
-    is_p_replicated: bool = field(init=False)
-
-    # Pre-built set for fast lookup
-    _fa_target_set: frozenset[int] = field(init=False, repr=False)
-    # Map: P rank → index in fa_read_targets (for head slot offset)
-    _fa_target_index: dict[int, int] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        K = self.K
-        self.is_d_replicated = self.d_tp > K
-        self.is_p_replicated = self.p_tp > K
-
-        self.d_physical_heads = max(1, K // self.d_tp)
-        self.p_physical_heads = max(1, K // self.p_tp)
-
-        abs_tp = -self.tp_ratio if self.tp_ratio < 0 else 1
-
-        # ---- Mamba range (computed first so FA can prefer ranks in it) ----
-        mamba_range: range | None = None
-        if self.tp_ratio < 0:
-            mamba_range = range(self.d_rank * abs_tp, (self.d_rank + 1) * abs_tp)
-
-        # ---- FA read targets ----
-        if self.use_mla or self.tp_ratio >= 0:
-            self.physical_fa_num_reads = 1
-            self.fa_read_targets = (
-                [0]
-                if self.use_mla
-                # Must match kv_topo.get_target_remote_ranks (d_rank // tp_ratio).
-                else [
-                    self.d_rank // self.tp_ratio if self.tp_ratio > 0 else self.d_rank
-                ]
-            )
-        else:
-            d_needs = _physical_head_range(self.d_tp, K, self.d_rank)
-            # When mamba range exists, prefer P ranks within it so that
-            # FA targets are a subset of mamba transfer_targets (avoids
-            # orphaned FA targets outside the transfer loop).
-            search_range = mamba_range if mamba_range is not None else range(self.p_tp)
-            seen: set[tuple[int, int]] = set()
-            targets: list[int] = []
-            for p in search_range:
-                p_has = _physical_head_range(self.p_tp, K, p)
-                ov = _range_overlap(d_needs, p_has)
-                if len(ov) > 0:
-                    key = (ov.start, ov.stop)
-                    if key not in seen:
-                        seen.add(key)
-                        targets.append(p)
-            if not targets:
-                # Fallback: search globally (should not happen in practice)
-                for p in range(self.p_tp):
-                    p_has = _physical_head_range(self.p_tp, K, p)
-                    ov = _range_overlap(d_needs, p_has)
-                    if len(ov) > 0:
-                        key = (ov.start, ov.stop)
-                        if key not in seen:
-                            seen.add(key)
-                            targets.append(p)
-            self.fa_read_targets = targets
-            self.physical_fa_num_reads = len(targets)
-
-        self._fa_target_set = frozenset(self.fa_read_targets)
-        self._fa_target_index = {r: i for i, r in enumerate(self.fa_read_targets)}
-
-        # ---- Mamba targets ----
-        if mamba_range is not None and abs_tp > self.physical_fa_num_reads:
-            self.mamba_num_reads = abs_tp
-            self.transfer_targets = list(mamba_range)
-        else:
-            self.mamba_num_reads = self.physical_fa_num_reads
-            self.transfer_targets = list(self.fa_read_targets)
-
-        # ---- FA entry size ----
-        # For blocks_first: block_len_per_layer includes K+V; // 2 gives K (or V).
-        # Use min(D, P) because D indexes into P when tp_ratio > 0,
-        # and P is the natural unit when tp_ratio < 0.
-        effective_block_len = min(self.d_block_len, self.p_block_len)
-        if self.is_blocks_first:
-            self.fa_entry_size = effective_block_len // 2
-        else:
-            self.fa_entry_size = effective_block_len
-
-        self._validate()
-
-    def _validate(self) -> None:
-        """Cross-check internal consistency."""
-        if self.is_d_replicated and self.is_p_replicated and self.tp_ratio > 0:
-            logger.info(
-                "Both-replicated hetero-TP: D_TP=%d > P_TP=%d > K=%d. "
-                "Using d_rank // tp_ratio routing with relative head offset.",
-                self.d_tp,
-                self.p_tp,
-                self.K,
-            )
-
-        # FA targets must be a subset of transfer_targets
-        tt_set = set(self.transfer_targets)
-        for t in self.fa_read_targets:
-            if t not in tt_set:
-                logger.error(
-                    "FA target P rank %d is NOT in transfer_targets %s. "
-                    "This will cause missed FA reads!",
-                    t,
-                    self.transfer_targets,
-                )
-
-        # For tp_ratio < 0 with blocks_first: D_K_half / reads should == P_K_half
-        if (
-            self.is_blocks_first
-            and self.tp_ratio < 0
-            and self.physical_fa_num_reads > 0
-        ):
-            d_k_half = self.d_block_len // 2
-            p_k_half = self.p_block_len // 2
-            expected_local = d_k_half // self.physical_fa_num_reads
-            if expected_local != p_k_half:
-                logger.warning(
-                    "FA size mismatch: D_K_half=%d / reads=%d = %d, "
-                    "but P_K_half=%d.  This may indicate a head count or "
-                    "Mamba-HMA inflation inconsistency.",
-                    d_k_half,
-                    self.physical_fa_num_reads,
-                    expected_local,
-                    p_k_half,
-                )
-
-    # ---- Query methods ----
-
-    def should_skip_fa(self, p_rank: int) -> bool:
-        """Whether to skip FA groups for this P rank (mamba-only transfer)."""
-        return p_rank not in self._fa_target_set
-
-    def fa_head_slot(self, p_rank: int) -> int:
-        """Index into D's FA block for this P rank's head data.
-
-        For P ranks in fa_read_targets, returns 0, 1, ..., reads-1.
-        For P ranks NOT in fa_read_targets (replicated duplicates),
-        returns the slot of the matching FA target with the same head.
-        """
-        if p_rank in self._fa_target_index:
-            return self._fa_target_index[p_rank]
-        # Duplicate head: find which fa_target has the same physical head
-        p_head = _physical_head_range(self.p_tp, self.K, p_rank)
-        for target in self.fa_read_targets:
-            t_head = _physical_head_range(self.p_tp, self.K, target)
-            if _range_overlap(p_head, t_head):
-                return self._fa_target_index[target]
-        return 0  # fallback
-
-    def fa_rank_offset(self, remote_kv_block_len: int) -> int:
-        """Byte offset into P's FA block for this D rank.
-
-        When D is replicated (D_TP > K), multiple D ranks share a head.
-        Computes offset *relative to the target P rank's first head*
-        so it works regardless of how many heads P has.
-        When neither side replicates, falls back to tp_rank % tp_ratio.
-        Returns 0 when D does not index into P's block.
-        """
-        if self.use_mla or self.tp_ratio <= 0:
-            return 0
-        if self.is_d_replicated:
-            d_head = self.d_rank * self.K // self.d_tp
-            p_rank = self.fa_read_targets[0]
-            p_start = p_rank * self.K // self.p_tp
-            return (d_head - p_start) * remote_kv_block_len
-        return self.d_rank % self.tp_ratio * remote_kv_block_len
-
-    @property
-    def needs_split_handles(self) -> bool:
-        """Whether per-P-rank split handles are needed.
-
-        True when FA and mamba have different read counts, requiring
-        different splitting factors in the local handle.
-        """
-        return self.tp_ratio < 0 and not self.use_mla and len(self.transfer_targets) > 1
-
-    def compute_split_handle_data(
-        self,
-        src_blocks_data: list[tuple[int, int, int]],
-        num_fa_descs: int,
-        abs_tp: int,
-    ) -> list[list[tuple[int, int, int]]]:
-        """Compute per-P-rank (addr, len, tp) triples for Mamba-HMA split handles.
-
-        FA descriptors (indices < num_fa_descs) are sliced by
-        ``physical_fa_num_reads``; mamba descriptors are sliced uniformly
-        by ``abs_tp``.
-
-        Returns one list of triples per transfer target.
-        """
-        all_handle_data: list[list[tuple[int, int, int]]] = []
-        for p_idx, p_rank in enumerate(self.transfer_targets):
-            handle_data: list[tuple[int, int, int]] = []
-            skip_fa = self.should_skip_fa(p_rank)
-            fa_slot = self.fa_head_slot(p_rank) if not skip_fa else 0
-
-            for j, (addr, local_len, tp) in enumerate(src_blocks_data):
-                if j < num_fa_descs:
-                    assert self.physical_fa_num_reads >= 1
-                    fa_chunk = local_len // self.physical_fa_num_reads
-                    handle_data.append((addr + fa_slot * fa_chunk, fa_chunk, tp))
-                else:
-                    mamba_chunk = local_len // abs_tp
-                    handle_data.append((addr + p_idx * mamba_chunk, mamba_chunk, tp))
-            all_handle_data.append(handle_data)
-        return all_handle_data
-
-    def filter_block_ids_for_rank(
-        self,
-        remote_rank: int,
-        local_ids: BlockIds,
-        remote_ids: BlockIds,
-        is_mamba_group: list[bool],
-    ) -> tuple[BlockIds, BlockIds]:
-        """Zero out FA groups for P ranks outside fa_read_targets.
-
-        Returns (filtered_local_ids, filtered_remote_ids).  When the
-        remote rank carries FA data for this D rank, returns the inputs
-        unchanged.
-        """
-        if not self.should_skip_fa(remote_rank):
-            return local_ids, remote_ids
-        num_groups = len(local_ids)
-        filtered_local: list[list[int]] = [
-            [] if not is_mamba_group[g] else local_ids[g] for g in range(num_groups)
-        ]
-        filtered_remote: list[list[int]] = [
-            [] if not is_mamba_group[g] else remote_ids[g] for g in range(num_groups)
-        ]
-        return filtered_local, filtered_remote
-
-    def describe(self) -> str:
-        """One-line summary for logging."""
-        return (
-            f"HeteroTPTransferConfig("
-            f"tp_ratio={self.tp_ratio}, K={self.K}, "
-            f"d_tp={self.d_tp}, p_tp={self.p_tp}, d_rank={self.d_rank}, "
-            f"physical_fa_reads={self.physical_fa_num_reads}, "
-            f"mamba_reads={self.mamba_num_reads}, "
-            f"fa_targets={self.fa_read_targets}, "
-            f"transfer_targets={self.transfer_targets}, "
-            f"fa_entry_size={self.fa_entry_size}, "
-            f"d_block_len={self.d_block_len}, p_block_len={self.p_block_len})"
-        )
+    for req_id, block_id_groups in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
+        yield req_id, block_id_groups, False
 
 
 def get_current_attn_backends(
@@ -860,6 +364,7 @@ def get_current_attn_backends(
 
     Returns:
         Deduplicated list of attention backend classes.
+
     """
     layer_type = cast(type[Any], AttentionLayerBase)
     layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
@@ -876,14 +381,80 @@ def get_current_attn_backends(
     )
     from vllm.v1.attention.selector import get_attn_backend
 
-    return [
-        get_attn_backend(
-            head_size=vllm_config.model_config.get_head_size(),
-            dtype=vllm_config.model_config.dtype,
-            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-            use_mla=vllm_config.model_config.use_mla,
-        )
-    ]
+    with set_current_vllm_config(vllm_config):
+        return [
+            get_attn_backend(
+                head_size=vllm_config.model_config.get_head_size(),
+                dtype=vllm_config.model_config.dtype,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                use_mla=vllm_config.model_config.use_mla,
+            )
+        ]
+
+
+def get_current_attn_backends_and_specs(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    fallback: list[type[AttentionBackend]],
+) -> tuple[
+    list[type[AttentionBackend]], list[AttentionSpec | None], list[list[str]] | None
+]:
+    """Distinct (backend, spec, query heads) groups of the transfer layers, with
+    their layer names, else `fallback` with no layer names.
+
+    The layer names let kernel block selection match the model runner's, which
+    picks per attention group. Attention caches in a block-outermost layout are
+    skipped: blocks there are never split group-wide
+    (`prepare_kernel_block_sizes`), and a cache that needs smaller kernel blocks
+    views them inside each block, so its kernel pages never split transferred
+    blocks. Compressed caches are skipped too (`check_compressed_kernel_split`
+    guards them).
+    """
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    groups: dict[
+        tuple[type[AttentionBackend], AttentionSpec | None, int], list[str]
+    ] = {}
+    has_layers = False
+    layer_type = cast(type[Any], AttentionLayerBase)
+    for group in kv_cache_config.transfer_groups:
+        layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
+        for name, layer in layers.items():
+            has_layers = True
+            group_spec = group.kv_cache_specs[name]
+            spec: AttentionSpec | None = None
+            if isinstance(group_spec, AttentionSpec):
+                if group_spec.tokens_per_state != 1 or layout.is_block_outermost:
+                    continue
+                spec = group_spec
+            key = (layer.get_attn_backend(), spec, getattr(layer, "num_heads", 0))
+            groups.setdefault(key, []).append(name)
+    if not has_layers:
+        return fallback, [None] * len(fallback), None
+    return (
+        [backend for backend, _, _ in groups],
+        [spec for _, spec, _ in groups],
+        list(groups.values()),
+    )
+
+
+def check_compressed_kernel_split(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, kernel_block_size: int
+) -> None:
+    """A layer-outer layout cannot split compressed pages into kernel blocks."""
+    if vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
+        return
+    for group in kv_cache_config.transfer_groups:
+        for spec in group.kv_cache_specs.values():
+            if (
+                isinstance(spec, AttentionSpec)
+                and spec.tokens_per_state > 1
+                and spec.block_size % kernel_block_size == 0
+                and spec.block_size != kernel_block_size
+            ):
+                raise NotImplementedError(
+                    "Compressed KV caches cannot be split into kernel blocks "
+                    "with a layer-outermost KV cache layout."
+                )
 
 
 def get_current_attn_backend(
@@ -893,48 +464,301 @@ def get_current_attn_backend(
     return get_current_attn_backends(vllm_config, layer_names)[0]
 
 
-# TODO (ZhanqiuHu): Consolidate TpKVTopology and HeteroTPTransferConfig
-# into a single engine-agnostic TransferTopology class.
-# 6 of 9 HeteroTPTransferConfig init fields duplicate TpKVTopology data.
-#
-# @dataclass
-# class EngineTransferInfo:
-#     """Per-remote-engine transfer state, computed at handshake."""
-#     p_tp: int
-#     tp_ratio: int
-#     p_block_len: int
-#     block_size: int
-#     # Mamba-specific (None for non-mamba models)
-#     fa_read_targets: list[int] | None = None
-#     transfer_targets: list[int] | None = None
-#     physical_fa_num_reads: int | None = None
-#     mamba_num_reads: int | None = None
-#     fa_entry_size: int | None = None
-#
-# class TransferTopology:
-#     """Single source of truth for TP topology + transfer sizing."""
-#     # Shared (set once at init, replaces duplicate fields)
-#     tp_rank: int          # == TpKVTopology.tp_rank == HeteroTP.d_rank
-#     tp_size: int          # == TpKVTopology.tp_size == HeteroTP.d_tp
-#     total_num_kv_heads: int  # == HeteroTP.K
-#     is_mla: bool          # == HeteroTP.use_mla
-#     is_mamba: bool
-#     is_blocks_first: bool # == HeteroTP.is_blocks_first
-#     d_block_len: int
-#
-#     # Per-engine (populated via register_engine() at handshake)
-#     _engines: dict[EngineId, EngineTransferInfo]
-#
-#     def register_engine(self, engine_id, p_tp, p_block_len, ...): ...
-#
-#     # General (from TpKVTopology)
-#     def tp_ratio(self, engine_id) -> int: ...
-#     def target_remote_ranks(self, engine_id) -> list[int]: ...
-#     def is_kv_replicated(self, engine_id) -> bool: ...
-#
-#     # Mamba-specific (from HeteroTPTransferConfig, gated by is_mamba)
-#     def fa_rank_offset(self, engine_id, block_len) -> int: ...
-#     def physical_fa_num_reads(self, engine_id) -> int: ...
-#     def transfer_targets(self, engine_id) -> list[int]: ...
-#     def should_skip_fa(self, engine_id, p_rank) -> bool: ...
-#     def filter_block_ids_for_rank(self, engine_id, ...) -> ...: ...
+# ---- Per-engine transfer info ----
+
+
+@dataclass(frozen=True, slots=True)
+class EngineTransferInfo:
+    """Common per-remote-engine transfer state, computed at handshake.
+
+    Stored per `(engine_id, pp_rank)` inside `TransferTopology._engines`.
+    """
+
+    remote_tp_size: int
+
+    remote_block_len: int
+    """Block length (bytes)"""
+
+    remote_block_size: int
+    """Tokens per block."""
+
+    remote_physical_blocks_per_logical: int
+    """Physical blocks per logical block."""
+
+    remote_pp_rank: int = 0
+    """Remote producer PP rank for this engine."""
+
+    start_layer: int = 0
+    """Global index of the first layer owned by this PP rank."""
+
+    end_layer: int = 0
+    """Exclusive global index after the last layer owned by this PP rank."""
+
+    remote_dcp_size: int = 1
+    """Remote decode context parallel size."""
+
+
+# ---- Transfer topology ----
+
+
+@dataclass
+class TransferTopology:
+    """Single source of truth for local TP identity and per-engine remote info."""
+
+    tp_rank: int
+    tp_size: int
+    block_size: int
+    engine_id: EngineId
+    is_mla: bool
+    is_mamba: bool
+    total_num_kv_heads: int
+    attn_backends: list[type[AttentionBackend]]
+    dcp_size: int = 1
+    tensor_shape: torch.Size | None = None
+
+    def __post_init__(self):
+        self.local_physical_heads = max(1, self.total_num_kv_heads // self.tp_size)
+
+        self._engines: dict[tuple[EngineId, int], EngineTransferInfo] = {}
+
+    # ============================================================
+    # Engine registration
+    # ============================================================
+
+    def register_remote_engine(
+        self,
+        remote_engine_id: EngineId,
+        info: EngineTransferInfo,
+    ) -> EngineTransferInfo:
+        """Register a remote engine, unifying worker dicts state.
+
+        The caller (worker) is responsible for computing the info via
+        the transfer policy.  This method only stores and deduplicates.
+        """
+        assert remote_engine_id != self.engine_id, (
+            f"Cannot register local engine {self.engine_id} as remote. "
+            f"Local identity is set via __init__ params."
+        )
+        engine_key = (remote_engine_id, info.remote_pp_rank)
+        if engine_key in self._engines:
+            return self._engines[engine_key]
+        self._engines[engine_key] = info
+        return info
+
+    def get_engine_info(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> EngineTransferInfo:
+        return self._engines[(remote_engine_id, remote_pp_rank)]
+
+    def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
+        # Remove all pp_rank entries for the remote engine.
+        for key in [k for k in self._engines if k[0] == remote_engine_id]:
+            del self._engines[key]
+
+    @property
+    def dcp_rank(self) -> int:
+        """This rank's DCP coverage rank.
+
+        with `dcp_size in (1, tp_size)` enforced at the connector boundary, a
+        rank's DCP identity is always exactly `tp_rank % dcp_size`.
+        """
+        return self.tp_rank % self.dcp_size
+
+    # ============================================================
+    # Common methods
+    # ============================================================
+
+    def tp_ratio(self, remote_tp_size: int) -> int:
+        """Calculate the tensor parallel ratio between local and remote TP.
+
+        Positive when local_tp >= remote_tp (local workers read from the
+        same remote worker in groups of size `tp_ratio`).  Negative when
+        remote_tp > local_tp (ratio is flipped).
+        """
+        if self.tp_size >= remote_tp_size:
+            assert self.tp_size % remote_tp_size == 0, (
+                f"Local tensor parallel size {self.tp_size} is not divisible "
+                f"by remote tensor parallel size {remote_tp_size}."
+            )
+            return self.tp_size // remote_tp_size
+        assert remote_tp_size % self.tp_size == 0, (
+            f"Remote tensor parallel size {remote_tp_size} is not divisible "
+            f"by local tensor parallel size {self.tp_size}."
+        )
+        return -(remote_tp_size // self.tp_size)
+
+    def block_size_ratio(self, remote_block_size: int) -> int:
+        """Calculate the block size ratio between local and remote."""
+        assert self.block_size % remote_block_size == 0, (
+            f"Local block size {self.block_size} is not divisible "
+            f"by remote block size {remote_block_size} or vice versa."
+        )
+        return self.block_size // remote_block_size
+
+    def is_kv_replicated(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> bool:
+        """Whether the KV cache is replicated across TP workers due to the
+        number of TP workers being greater than the number of KV heads.
+        """
+        return (
+            self._engines[(remote_engine_id, remote_pp_rank)].remote_tp_size
+            > self.total_num_kv_heads
+        )
+
+    def replicates_kv_cache(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> bool:
+        # MLA is always replicated as the hidden dim can't be split.
+        return self.is_mla or self.is_kv_replicated(remote_engine_id, remote_pp_rank)
+
+    @property
+    def local_replicates_kv_cache(self) -> bool:
+        """Whether the local engine's KV cache is replicated."""
+        return self.is_mla or self.tp_size > self.total_num_kv_heads
+
+    def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
+        """Remote ranks whose DCP slice overlaps mine (MLA, `remote_dcp_size > 1`).
+
+        Shared by `handshake_target_ranks` (who to query metadata from) and
+        `compute_tp_mapping` (who to actually read from) — for MLA the two
+        questions have the identical answer, since DCP sharding is the only
+        thing keeping a remote rank from being interchangeable with any other.
+        """
+        local_dcp_size = self.dcp_size
+        local_dcp_rank = self.dcp_rank
+        if local_dcp_size <= remote_dcp_size:
+            # Keep every remote rank whose slice sits inside mine. When
+            # local_dcp_size == 1 (replicated locally), local_dcp_rank == 0 reduces to
+            # every remote rank, since no single one holds the whole sequence.
+            return [
+                r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
+            ]
+        # Local finer-grained: exactly one remote rank covers my whole slice
+        return [local_dcp_rank % remote_dcp_size]
+
+    def handshake_target_ranks(
+        self, remote_tp_size: int, remote_dcp_size: int = 1
+    ) -> list[int]:
+        """Pre-registration: compute which remote TP ranks to handshake with.
+
+        Pure math based on local/remote TP (and DCP, when the remote shards
+        its KV cache) sizes — does not require the remote engine to be
+        registered yet.
+
+        DCP support is scoped to `dcp_size in (1, tp_size)` on each side
+        and DCP sizes that divide one another: neither side ever has a
+        partially-duplicated, partially-sharded KV cache. When the
+        remote is not sharded (`remote_dcp_size == 1`) this reduces
+        exactly to the DTP>=PTP case, since a sharded local side
+        already has `tp_size == dcp_size`.
+        """
+        if remote_dcp_size > 1:
+            return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
+
+        tp_ratio = self.tp_ratio(remote_tp_size)
+        if tp_ratio > 0:
+            return [self.tp_rank // tp_ratio]
+        abs_ratio = -tp_ratio
+        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+
+    def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
+        """How many local ranks (in aggregate) read from a given remote rank.
+
+        Used by the producer side to know how many reader notifications to
+        wait for before freeing a request's blocks. Reuses `tp_ratio`
+        whenever the remote isn't sharded — a sharded local side already
+        has `tp_size == dcp_size`, so the existing TP-ratio formula is
+        already correct there unmodified.
+        """
+        if remote_dcp_size > 1:
+            if self.dcp_size == 1:
+                # Replicated locally: every local rank reads every shard.
+                return self.tp_size
+            # Both sharded, different degrees.
+            return max(1, self.dcp_size // remote_dcp_size)
+        # Remote replicated: `tp_ratio` local ranks share each remote rank
+        # when local_tp >= remote_tp, else each remote rank has one reader.
+        return max(1, self.tp_ratio(remote_tp_size))
+
+    def target_remote_ranks(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> list[int]:
+        """Get the remote TP rank(s) that the current local TP rank will
+        read from.  When remote tp_size > local tp_size, reads from
+        multiple remote ranks.
+        """
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
+        tp_ratio = self.tp_ratio(info.remote_tp_size)
+        if tp_ratio > 0:
+            return [self.tp_rank // tp_ratio]
+        # remote TP > local TP: read from |tp_ratio| remote workers
+        abs_ratio = -tp_ratio
+        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+
+    def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
+        """One-line summary of transfer config for logging."""
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
+        return (
+            f"TransferTopology("
+            f"tp_ratio={self.tp_ratio(info.remote_tp_size)}, "
+            f"num_kv_heads={self.total_num_kv_heads if not self.is_mla else 1}, "
+            f"local_tp={self.tp_size}, "
+            f"remote_tp={info.remote_tp_size}, "
+            f"remote_pp={remote_pp_rank}, "
+            f"local_dcp={self.dcp_size}, "
+            f"remote_dcp={info.remote_dcp_size}, "
+            f"local_rank={self.tp_rank}, "
+            f"remote_block_len={info.remote_block_len})"
+        )
+
+
+class CircuitBreaker:
+    """Opens for `cooldown_s` after `failure_threshold` consecutive
+    failures; callers skip requests while it is open. After the cooldown,
+    `allow()` admits a single probe and holds others for `probe_window_s`:
+    a failed probe reopens the breaker, a success closes it, and a probe that
+    never reports back lets the next request probe once the window passes."""
+
+    def __init__(
+        self,
+        name: str,
+        cooldown_s: float,
+        failure_threshold: int,
+        probe_window_s: float,
+    ):
+        assert cooldown_s > 0 and failure_threshold > 0 and probe_window_s > 0
+        self.name = name
+        self.cooldown_s = cooldown_s
+        self.failure_threshold = failure_threshold
+        self.probe_window_s = probe_window_s
+        self._failures = 0
+        self._open_until = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        if now < self._open_until:
+            return False
+        if self._failures >= self.failure_threshold:
+            self._open_until = now + self.probe_window_s
+        return True
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.failure_threshold:
+            self._open_until = time.monotonic() + self.cooldown_s
+            logger.warning(
+                "%s circuit breaker opened after %d consecutive failures; "
+                "skipping requests for %s seconds",
+                self.name,
+                self._failures,
+                self.cooldown_s,
+            )
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._open_until = 0.0

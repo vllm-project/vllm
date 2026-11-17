@@ -10,7 +10,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 
-MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
+MODEL_NAME = "vllm-project/Qwen2.5-1.5B-apeach"
 DTYPE = "float32"  # Use float32 to avoid NaN issue
 input_text = "This product was excellent and exceeded my expectations"
 input_tokens = [1986, 1985, 572, 9073, 323, 33808, 847, 16665]
@@ -166,7 +166,7 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_add_special_tokens(server: RemoteOpenAIServer, model_name: str):
     # The add_special_tokens parameter doesn't seem to be working with this model.
-    # working with papluca/xlm-roberta-base-language-detection
+    # working with vllm-project/xlm-roberta-base-language-detection
     response = requests.post(
         server.url_for("classify"),
         json={"model": model_name, "input": input_text, "add_special_tokens": False},
@@ -436,26 +436,7 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
-    task = "token_classify"
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_text,
-            "encoding_format": "float",
-            "task": task,
-        },
-    )
-    poolings = PoolingResponse.model_validate(response.json())
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 8
-    assert len(poolings.data[0].data[0]) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "token_classify", "plugin"])
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):
@@ -469,8 +450,11 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
+
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "token_classify":
+        err_msg = "Try switching the model's pooling_task via"
     else:
         err_msg = f"Unsupported task: {task!r}"
     assert response.json()["error"]["message"].startswith(err_msg)

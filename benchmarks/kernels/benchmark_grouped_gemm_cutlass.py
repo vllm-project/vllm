@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
     fused_topk,
@@ -54,9 +54,7 @@ def bench_run(
     label = "Quant Matmul"
 
     sub_label = (
-        "{}, num_experts={}, topk={}, per_act_token={} per_out_ch={}, MKN=({})".format(
-            model, num_experts, topk, per_act_token, per_out_ch, mkn
-        )
+        f"{model}, {num_experts=}, {topk=}, {per_act_token=} {per_out_ch=}, MKN=({mkn})"
     )
 
     print(f"Testing: {sub_label}")

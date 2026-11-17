@@ -7,9 +7,11 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
@@ -40,9 +42,8 @@ class CLSPool(SequencePoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        assert not pooling_cursor.is_partial_prefill(), (
-            "partial prefill not supported with CLS pooling"
-        )
+        if pooling_cursor.is_partial_prefill():
+            raise RuntimeError("partial prefill is not supported with CLS pooling")
 
         return hidden_states[pooling_cursor.first_token_indices_gpu]
 
@@ -64,25 +65,31 @@ class MeanPool(SequencePoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        assert not pooling_cursor.is_partial_prefill(), (
-            "partial prefill not supported with MEAN pooling"
-        )
+        if pooling_cursor.is_partial_prefill():
+            raise RuntimeError("partial prefill is not supported with MEAN pooling")
 
-        prompt_lens = pooling_cursor.prompt_lens_cpu.to(
-            hidden_states.device, dtype=torch.int64, non_blocking=True
-        )
-
-        num_seqs = prompt_lens.numel()
+        prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
+        num_seqs = prompt_lens_cpu.numel()
         hidden_size = hidden_states.shape[-1]
 
         if num_seqs == 0:
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
 
+        prompt_lens = async_tensor_h2d(
+            prompt_lens_cpu, device=hidden_states.device, dtype=torch.int64
+        )
+        if envs.VLLM_BATCH_INVARIANT:
+            # index_add_ is nondeterministic on GPUs, so reduce each sequence alone.
+            segments = hidden_states.split(prompt_lens_cpu.tolist())
+            sums = torch.stack([s.sum(dim=0, dtype=torch.float32) for s in segments])
+            return sums / prompt_lens.unsqueeze(1)
+
         # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
         segment_ids = torch.repeat_interleave(
             torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
             prompt_lens,
+            output_size=int(prompt_lens_cpu.sum()),
         )
         segment_sums = torch.zeros(
             (num_seqs, hidden_size),
@@ -106,7 +113,9 @@ class MeanPool(SequencePoolingMethod):
         return segment_sums / prompt_lens.unsqueeze(1)
 
 
-def get_seq_pooling_method(pooling_type: SequencePoolingType | str):
+def get_seq_pooling_method(
+    pooling_type: SequencePoolingType | str,
+) -> SequencePoolingMethod:
     if pooling_type == "CLS":
         return CLSPool()
     if pooling_type == "LAST":

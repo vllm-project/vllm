@@ -7,6 +7,15 @@ import pytest
 
 from tests.conftest import HfRunner
 from tests.models.utils import EmbedModelInfo, check_embeddings_close, matryoshka_fy
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
+
+
+def float_embeddings(response: EmbeddingResponse) -> list[list[float]]:
+    embeddings = []
+    for d in response.data:
+        assert isinstance(d.embedding, list)
+        embeddings.append(d.embedding)
+    return embeddings
 
 
 def run_embedding_correctness_test(
