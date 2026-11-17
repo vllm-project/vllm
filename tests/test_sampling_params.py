@@ -4,10 +4,16 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import LlamaConfig, TokenizersBackend
 
 from vllm import SamplingParams
+from vllm.config import ModelConfig
 from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -295,3 +301,104 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.fixture
+def sampler_model_config(tmp_path):
+    LlamaConfig(
+        vocab_size=1024,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        max_position_embeddings=32,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    return ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        dtype="float32",
+    )
+
+
+def _bad_word_tokenizer():
+    tokenizer = Tokenizer(
+        WordLevel({"[UNK]": 0, "bad": 1024, "word": 1}, unk_token="[UNK]")
+    )
+    tokenizer.pre_tokenizer = Whitespace()
+    return get_cached_tokenizer(
+        TokenizersBackend(tokenizer_object=tokenizer, unk_token="[UNK]")
+    )
+
+
+@pytest.mark.parametrize("token_id", [-1, 1024])
+def test_stop_token_ids_reject_model_out_of_vocab_ids(token_id, sampler_model_config):
+    params = SamplingParams(stop_token_ids=[token_id])
+    with pytest.raises(VLLMValidationError, match="stop_token_ids"):
+        params.verify(sampler_model_config, None, None, None)
+
+
+def test_eos_expansion_rejects_model_out_of_vocab_ids(sampler_model_config):
+    params = SamplingParams()
+    params.update_from_generation_config(
+        {"eos_token_id": [1023, 1024]}, eos_token_id=1023
+    )
+    with pytest.raises(VLLMValidationError, match="stop_token_ids"):
+        params.validate_model_token_ids(sampler_model_config)
+
+
+def test_bad_word_token_ids_use_model_vocab(sampler_model_config):
+    params = SamplingParams(bad_words=["bad"])
+    params.update_from_tokenizer(_bad_word_tokenizer())
+    with pytest.raises(VLLMValidationError, match="bad_words"):
+        params.validate_model_token_ids(sampler_model_config)
+
+
+def test_bad_word_total_token_limit_uses_effective_environment(monkeypatch):
+    monkeypatch.setenv("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1")
+    params = SamplingParams(bad_words=["bad word"])
+    with pytest.raises(VLLMValidationError, match="total bad word tokens"):
+        params.update_from_tokenizer(_bad_word_tokenizer())
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "parameter"),
+    [
+        ({"allowed_token_ids": list(range(1025))}, "allowed_token_ids"),
+        ({"logit_bias": {str(i): 1.0 for i in range(1025)}}, "logit_bias"),
+        ({"stop_token_ids": list(range(129)), "min_tokens": 1}, "stop_token_ids"),
+    ],
+)
+def test_rejects_sampler_inputs_wider_than_fixed_rows(kwargs, parameter):
+    with pytest.raises(VLLMValidationError, match=parameter):
+        SamplingParams.from_optional(**kwargs)
+
+
+def test_rejects_stop_tokens_wider_than_fixed_row_after_eos_merge():
+    params = SamplingParams(stop_token_ids=list(range(128)), min_tokens=1)
+    with pytest.raises(VLLMValidationError, match="stop_token_ids"):
+        params.update_from_generation_config({}, eos_token_id=128)
+
+
+def test_fixed_stop_budget_uses_effective_tokens():
+    params = SamplingParams(stop_token_ids=[7] * 129, min_tokens=1)
+    params.update_from_generation_config({}, eos_token_id=7)
+    assert params.all_stop_token_ids == {7}
+
+
+def test_stop_budget_does_not_limit_requests_without_min_tokens():
+    params = SamplingParams(stop_token_ids=list(range(129)))
+    assert params.all_stop_token_ids == set(range(129))
+
+
+def test_sampler_inputs_at_fixed_limits_retain_values():
+    allowed = list(range(1024))
+    bias = {i: 1.0 for i in allowed}
+    stops = list(range(128))
+    params = SamplingParams(
+        allowed_token_ids=allowed, logit_bias=bias, stop_token_ids=stops, min_tokens=1
+    )
+    assert params.allowed_token_ids == allowed
+    assert params.logit_bias == bias
+    assert params.all_stop_token_ids == set(stops)

@@ -148,3 +148,10 @@ def test_v2_bad_words_committed_prefix():
     expected = torch.zeros_like(out)
     expected[0, 60] = -float("inf")
     torch.testing.assert_close(out, expected)
+
+
+@pytest.mark.parametrize("token_id", [-1, VOCAB_SIZE])
+def test_v2_bad_word_out_of_vocab_id_preserves_logits(token_id):
+    """Invalid last tokens must not corrupt the neighboring logits row."""
+    out = _apply([[10, 11, token_id]])
+    torch.testing.assert_close(out, torch.zeros_like(out), rtol=0, atol=0)

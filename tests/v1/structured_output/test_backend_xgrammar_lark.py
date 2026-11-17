@@ -59,6 +59,10 @@ def _validate(
 class _StubModelConfig:
     is_diffusion = False
 
+    @staticmethod
+    def get_vocab_size() -> int:
+        return VOCAB_SIZE
+
 
 GRAMMARS = [
     pytest.param(LARK_GRAMMAR, id="lark"),

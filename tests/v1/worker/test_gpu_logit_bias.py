@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcRequestState,
 )
+from vllm.v1.worker.gpu.sample.penalties import bincount
 from vllm.v1.worker.gpu.states import RequestState
 
 DEVICE = torch.device(current_platform.device_type)
@@ -50,7 +51,11 @@ def _only_stop_token_left(num_rows: int) -> torch.Tensor:
     return logits
 
 
-def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
+def _apply(
+    logits: torch.Tensor,
+    structured: list[bool],
+    params: list[SamplingParams] | None = None,
+) -> torch.Tensor:
     """Run the fused bias kernel with one logits row per request."""
     req_states = RequestState(
         max_num_reqs=4,
@@ -65,7 +70,9 @@ def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
 
     state = LogitBiasState(None, LogitsProcRequestState.from_request_state(req_states))
     for req_idx, is_structured in enumerate(structured):
-        state.add_request(req_idx, _params(is_structured))
+        state.add_request(
+            req_idx, params[req_idx] if params else _params(is_structured)
+        )
     state.apply_staged_writes()
 
     num_reqs = len(structured)
@@ -115,3 +122,61 @@ def test_v2_min_tokens_mixed_batch_gates_restore_per_request():
 
     assert out[0, STOP_TOKEN] == 1.0
     assert torch.isneginf(out[1]).all()
+
+
+@pytest.mark.parametrize(
+    "parameter", ["allowed_token_ids", "logit_bias", "stop_token_ids"]
+)
+@pytest.mark.parametrize("structured", [False, True])
+def test_v2_token_bounds_preserve_neighboring_logits(parameter, structured):
+    """An ID outside the vocabulary must not read or write a neighboring row."""
+    ids = [-1, STOP_TOKEN, VOCAB_SIZE]
+    values = {token_id: 2.0 for token_id in ids} if parameter == "logit_bias" else ids
+    params = SamplingParams(
+        **{parameter: values},
+        min_tokens=MIN_TOKENS,
+        structured_outputs=StructuredOutputsParams(json={"type": "boolean"})
+        if structured
+        else None,
+    )
+    logits = torch.arange(3 * VOCAB_SIZE, device=DEVICE, dtype=torch.float32).reshape(
+        3, VOCAB_SIZE
+    )
+    expected = logits.cpu().clone()
+    if parameter == "allowed_token_ids":
+        expected[1] = -float("inf")
+        expected[1, STOP_TOKEN] = logits[1, STOP_TOKEN].item()
+    elif parameter == "logit_bias":
+        expected[1, STOP_TOKEN] += 2.0
+    else:
+        expected[1, STOP_TOKEN] = -float("inf")
+    out = _apply(
+        logits, [False, structured, False], [SamplingParams(), params, SamplingParams()]
+    )
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+def test_v2_penalty_counts_ignore_ids_outside_model_vocab():
+    """Tokenizer-only prompt/output IDs must leave adjacent request counts intact."""
+    tokens = torch.tensor(
+        [[0] * 6, [-1, 5, VOCAB_SIZE, -1, 6, VOCAB_SIZE], [0] * 6],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    prompt_mask = torch.zeros((3, VOCAB_SIZE // 32), dtype=torch.int32, device=DEVICE)
+    output_counts = torch.zeros((3, VOCAB_SIZE), dtype=torch.int32, device=DEVICE)
+    bincount(
+        torch.tensor([1], dtype=torch.int32, device=DEVICE),
+        tokens,
+        torch.tensor([0, 3, 0], dtype=torch.int32, device=DEVICE),
+        torch.tensor([0, 6, 0], dtype=torch.int32, device=DEVICE),
+        prompt_mask,
+        output_counts,
+        max_prefill_len=6,
+    )
+    expected_mask = torch.zeros_like(prompt_mask)
+    expected_mask[1, 0] = 1 << 5
+    expected_counts = torch.zeros_like(output_counts)
+    expected_counts[1, 6] = 1
+    torch.testing.assert_close(prompt_mask, expected_mask, rtol=0, atol=0)
+    torch.testing.assert_close(output_counts, expected_counts, rtol=0, atol=0)

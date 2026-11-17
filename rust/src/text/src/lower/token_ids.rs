@@ -4,7 +4,10 @@
 use std::result::Result;
 
 use thiserror::Error;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::tensor::WireArrayData;
 
 use crate::SamplingLimits;
 
@@ -38,6 +41,27 @@ pub enum TokenIdsError {
         token_ids: Vec<u32>,
         vocab_size: usize,
     },
+    #[error("{parameter} has {requested} entries, which exceeds the maximum of {max_allowed}")]
+    TooManyEntries {
+        parameter: &'static str,
+        requested: usize,
+        max_allowed: usize,
+    },
+}
+
+fn validate_count(
+    parameter: &'static str,
+    requested: usize,
+    max_allowed: usize,
+) -> Result<(), TokenIdsError> {
+    if requested > max_allowed {
+        return Err(TokenIdsError::TooManyEntries {
+            parameter,
+            requested,
+            max_allowed,
+        });
+    }
+    Ok(())
 }
 
 fn validate_param(
@@ -94,13 +118,48 @@ fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), Tok
 /// vocabulary range.
 pub(crate) fn validate_prompt_token_ids(
     prompt_token_ids: &[u32],
+    mm_features: Option<&MmFeatures>,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
     validate_param(
         "prompt",
         prompt_token_ids.iter().copied(),
         limits.prompt_token_vocab_size(),
+    )?;
+    validate_param(
+        "prompt",
+        prompt_token_ids.iter().copied().enumerate().filter_map(|(position, token_id)| {
+            ((token_id as usize) < limits.model_vocab_size
+                || !is_multimodal_embed_position(position, mm_features))
+            .then_some(token_id)
+        }),
+        limits.model_vocab_size,
     )
+}
+
+fn is_multimodal_embed_position(position: usize, mm_features: Option<&MmFeatures>) -> bool {
+    mm_features.is_some_and(|features| {
+        features.iter().any(|feature| {
+            let Some(offset) = position.checked_sub(feature.mm_position.offset) else {
+                return false;
+            };
+            if offset >= feature.mm_position.length {
+                return false;
+            }
+            let Some(mask) = feature.mm_position.is_embed.as_ref() else {
+                return true;
+            };
+            if mask.dtype != TensorDtype::Bool
+                || mask.shape.as_slice() != [feature.mm_position.length]
+            {
+                return false;
+            }
+            match &mask.data {
+                WireArrayData::RawView(bytes) => bytes.get(offset).is_some_and(|value| *value != 0),
+                WireArrayData::AuxIndex(_) => false,
+            }
+        })
+    })
 }
 
 /// Validate that token IDs in text sampling parameters are within their
@@ -109,9 +168,16 @@ pub(crate) fn validate_vocab_range(
     params: &EngineCoreSamplingParams,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
+    if params.min_tokens > 0 {
+        validate_count(
+            "stop_token_ids after EOS expansion",
+            params.all_stop_token_ids.len(),
+            SamplingLimits::MAX_STOP_TOKEN_IDS,
+        )?;
+    }
     validate_param(
         "stop_token_ids",
-        params.stop_token_ids.iter().copied(),
+        params.all_stop_token_ids.iter().copied(),
         limits.model_vocab_size,
     )?;
 
@@ -119,14 +185,24 @@ pub(crate) fn validate_vocab_range(
         if token_ids.is_empty() {
             return Err(TokenIdsError::EmptyAllowedTokenIds);
         }
+        validate_count(
+            "allowed_token_ids",
+            token_ids.len(),
+            SamplingLimits::MAX_ALLOWED_TOKEN_IDS,
+        )?;
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
     if let Some(logit_bias) = params.logit_bias.as_ref() {
+        validate_count(
+            "logit_bias",
+            logit_bias.len(),
+            SamplingLimits::MAX_LOGIT_BIAS_TOKENS,
+        )?;
         validate_param(
             "logit_bias",
             logit_bias.keys().copied(),
@@ -150,7 +226,7 @@ pub(crate) fn validate_vocab_range(
         validate_param(
             "bad_words",
             bad_words_token_ids.iter().flatten().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 

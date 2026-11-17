@@ -72,7 +72,11 @@ pub fn lower_text_request(
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
-    validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    validate_prompt_token_ids(
+        &prompt_token_ids,
+        request.mm_features.as_ref(),
+        &sampling_limits,
+    )?;
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -438,7 +442,7 @@ mod tests {
         MmFeatureSpec, MmModality, PlaceholderRange,
     };
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
-    use vllm_engine_core_client::protocol::tensor::WireNdArray;
+    use vllm_engine_core_client::protocol::tensor::{WireNdArray, WireTensor};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -949,8 +953,8 @@ mod tests {
     }
 
     #[test]
-    fn lower_text_request_uses_union_vocab_for_prompt_token_ids() {
-        lower_text_request(
+    fn lower_text_request_uses_model_vocab_for_prompt_token_ids() {
+        let prepared = lower_text_request(
             sample_request(),
             vec![1500],
             sample_sampling_hints(),
@@ -963,8 +967,9 @@ mod tests {
             &stub_tokenizer(),
         )
         .expect("model vocab extends prompt token range");
+        assert_eq!(prepared.generate_request.prompt_token_ids, [1500]);
 
-        lower_text_request(
+        let error = lower_text_request(
             sample_request(),
             vec![1500],
             sample_sampling_hints(),
@@ -976,7 +981,16 @@ mod tests {
             StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
-        .expect("tokenizer vocab extends prompt token range");
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1500]
+        ));
 
         let error = lower_text_request(
             sample_request(),
@@ -999,6 +1013,79 @@ mod tests {
                 token_ids,
                 vocab_size: 2000,
             }) if token_ids == vec![2000]
+        ));
+    }
+
+    #[test]
+    fn lower_text_request_allows_out_of_vocab_multimodal_embed_positions() {
+        let mut request = sample_request();
+        request.mm_features = Some(vec![MmFeatureSpec {
+            data: None,
+            modality: MmModality::Image,
+            identifier: "image-1".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 0,
+                length: 1,
+                is_embed: None,
+            },
+            mm_hash: None,
+        }]);
+
+        let prepared = lower_text_request(
+            request,
+            vec![1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 1000,
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            StructuredOutputBackend::Xgrammar,
+            &stub_tokenizer(),
+        )
+        .expect("multimodal embed position replaces the prompt token");
+        assert_eq!(prepared.generate_request.prompt_token_ids, [1500]);
+    }
+
+    #[test]
+    fn lower_text_request_rejects_unreplaced_multimodal_token() {
+        let mut request = sample_request();
+        request.mm_features = Some(vec![MmFeatureSpec {
+            data: None,
+            modality: MmModality::Image,
+            identifier: "image-1".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 0,
+                length: 2,
+                is_embed: Some(
+                    WireTensor::from_bool(vec![2], vec![false, true])
+                        .expect("valid boolean replacement mask"),
+                ),
+            },
+            mm_hash: None,
+        }]);
+
+        let error = lower_text_request(
+            request,
+            vec![1500, 1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 1000,
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            StructuredOutputBackend::Xgrammar,
+            &stub_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1500]
         ));
     }
 
@@ -1400,6 +1487,92 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_bounds_fixed_width_sampler_controls() {
+        let limits = SamplingLimits {
+            model_vocab_size: 4096,
+            ..sample_sampling_limits()
+        };
+        for count in [1024, 1025] {
+            for (sampling_params, parameter) in [
+                (
+                    SamplingParams {
+                        allowed_token_ids: Some(vec![1; count]),
+                        ..Default::default()
+                    },
+                    "allowed_token_ids",
+                ),
+                (
+                    SamplingParams {
+                        logit_bias: Some((0..count as u32).map(|id| (id, 1.0)).collect()),
+                        ..Default::default()
+                    },
+                    "logit_bias",
+                ),
+            ] {
+                let result = lower_sampling_params_with_limits(sampling_params, limits);
+                if count == 1024 {
+                    let params = result.expect("the sampler buffer fits this request");
+                    let actual = params
+                        .allowed_token_ids
+                        .map(|ids| ids.len())
+                        .or_else(|| params.logit_bias.map(|bias| bias.len()));
+                    assert_eq!(actual, Some(count));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::TokenIds(TokenIdsError::TooManyEntries {
+                            parameter: actual,
+                            requested: 1025,
+                            max_allowed: 1024,
+                        })) if actual == parameter
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_bounds_effective_stop_tokens_after_eos_expansion() {
+        for min_tokens in [0, 1] {
+            let sampling_params = SamplingParams {
+                min_tokens: Some(min_tokens),
+                stop_token_ids: Some((0..128).chain(0..128).collect()),
+                ..Default::default()
+            };
+            let params = lower_sampling_params_with_limits(
+                sampling_params.clone(),
+                sample_sampling_limits(),
+            )
+            .expect("duplicate stop IDs do not consume additional sampler slots");
+            assert_eq!(params.all_stop_token_ids.len(), 128);
+
+            let result = lower_sampling_params(
+                sampling_params,
+                SamplingHints {
+                    primary_eos_token_id: Some(999),
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
+                3,
+                &stub_tokenizer(),
+            );
+            if min_tokens == 0 {
+                assert_eq!(result.unwrap().all_stop_token_ids.len(), 129);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::TokenIds(TokenIdsError::TooManyEntries {
+                        parameter: "stop_token_ids after EOS expansion",
+                        requested: 129,
+                        max_allowed: 128,
+                    }))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_stop_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
@@ -1424,7 +1597,7 @@ mod tests {
     fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
-                allowed_token_ids: Some(vec![1999, 2000]),
+                allowed_token_ids: Some(vec![999, 1000]),
                 ..Default::default()
             },
             sample_sampling_limits(),
@@ -1436,8 +1609,8 @@ mod tests {
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
-                vocab_size: 2000,
-            }) if token_ids == vec![2000]
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
         ));
     }
 
@@ -1460,14 +1633,14 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
-        let tokenizer = TestTokenizer::new().with_regular_token("blocked", 2000);
+        let tokenizer = TestTokenizer::new().with_regular_token("blocked", 1000);
         for sampling_params in [
             SamplingParams {
                 bad_words: Some(vec!["blocked".to_string()]),
                 ..Default::default()
             },
             SamplingParams {
-                bad_words_token_ids: Some(vec![vec![1999, 2000]]),
+                bad_words_token_ids: Some(vec![vec![999, 1000]]),
                 ..Default::default()
             },
         ] {
@@ -1486,8 +1659,8 @@ mod tests {
                 Error::TokenIds(TokenIdsError::OutOfVocab {
                     parameter: "bad_words",
                     token_ids,
-                    vocab_size: 2000,
-                }) if token_ids == vec![2000]
+                    vocab_size: 1000,
+                }) if token_ids == vec![1000]
             ));
         }
     }

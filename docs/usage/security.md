@@ -300,6 +300,29 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
 
+### Token IDs and sampler limits
+
+Prompt token IDs must fit the model's vocabulary before engine execution.
+A token appearing in the tokenizer's vocabulary does not guarantee that the
+model has an embedding for it. Out-of-range IDs are rejected, including on
+text-only models whose tokenizer includes unused multimodal special tokens.
+Multimodal placeholder positions that are replaced by media embeddings retain
+their model-specific handling.
+
+Sampler inputs are also checked before they reach fixed-size GPU tables:
+
+| Parameter | Limit |
+| --- | --- |
+| `allowed_token_ids` | 1024 entries |
+| `logit_bias` | 1024 entries |
+| `stop_token_ids` with `min_tokens > 0` | 128 distinct effective stop IDs, including EOS IDs added from model configuration |
+
+Bad-word tokenization respects both `VLLM_MAX_NUM_BAD_WORDS` and
+`VLLM_MAX_BAD_WORDS_TOTAL_TOKENS`. Sampler token IDs must fit the model
+vocabulary, and structural-tag token references are checked against the
+grammar vocabulary before native compilation. Invalid requests return a
+validation error rather than reaching the engine's indexing operations.
+
 ### Per-request multimodal arguments
 
 API server endpoints reject non-empty per-request `mm_processor_kwargs` and

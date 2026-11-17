@@ -151,6 +151,11 @@ completion = client.chat.completions.create(
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
+Pre-tokenized prompts must use IDs supported by the model's embedding vocabulary,
+even when the tokenizer contains additional special tokens. Invalid IDs are
+rejected before model execution. See [Token IDs and sampler limits](../../usage/security.md#token-ids-and-sampler-limits)
+for the limits on `allowed_token_ids`, `logit_bias`, and effective stop-token sets.
+
 Code example: [examples/basic/online_serving/openai_completion_client.py](../../../examples/basic/online_serving/openai_completion_client.py)
 
 #### Extra parameters

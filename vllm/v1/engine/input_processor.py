@@ -489,6 +489,7 @@ class InputProcessor:
                 sampling_params.update_from_tokenizer(self.tokenizer)
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
+            sampling_params.validate_model_token_ids(self.model_config)
         else:
             pooling_params = params.clone()
 
@@ -602,7 +603,7 @@ class InputProcessor:
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
         prompt_ids = (
-            None
+            prompt_input.get("prompt_token_ids")
             if prompt_input["type"] == "embeds"
             else prompt_input["prompt_token_ids"]
         )
@@ -637,9 +638,53 @@ class InputProcessor:
                             f"by setting --limit-mm-per-prompt at startup."
                         )
 
-        # Shared by generate, embedding and pooling requests.
         if prompt_ids:
-            self.renderer.validate_token_ids(prompt_ids)
+            if prompt_input["type"] != "embeds":
+                self.renderer.validate_token_ids(prompt_ids)
+            min_input_id = min(prompt_ids)
+            if min_input_id < 0:
+                raise VLLMValidationError(
+                    f"Token id {min_input_id} is out of vocabulary"
+                )
+
+            model_vocab_size = self.model_config.get_vocab_size()
+            if max(prompt_ids) < model_vocab_size:
+                return
+            replaceable_positions = self._get_embedding_replacement_positions(
+                prompt_input, len(prompt_ids)
+            )
+            for index, token_id in enumerate(prompt_ids):
+                if token_id >= model_vocab_size and not replaceable_positions[index]:
+                    raise VLLMValidationError(
+                        f"Token id {token_id} is out of vocabulary"
+                    )
+
+    @staticmethod
+    def _get_embedding_replacement_positions(
+        prompt_input: SingletonInput,
+        prompt_len: int,
+    ) -> list[bool]:
+        positions = [False] * prompt_len
+        if prompt_input["type"] != "multimodal":
+            return positions
+
+        for ranges in prompt_input["mm_placeholders"].values():
+            for placeholder in ranges:
+                is_embed = placeholder.is_embed
+                embed_mask = (
+                    [True] * placeholder.length
+                    if is_embed is None
+                    else (
+                        is_embed.tolist()
+                        if hasattr(is_embed, "tolist")
+                        else list(is_embed)
+                    )
+                )
+                for offset, replaces_token in enumerate(embed_mask):
+                    position = placeholder.offset + offset
+                    if replaces_token and 0 <= position < prompt_len:
+                        positions[position] = True
+        return positions
 
     def _validate_model_inputs(
         self,

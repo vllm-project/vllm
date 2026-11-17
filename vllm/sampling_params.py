@@ -5,6 +5,7 @@
 import copy
 import json as json_mod
 import math
+from collections.abc import Iterable, Sized
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -35,6 +36,11 @@ _MAX_TEMP = 1e-2
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+# Fixed per-request row widths used by the V2 GPU sampler.
+MAX_NUM_ALLOWED_TOKEN_IDS = 1024
+MAX_NUM_LOGIT_BIAS_TOKENS = 1024
+MAX_NUM_STOP_TOKEN_IDS = 128
 
 MAX_STRUCTURED_OUTPUT_JSON_NESTING = 64
 """Upper bound on nested objects and arrays in a structured-output JSON schema
@@ -268,6 +274,15 @@ def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
     return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
 
 
+def _get_xgrammar_vocab_size(
+    model_config: ModelConfig,
+    tokenizer: TokenizerLike,
+) -> int:
+    if is_mistral_tokenizer(tokenizer):
+        return len(tokenizer.vocab)
+    return model_config.get_vocab_size()
+
+
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -493,6 +508,11 @@ class SamplingParams(
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
+            SamplingParams._validate_fixed_array_length(
+                "logit_bias",
+                logit_bias,
+                MAX_NUM_LOGIT_BIAS_TOKENS,
+            )
             # Fast path uses a dict comprehension; on failure we iterate once
             # to identify the exact offending entry for the error message.
             try:
@@ -625,6 +645,7 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+        self._validate_sampler_fixed_array_limits(self._all_stop_token_ids)
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
@@ -749,6 +770,45 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+        self._validate_sampler_fixed_array_limits()
+
+    @staticmethod
+    def _validate_fixed_array_length(
+        parameter: str,
+        values: Sized | None,
+        max_size: int,
+    ) -> None:
+        if values is None:
+            return
+        size = len(values)
+        if size > max_size:
+            raise VLLMValidationError(
+                f"Requested {parameter} of length {size}, "
+                f"which is greater than max allowed: {max_size}",
+                parameter=parameter,
+                value=size,
+            )
+
+    def _validate_sampler_fixed_array_limits(
+        self,
+        effective_stop_token_ids: Sized | None = None,
+    ) -> None:
+        self._validate_fixed_array_length(
+            "allowed_token_ids",
+            self.allowed_token_ids,
+            MAX_NUM_ALLOWED_TOKEN_IDS,
+        )
+        self._validate_fixed_array_length(
+            "logit_bias",
+            self.logit_bias,
+            MAX_NUM_LOGIT_BIAS_TOKENS,
+        )
+        if self.min_tokens > 0 and effective_stop_token_ids is not None:
+            self._validate_fixed_array_length(
+                "stop_token_ids",
+                effective_stop_token_ids,
+                MAX_NUM_STOP_TOKEN_IDS,
+            )
 
     def _verify_extra_args(self) -> None:
         # JSON accepts arbitrary integers, but the engine's MessagePack
@@ -805,12 +865,15 @@ class SamplingParams(
                     assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
+        self._validate_sampler_fixed_array_limits(self._all_stop_token_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
         max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        total_tokens = 0
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -841,6 +904,7 @@ class SamplingParams(
                     and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
+                    total_tokens += len(prompt_token_ids)
                     if len(self._bad_words_token_ids) > max_num_bad_words:
                         raise VLLMValidationError(
                             f"Too many bad words after tokenization: "
@@ -849,23 +913,13 @@ class SamplingParams(
                             parameter="bad_words",
                             value=self.bad_words,
                         )
-
-        invalid_token_ids = [
-            token_id
-            for bad_words_token_ids in self._bad_words_token_ids
-            for token_id in bad_words_token_ids
-            if token_id < 0 or token_id > tokenizer.max_token_id
-        ]
-        if len(invalid_token_ids) > 0:
-            raise VLLMValidationError(
-                f"The model vocabulary size is {tokenizer.max_token_id + 1},"
-                f" but the following tokens"
-                f" were specified as bad: {invalid_token_ids}."
-                f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}.",
-                parameter="bad_words",
-                value=self.bad_words,
-            )
+                    if total_tokens > max_total_tokens:
+                        raise VLLMValidationError(
+                            "Too many total bad word tokens after tokenization: "
+                            f"{total_tokens}. The max number is {max_total_tokens}.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -916,7 +970,8 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_allowed_token_ids(model_config)
+        self._validate_allowed_token_ids()
+        self.validate_model_token_ids(model_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
@@ -1153,7 +1208,7 @@ class SamplingParams(
                 value=invalid_token_ids,
             )
 
-    def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
+    def _validate_allowed_token_ids(self) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
             return
@@ -1165,23 +1220,44 @@ class SamplingParams(
                 value=allowed_token_ids,
             )
 
-        # allowed_token_ids are client-supplied ids used as column indices
-        # into the logits tensor (the mask in InputBatch is sized by
-        # model_config.get_vocab_size(), and the ids are written as
-        # mask[req_index][allowed_token_ids]), so use the same bound here —
-        # like _validate_stop_token_ids and _validate_logit_bias, which
-        # index the same tensor.
-        vocab_size = model_config.get_vocab_size()
+    @staticmethod
+    def _validate_model_vocab_token_ids(
+        parameter: str,
+        token_ids: Iterable[int],
+        vocab_size: int,
+    ) -> None:
         invalid_token_ids = [
             token_id
-            for token_id in allowed_token_ids
-            if token_id < 0 or token_id >= vocab_size
+            for token_id in token_ids
+            if not isinstance(token_id, int) or token_id < 0 or token_id >= vocab_size
         ]
         if invalid_token_ids:
             raise VLLMValidationError(
-                "allowed_token_ids contains out-of-vocab token id!",
-                parameter="allowed_token_ids",
+                f"token_id(s) {invalid_token_ids} in {parameter} contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter=parameter,
                 value=invalid_token_ids,
+            )
+
+    def validate_model_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate all sampler token IDs that index model-sized tensors."""
+        vocab_size = model_config.get_vocab_size()
+        self._validate_model_vocab_token_ids(
+            "stop_token_ids", self._all_stop_token_ids, vocab_size
+        )
+        if self.allowed_token_ids is not None:
+            self._validate_model_vocab_token_ids(
+                "allowed_token_ids", self.allowed_token_ids, vocab_size
+            )
+        if self._bad_words_token_ids is not None:
+            self._validate_model_vocab_token_ids(
+                "bad_words",
+                (
+                    token_id
+                    for token_ids in self._bad_words_token_ids
+                    for token_id in token_ids
+                ),
+                vocab_size,
             )
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:
@@ -1323,7 +1399,11 @@ class SamplingParams(
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
-            validate_xgrammar_grammar(self)
+            validate_xgrammar_grammar(
+                self,
+                vocab_size=_get_xgrammar_vocab_size(model_config, tokenizer),
+                tokenizer=tokenizer,
+            )
         elif backend.startswith("guidance"):
             if _is_non_tekken_mistral(tokenizer=tokenizer):
                 raise VLLMValidationError(
@@ -1383,7 +1463,11 @@ class SamplingParams(
             # this setting. We include fallback behavior here, but not with any
             # other setting where a specific backend was specified.
             try:
-                validate_xgrammar_grammar(self)
+                validate_xgrammar_grammar(
+                    self,
+                    vocab_size=_get_xgrammar_vocab_size(model_config, tokenizer),
+                    tokenizer=tokenizer,
+                )
                 self.structured_outputs._backend = "xgrammar"
             except VLLMValidationError:
                 # The request either failed validation
