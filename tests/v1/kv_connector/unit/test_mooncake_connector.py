@@ -32,6 +32,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_utils,
     transfer_engine_registry,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.adapter import (
+    load_backend,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
@@ -62,7 +65,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.session_ipc import (
+    OpenProducerJob,
+)
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -1272,6 +1283,119 @@ def test_public_shutdown_stops_worker_threads(monkeypatch):
             kv_transfer_state.ensure_kv_transfer_shutdown()
             assert not thread.is_alive()
             assert not kv_transfer_state.has_kv_transfer_group()
+        finally:
+            worker.shutdown()
+
+
+@pytest.mark.parametrize("compressed_layer", [0, 1, 2])
+def test_compression_transfers_swa_layers_in_unified_group(
+    monkeypatch, compressed_layer
+):
+    if os.environ.get("VLLM_TEST_REQUIRE_MOONCAKE_COMPRESSION") != "1":
+        pytest.importorskip("kvserve_v1.compression.runtime")
+    backend = load_backend()
+    extra = {
+        "compression": {
+            "enable-compression-pipeline": True,
+            "pipeline": ["codec"],
+            "split_type": "layer",
+            "logical_blocks_per_chunk": 2,
+        }
+    }
+    config = _make_worker_vllm_config("kv_producer", extra)
+    config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    geometry = dict(
+        block_size=config.cache_config.block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    names = [f"model.layers.{i}.self_attn" for i in range(3)]
+    specs = {
+        name: FullAttentionManager.layer_config(AttentionSpec(**geometry))
+        if i == compressed_layer
+        else SlidingWindowManager.layer_config(
+            AttentionSpec(**geometry), sliding_window=32
+        )
+        for i, name in enumerate(names)
+    }
+    groups = get_kv_cache_groups(config, dict(specs))
+    assert len(groups) == 1
+    cache_config = KVCacheConfig(
+        num_blocks=4, kv_cache_tensors=[], kv_cache_groups=groups
+    )
+    spec = groups[0].kv_cache_specs[names[0]]
+    source = torch.empty(4 * 3 * spec.page_size_bytes, dtype=torch.uint8, device="cuda")
+    target = torch.zeros_like(source)
+    local = dense_kv_cache_views(source, spec, 4, 3, KVCacheLayout.LBHNC)
+    remote = dense_kv_cache_views(target, spec, 4, 3, KVCacheLayout.LBHNC)
+    for i, cache in enumerate(local):
+        cache.fill_(i + 1)
+
+    def transfer(peer, srcs, dsts, lengths):
+        for src, dst, length in zip(srcs, dsts, lengths):
+            start, end = src - source.data_ptr(), dst - target.data_ptr()
+            target[end : end + length].copy_(source[start : start + length])
+        return 0
+
+    monkeypatch.setattr(
+        FakeMooncakeWrapper, "batch_transfer_sync_write", staticmethod(transfer)
+    )
+    plan = backend.build_memory_plan(
+        backend.CompressionConfig.from_extra_config(extra),
+        {
+            names[compressed_layer]: backend.CacheSpec(
+                layer_index=compressed_layer, **geometry
+            )
+        },
+        num_layers=3,
+        device=torch.device("cuda"),
+    )
+    with set_current_vllm_config(config), patch_worker_dependencies():
+        connector = MooncakeConnector(config, KVConnectorRole.WORKER, cache_config)
+        worker = connector.connector_worker
+        assert worker is not None
+        try:
+            worker.compression = backend.CompressionRuntime(
+                plan=plan,
+                kv_cache_layout="LBHNC",
+                blocks_per_logical=1,
+                device=torch.device("cuda"),
+            )
+            connector.register_kv_caches(dict(zip(names, local)))
+            metadata = MooncakeXferMetadata(
+                remote_hostname="consumer",
+                remote_port=12345,
+                remote_tp_size=1,
+                remote_tp_rank=0,
+                req_blocks={"d": ("xfer", [[0, 1]])},
+                kv_caches_base_addr=[
+                    target.data_ptr() + p - source.data_ptr()
+                    for p in worker.kv_caches_base_addr
+                ],
+                block_lens=worker.block_len_per_layer,
+                kv_block_lens=worker.kv_block_len_per_layer,
+                registered_layer_names=worker.registered_layer_names,
+                registered_layer_indices=worker.registered_layer_indices,
+                registered_group_indices=worker.registered_group_indices,
+                registered_row_offsets=worker.region_row_offsets,
+            )
+            worker._session_job_open_producer(
+                OpenProducerJob(
+                    job_id=1,
+                    transfer_id="xfer",
+                    d_req_id="d",
+                    nonce="n",
+                    metadata=metadata,
+                    local_block_ids=[[1, 2]],
+                    num_tokens=2 * spec.block_size,
+                )
+            )
+            for i in range(3):
+                if i == compressed_layer:
+                    assert torch.count_nonzero(remote[i]) == 0
+                else:
+                    assert torch.equal(remote[i][:2], local[i][1:3])
         finally:
             worker.shutdown()
 
@@ -3833,7 +3957,27 @@ def test_compression_rejects_kv_both_before_slot_allocation(monkeypatch, extra_c
         MooncakeConnector(config, KVConnectorRole.WORKER, _make_test_kv_cache_config())
 
 
-def test_raw_worker_uses_native_sender_and_receiver():
+@pytest.mark.parametrize(
+    "extra_config",
+    [{"compression": {"enable-compression-pipeline": True}}, {"raw_aggregate": True}],
+)
+def test_compression_rejects_retired_inprocess_backend(monkeypatch, extra_config):
+    monkeypatch.setattr(
+        mooncake_connector, "get_compression_config", lambda extra: True
+    )
+    monkeypatch.setenv("KVSERVE_SESSION_PROCESS", "0")
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    config.kv_transfer_config.kv_connector_extra_config = extra_config
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        pytest.raises(ValueError, match="no longer supported"),
+    ):
+        MooncakeConnectorWorker(config, "test-engine", _make_test_kv_cache_config())
+
+
+def test_raw_worker_ignores_retired_compression_backend(monkeypatch):
+    monkeypatch.setenv("KVSERVE_SESSION_PROCESS", "0")
     config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_both")
     with set_current_vllm_config(config), patch_worker_dependencies():
         worker = MooncakeConnectorWorker(
@@ -3850,15 +3994,15 @@ def test_raw_worker_uses_native_sender_and_receiver():
 def test_compression_cannot_fall_through_to_raw_before_memory_init():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker._compression_configured = True
-    worker._inline_compression = None
-    with pytest.raises(RuntimeError, match="must be initialized"):
+    worker._session_process = None
+    with pytest.raises(AssertionError, match="must be initialized"):
         worker.start_load_kv(MooncakeConnectorMetadata())
 
 
-def test_unsafe_compression_shutdown_retains_registered_memory():
+def test_unsafe_helper_shutdown_retains_registered_memory():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker._inline_compression = MagicMock()
-    worker._inline_compression.shutdown.side_effect = RuntimeError("writes pending")
+    worker._session_process = MagicMock()
+    worker._session_process.shutdown.side_effect = RuntimeError("writes pending")
     worker.compression = MagicMock()
     worker.async_zmq_ctx = MagicMock()
     worker.shutdown()
@@ -3978,149 +4122,4 @@ def test_transfer_engine_init_restores_worker_device(monkeypatch):
         try:
             assert worker.device_id == selected[0] == 3
         finally:
-            worker.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_inline_abort_waits_for_inflight_mooncake_write(monkeypatch):
-    """A failed chunk cannot release a slot while another Mooncake write runs."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.inline import (  # noqa: E501
-        InlineCompression,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.protocol import (  # noqa: E501
-        CompressionAbort,
-        CompressionAbortAck,
-        CompressionChunkPull,
-        CompressionChunkReady,
-        CompressionResponse,
-        CompressionSessionOpen,
-        CompressionSessionOpened,
-    )
-
-    first_started = threading.Event()
-    release_first = threading.Event()
-    calls_lock = threading.Lock()
-    calls = 0
-
-    def transfer(engine, *args):
-        nonlocal calls
-        with calls_lock:
-            calls += 1
-            index = calls
-        if index == 1:
-            first_started.set()
-            assert release_first.wait(timeout=10)
-            return 0
-        assert first_started.wait(timeout=10)
-        return -1
-
-    monkeypatch.setattr(FakeMooncakeWrapper, "batch_transfer_sync_write", transfer)
-    config = _make_worker_vllm_config("kv_producer")
-    with set_current_vllm_config(config), patch_worker_dependencies():
-        connector = MooncakeConnector(
-            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
-        )
-        worker = connector.connector_worker
-        assert worker is not None
-
-        def encoded(*args, **kwargs):
-            return SimpleNamespace(
-                event=SimpleNamespace(synchronize=lambda: None),
-                codec_bytes=8,
-                u8_bytes=8,
-                raw_tail_bytes=0,
-            )
-
-        slots = [
-            SimpleNamespace(
-                arena_a=torch.empty(8, dtype=torch.uint8),
-                aux=torch.empty(8, dtype=torch.uint8),
-                raw_tail=None,
-            )
-            for _ in range(2)
-        ]
-        worker.compression = SimpleNamespace(
-            slots=slots,
-            config=SimpleNamespace(logical_blocks_per_chunk=1),
-            wire_profile="f" * 64,
-            fa_group_indices={0},
-            streams=[SimpleNamespace(synchronize=lambda: None) for _ in slots],
-            encode=encoded,
-            aux_bytes=lambda *args: 0,
-            shutdown=lambda: None,
-        )
-        inline = InlineCompression(worker)
-        context = zmq.asyncio.Context()
-        router = context.socket(zmq.ROUTER)
-        port = router.bind_to_random_port("tcp://127.0.0.1")
-        dealer = context.socket(zmq.DEALER)
-        dealer.connect(f"tcp://127.0.0.1:{port}")
-        encoder = msgspec.msgpack.Encoder()
-        decoder = msgspec.msgpack.Decoder(CompressionResponse)
-
-        async def serve():
-            while True:
-                identity, payload = await router.recv_multipart()
-                inline.dispatch(identity, payload, router)
-
-        server = asyncio.create_task(serve())
-        try:
-            metadata = MooncakeConnectorMetadata()
-            metadata.reqs_to_send = {"p": ("t", [])}
-            await worker.record_send_reqs(metadata)
-            metadata.reqs_to_send = {"p": ("t", [[1, 2]])}
-            metadata.num_tokens["p"] = 2 * worker.block_size
-            await worker.record_send_reqs(metadata)
-
-            pull = MooncakeXferMetadata(
-                remote_hostname="consumer",
-                remote_port=123,
-                remote_tp_size=1,
-                remote_tp_rank=0,
-                req_blocks={"d": ("t", [[10, 11]])},
-                kv_caches_base_addr=[],
-                block_lens=[],
-                kv_block_lens=[],
-            )
-            await dealer.send(
-                encoder.encode(CompressionSessionOpen(pull, "nonce", "f" * 64))
-            )
-            opened = decoder.decode(await asyncio.wait_for(dealer.recv(), 5))
-            assert isinstance(opened, CompressionSessionOpened)
-            assert opened.total_chunks == 4
-            for chunk in (0, 1):
-                await dealer.send(
-                    encoder.encode(
-                        CompressionChunkPull("t", "d", chunk, 1, 2, 0, "nonce")
-                    )
-                )
-            failed = decoder.decode(await asyncio.wait_for(dealer.recv(), 5))
-            assert isinstance(failed, CompressionChunkReady)
-            assert failed.error is not None
-
-            await dealer.send(
-                encoder.encode(CompressionAbort("t", "d", "failed", "nonce"))
-            )
-            reply = asyncio.ensure_future(dealer.recv())
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(reply), 0.1)
-            assert worker._finished_sending.empty()
-
-            release_first.set()
-            responses = [decoder.decode(await asyncio.wait_for(reply, 5))]
-            while not any(isinstance(item, CompressionAbortAck) for item in responses):
-                responses.append(
-                    decoder.decode(await asyncio.wait_for(dealer.recv(), 5))
-                )
-            assert isinstance(responses[0], CompressionChunkReady)
-            assert responses[-1].error is None
-            assert worker._finished_sending.get_nowait() == "p"
-        finally:
-            release_first.set()
-            server.cancel()
-            await asyncio.gather(server, return_exceptions=True)
-            dealer.close(linger=0)
-            router.close(linger=0)
-            context.term()
-            inline.shutdown()
             worker.shutdown()

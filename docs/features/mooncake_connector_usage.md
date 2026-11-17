@@ -69,9 +69,10 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - When `kv_lease_duration` is set, the lease decides when those blocks are released instead. This timeout still bounds how long a pull waits for a prefill that has not finished.
     - A decoder does not wait out this timeout for a prefill worker that is gone. A pull fails as soon as its connection to the worker closes or is refused, as when the prefill process exits, or after the worker leaves ZMQ heartbeats unanswered for 10 seconds, as when it hangs or its host drops off the network. The failure is handled per `kv_load_failure_policy`.
 
-Compression uses the existing Mooncake sender and receiver loops. A bounded
-pool of GPU buffers allows multiple chunks to be encoded, transferred, and
-decoded concurrently.
+Compression and `raw_aggregate` use a session helper process per TP rank. The
+legacy `KVSERVE_SESSION_PROCESS=0` backend has been removed; unset this variable
+to use the helper. Selecting the removed backend raises an error at worker
+startup. Native raw Mooncake transport does not use this setting.
 
 ## KV Transfer Config
 
@@ -129,15 +130,17 @@ Both P and D must run the compression-enabled connector and the same fixed
 profile. Disabled compression uses the native Mooncake path and needs no
 compression dependencies.
 
-The current implementation supports dense BF16 FullAttention KV caches.
-Models combining FullAttention with other cache types are rejected at startup.
+The current implementation supports dense BF16 FullAttention KV caches, including
+FullAttention regions of hybrid models. Other regions use raw transfer,
+including SWA layers sharing a group with FullAttention when the hybrid KV
+cache manager is disabled.
 Compressed P/D requires identical TP and PP sizes and a common logical
 block size across FullAttention groups. `kv_both`, MLA, and FP16/FP8
 compressed KV are unsupported and fail explicitly. No adaptive selection or
 Mooncake Store compression is implemented here.
-Sleep mode is unsupported when compression is enabled;
+Sleep mode is unsupported when compression or raw aggregation is enabled;
 disabled compression retains native Mooncake's RDMA sleep support.
-`kv_lease_duration` is also unsupported with compression;
+`kv_lease_duration` is also unsupported with compression or raw aggregation;
 leave it unset to retain the existing session timeout. Native Mooncake keeps
 its lease-renewal support.
 The compression pipeline requires the connector's `LBHNC` (`HND`) layout;
@@ -182,7 +185,7 @@ and `kv_role=kv_consumer` on D.
 }
 ```
 
-`logical_blocks_per_chunk` trades codec and transfer overhead against workspace size
+`logical_blocks_per_chunk` trades codec/IPC overhead against workspace size
 and the quantization range. Its current default is 1; the example explicitly
 uses 64. `slot_count` controls reusable in-flight buffers. Connector GPU memory
 is reserved before automatic KV-cache sizing. With explicit
@@ -198,9 +201,9 @@ C++ compiler, and Ninja, and compiles during cache binding before requests.
 It preserves the wire profile of compatible Python configurations.
 Its startup probe does not invoke the Python Hadamard stage.
 
-The receiver holds each slot until its network write and GPU decode finish.
-If a transfer fails, it waits for the producer to drain pending writes before
-reusing slots. If draining cannot be confirmed, the worker fails closed.
+The helper emits a heartbeat; a stalled helper fails the worker rather than
+publishing completed blocks. Shutdown waits for a bounded interval and retains
+registered buffers if jobs cannot quiesce; vLLM's executor terminates that worker.
 Native RDMA submissions are unchanged. TCP submissions use at most 1,024
 descriptors and a 64 MiB aggregate target; a larger individual region stays intact.
 
@@ -208,4 +211,6 @@ The supported stage order is `transformer`, `quantizer`, `codec`; stages may
 be omitted. ANS alone preserves the KV values exactly. Adding a quantizer is
 lossy and can change model outputs. Omitting the pipeline selects a preset
 that includes quantization. Evaluate quality with the intended profile.
-Setting `enable-compression-pipeline=false` restores native raw transfer.
+Setting `enable-compression-pipeline=false` restores native raw transfer. The separate
+`raw_aggregate` transport gathers and scatters raw KV without transformation,
+quantization, or ANS. It uses the same helper and slot lifecycle.

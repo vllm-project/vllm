@@ -49,8 +49,6 @@ def get_compression_config(extra: dict[str, Any]) -> Any:
         raise ValueError(
             "Mooncake compression does not support kv_lease_duration; leave it unset."
         )
-    if aggregate is not None and aggregate is not False:
-        raise ValueError("Mooncake raw aggregation is not available in this version")
     return load_backend().CompressionConfig.from_extra_config(extra)
 
 
@@ -68,7 +66,7 @@ def build_memory_plan(
     for name, layer in specs.items():
         spec = layer.spec
         if layer.manager_cls is not FullAttentionManager:
-            raise ValueError("Mooncake compression requires full-attention layers")
+            continue
         if not isinstance(spec, AttentionSpec):
             raise ValueError(f"Invalid full-attention cache spec for {name}")
         if isinstance(spec, MLAAttentionSpec):

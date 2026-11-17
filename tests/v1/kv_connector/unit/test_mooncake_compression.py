@@ -50,11 +50,6 @@ def test_disabled_compression_does_not_import_backend(monkeypatch, extra):
     assert adapter.build_memory_plan(config, {}) is None
 
 
-def test_raw_aggregation_is_rejected():
-    with pytest.raises(ValueError, match="raw aggregation"):
-        adapter.get_compression_config({"raw_aggregate": True})
-
-
 def test_missing_backend_fails_explicitly(monkeypatch):
     def missing(name):
         raise ModuleNotFoundError(name)
@@ -110,12 +105,20 @@ def planned_adapter(monkeypatch):
     return config, spec, calls
 
 
-def test_plan_translates_cache_geometry(planned_adapter):
+def test_plan_translates_cache_geometry_and_excludes_raw_state(planned_adapter):
     config, spec, calls = planned_adapter
     result = adapter.build_memory_plan(
         config,
         {
             "model.layers.3.self_attn": FullAttentionManager.layer_config(spec),
+            "model.layers.2": MambaManager.layer_config(
+                MambaSpec(
+                    block_size=16,
+                    shapes=((4, 8),),
+                    dtypes=(torch.bfloat16,),
+                    num_heads=4,
+                ),
+            ),
         },
     )
     assert result.reserved_bytes == 123
@@ -128,22 +131,6 @@ def test_plan_translates_cache_geometry(planned_adapter):
         2,
         1,
     )
-
-
-def test_plan_rejects_mixed_cache_before_backend_allocation(planned_adapter):
-    config, spec, calls = planned_adapter
-    state = MambaSpec(
-        block_size=16, shapes=((4, 8),), dtypes=(torch.bfloat16,), num_heads=4
-    )
-    with pytest.raises(ValueError, match="full-attention layers"):
-        adapter.build_memory_plan(
-            config,
-            {
-                "model.layers.3.self_attn": FullAttentionManager.layer_config(spec),
-                "model.layers.2": MambaManager.layer_config(state),
-            },
-        )
-    assert not calls
 
 
 @pytest.mark.parametrize(

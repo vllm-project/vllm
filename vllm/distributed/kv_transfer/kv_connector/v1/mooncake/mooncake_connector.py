@@ -14,7 +14,8 @@ from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any, Final
+from itertools import groupby
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import msgspec
 import numpy as np
@@ -102,12 +103,29 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
 from .compression.adapter import create_worker_runtime, get_compression_config
-from .compression.inline import InlineCompression
 from .compression.protocol import (
+    KVPart,
     MooncakeXferMetadata,
     ReqId,
     TransferId,
 )
+from .compression.tokens import suffix_token_counts
+from .session_ipc import (
+    ConsumerMetadata,
+    ConsumerRequest,
+    DecodeChunkJob,
+    DrainSlotsJob,
+    EncodeChunkJob,
+    InitMessage,
+    JobDone,
+    OpenProducerJob,
+    ProducerAnnouncement,
+    ProducerMetadata,
+    ProducerPublish,
+    SlotAddresses,
+    validate_session_process_mode,
+)
+from .session_process import SessionProcess
 
 logger = init_logger(__name__)
 
@@ -135,6 +153,61 @@ def _align_transfer_blocks(local_group, remote_group, is_mamba):
     if len(local_group) > len(remote_group):
         local_group = local_group[-len(remote_group) :] if remote_group else []
     return local_group, remote_group
+
+
+def _compression_total_chunks(
+    logical_block_count: int, logical_blocks_per_chunk: int
+) -> int:
+    return (
+        (logical_block_count + logical_blocks_per_chunk - 1) // logical_blocks_per_chunk
+    ) * 2
+
+
+def _producer_session_metadata(
+    metadata: "MooncakeConnectorMetadata",
+) -> ProducerMetadata:
+    announced: list[ProducerAnnouncement] = []
+    published: list[ProducerPublish] = []
+    for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
+        if block_ids:
+            announced.append(
+                ProducerAnnouncement(
+                    p_req_id=p_req_id,
+                    transfer_id=transfer_id,
+                    local_block_ids=[list(group) for group in block_ids],
+                    num_tokens=metadata.num_tokens.get(p_req_id),
+                )
+            )
+        else:
+            published.append(
+                ProducerPublish(p_req_id=p_req_id, transfer_id=transfer_id)
+            )
+    return ProducerMetadata(
+        announced=announced,
+        published=published,
+        dropped=list(metadata.reqs_not_processed),
+    )
+
+
+def _consumer_session_metadata(
+    metadata: "MooncakeConnectorMetadata",
+) -> ConsumerMetadata:
+    requests: list[ConsumerRequest] = []
+    for pull_metas in metadata.reqs_to_recv.values():
+        for pull_meta in pull_metas.values():
+            requests.append(
+                ConsumerRequest(
+                    d_req_id=pull_meta.d_req_id,
+                    transfer_id=pull_meta.transfer_id,
+                    local_block_ids=[
+                        list(group) for group in pull_meta.local_block_ids
+                    ],
+                    num_tokens=pull_meta.num_tokens,
+                    remote_engine_id=pull_meta.remote_engine_id,
+                    remote_bootstrap_addr=pull_meta.remote_bootstrap_addr,
+                )
+            )
+    return ConsumerMetadata(requests=requests)
 
 
 try:
@@ -1563,12 +1636,16 @@ class MooncakeConnectorWorker:
                 "transport or separate producer/consumer workers."
             )
         self._compression_configured = compression_config is not None
-        self._inline_compression: InlineCompression | None = None
+        # The out-of-process session helper owns the ZMQ listener/receiver
+        # loops when enabled; the engine process only executes short jobs.
+        if compression_config is not None:
+            validate_session_process_mode()
+        self._session_process: SessionProcess | None = None
         self.sender_loop: asyncio.AbstractEventLoop | None = None
         self.receiver_loop: asyncio.AbstractEventLoop | None = None
 
         # For kv_both, we will act both prefiller and decoder.
-        if not self.is_kv_consumer:
+        if not self.is_kv_consumer and not self._compression_configured:
             # Background threads for sending kvcaches to D.
             # Each pool thread must be bound to the correct CUDA device
             # because CUDA device selection is thread-local.
@@ -1597,7 +1674,7 @@ class MooncakeConnectorWorker:
             self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
             self.bootstrap_server.start()
 
-        if not self.is_kv_producer:
+        if not self.is_kv_producer and not self._compression_configured:
             self.receiver_loop = asyncio.new_event_loop()
             self._mooncake_receiver_t = threading.Thread(
                 target=_async_loop, args=(self.receiver_loop,), daemon=True
@@ -1712,16 +1789,16 @@ class MooncakeConnectorWorker:
         if getattr(self, "_shutdown_complete", False):
             return
         self._shutdown_complete = True
-        inline = getattr(self, "_inline_compression", None)
-        if inline is not None:
+        session_process = getattr(self, "_session_process", None)
+        if session_process is not None:
             try:
-                inline.shutdown()
+                session_process.shutdown()
             except Exception:
                 logger.exception(
-                    "Compressed transfers did not drain; retaining registered memory"
+                    "Compression helper shutdown is unsafe; retaining registered memory"
                 )
                 return
-            self._inline_compression = None
+            self._session_process = None
         shared_engine = getattr(self, "_shared_engine", None)
         if shared_engine is not None:
             clear_shared_transfer_engine(shared_engine)
@@ -1825,14 +1902,10 @@ class MooncakeConnectorWorker:
         await self.register_worker_with_bootstrap()
 
         # Create async worker tasks that process items from the queue
-        sender_tasks = (
-            []
-            if self._compression_configured
-            else [
-                asyncio.create_task(self._sender_worker(sock))
-                for _ in range(self.num_sender_tasks)
-            ]
-        )
+        sender_tasks = [
+            asyncio.create_task(self._sender_worker(sock))
+            for _ in range(self.num_sender_tasks)
+        ]
 
         sender_tasks.append(asyncio.create_task(self._send_timeout_loop()))
         ready_event.set()
@@ -1840,18 +1913,6 @@ class MooncakeConnectorWorker:
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
-                if self._compression_configured:
-                    assert self._inline_compression is not None
-                    try:
-                        self._inline_compression.dispatch(
-                            identity, metadata_bytes, sock
-                        )
-                    except Exception:
-                        self._inline_compression.fail(
-                            "Invalid compressed Mooncake request"
-                        )
-                        raise
-                    continue
                 # Renew here, not in a sender worker: those can all be
                 # waiting for prefills, and the renewal must not wait.
                 heartbeat = self._decode_heartbeat(metadata_bytes)
@@ -2740,10 +2801,10 @@ class MooncakeConnectorWorker:
             self.kv_block_len_per_layer,
         )
 
-        if not self.is_kv_consumer and not self._compression_configured:
-            self._start_sender_listener()
+        # No need to launch server for D node.
+        if self.is_kv_consumer or self._compression_configured:
+            return
 
-    def _start_sender_listener(self) -> None:
         # httpx applies the timeout to each phase (connect, read, write, pool)
         # rather than to the whole request, so budget for all four.
         register_timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
@@ -2794,9 +2855,9 @@ class MooncakeConnectorWorker:
         into plain queues; draining them here keeps this call lock-free and
         non-blocking on the engine's critical path.
         """
-        inline = getattr(self, "_inline_compression", None)
-        if inline is not None:
-            inline.check_health()
+        helper = getattr(self, "_session_process", None)
+        if helper is not None:
+            helper.check_health()
         finished_sending_reqs: set[ReqId] = set()
         finished_recving_reqs: set[ReqId] = set()
         while True:
@@ -3123,16 +3184,9 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            if self._compression_configured:
-                assert self._inline_compression is not None
-                for pull_meta in pull_metas.values():
-                    asyncio.create_task(
-                        self._inline_compression.receive(worker_addr, pull_meta)
-                    )
-            else:
-                asyncio.create_task(
-                    self.receive_kv_from_single_worker(worker_addr, pull_metas)
-                )
+            asyncio.create_task(
+                self.receive_kv_from_single_worker(worker_addr, pull_metas)
+            )
 
     async def _query_bootstrap(self, remote_bootstrap_addr: str):
         """Query a bootstrap server, or wait for the query already running."""
@@ -3263,8 +3317,17 @@ class MooncakeConnectorWorker:
             asyncio.create_task(self._send_lease_heartbeat(remote_engine_id, heartbeat))
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
-        if self._compression_configured and self._inline_compression is None:
-            raise RuntimeError("Compression worker memory must be initialized")
+        if self._compression_configured:
+            assert self._session_process is not None, (
+                "Compression worker memory must be initialized before loading KV"
+            )
+            if not self.is_kv_producer and metadata.reqs_to_recv:
+                self._session_process.publish(_consumer_session_metadata(metadata))
+            if not self.is_kv_consumer and (
+                metadata.reqs_to_send or metadata.reqs_not_processed
+            ):
+                self._session_process.publish(_producer_session_metadata(metadata))
+            return
         if not self.is_kv_producer and metadata.reqs_to_recv:
             assert self.receiver_loop is not None
             asyncio.run_coroutine_threadsafe(
@@ -3393,20 +3456,45 @@ class MooncakeConnectorWorker:
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
-        if getattr(self, "compression", None) is not None:
-            # All registered regions are full attention when compression is enabled.
-            local_regions, remote_regions = [], []
-        elif (
-            _get_tp_ratio(self.tp_size, meta.remote_tp_size) == 1
-            or self._producer_cache_is_replicated()
+        compression = getattr(self, "compression", None)
+        compressed_layers = set()
+        if compression is not None and compression.config.pipeline:
+            compressed_layers = {
+                part.layer_name for part in compression.layout.layer_parts
+            }
+            fa_groups = compression.fa_group_indices
+            for region in local_regions:
+                groups = set(region.shared_group_ids or (region.group_index,))
+                if groups & fa_groups and not groups <= fa_groups:
+                    return finish(
+                        [],
+                        [],
+                        "Compressed KV and raw state must have separate "
+                        "transfer regions.",
+                    )
+        tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
+        covered_both_sides = len(local_regions) == len(pre_align_local) and len(
+            remote_regions
+        ) == len(pre_align_remote)
+        raw_local: list[TransferRegion] = []
+        raw_remote: list[TransferRegion] = []
+        # Compressed layers are barriers: raw spans must not cover their bytes.
+        for compressed, pairs in groupby(
+            zip(local_regions, remote_regions),
+            key=lambda pair: pair[0].layer_name in compressed_layers,
         ):
-            covered_both_sides = len(local_regions) == len(pre_align_local) and len(
-                remote_regions
-            ) == len(pre_align_remote)
-            local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
-                local_regions, remote_regions, promote_full_row=covered_both_sides
-            )
-        prepared = (local_regions, remote_regions, None)
+            if compressed:
+                continue
+            local_run, remote_run = map(list, zip(*pairs))
+            if tp_ratio == 1 or self._producer_cache_is_replicated():
+                local_run, remote_run = _coalesce_contiguous_transfer_regions(
+                    local_run,
+                    remote_run,
+                    promote_full_row=covered_both_sides and not compressed_layers,
+                )
+            raw_local.extend(local_run)
+            raw_remote.extend(remote_run)
+        prepared = (raw_local, raw_remote, None)
         self._prepared_transfer_regions[cache_key] = prepared
         self._remember_peer_layout(meta, prepared)
         return prepared
@@ -3601,12 +3689,10 @@ class MooncakeConnectorWorker:
         self.transfer_backend.register_regions(
             self._memory_regions(compression_ptrs, compression_lens)
         )
-        self._inline_compression = InlineCompression(self)
-        if not self.is_kv_consumer:
-            self._start_sender_listener()
+        self._start_session_process()
         logger.info(
-            "Initialized Mooncake in-process compression pool: "
-            "transport=%s reserved=%d arena=%d "
+            "Initialized Mooncake compression fixed pool in session "
+            "helper process: transport=%s reserved=%d arena=%d "
             "aux_per_slot=%d workspace=%d slots=%d",
             plan.config.transport,
             plan.reserved_bytes,
@@ -3614,6 +3700,65 @@ class MooncakeConnectorWorker:
             plan.layout.aux_arena_bytes,
             plan.codec_workspace_bytes,
             plan.config.slot_count,
+        )
+
+    def _start_session_process(self) -> None:
+        assert self.compression is not None
+        bootstrap_host, bootstrap_port = get_mooncake_bootstrap_addr(self.vllm_config)
+        needs_sender = not self.is_kv_consumer
+        init = InitMessage(
+            needs_sender=needs_sender,
+            needs_receiver=not self.is_kv_producer,
+            register_with_bootstrap=needs_sender,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            pp_rank=self.pp_rank,
+            pp_size=self.pp_size,
+            engine_id=self.engine_id,
+            dp_rank=self.dp_rank if self.dp_rank is not None else 0,
+            hostname=self.hostname,
+            rpc_port=self.rpc_port,
+            bootstrap_host=bootstrap_host,
+            bootstrap_port=bootstrap_port,
+            slot_addresses=[
+                SlotAddresses(
+                    payload=slot.arena_a.data_ptr(),
+                    aux=slot.aux.data_ptr(),
+                    tail=slot.raw_tail.data_ptr() if slot.raw_tail is not None else 0,
+                )
+                for slot in self.compression.slots
+            ],
+            kv_caches_base_addr=self.kv_caches_base_addr,
+            block_lens=self.block_len_per_layer,
+            kv_block_lens=self.kv_block_len_per_layer,
+            registered_layer_names=self.registered_layer_names,
+            registered_layer_indices=self.registered_layer_indices,
+            registered_group_indices=self.registered_group_indices,
+            registered_shared_group_ids=[
+                list(groups) for groups in self.region_shared_groups
+            ],
+            registered_row_offsets=self.region_row_offsets,
+            abort_timeout_s=float(envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT),
+            compression_profile=self.compression.wire_profile,
+            logical_blocks_per_chunk=self.compression.config.logical_blocks_per_chunk,
+            fa_group_block_sizes=self._compression_block_sizes(),
+        )
+        self._session_process = SessionProcess(
+            handler=self._session_process_execute,
+            init=init,
+            finished_sending=self._finished_sending,
+            finished_recving=self._finished_recving,
+            invalid_block_ids=self._invalid_block_ids,
+            failed_recving=self._failed_recv_reqs if self._is_hma_required else None,
+            stats=self.xfer_stats,
+            device_id=self.device_id,
+        )
+        self._session_process.start()
+        logger.info(
+            "Mooncake compression session helper started: transport=%s role=%s port=%d",
+            self.compression.config.transport,
+            "producer" if needs_sender else "consumer",
+            self._session_process.side_channel_port,
         )
 
     def _compression_block_sizes(self) -> dict[int, int]:
@@ -3686,6 +3831,143 @@ class MooncakeConnectorWorker:
             )
         return codec_bytes
 
+    def _session_process_execute(self, job) -> JobDone:
+        if isinstance(job, OpenProducerJob):
+            return self._session_job_open_producer(job)
+        if isinstance(job, EncodeChunkJob):
+            return self._session_job_encode_chunk(job)
+        if isinstance(job, DecodeChunkJob):
+            return self._session_job_decode_chunk(job)
+        if isinstance(job, DrainSlotsJob):
+            return self._session_job_drain_slots(job)
+        raise ValueError(f"Unsupported session job {type(job).__name__}")
+
+    def _session_job_open_producer(self, job: OpenProducerJob) -> JobDone:
+        assert self.compression is not None
+        metadata = job.metadata
+        if (
+            metadata.remote_tp_size != self.tp_size
+            or metadata.remote_pp_size != self.pp_size
+        ):
+            raise ValueError(
+                "Compressed Mooncake transport requires matching TP/PP topology"
+            )
+        raw = not self.compression.config.pipeline
+        send_meta = SendBlockMeta(
+            p_req_id="",
+            transfer_id=job.transfer_id,
+            local_block_ids=job.local_block_ids,
+            ready=asyncio.Event(),
+            expire_time=float("inf"),
+            need_send=0,
+            sent=0,
+            sending=0,
+            num_tokens=job.num_tokens,
+        )
+        local_ids, remote_ids = self._match_compression_blocks(
+            send_meta, metadata.req_blocks[job.d_req_id][1]
+        )
+        if raw:
+            valid_tokens_by_group: dict[int, int] = {}
+        else:
+            assert send_meta.num_tokens is not None
+            valid_tokens_by_group = suffix_token_counts(
+                send_meta.num_tokens, remote_ids, self._compression_block_sizes()
+            )
+        local_regions, remote_regions, align_err = self._prepare_transfer_regions(
+            metadata
+        )
+        if align_err is not None:
+            raise ValueError(align_err)
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = self._build_transfer_params_sync(
+            [(job.d_req_id, send_meta)],
+            metadata,
+            local_regions,
+            remote_regions,
+        )
+        if err_reqs:
+            raise RuntimeError(err_msg or "Raw KV transfer planning failed.")
+        if len(src_ptrs):
+            remote_session = f"{metadata.remote_hostname}:{metadata.remote_port}"
+            error = self._send_blocks(remote_session, src_ptrs, dst_ptrs, lengths)
+            if error is not None:
+                raise RuntimeError(f"Mooncake raw transfer failed: {error}")
+        if raw:
+            logical_count = 0
+        else:
+            logical_count = len(
+                remote_ids[next(iter(self.compression.fa_group_indices))]
+            )
+        total_chunks = (
+            _compression_total_chunks(
+                logical_count, self.compression.config.logical_blocks_per_chunk
+            )
+            if not raw
+            else 0
+        )
+        return JobDone(
+            job_id=job.job_id,
+            logical_block_count=logical_count,
+            total_chunks=total_chunks,
+            local_block_ids=local_ids,
+            valid_tokens_by_group=valid_tokens_by_group,
+        )
+
+    def _session_job_encode_chunk(self, job: EncodeChunkJob) -> JobDone:
+        assert self.compression is not None
+        kv_part = cast(KVPart, job.chunk_id % 2)
+        encoded = self.compression.encode(
+            job.slot_id,
+            job.local_block_ids,
+            kv_part,
+            valid_tokens_by_group=job.valid_tokens_by_group,
+        )
+        aux_bytes = self.compression.aux_bytes(kv_part, job.valid_tokens_by_group)
+        slot = self.compression.slots[job.slot_id]
+        codec_bytes = self._send_compressed_blocks(
+            encoded,
+            job.remote_session,
+            slot.arena_a.data_ptr(),
+            slot.aux.data_ptr(),
+            job.payload_addr,
+            job.aux_addr,
+            job.tail_addr,
+            aux_bytes,
+        )
+        return JobDone(
+            job_id=job.job_id,
+            u8_bytes=encoded.u8_bytes,
+            codec_bytes=codec_bytes,
+        )
+
+    def _session_job_decode_chunk(self, job: DecodeChunkJob) -> JobDone:
+        assert self.compression is not None
+        kv_part = cast(KVPart, job.chunk_id % 2)
+        event = self.compression.decode(
+            job.slot_id,
+            job.local_block_ids,
+            kv_part,
+            job.codec_bytes,
+            job.u8_bytes,
+            valid_tokens_by_group=job.valid_tokens_by_group,
+        )
+        event.synchronize()
+        return JobDone(job_id=job.job_id)
+
+    def _session_job_drain_slots(self, job: DrainSlotsJob) -> JobDone:
+        assert self.compression is not None
+        for slot_id in job.slot_ids:
+            event = torch.cuda.Event()
+            event.record(self.compression.streams[slot_id])
+            event.synchronize()
+        return JobDone(job_id=job.job_id)
+
     def _sweep_expired_sends(self) -> None:
         """Free blocks of requests that were never sent to the remote side."""
         now = time.perf_counter()
@@ -3728,8 +4010,6 @@ class MooncakeConnectorWorker:
         while True:
             await asyncio.sleep(0.1)
             self._sweep_expired_sends()
-            if self._inline_compression is not None:
-                self._inline_compression.expire()
 
 
 def _normalize_paired_block_order(
