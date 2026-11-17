@@ -351,8 +351,8 @@ class UBatchRunner:
             else None
             for _ in range(self.num_ubatches)
         ]
-        self.comm_stream = torch.cuda.Stream(
-            device=device, priority=dbo_comm_stream_priority()
+        self.comm_stream = current_platform.create_ubatch_comm_stream(
+            device, dbo_comm_stream_priority()
         )
         # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)

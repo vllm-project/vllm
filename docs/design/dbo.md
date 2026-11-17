@@ -67,6 +67,8 @@ The batch is sliced before its attention metadata is built. `prepare` splits the
 
 Capture uses the same path through `begin_capturable_run`, which parks the threads before the caller enters the capture context. `CudaGraphManager` adds a microbatched capture candidate for each eligible uniform Full graph. Once a DBO CUDA graph has been captured, it can be replayed without any multithreading or CPU synchronization.
 
+The runner creates the communication stream with `Platform.create_ubatch_comm_stream`. On ROCm this is a CU-masked stream (mask: every CU). HIP maps the other streams of a process onto a pool of `GPU_MAX_HW_QUEUES` hardware queues whatever their priority, so a pooled communication stream can land on the compute stream's queue, where the all-reduce serializes with compute for the life of the server. A CU-masked stream gets a queue outside that pool. Serve DBO on ROCm with `GPU_MAX_HW_QUEUES=3`: with the default of 4, the extra queue can share a command-processor pipe with the compute stream's queue and slow the step by a few percent (observed on MI350X, TP2, not checked on other parts). With `DEBUG_HIP_DYNAMIC_QUEUES=0`, which assigns queues in creation order, the compute stream always lands on that queue, so set `GPU_MAX_HW_QUEUES=3` there too. If the CU-masked stream cannot be created, the runner logs a warning and uses a pooled stream.
+
 ### UBatchContext
 
 `UBatchContext`, in `vllm/v1/worker/ubatching.py`, is a `ForwardContext` wrapper class that is used by `UBatchRunner` to synchronize the two UBatch threads. It should only be instantiated by using `make_ubatch_contexts`.
