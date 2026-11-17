@@ -472,7 +472,7 @@ CUtensorMap make_tensor_map(const void* ptr, uint64_t rows, uint64_t cols,
   const CUresult res = get_encode_fn()(
       &map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, const_cast<void*>(ptr), dims,
       strides, box, elem_strides, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle,
-      CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   STD_TORCH_CHECK(res == CUDA_SUCCESS,
                   "cuTensorMapEncodeTiled failed: ", static_cast<int>(res));
   return map;
