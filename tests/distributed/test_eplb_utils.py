@@ -13,12 +13,18 @@ import torch.multiprocessing as mp
 
 import vllm.config.parallel as parallel_config_module
 import vllm.distributed.eplb.eplb_state as eplb_state_module
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.parallel import EPLBConfig
 from vllm.config.utils import hash_config_cached
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.distributed.eplb.eplb_state import (
     EplbModelState,
     EplbState,
+    _node_count_with_rank_mapping,
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import AbstractEplbPolicy, EplbStats
@@ -26,7 +32,12 @@ from vllm.distributed.eplb.rebalance_execute import (
     AsyncEplbLayerResult,
     TransferMetadata,
 )
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    destroy_model_parallel,
+    get_ep_group,
+)
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
@@ -554,6 +565,95 @@ def test_async_rearrangement_overrun_warning_names_slowest_rank():
     the progress all-reduce, and only rank 0 logs the rank that is behind.
     """
     mp.spawn(_overrun_warning_worker, args=(2, get_open_port()), nprocs=2, join=True)
+
+
+def _rank_node_ids_worker(rank: int, init_method: str) -> None:
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2, distributed_executor_backend="mp"
+        )
+    )
+    with set_current_vllm_config(config):
+        init_distributed_environment(
+            world_size=2,
+            rank=rank,
+            local_rank=rank,
+            distributed_init_method=init_method,
+            backend="gloo",
+            timeout=timedelta(seconds=30),
+        )
+        initialize_model_parallel(tensor_model_parallel_size=2, backend="gloo")
+        try:
+            state = EplbState(ParallelConfig(), torch.device("cpu"))
+            original_group = get_ep_group().cpu_group
+            node_ids = state.get_rank_node_ids()
+            assert node_ids == (0, 0)
+            if rank == 0:
+                # Rank 1 proceeds to the barrier, so a cache miss cannot succeed.
+                assert state.get_rank_node_ids() is node_ids
+            dist.barrier(group=original_group)
+
+            destroy_model_parallel()
+            replacement = VllmConfig(
+                parallel_config=ParallelConfig(
+                    pipeline_parallel_size=2, distributed_executor_backend="mp"
+                )
+            )
+            with set_current_vllm_config(replacement):
+                initialize_model_parallel(
+                    pipeline_model_parallel_size=2, backend="gloo"
+                )
+                assert get_ep_group().cpu_group is not original_group
+                assert state.get_rank_node_ids() == (0,)
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+@pytest.mark.cpu_test
+def test_rank_node_ids_are_cached_until_the_ep_group_changes(tmp_path):
+    """Cached reads need no peer participation; a new EP group gets new IDs."""
+    mp.spawn(
+        _rank_node_ids_worker,
+        args=(f"file://{tmp_path}/store",),
+        nprocs=2,
+        join=True,
+    )
+
+
+def _node_count_mapping_worker(rank: int, init_method: str, port: int) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        stateless = StatelessProcessGroup.create(
+            "127.0.0.1", port, rank, 2, store_timeout=30
+        )
+        for group in (dist.group.WORLD, stateless):
+            assert _node_count_with_rank_mapping(group, {0: 0, 1: 1}) == 1
+            assert _node_count_with_rank_mapping(group, {0: -1, 1: 0}) == 1
+            assert _node_count_with_rank_mapping(group, {0: -1, 1: -1}) == 0
+        for member in range(2):
+            group = dist.new_group(ranks=[member], backend="gloo")
+            if rank == member:
+                assert _node_count_with_rank_mapping(group, {0: 0}) == 1
+                assert _node_count_with_rank_mapping(group, {0: -1}) == 1
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.cpu_test
+def test_node_count_keeps_rank_remapping_and_single_rank_semantics(tmp_path):
+    """Native and stateless groups count retained nodes through the same path."""
+    mp.spawn(
+        _node_count_mapping_worker,
+        args=(f"file://{tmp_path}/store", get_open_port()),
+        nprocs=2,
+        join=True,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
