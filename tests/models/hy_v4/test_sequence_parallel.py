@@ -11,7 +11,11 @@ from vllm.outputs import CompletionOutput
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 
 
-def _check_ihc_rows(worker, min_tokens):
+def _keep_ihc_rows_replicated(worker):
+    worker.model_runner.model.model.ihc_sequence_parallel = False
+
+
+def _check_ihc_rows(worker, sequence_parallel):
     from vllm.distributed import get_tensor_model_parallel_world_size
     from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.attention.sparse_mla_attention import (
@@ -36,7 +40,7 @@ def _check_ihc_rows(worker, min_tokens):
     def check_rows(module, args):
         expected = (
             (current_rows + world - 1) // world
-            if current_rows >= min_tokens
+            if sequence_parallel and current_rows >= 1024
             else current_rows
         )
         assert args[0].shape[0] == expected, (
@@ -57,7 +61,7 @@ def _check_ihc_rows(worker, min_tokens):
 def test_ihc_shards_rows_and_preserves_generation(
     vllm_runner, tmp_path, monkeypatch, enforce_eager
 ):
-    """Keep iHC rows local with ShardQ, odd chunks, shared indexers and replay."""
+    """Shard iHC rows with and without ShardQ and preserve generation."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = HYV4Config(
         vocab_size=1024,
@@ -72,20 +76,20 @@ def test_ihc_shards_rows_and_preserves_generation(
         n_shared_experts=1,
         num_experts_per_tok=2,
         index_n_heads=32,
-        index_topk=512,
         indexer_types=["full", "shared"],
         layer_types=["deepseek_sparse_attention"] * 2,
-        max_position_embeddings=1024,
+        max_position_embeddings=4096,
         num_nextn_predict_layers=0,
     )
     config.architectures = ["HYV4ForCausalLM"]
     config.save_pretrained(tmp_path)
     prompts = [
-        {"prompt_token_ids": [2 + i % 997 for i in range(n)]} for n in (769, 17, 3)
+        {"prompt_token_ids": [2 + i % 997 for i in range(n)]} for n in (3073, 17, 3)
     ]
     sampling = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True, logprobs=16)
     outputs: list[list[CompletionOutput]] = []
-    for use_shardq in (False, True):
+    modes = [(False, False), (True, False), (True, True)]
+    for sequence_parallel, use_shardq in modes:
         with vllm_runner(
             str(tmp_path),
             load_format="dummy",
@@ -94,8 +98,8 @@ def test_ihc_shards_rows_and_preserves_generation(
             enable_expert_parallel=True,
             dtype="bfloat16",
             enforce_eager=enforce_eager,
-            max_model_len=1024,
-            max_num_batched_tokens=255,
+            max_model_len=4096,
+            max_num_batched_tokens=1025,
             max_num_seqs=4,
             enable_chunked_prefill=True,
             enable_prefix_caching=True,
@@ -108,24 +112,33 @@ def test_ihc_shards_rows_and_preserves_generation(
             },
             gpu_memory_utilization=0.1,
         ) as runner:
-            if use_shardq and enforce_eager:
-                runner.llm.collective_rpc(partial(_check_ihc_rows, min_tokens=64))
+            if not sequence_parallel:
+                runner.llm.collective_rpc(_keep_ihc_rows_replicated)
+            if enforce_eager:
+                runner.llm.collective_rpc(
+                    partial(_check_ihc_rows, sequence_parallel=sequence_parallel)
+                )
             runs: list[CompletionOutput] = []
             for batch in (prompts, prompts[:1]):
                 result = runner.llm.generate(batch, sampling, use_tqdm=False)
                 runs.extend(r.outputs[0] for r in result)
             outputs.append(runs)
-            if use_shardq and enforce_eager:
+            if enforce_eager:
                 observed = runner.llm.collective_rpc(
                     lambda worker: worker.ihc_token_rows
                 )
                 assert all(
-                    any(full > local and shardq for full, local, shardq in rows)
+                    any(
+                        (full > local) == sequence_parallel and shardq == use_shardq
+                        for full, local, shardq in rows
+                        if full >= 1024
+                    )
                     for rows in observed
-                ), "iHC SP and attention ShardQ did not run together"
-    check_logprobs_close(
-        outputs_0_lst=[(list(r.token_ids), r.text, r.logprobs) for r in outputs[0]],
-        outputs_1_lst=[(list(r.token_ids), r.text, r.logprobs) for r in outputs[1]],
-        name_0="replicated",
-        name_1="sequence-parallel",
-    )
+                ), "iHC SP and attention ShardQ were not selected independently"
+    for (_, use_shardq), runs in zip(modes[1:], outputs[1:]):
+        check_logprobs_close(
+            outputs_0_lst=[(list(r.token_ids), r.text, r.logprobs) for r in outputs[0]],
+            outputs_1_lst=[(list(r.token_ids), r.text, r.logprobs) for r in runs],
+            name_0="replicated",
+            name_1=f"sequence-parallel, shardq={use_shardq}",
+        )

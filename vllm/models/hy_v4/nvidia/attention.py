@@ -255,7 +255,7 @@ class HYV4MLAAttention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         layer_idx: int = 0,
-        sequence_parallel: bool = False,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.config = config
@@ -364,6 +364,14 @@ class HYV4MLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+            reduce_results=reduce_results,
+        )
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             max_position=max_position_embeddings,
@@ -465,14 +473,6 @@ class HYV4MLAAttention(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             attn_backend=sink_backend,
             **extra_impl_args,
-        )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-            reduce_results=not (sequence_parallel and self.mla_attn.use_shardq),
         )
 
     @property
