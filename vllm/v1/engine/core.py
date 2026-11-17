@@ -1354,6 +1354,8 @@ _INPUTS_HANDLED_DURING_STEP = (
 # While waiting for a step's output, how long to busy-poll for new inputs
 # before falling back to a blocking wait for the output.
 _INPUT_SPIN_DURATION_S = 1.0
+# With a free batch slot, how often to check for new requests after spinning.
+_INPUT_POLL_INTERVAL_S = 0.001
 
 
 class EngineCoreProc(EngineCore):
@@ -1995,6 +1997,10 @@ class EngineCoreProc(EngineCore):
                     # Spin on something cheaper than poll(), to leave the GIL
                     # free more of the time for the input and output threads.
                     wait_briefly(pending_inputs, spin_deadline)
+                elif stop_on_add:
+                    # A new request could use the free batch slot, so keep
+                    # checking, but without holding the GIL.
+                    time.sleep(_INPUT_POLL_INTERVAL_S)
                 else:
                     # Long-running step: stop busy-looping and block until the
                     # output arrives. Later inputs are handled after the step.
