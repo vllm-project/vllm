@@ -63,6 +63,22 @@ The environment variables:
 !!! warning
     Claude Code recently started injecting a per-request hash in the system prompt, which can defeat [prefix caching](../../design/prefix_caching.md) because the prompt changes on every request, causing greatly reduced performance. This is addressed automatically in vLLM versions > 0.17.1 but for older versions `"CLAUDE_CODE_ATTRIBUTION_HEADER": "0"` should be added to the `"env"` section of `~/.claude/settings.json` (see this [blog post](https://unsloth.ai/docs/basics/claude-code#fixing-90-slower-inference-in-claude-code) from Unsloth).
 
+## Tool Search
+
+Claude Code defers MCP tools and some built-in tools, such as `WebFetch`, and loads them with its `ToolSearch` tool, whose results are `tool_reference` blocks that name the tools. The model's chat template must render these blocks, for example by printing each referenced tool's definition from `tools`, as the GLM-5.1 and GLM-5.3 templates do. If the template doesn't, vLLM rejects the request with a 400, and Claude Code (v2.1.305 or later) retries it without tool search, with all tools loaded upfront.
+
+To keep tool search, pass a chat template that renders `tool_reference` with `--chat-template`. For Muse Spark Open, one is proposed in [this pull request](https://huggingface.co/meta-models/Muse-Spark-Open-816B-A42B-NVFP4/discussions/17):
+
+```bash
+hf download meta-models/Muse-Spark-Open-816B-A42B-NVFP4 chat_template.jinja \
+    --revision refs/pr/17 --local-dir muse-spark-template
+vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 --served-model-name my-model \
+    --enable-auto-tool-choice --tool-call-parser muse --reasoning-parser muse \
+    --chat-template muse-spark-template/chat_template.jinja
+```
+
+To avoid the rejected request instead, set `ENABLE_TOOL_SEARCH=false` so Claude Code loads all tools upfront.
+
 ## Testing the Setup
 
 Once Claude Code launches, try a simple prompt to verify the connection:

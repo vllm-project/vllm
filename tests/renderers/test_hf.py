@@ -1018,8 +1018,9 @@ SEARCH_TOOLS = [
 
 
 class TestSafeApplyChatTemplateToolReference:
-    """Claude Code's ToolSearch returns tool_reference parts that name tools;
-    templates that skip them would show the model an empty search result."""
+    """Claude Code's ToolSearch returns tool_reference parts that name tools.
+    Templates that skip them would show an empty search result, so the request
+    is rejected and Claude Code retries without tool search."""
 
     @pytest.fixture
     def model_config(self):
@@ -1046,69 +1047,17 @@ class TestSafeApplyChatTemplateToolReference:
             tokenize=False,
         )
 
-    def test_expanded_to_definition(self, model_config, tokenizer):
-        result = self._render(
-            model_config, tokenizer, TEXT_PARTS_TEMPLATE, "jira_add_comment"
-        )
-        assert (
-            '<|im_start|>tool\n{"name":"jira_add_comment",'
-            '"description":"Add a comment to a Jira issue.",'
-            '"parameters":{"type":"object","properties":{}}}<|im_end|>'
-        ) in result
-
-    def test_unknown_tool_rendered_by_name(self, model_config, tokenizer):
-        result = self._render(model_config, tokenizer, TEXT_PARTS_TEMPLATE, "missing")
-        assert "<|im_start|>tool\nmissing<|im_end|>" in result
+    def test_rejected_when_template_skips_it(self, model_config, tokenizer):
+        with pytest.raises(VLLMValidationError, match="tool search"):
+            self._render(
+                model_config, tokenizer, TEXT_PARTS_TEMPLATE, "jira_add_comment"
+            )
 
     def test_template_support_preserved(self, model_config, tokenizer):
         result = self._render(
             model_config, tokenizer, TOOL_REFERENCE_TEMPLATE, "jira_add_comment"
         )
         assert "<|im_start|>tool\nREF:jira_add_comment<|im_end|>" in result
-
-    def test_search_keeps_prompt_prefix(self, model_config, tokenizer):
-        """Claude Code adds the found tool to `tools` and reorders its deferred
-        placeholder on the request after a search; the prefix must still hold.
-        Deferred tools are not rendered, as on GLM-5.3 and Fireworks."""
-        template = (
-            "{% for tool in tools %}{{ tool['function']['name'] }}\n{% endfor %}"
-            + TEXT_PARTS_TEMPLATE
-        )
-
-        def tool(name, deferred=False):
-            fn = {"name": name, "parameters": {"type": "object"}}
-            return {"type": "function", "function": fn, "defer_loading": deferred}
-
-        before: list[ConversationMessage] = [{"role": "user", "content": "hi"}]
-        after = before + [
-            {
-                "role": "tool",
-                "tool_call_id": "t1",
-                "content": [{"type": "tool_reference", "name": "jira_add_comment"}],
-            }
-        ]
-
-        def render(conversation, tools):
-            return safe_apply_chat_template(
-                model_config,
-                tokenizer,
-                conversation,
-                tools=tools,
-                chat_template=template,
-                tokenize=False,
-            )
-
-        prefix = render(before, tools=[tool("Placeholder", True), tool("Bash")])
-        result = render(
-            after,
-            tools=[
-                tool("Bash"),
-                tool("jira_add_comment", True),
-                tool("Placeholder", True),
-            ],
-        )
-        assert result.startswith(prefix)
-        assert '"name":"jira_add_comment"' in result
 
 
 EFFORT_VALIDATING_TEMPLATE = (
