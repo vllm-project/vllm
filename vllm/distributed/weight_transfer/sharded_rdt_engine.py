@@ -418,16 +418,37 @@ class ShardedRDTWeightTransferEngine(
                     return
                 inflight[hooks.issue(bucket, sync_idx)] = bucket
 
+        # seconds spent waiting for producers, fetching, and applying
+        spent = [0.0, 0.0, 0.0]
+
         def land(ready: list[Any]) -> None:
             # Returning drops the handles, which frees the producers' pool
             # blocks before the next pulls are issued.
-            for handle, tensors in zip(ready, hooks.get(ready)):
+            t0 = time.perf_counter()
+            fetched = hooks.get(ready)
+            t1 = time.perf_counter()
+            for handle, tensors in zip(ready, fetched):
                 self._apply(inflight.pop(handle), tensors)
+            spent[1] += t1 - t0
+            spent[2] += time.perf_counter() - t1
 
+        t_start = time.perf_counter()
         refill()
         while inflight:
-            land(hooks.wait(list(inflight)))
+            t0 = time.perf_counter()
+            ready = hooks.wait(list(inflight))
+            spent[0] += time.perf_counter() - t0
+            land(ready)
+            del ready
             refill()
+        logger.info(
+            "Sharded RDT sync %d: %d pulls in %.2f s (waiting %.2f s, fetching "
+            "%.2f s, applying %.2f s)",
+            sync_idx,
+            len(self._buckets),
+            time.perf_counter() - t_start,
+            *spent,
+        )
 
     def _apply(self, bucket: _Bucket, tensors: list[torch.Tensor]) -> None:
         """Land a staged bucket; a direct one is already in place."""
