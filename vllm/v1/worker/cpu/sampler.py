@@ -928,13 +928,10 @@ class CPUWatermarkSampler(CPUSampler):
             )
 
         temperatures = self.sampling_states.temperature[expanded_idx_mapping]
-        needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
-        skip_mask = None
-        if needs_mixed_sampling:
-            watermarking = self.watermarking[expanded_idx_mapping] & (temperatures != 0)
-            if repeated_contexts is not None:
-                watermarking &= ~repeated_contexts
-            skip_mask = ~watermarking
+        watermarking = self.watermarking[expanded_idx_mapping] & (temperatures != 0)
+        skip_mask = ~watermarking | (contexts < 0).any(dim=-1)
+        if repeated_contexts is not None:
+            skip_mask |= repeated_contexts
 
         random_sampler = CPURandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,
