@@ -40,19 +40,32 @@ enum Api {
   API_RESPONSES = 4;
 }
 
+// Multimodal payload returned by raw-JSON rendering.
+enum MmPayload {
+  // Same as MM_PAYLOAD_TENSORS.
+  MM_PAYLOAD_UNSPECIFIED = 0;
+  MM_PAYLOAD_TENSORS = 1;
+  // Keep hashes and placeholder ranges, without inline kwargs tensors.
+  MM_PAYLOAD_NONE = 2;
+  // Metadata-only payload support follows in #65018.
+}
+
 message RenderRequest {
   Api api = 1;
   // Raw client JSON request body.
   bytes body = 2;
-  // Leave `kwargs` unset in `RenderResponse.media`, keeping the hashes and
-  // placeholder ranges. For callers that only route on the prompt layout, such
-  // as cache-aware routers; such media cannot be sent to Inference.Generate.
-  bool omit_media_kwargs = 3;
+  // Controls the returned media independently of `mm_payload` and
+  // `return_mm_kwargs` in the client JSON body, which do not select this mode.
+  MmPayload mm_payload = 3;
 }
 
 // Output of engine-free rendering.
 //
-// Copy each field into the GenerateRequest sent to Inference.Generate.
+// Copy these fields into the GenerateRequest sent to Inference.Generate.
+// Sampling and stopping values (including temperature, max_tokens, stop,
+// bad_words, and n) are not returned yet. The caller must supply the equivalent
+// generation parameters separately; copying only these fields is insufficient.
+// Tracked in https://github.com/vllm-project/vllm/issues/65503.
 message RenderResponse {
   // The rendered prompt, already truncated. Send as `token_ids`.
   repeated uint32 prompt_token_ids = 1;

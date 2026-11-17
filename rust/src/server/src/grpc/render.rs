@@ -34,7 +34,6 @@ use super::pb::render_server::{Render, RenderServer};
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
-use crate::routes::inference::generate::MmPayload;
 use crate::routes::openai::utils::types::Normalizable as _;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::openai::{ChatCompletionRequest, lower_chat_request};
@@ -178,12 +177,11 @@ async fn render(
         }
     }
 
-    if request.body.len() > crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES {
-        return Err(Status::invalid_argument(format!(
-            "request body exceeds limit of {} bytes",
-            crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES
-        )));
-    }
+    let omit_media_kwargs =
+        match enum_from_proto::<pb::MmPayload>(request.mm_payload, "mm_payload")? {
+            pb::MmPayload::Unspecified | pb::MmPayload::Tensors => false,
+            pb::MmPayload::None => true,
+        };
 
     let mut deserializer = serde_json::Deserializer::from_slice(&request.body);
     let mut body: ChatCompletionRequest = serde_path_to_error::deserialize(&mut deserializer)
@@ -198,9 +196,6 @@ async fn render(
     let lora_resolution = state.resolve_model(model).await;
 
     let n = body.n;
-    let omit_media_kwargs = request.omit_media_kwargs
-        || body.mm_payload == Some(MmPayload::None)
-        || body.return_mm_kwargs == Some(false);
 
     let request_id = body.request_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let request_context = ResolvedRequestContext {
@@ -219,8 +214,12 @@ async fn render(
     )
     .map_err(api_error_to_status)?;
 
-    let (prompt_token_ids, structured_output, engine_reasoning_gate, media) =
-        prepare_and_render_chat(state, chat_request, None, omit_media_kwargs).await?;
+    let RenderedChat {
+        prompt_token_ids,
+        structured_output,
+        engine_reasoning_gate,
+        media,
+    } = prepare_and_render_chat(state, chat_request, None, omit_media_kwargs).await?;
 
     Ok(pb::RenderResponse {
         prompt_token_ids,
@@ -239,14 +238,18 @@ async fn render_chat(
     let requested_structured_output = chat.structured_output.clone();
     let chat_request = to_chat_request(chat)?;
 
-    let (prompt_token_ids, structured_output, engine_reasoning_gate, media) =
-        prepare_and_render_chat(
-            state,
-            chat_request,
-            requested_structured_output,
-            omit_media_kwargs,
-        )
-        .await?;
+    let RenderedChat {
+        prompt_token_ids,
+        structured_output,
+        engine_reasoning_gate,
+        media,
+    } = prepare_and_render_chat(
+        state,
+        chat_request,
+        requested_structured_output,
+        omit_media_kwargs,
+    )
+    .await?;
 
     Ok(pb::RenderChatResponse {
         prompt_token_ids,
@@ -256,20 +259,19 @@ async fn render_chat(
     })
 }
 
+struct RenderedChat {
+    prompt_token_ids: Vec<u32>,
+    structured_output: Option<pb::StructuredOutput>,
+    engine_reasoning_gate: Option<pb::EngineReasoningGate>,
+    media: Vec<pb::MediaItem>,
+}
+
 async fn prepare_and_render_chat(
     state: &impl RenderContext,
     chat_request: ChatRequest,
     requested_structured_output: Option<pb::StructuredOutput>,
     omit_media_kwargs: bool,
-) -> Result<
-    (
-        Vec<u32>,
-        Option<pb::StructuredOutput>,
-        Option<pb::EngineReasoningGate>,
-        Vec<pb::MediaItem>,
-    ),
-    Status,
-> {
+) -> Result<RenderedChat, Status> {
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
 
     let text_request = state
@@ -317,12 +319,12 @@ async fn prepare_and_render_chat(
         )),
     });
 
-    Ok((
-        prepared.generate_request.prompt_token_ids,
+    Ok(RenderedChat {
+        prompt_token_ids: prepared.generate_request.prompt_token_ids,
         structured_output,
         engine_reasoning_gate,
         media,
-    ))
+    })
 }
 
 // ========================================================================================
