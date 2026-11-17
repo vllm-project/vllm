@@ -190,6 +190,21 @@ def test_option_limit(server):
     assert "at most 26 options" in over.json()["error"]["message"]
 
 
+def test_score_rejects_too_many_levels_before_checking_duplicates(server):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": "Priority: low.",
+            "questions": {
+                "priority": {"type": "score", "criteria": ["low"] * 11},
+            },
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "at most 10 options" in response.json()["error"]["message"]
+
+
 def test_thinking_is_refused(server):
     response = post(
         server,
