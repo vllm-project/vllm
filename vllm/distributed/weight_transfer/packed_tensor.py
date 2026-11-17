@@ -246,7 +246,7 @@ def packed_nccl_broadcast_consumer(
     caller_stream = torch.accelerator.current_stream()
     for stream in streams:
         stream.wait_stream(caller_stream)
-    prev_done: torch.Event | None = None  # the previous chunk's last work
+    prev_unpacked: torch.Event | None = None  # the previous chunk's copies
     slot_done: list[torch.Event | None] = [None] * num_buffers
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
@@ -261,15 +261,15 @@ def packed_nccl_broadcast_consumer(
         with torch.cuda.stream(streams[slot]):
             packed = torch.empty(chunk_bytes(pieces), dtype=torch.uint8, device=device)
             group.broadcast(packed, src=src)
-            # post_unpack_func may keep the unpacked tensors (and a split
-            # tensor's earlier rows are copied on another slot) and read them
-            # from a later chunk's callback, on another slot stream. Waiting
-            # for the previous chunk's work orders every unpack and callback
-            # after all earlier chunks' copies, and record_stream keeps the
-            # allocator from reissuing this buffer once it is freed while the
-            # broadcast or such a read is still pending.
-            if prev_done is not None:
-                streams[slot].wait_event(prev_done)
+            # post_unpack_func may keep the unpacked tensors and read them
+            # from a later chunk's callback, on another slot stream, and a
+            # split tensor's earlier rows are copied on another slot. Waiting
+            # for the previous chunk's unpack (its receive and copies) orders
+            # every later unpack and callback after them, and record_stream
+            # keeps the allocator from reissuing this buffer once it is freed
+            # while the broadcast or such a read is still pending.
+            if prev_unpacked is not None:
+                streams[slot].wait_event(prev_unpacked)
             for stream in (*streams, caller_stream):
                 packed.record_stream(stream)
             out = []
@@ -299,10 +299,13 @@ def packed_nccl_broadcast_consumer(
                     for stream in (*streams, caller_stream):
                         view.record_stream(stream)
                 out.append((names[index], view))
+            prev_unpacked = torch.Event()
+            prev_unpacked.record(streams[slot])
             if out:
                 post_unpack_func(out)
-            prev_done = slot_done[slot] = torch.Event()
-            prev_done.record(streams[slot])
+            event = torch.Event()
+            event.record(streams[slot])
+            slot_done[slot] = event
 
     # Drain every slot before returning.
     for stream in streams:
