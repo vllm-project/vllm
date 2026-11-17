@@ -479,3 +479,30 @@ def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
             MMEncoderAttention(4, 64)
     finally:
         vllm_config.model_config = old_model_config
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer requires CUDA")
+@pytest.mark.parametrize("flatten_heads", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mha_attn_fixed_length_flashinfer(flatten_heads, dtype):
+    """Fixed-length image batches must retain separate attention sequences."""
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model="HuggingFaceTB/SmolVLM-256M-Instruct",
+            mm_encoder_attn_backend="FLASHINFER",
+        )
+    )
+    set_random_seed(0)
+    with set_current_vllm_config(config), set_default_torch_dtype(dtype):
+        attn = MMEncoderAttention(4, 64)
+        # Interleaved QKV views match the vision projection's noncontiguous layout.
+        qkv = torch.randn(2, 64, 3, 4, 64, device="cuda", dtype=dtype)
+        q, k, v = qkv.unbind(2)
+        expected = ref_attention(q, k, v, scale=attn.scale)
+        if flatten_heads:
+            q, k, v = (x.flatten(2) for x in (q, k, v))
+            expected = expected.flatten(2)
+        actual = attn(q, k, v)
+        torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
