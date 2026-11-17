@@ -16,6 +16,7 @@ cold-start addresses."""
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
@@ -50,14 +51,15 @@ _SCALE = {"block": "weight_scale_inv", "tensor": "weight_scale"}
 
 
 @pytest.fixture
-def model_config(dist_init):
+def model_config():
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 
-    config = ModelConfig(
-        "facebook/opt-125m", dtype="bfloat16", skip_tokenizer_init=True
-    )
-    with set_current_vllm_config(VllmConfig(model_config=config)):
-        yield config
+    with override_parallel_groups(SingleRankGroup()):
+        config = ModelConfig(
+            "facebook/opt-125m", dtype="bfloat16", skip_tokenizer_init=True
+        )
+        with set_current_vllm_config(VllmConfig(model_config=config)):
+            yield config
 
 
 def _block_fp8(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:

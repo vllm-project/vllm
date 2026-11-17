@@ -170,6 +170,7 @@ steps:
   - vllm/models/hy_v4/
   - tests/models/quantization
   - tests/quantization/test_fp8_dequant.py
+  - tests/single_rank_group.py
   commands:
     - >-
       pytest -v -s
