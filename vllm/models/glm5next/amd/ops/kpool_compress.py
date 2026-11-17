@@ -978,8 +978,8 @@ def expand_pools_and_append_tail(
     If `out` is given (an int32 `[rows, W]` view with unit column stride,
     e.g. a row slice of `topk_indices_buffer`), the result is written there
     in place: columns `[0, topk + pool_size - 1)` as above and columns
-    `[topk + pool_size - 1, W)` set to -1. This replaces the caller's
-    `buffer[rows] = -1` fill and the `buffer[rows, :cols] = result` copy.
+    `[topk + pool_size - 1, W)` set to -1. The caller can then skip the -1
+    fill for the rows it covers and the `buffer[rows, :cols] = result` copy.
     """
     rows, n_groups = pool_ids.shape
     topk = n_groups * pool_size

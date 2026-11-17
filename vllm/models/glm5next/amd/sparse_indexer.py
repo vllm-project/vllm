@@ -294,7 +294,9 @@ def sparse_attn_indexer_kpool(
             )
 
     # The decode paths below write their rows full-width (tail -1 included),
-    # so only the rows after them need the -1 fill.
+    # so only the rows after them need the -1 fill. Every decode return taken
+    # while this is True must keep writing full width (marked below), or the
+    # previous step's indices survive in the tail columns.
     decode_rows_self_filled = (
         has_decode
         and index_kpool > 1
@@ -594,6 +596,7 @@ def sparse_attn_indexer_kpool(
             attn_metadata_narrowed.max_seq_len,
             topk_tokens,
         ):
+            # decode_rows_self_filled: must write full width.
             return topk_indices_buffer
         decode_lens = decode_metadata.decode_lens
         if decode_metadata.requires_padding:
@@ -701,6 +704,7 @@ def sparse_attn_indexer_kpool(
                 seq_len_offset=1,
                 out=topk_indices_buffer[:n],
             )
+            # decode_rows_self_filled: must write full width.
             return topk_indices_buffer
         if index_kpool > 1:
             pool_ids = pool_topk

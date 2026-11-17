@@ -686,11 +686,13 @@ def test_batched_matches_reference_fuzz(seed):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD kpool ops")
+@pytest.mark.parametrize("row_start", [0, 5])
 @pytest.mark.parametrize("rows", [1, 16, 64])
-def test_expand_pools_and_append_tail_in_place(rows):
+def test_expand_pools_and_append_tail_in_place(rows, row_start):
     """The fused in-place call the AMD indexer makes (int32 pool ids, int64
     positions, `seq_len_offset=1`, `out=` a wide buffer row slice) matches
-    `expand_pools_to_tokens` + `append_tail_to_topk`."""
+    `expand_pools_to_tokens` + `append_tail_to_topk`. `row_start` > 0 is the
+    prefill-chunk call, where `out` and `positions` are offset views."""
     from vllm.models.glm5next.amd.ops.kpool_compress import (
         append_tail_to_topk,
         expand_pools_and_append_tail,
@@ -701,14 +703,19 @@ def test_expand_pools_and_append_tail_in_place(rows):
     topk = n_groups * pool_size
     width = topk + 128  # topk_indices_buffer rows are wider than the result
     g = torch.Generator(device="cuda").manual_seed(rows)
-    positions = torch.randint(
-        0, 60000, (rows,), dtype=torch.int64, device="cuda", generator=g
+    positions_full = torch.randint(
+        0, 60000, (row_start + rows,), dtype=torch.int64, device="cuda", generator=g
     )
+    positions = positions_full[row_start : row_start + rows]
+    # A request's first decode steps: no complete pool, then exactly one.
+    first = torch.arange(min(rows, 5), device="cuda")
+    positions[: first.shape[0]] = first
     seq_lens = (positions + 1).to(torch.int32)
     pool_lens = seq_lens // pool_size
     rand = torch.rand(rows, n_groups, device="cuda", generator=g)
     pool_ids = (rand * pool_lens.clamp(min=1)[:, None]).to(torch.int32)
     pool_ids[rand < 0.15] = -1  # unused top-k slots
+    pool_ids[pool_lens == 0] = -1  # no complete pool to select yet
 
     expanded = expand_pools_to_tokens(
         pool_ids.to(torch.int64), pool_ids >= 0, topk, pool_size
@@ -717,10 +724,12 @@ def test_expand_pools_and_append_tail_in_place(rows):
     ref = torch.full((rows, width), -1, dtype=torch.int32, device="cuda")
     ref[:, : ref_rows.shape[1]] = ref_rows
 
-    buf = torch.full((rows + 3, width), 7, dtype=torch.int32, device="cuda")
+    end = row_start + rows
+    buf = torch.full((end + 3, width), 7, dtype=torch.int32, device="cuda")
     expand_pools_and_append_tail(
-        pool_ids, positions, pool_size, seq_len_offset=1, out=buf[:rows]
+        pool_ids, positions, pool_size, seq_len_offset=1, out=buf[row_start:end]
     )
 
-    torch.testing.assert_close(buf[:rows], ref, rtol=0, atol=0)
-    assert (buf[rows:] == 7).all()  # rows past the slice are untouched
+    torch.testing.assert_close(buf[row_start:end], ref, rtol=0, atol=0)
+    # Rows outside the slice are untouched.
+    assert (buf[:row_start] == 7).all() and (buf[end:] == 7).all()
