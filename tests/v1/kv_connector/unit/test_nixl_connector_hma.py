@@ -412,7 +412,7 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     backing = torch.full((4, 3, 8), 7, dtype=torch.uint8)
     caches = {"host": backing[:, 1], "indexer": backing[:, 2]}
     worker.device_kv_caches = caches
-    worker.region_names = list(caches)
+    worker.region_members = [[name] for name in caches]
     worker.kv_caches_base_addr = {"D": {0: [c.data_ptr() for c in caches.values()]}}
     worker.region_num_blocks = [4, 4]
     worker.block_len_per_layer = [8, 8]
@@ -1733,7 +1733,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
     }
     caches = {"mla.host": host_cache, "mla.device": device_cache}
     assert worker.kv_caches_base_addr[worker.engine_id][0] == [
-        caches[name].data_ptr() for name in worker.region_names
+        caches[name].data_ptr() for (name,) in worker.region_members
     ]
     assert worker.block_stride_per_layer == [physical_page_bytes] * 2
 

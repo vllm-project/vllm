@@ -41,7 +41,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
-from vllm.v1.attention.backends.gdn_attn import GDNSpec
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -69,6 +68,7 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     expand_strided_descs,
+    gdn_spec,
     make_kv_cache_group,
 )
 
@@ -161,8 +161,11 @@ def _make_packed_mla_view_worker(
     pp_size=1,
     backend_names=("FLASHMLA",),
     worker_cls=NixlPushConnectorWorker,
+    one_group=False,
 ):
-    """Register real strided views; only NIXL and distributed runtime are fake."""
+    """Register real strided views; only NIXL and distributed runtime are fake.
+
+    Each layer is a cache group of its own unless `one_group`."""
     block_size = 16
     raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
@@ -186,6 +189,8 @@ def _make_packed_mla_view_worker(
             raw, spec, num_blocks, KVCacheLayout.BLHNC, tensor
         )
 
+    if one_group:
+        groups = [KVCacheGroupSpec(list(layouts), spec)]
     config = create_vllm_config(block_size=block_size)
     config.parallel_config.pipeline_parallel_size = pp_size
     config.kv_transfer_config.kv_role = "kv_producer"
@@ -219,55 +224,78 @@ def _make_packed_mla_view_worker(
     "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
 )
 @pytest.mark.parametrize("num_layers", [1, 2])
-def test_packed_mla_pp1_transfers_whole_rows(num_layers, worker_cls):
-    # BLHNC packs every layer's page of a block in one row: register the row
-    # once so a block is one descriptor, not one per layer.
+@pytest.mark.parametrize("one_group", [True, False])
+def test_interleaved_mla_layers_of_a_group_move_one_descriptor_per_block(
+    num_layers, worker_cls, one_group
+):
+    # BLHNC interleaves every layer's page of a block. Each layer is a region;
+    # the abutting pages of a cache group move as one descriptor per block.
     layouts = {f"L{i}": (i * 128, 128) for i in range(num_layers)}
     stride = num_layers * 128
-    worker, raw = _make_packed_mla_view_worker(layouts, stride, worker_cls=worker_cls)
-    assert worker.num_regions == 1
+    worker, raw = _make_packed_mla_view_worker(
+        layouts, stride, worker_cls=worker_cls, one_group=one_group
+    )
+    assert worker.num_regions == num_layers
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
-    assert worker.region_members == [list(layouts)]
+    assert worker.region_members == [[name] for name in layouts]
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
-    assert metadata.packed_member_layouts == layouts
-    # Paired with a like remote, one packed region moves 4 whole rows.
+    assert metadata.block_lens == [128] * num_layers
+    assert metadata.block_strides == [stride] * num_layers
     metadata.engine_id = "remote"
     worker.add_remote_agent(metadata)
     local = worker.nixl_wrapper.dlists[worker._local_descs["remote"].handle]
-    assert local.tolist() == [
-        [raw.data_ptr() + b * stride, stride, 0] for b in range(4)
-    ]
+    remote = worker.nixl_wrapper.dlists[worker.dst_xfer_side_handles["remote"][0]]
+    if one_group:
+        expected = [[raw.data_ptr() + b * stride, stride, 0] for b in range(4)]
+    else:
+        # Cache groups move their own pages.
+        expected = [
+            [raw.data_ptr() + offset + b * stride, 128, 0]
+            for offset, _ in layouts.values()
+            for b in range(4)
+        ]
+    assert local.tolist() == remote.tolist() == expected
 
 
 @pytest.mark.cpu_test
-def test_per_layer_peer_addresses_pages_inside_packed_rows():
-    # E.g. a HiSparse decoder reading a BLHNC prefiller's whole-row region.
-    remote, raw = _make_packed_mla_view_worker({"L0": (64, 128)}, 192)
+def test_layer_region_addresses_its_pages_inside_interleaved_blocks():
+    worker, raw = _make_packed_mla_view_worker({"L0": (64, 128)}, 192)
     metadata = msgspec.msgpack.decode(
-        remote.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
-    assert metadata.block_lens == [192]
-    bw.NixlBaseConnectorWorker._expand_remote_packed_rows(metadata)
     assert metadata.kv_caches_base_addr == [raw.data_ptr() + 64]
     assert metadata.block_lens == [128]
     assert metadata.block_strides == [192]
-    assert metadata.region_names == ["L0"]
     assert metadata.region_members == [["L0"]]
-    assert metadata.packed_member_layouts == {}
 
 
 @pytest.mark.cpu_test
-def test_packed_rows_reject_a_peer_packing_rows_differently():
-    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128), "L1": (128, 64)}, 192)
-    consumer, _ = _make_packed_mla_view_worker({"L0": (64, 128), "L1": (0, 64)}, 192)
+def test_peers_placing_layers_differently_in_a_block_pair_by_layer():
+    producer, p_raw = _make_packed_mla_view_worker(
+        {"L0": (0, 128), "L1": (128, 64)}, 192
+    )
+    consumer, d_raw = _make_packed_mla_view_worker(
+        {"L0": (64, 128), "L1": (0, 64)}, 192
+    )
     metadata = msgspec.msgpack.decode(
         producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
     metadata.engine_id = "remote"
-    with pytest.raises(RuntimeError, match="Packed KV block rows differ"):
-        consumer.add_remote_agent(metadata)
+    consumer.add_remote_agent(metadata)
+    local = consumer.nixl_wrapper.dlists[consumer._local_descs["remote"].handle]
+    remote = consumer.nixl_wrapper.dlists[consumer.dst_xfer_side_handles["remote"][0]]
+    assert local.tolist() == [
+        [d_raw.data_ptr() + offset + b * 192, num_bytes, 0]
+        for offset, num_bytes in ((64, 128), (0, 64))
+        for b in range(4)
+    ]
+    assert remote.tolist() == [
+        [p_raw.data_ptr() + offset + b * 192, num_bytes, 0]
+        for offset, num_bytes in ((0, 128), (128, 64))
+        for b in range(4)
+    ]
 
 
 @pytest.mark.cpu_test
@@ -321,8 +349,8 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
             type=NixlAgentMetadata,
         )
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
-        assert metadata.region_num_blocks == [d_num_blocks] * 3
-        assert metadata.region_names == ["L2", "L2.swa", "L3"]
+        # L0 is another stage's.
+        assert producer._dst_pairs[consumer.engine_id].remote == [1, 2, 3]
         local_ids, remote_ids = producer._compute_desc_ids(
             consumer.engine_id, rank, [[1], [2], [3]], [[3], [1], [2]]
         )
@@ -380,7 +408,7 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 def _register_overlaid_mla_worker(
     *, push_pp: bool = False, tail_bytes: int = 0, page_covers_view: bool = True
 ):
-    """Register two MLA layers overlaid on one allocation.
+    """Register two MLA layers, each a cache group, overlaid on one allocation.
 
     `tail_bytes` leaves spare bytes past the last block, the way an allocation
     rounded up to a page boundary does. Clearing `page_covers_view` narrows
@@ -457,7 +485,6 @@ def _register_overlaid_mla_worker(
     worker.region_mem_types = []
     worker.region_group_ids = []
     worker._mixed_mem_types = False
-    worker.region_names = []
     worker.region_num_blocks = []
     worker.source_ranks = {}
     worker.block_len_per_layer = []
@@ -473,6 +500,7 @@ def _register_overlaid_mla_worker(
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
     worker._layer_specs = {name: spec for name in caches}
+    worker._layer_views = {}
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -503,41 +531,37 @@ def _register_overlaid_mla_worker(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("push_pp", [False, True])
-def test_overlaid_transfer_groups_share_region_geometry(push_pp):
-    """Groups overlaid on one allocation share its transfer region."""
-    import msgspec
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlAgentMetadata,
-    )
-
+def test_overlaid_transfer_groups_are_regions_of_the_same_blocks(push_pp):
+    """Groups overlaid on one allocation are each a region of its blocks."""
     registered = _register_overlaid_mla_worker(push_pp=push_pp)
     worker = registered.worker
     allocation = registered.allocation
     num_blocks = registered.num_blocks
     block_stride = registered.block_stride
 
-    assert worker.region_group_ids == [-1]
-    assert worker.block_stride_per_layer == [block_stride]
+    assert worker.region_group_ids == [0, 1]
+    assert worker.block_stride_per_layer == [block_stride] * 2
     assert worker.nixl_wrapper.registered[0][0] == [
         (allocation.data_ptr(), allocation.nbytes, 0, "")
     ]
     expected_addrs = [
         allocation.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
-    # One region of blocks, whichever layers share it.
     local_descs = _region_blocks(worker)
-    assert local_descs[:, 0].tolist() == expected_addrs
-    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks]
+    assert local_descs[:, 0].tolist() == expected_addrs * 2
+    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks] * 2
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
         type=NixlAgentMetadata,
     )
-    assert metadata.region_group_ids == [-1]
-    assert metadata.region_num_blocks == [num_blocks]
-    assert metadata.region_members == [["layer.0", "layer.1"]]
-    assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
+    assert metadata.region_group_ids == [0, 1]
+    assert metadata.region_num_blocks == [num_blocks] * 2
+    assert metadata.region_members == [["layer.0"], ["layer.1"]]
+    assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [
+        [0],
+        [2],
+    ]
 
 
 def _region_blocks(worker) -> np.ndarray:
@@ -620,11 +644,12 @@ def _make_mla_hybrid_worker(
         dtype=torch.float16,
     )
     unified_page = mla_spec.page_size_bytes
-    kda_spec = GDNSpec(
+    # Q|K|V = 8|8|8 conv channels and 8 heads (48 + 64 bytes), so the state
+    # shards evenly up to TP8.
+    kda_shapes = ((24, 1), (8, 1, 2))
+    kda_spec = gdn_spec(
         block_size=local_block_size,
-        # Q|K|V = 8|8|8 conv rows and 8 heads (48 + 64 bytes), so the state
-        # shards evenly up to TP8.
-        shapes=((24, 1), (8, 1, 2)),
+        shapes=kda_shapes,
         dtypes=(torch.float16, torch.float32),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -743,17 +768,17 @@ def _own_pairs(worker) -> tuple[list[int], list[int]]:
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kda_only_tensor", [False, True])
 def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
-    """A KDA-only tensor is a region without MLA pages: MLA reads of it would
-    only re-read bytes aliased by other groups (e.g. GLM-5.3-Flash). Likewise a
-    KDA group skips SSM regions holding none of its layers."""
+    """Each layer is a region of its cache group's blocks, so MLA reads skip
+    a KDA-only tensor (e.g. GLM-5.3-Flash) and a KDA group skips the tensors
+    holding none of its layers."""
     worker = _make_mla_hybrid_worker(
         local_block_size=16,
         kernel_block_size=16,
         num_logical_blocks=4,
         kda_only_tensor=kda_only_tensor,
     )
-    num_regions = 3 if kda_only_tensor else 2
-    assert worker.num_regions == num_regions
+    assert worker.num_regions == (7 if kda_only_tensor else 6)
+    assert all(len(names) == 1 for names in worker.region_members)
 
     # Each group's pairs read only the regions holding its layers.
     group_by_layer = worker.kv_cache_config.transfer_group_index_by_layer
@@ -893,7 +918,9 @@ def _make_remote_meta(
             )
             num_blocks.append(remote_num_logical * remote_ppl)
         else:
-            block_lens.append(remote_page)
+            # A page holds at least its state.
+            state = worker._layer_specs[names[0]].real_page_size_bytes
+            block_lens.append(max(remote_page, state))
             num_blocks.append(remote_num_logical)
     if layer_group_ids is None:
         layer_group_ids = {
@@ -918,11 +945,6 @@ def _make_remote_meta(
         region_members=worker.region_members,
         region_group_ids=region_group_ids,
         layer_group_ids=layer_group_ids,
-        layer_num_kv_heads={
-            name: spec.num_kv_heads
-            for name, spec in worker._layer_specs.items()
-            if isinstance(spec, AttentionSpec)
-        },
     )
 
 
@@ -1500,7 +1522,7 @@ def _make_csa_linear_ple_worker(
         )
         for index in range(2)
     }
-    sharded_mamba_spec = GDNSpec(
+    sharded_mamba_spec = gdn_spec(
         block_size=1,
         shapes=((8, 3), (2, 2, 4)),
         dtypes=(torch.float16, torch.float32),
@@ -1628,14 +1650,18 @@ def _region_of(worker, layer_name) -> int:
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("scratch_aliases", ["compressed", "main_kv"])
 def test_csa_linear_scratch_follows_the_pages_it_overlays(scratch_aliases):
-    """The scratch ring is read in the regions it registered in, not by
-    inferring that it must sit on the MLA blocks; the Mamba and PLE states are
-    regions of their own blocks."""
+    """The scratch ring is read in the regions it registered in, at the pages
+    it overlays, not by inferring that it must sit on the MLA blocks; the Mamba
+    and PLE states are regions of their own blocks."""
     worker = _make_csa_linear_ple_worker(scratch_aliases=scratch_aliases)
     regions = _regions_by_group(worker)
+    bases = worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank]
 
     assert regions[1] == [
-        _region_of(worker, f"{scratch_aliases}.{index}") for index in range(2)
+        _region_of(worker, f"compressor_state.{index}") for index in range(2)
+    ]
+    assert [bases[region] for region in regions[1]] == [
+        bases[_region_of(worker, f"{scratch_aliases}.{index}")] for index in range(2)
     ]
     assert regions[2] == [_region_of(worker, "mamba.sharded")]
     assert regions[3] == [_region_of(worker, "mamba.ple")]
@@ -1651,8 +1677,10 @@ def test_csa_linear_ple_moves_whole_from_one_rank(ple_page_size):
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
+    # The worker's own metadata stands in for a TP 2 remote's, whose views
+    # `fake_remote_layer_meta_tensors` supplies.
+    metadata.layer_meta_tensors = {}
     pairs = worker._pair_regions(metadata)
-    worker._select_remote_regions(metadata, pairs.remote_regions)
     regions = list(zip(pairs.local, pairs.group, pairs.remote))
     ranges = dict(
         zip(pairs.group, worker._tp_byte_ranges(metadata, regions, 2, 1, 1, True))

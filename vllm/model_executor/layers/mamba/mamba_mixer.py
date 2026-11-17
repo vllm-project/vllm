@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -26,6 +26,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    create_conv_temporal_state_spec,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -45,6 +46,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -436,6 +438,11 @@ class MambaMixer(MambaBase, PluggableLayer):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
         )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        # The conv state is `x`, as long as the `[x, state]` temporal state.
+        return create_conv_temporal_state_spec(spec, {"x": spec.shapes[1][0]})
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

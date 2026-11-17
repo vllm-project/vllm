@@ -9,7 +9,6 @@ descriptor lists from the KV cache specs. No GPU or NIXL required.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -17,7 +16,10 @@ import numpy as np
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import region_pairs_by_index
+from tests.v1.kv_connector.unit.utils import (
+    region_pairs_by_index,
+    remote_layer_spec,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     TransferTopology,
 )
@@ -29,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    ComponentSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -42,12 +45,15 @@ _ENGINE = "remote-engine"
 _HEAD_SIZE = 8
 
 
-@dataclass(frozen=True)
-class _ShardedStateSpec(MambaSpec):
-    """One state sharded across TP along its leading dim."""
-
-    def _tp_segments(self) -> tuple[tuple[int, ...], ...]:
-        return ((self.shapes[0][0],),)
+def _sharded_state_spec(size: int = 400) -> MambaSpec:
+    """One state of `size` bytes sharded across TP."""
+    state = ComponentSpec(block_size=4, num_heads=size, state_content_bytes=1)
+    return MambaSpec(
+        block_size=4,
+        shapes=((size,),),
+        dtypes=(torch.int8,),
+        component_specs=(("0", state),),
+    )
 
 
 def _spec(total_kv_heads: int | None, tp_size: int) -> AttentionSpec:
@@ -98,7 +104,7 @@ def _worker(
         transfer_group_index_by_layer={name: i for i, name in enumerate(layers)}
     )
     worker.region_members = [[name] for name in layers]
-    worker._regions_by_layer = {name: [i] for i, name in enumerate(layers)}
+    worker._region_by_layer = {name: i for i, name in enumerate(layers)}
     worker.block_len_per_layer = [
         spec.page_size_bytes for spec in worker._layer_specs.values()
     ]
@@ -112,43 +118,40 @@ def _worker(
     worker._byte_ranges = {}
     worker.source_ranks = {}
     worker._remote_block_splits = {}
+    worker.kv_cache_layout = "LBHNC"
+    worker._layer_views = {}
     worker._test_layers = layers
     return worker
 
 
 def _remote_meta(worker: NixlConnectorWorker, remote_tp_size: int) -> NixlAgentMetadata:
-    """Metadata of a remote at `remote_tp_size` holding the worker's layers."""
-    remote_specs = [
-        replace(
-            layer,
-            shapes=tuple(
-                (shape[0] * worker.transfer_tp_size // remote_tp_size, *shape[1:])
-                for shape in layer.shapes
-            ),
-            page_size_padded=None,
-        )
-        if isinstance(layer, MambaSpec)
-        else _spec(layer, remote_tp_size)
-        for layer in worker._test_layers.values()
+    """Metadata of a remote at `remote_tp_size` holding the worker's layers.
+    Its views come from `fake_remote_layer_meta_tensors`."""
+    heads = {
+        name: _spec(layer, remote_tp_size).num_kv_heads
+        for name, layer in worker._test_layers.items()
+        if not isinstance(layer, MambaSpec)
+    }
+    worker._fake_remote_kv_heads = {_ENGINE: heads}
+    block_lens = [
+        remote_layer_spec(
+            spec, worker.transfer_tp_size, remote_tp_size, heads.get(name)
+        ).page_size_bytes
+        for name, spec in worker._layer_specs.items()
     ]
     return NixlAgentMetadata(
         engine_id=_ENGINE,
         agent_metadata=b"",
-        kv_caches_base_addr=[0x10_000 * (i + 1) for i in range(len(remote_specs))],
+        kv_caches_base_addr=[0x10_000 * (i + 1) for i in range(len(block_lens))],
         device_id=0,
         num_blocks=8,
-        block_lens=[spec.page_size_bytes for spec in remote_specs],
-        block_strides=[spec.page_size_bytes for spec in remote_specs],
+        block_lens=block_lens,
+        block_strides=block_lens,
         kv_cache_layout="LBHNC",
         block_size=4,
         attn_backend_name="",
-        physical_blocks_per_group=[1] * len(remote_specs),
+        physical_blocks_per_group=[1] * len(block_lens),
         region_members=worker.region_members,
-        layer_num_kv_heads={
-            name: spec.num_kv_heads
-            for name, spec in zip(worker._layer_specs, remote_specs, strict=True)
-            if isinstance(spec, AttentionSpec)
-        },
     )
 
 
@@ -328,7 +331,7 @@ def test_mamba_state_is_one_more_region_of_chunked_pages():
     """MLA's replicated latent and a Mamba state sharded across P's ranks move
     through the same desc list: the latent whole from one rank, the state as
     one range per rank holding part of it."""
-    mamba = _ShardedStateSpec(block_size=4, shapes=((400,),), dtypes=(torch.int8,))
+    mamba = _sharded_state_spec()
     worker = _worker(0, 1, {"attn": None, "mamba": mamba})
     assert _map(worker, 2) == (0, 1)
     assert worker.source_ranks[_ENGINE] == [(0,), (0, 1)]
@@ -348,7 +351,7 @@ def test_mamba_state_is_one_more_region_of_chunked_pages():
 def test_push_writes_replicated_latent_to_every_rank_holding_it():
     """Pushing from P at TP1 to D at TP2, the specs' sending-side slices write
     MLA's replicated latent whole to both D ranks and each its Mamba shard."""
-    mamba = _ShardedStateSpec(block_size=4, shapes=((400,),), dtypes=(torch.int8,))
+    mamba = _sharded_state_spec()
     worker = _worker(0, 1, {"attn": None, "mamba": mamba})
     worker._TRANSFER_MODE = "push"
 
@@ -384,6 +387,17 @@ def test_push_decode_waits_for_the_ranks_writing_it(layers, p_tp, d_tp):
         worker._push_senders = defaultdict(dict)
         worker._add_notif_only_remote_agent(_remote_meta(worker, p_tp), 0, p_tp)
         assert worker._push_senders[_ENGINE] == {0: writes[d_rank]}
+
+
+def test_shards_one_remote_rank_holds_together_move_as_one_range():
+    """12 KV heads at TP 2 and TP 3 are cut 6 ways. A TP 3 rank holds two of
+    our three shards, next to each other on both sides: one range, not two."""
+    worker = _worker(0, 2, {"model.layers.0.self_attn": 12})
+    assert _map(worker, 3) == (0, 1)
+    shard = worker.block_len_per_layer[0] // 3
+    assert worker._byte_ranges[_ENGINE] == [
+        {0: [(0, 0, 2 * shard)], 1: [(2 * shard, 0, shard)]}
+    ]
 
 
 def test_smaller_remote_blocks_cannot_be_read_by_head():

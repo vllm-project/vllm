@@ -65,7 +65,6 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
-    nvfp4_split_data_scale,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -100,6 +99,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    MultiComponentSpec,
     is_quantized_kv_cache,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -165,47 +165,49 @@ _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
 def _nvfp4_kv_views(
-    kv_cache: torch.Tensor, num_kv_heads: int
+    kv_cache: torch.Tensor, num_kv_heads: int, head_size: int
 ) -> tuple[_KVPair, _KVPair, str]:
-    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
-    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
+    """Data and block scale views of NVFP4 K and V pages, as
+    `NVFP4AttentionSpec` places them, in the pages' HND or NHD order."""
+    _, num_slots, block_size, full_dim = kv_cache.shape
+    spec = NVFP4AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.uint8,
+    )
     hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
     if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
         raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
-    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
-    side_size = num_kv_heads * block_size * full_dim
-    (k_data, k_scale), (v_data, v_scale) = (
-        nvfp4_split_data_scale(
-            kv_cache.as_strided(
-                (num_blocks, *dims, full_dim),
-                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
-                kv_cache.storage_offset() + side * side_size,
-            )
-        )
-        for side in range(2)
+    views = spec.split(kv_cache)
+    if not hnd:
+        # FlashInfer takes NHD pages as they are stored: [B, N, H, C].
+        views = {name: view.transpose(1, 2) for name, view in views.items()}
+    scale_dtype = torch.float8_e4m3fn
+    return (
+        (views["k_data"], views["v_data"]),
+        (views["k_scale"].view(scale_dtype), views["v_scale"].view(scale_dtype)),
+        "HND" if hnd else "NHD",
     )
-    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
 @dataclass(frozen=True, kw_only=True)
-class NVFP4AttentionSpec(AttentionSpec):
-    """NVFP4 Attention page: slice K/V data and scale views by KV head
-    (see `_nvfp4_kv_views`), not the packed `2 * H` slots.
-    """
+class NVFP4AttentionSpec(AttentionSpec, MultiComponentSpec):
+    """NVFP4 Attention page: K data, K block scales, V data and V block
+    scales, each `[H, N, C]` by KV head; TP transfers slice each by KV head."""
 
-    def slice_for_tp_transfer(
-        self, cache: torch.Tensor, *args, **kwargs
-    ) -> list[torch.Tensor]:
-        (k_data, v_data), (k_scale, v_scale), layout = _nvfp4_kv_views(
-            cache, self.num_kv_heads
-        )
-        return [
-            sliced
-            for view in (k_data, k_scale, v_data, v_scale)
-            for sliced in super().slice_for_tp_transfer(
-                view if layout == "HND" else view.transpose(1, 2), *args, **kwargs
-            )
-        ]
+    slice_for_tp_transfer = MultiComponentSpec.slice_for_tp_transfer
+
+    @property
+    def components(self) -> dict[str, KVCacheSpec]:
+        plain = {f.name: getattr(self, f.name) for f in fields(AttentionSpec) if f.init}
+        plain |= {"num_head_slots": None, "page_size_padded": None}
+        # Packed fp4 data and one fp8 scale per 16 elements.
+        return {
+            f"{side}_{part}": AttentionSpec(**plain | {"state_content_bytes": size})
+            for side, head_size in (("k", self.head_size), ("v", self.head_size_v))
+            for part, size in (("data", head_size // 2), ("scale", head_size // 16))
+        }
 
 
 def _get_trtllm_workspace_buffer():
@@ -2599,7 +2601,7 @@ class FlashInferImpl(AttentionImpl):
                 canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
             nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
-                kv_cache, self.num_kv_heads
+                kv_cache, self.num_kv_heads, hs
             )
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
@@ -3125,7 +3127,9 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.nvfp4_fa2:
-                data, scales, kv_layout = _nvfp4_kv_views(kv_cache, self.num_kv_heads)
+                data, scales, kv_layout = _nvfp4_kv_views(
+                    kv_cache, self.num_kv_heads, self.head_size
+                )
                 nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
                     key,
                     value,

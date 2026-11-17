@@ -647,6 +647,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # When remote tp_size > local tp_size, handshake with multiple
         # remote ranks.
         num_handshakes = 1 if tp_ratio > 0 else -tp_ratio
+        self._fake_remote_kv_heads = {self.REMOTE_ENGINE_ID: {"layer0": remote_heads}}
         remote_agents: dict[tuple[int, int], str] = {}
         for remote_tp_rank in range(num_handshakes):
             remote_agent_name = self.add_remote_agent(
@@ -666,7 +667,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     region_group_ids=self.region_group_ids,
                     region_mem_types=self.region_mem_types,
                     region_members=self.region_members,
-                    layer_num_kv_heads={"layer0": remote_heads},
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
@@ -737,9 +737,10 @@ def _advertise_one_layer_per_region(worker, *metas: NixlAgentMetadata) -> None:
             worker._layer_specs[name] = dataclasses.replace(
                 spec, state_content_bytes=block_len // spec.num_heads // spec.num_states
             )
+    worker._fake_remote_kv_heads = {}
     for meta in metas:
         meta.region_members = region_layers
-        meta.layer_num_kv_heads = {
+        worker._fake_remote_kv_heads[meta.engine_id] = {
             name: max(1, worker._layer_specs[name].num_kv_heads * remote // local)
             for (name,), local, remote in zip(
                 region_layers, worker.block_len_per_layer, meta.block_lens
@@ -1496,7 +1497,7 @@ class TestNixlHandshake:
             )
             _advertise_one_layer_per_region(worker2, bad_meta)
             # The remote's MLA layer still holds its one latent head.
-            bad_meta.layer_num_kv_heads["layer2"] = 1
+            worker2._fake_remote_kv_heads[bad_meta.engine_id]["layer2"] = 1
             with pytest.raises(ValueError, match="has blocks of"):
                 worker2.add_remote_agent(bad_meta, remote_tp_size=1)
 
@@ -1544,10 +1545,6 @@ class TestNixlHandshake:
             head_size=64 // draft_heads,
             dtype=torch.int8,
         )
-        worker.region_names = [
-            "model.layers.0.self_attn",
-            "draft_model.model.layers.0.self_attn",
-        ]
         worker.num_blocks = 1
         worker.region_num_blocks = [1, 1]
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
@@ -1653,7 +1650,7 @@ class TestNixlHandshake:
         )
         meta.block_lens = [mla_len, draft_len]
         meta.block_strides = [mla_len, draft_len]
-        with pytest.raises(ValueError, match="spec there needs"):
+        with pytest.raises(ValueError, match="do not hold its shards"):
             worker.add_remote_agent(meta, remote_tp_size=1)
 
     @patch(
@@ -1796,9 +1793,9 @@ class TestNixlHandshake:
                 physical_blocks_per_group=[1],
             )
             _advertise_one_layer_per_region(worker, bad_meta)
-            bad_meta.layer_num_kv_heads = {"layer0": 16}
+            worker._fake_remote_kv_heads[bad_meta.engine_id] = {"layer0": 16}
 
-            with pytest.raises(ValueError, match="spec there needs"):
+            with pytest.raises(ValueError, match="do not hold its shards"):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
     @pytest.mark.parametrize(
@@ -2872,8 +2869,8 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
     [
         # V4 record: padded pages, so a layer view is not a contiguous page.
         pytest.param([(_dsv4_mla_spec(584, 576, 4), 4)], id="v4-padded-pages"),
-        # V4.1 MXFP8 record: unpadded pages in rows that the compressed caches
-        # and a compressor-state ring alias.
+        # V4.1 MXFP8 record: unpadded pages that the compressed caches and a
+        # compressor-state ring alias.
         pytest.param(
             [
                 (_dsv4_mla_spec(528, 512, 2), 2),
@@ -2892,14 +2889,10 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
                 ),
             ],
             id="v41-aliased-groups",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="Region dedup drops the packed-row alias; fixed by #64661",
-            ),
         ),
     ],
 )
-def test_register_packed_dsv4_mla_cache_as_single_region(
+def test_register_block_outermost_dsv4_mla_cache_one_region_per_layer(
     default_vllm_config, dist_init, groups
 ):
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
@@ -2914,10 +2907,6 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         mock_backends.return_value = [TritonAttentionBackend]
         num_blocks = 2
         specs = [getattr(layer, "spec", layer) for layer, _ in groups]
-        is_ring = [
-            getattr(layer, "manager_cls", None) is CircularBufferManager
-            for layer, _ in groups
-        ]
         group_layers = [
             [f"group{group_idx}.layer{idx}" for idx in range(num_layers)]
             for group_idx, (_, num_layers) in enumerate(groups)
@@ -2947,7 +2936,7 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         mock_thread.return_value.is_alive.return_value = False
         connector.connector_worker.use_mla = True
 
-        # Every group packs its layers' pages into the same block rows.
+        # Every group interleaves its layers' pages in the same blocks.
         (packed_block_len,) = {
             len(layer_names) * spec.page_size_bytes
             for layer_names, spec in zip(group_layers, specs)
@@ -2965,27 +2954,20 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
             kv_caches.update(zip(layer_names, views))
         connector.register_kv_caches(kv_caches)
 
-        # MLA pages transfer as whole rows; a ring page past the row start keeps
-        # its own region.
-        # #65232 prepares xfer dlists in _prep_descs (handshake), not in
-        # register_kv_caches (#61452). Assert region geometry from the worker.
-        ring_pages = [
-            (cache.data_ptr(), spec.page_size_bytes)
-            for layer_names, spec, ring in zip(group_layers, specs, is_ring)
-            if ring
-            for cache in (kv_caches[name] for name in layer_names)
-            if cache.data_ptr() != raw.data_ptr()
+        # Each layer is a region of its own pages, whichever groups alias them.
+        worker = connector.connector_worker
+        expected = [
+            [kv_caches[name].data_ptr(), spec.page_size_bytes]
+            for layer_names, spec in zip(group_layers, specs)
+            for name in layer_names
         ]
-        block_runs = _whole_block_descs(connector.connector_worker)
-        assert connector.connector_worker.kv_caches_base_addr[
-            connector.connector_worker.engine_id
-        ][0] == [raw.data_ptr()] + [addr for addr, _ in ring_pages]
-        assert block_runs.tolist() == [
-            [raw.data_ptr(), packed_block_len, 0, packed_block_len, num_blocks]
-        ] + [
+        assert sorted(worker.kv_caches_base_addr[worker.engine_id][0]) == sorted(
+            addr for addr, _ in expected
+        )
+        assert sorted(_whole_block_descs(worker).tolist()) == sorted(
             [addr, page_size, 0, packed_block_len, num_blocks]
-            for addr, page_size in ring_pages
-        ]
+            for addr, page_size in expected
+        )
 
 
 class FakePlatform(Platform):

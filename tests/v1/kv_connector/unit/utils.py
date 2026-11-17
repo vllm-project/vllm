@@ -3,7 +3,7 @@
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import count
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
@@ -24,7 +24,11 @@ from vllm.config import (
 )
 from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.utils import contiguous_byte_ranges
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    contiguous_byte_ranges,
+    pair_shards,
+    serialize_layer_meta_tensors,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -33,6 +37,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
+)
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    ConvComponentSpec,
+    create_conv_temporal_state_spec,
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
@@ -48,12 +56,14 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    ComponentSpec,
     KVCacheConfig,
     KVCacheGroup,
     KVCacheLayerConfig,
     KVCacheSpec,
     MambaSpec,
     ManagerConfig,
+    MultiComponentSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -825,8 +835,6 @@ def region_pairs_by_index(
         remote=regions,
         local=regions,
         group=list(groups) if groups is not None else [0] * num_regions,
-        remote_regions=regions,
-        partner=regions,
         groups_match=groups_match,
     )
 
@@ -847,16 +855,25 @@ def transfer_kv(
     written exactly once."""
     dst_raw, dst_view = dst_cache
     written = 0
+    dst_views = dst_spec.slice_for_tp_transfer(dst_view)
+
+    def where(shard: torch.Tensor) -> tuple:
+        return shard.storage_offset(), tuple(shard.shape), shard.stride()
+
     for src_rank, (src_raw, src_view) in enumerate(src_caches):
-        dst_slices = dst_spec.slice_for_tp_transfer(
-            dst_view, dst_tp, dst_rank, src_spec, src_tp, src_rank, receiving=True
-        )
-        src_slices = src_spec.slice_for_tp_transfer(
-            src_view, src_tp, src_rank, dst_spec, dst_tp, dst_rank, receiving=False
-        )
-        assert len(src_slices) == len(dst_slices)
-        for src, dst in zip(src_slices, dst_slices):
-            for src_off, dst_off, size in contiguous_byte_ranges(src, dst):
+        src_views = src_spec.slice_for_tp_transfer(src_view)
+        pairs = pair_shards(
+            dst_views, dst_tp, dst_rank, src_views, src_tp, receiving=True
+        ).get(src_rank, [])
+        sent = pair_shards(
+            src_views, src_tp, src_rank, dst_views, dst_tp, receiving=False
+        ).get(dst_rank, [])
+        assert {(where(d), where(s)) for d, s in pairs} == {
+            (where(d), where(s)) for s, d in sent
+        }
+        for dst, src in pairs:
+            ranges = contiguous_byte_ranges(src.view(torch.int8), dst.view(torch.int8))
+            for src_off, dst_off, size in ranges:
                 dst_raw[dst_off : dst_off + size] = src_raw[src_off : src_off + size]
                 written += size
     assert written == dst_raw.numel()
@@ -869,3 +886,92 @@ def rank_kv_heads(tp_rank: int, tp_size: int, total_num_kv_heads: int) -> range:
         return range(tp_rank * per_rank, (tp_rank + 1) * per_rank)
     head = tp_rank * total_num_kv_heads // tp_size
     return range(head, head + 1)
+
+
+def _declared_mamba_spec(conv_parts):
+    def build(*, conv_dim: int = 0, **kwargs) -> MambaSpec:
+        spec, dim_first = MambaSpec(**kwargs), conv_dim == 0
+        return create_conv_temporal_state_spec(
+            spec, conv_parts(spec.shapes, dim_first), dim_first
+        )
+
+    return build
+
+
+def _mamba2_conv_parts(shapes, dim_first: bool) -> dict[str, int]:
+    conv, temporal = shapes
+    x = temporal[0] * temporal[1]
+    groups = (conv[0 if dim_first else 1] - x) // 2
+    return {"x": x, "B": groups, "C": groups}
+
+
+def _gdn_conv_parts(shapes, dim_first: bool) -> dict[str, int]:
+    conv, temporal = shapes
+    value = temporal[0] * temporal[1]
+    key = (conv[0 if dim_first else 1] - value) // 2
+    return {"q": key, "k": key, "v": value}
+
+
+# A Mamba1, Mamba2 or GDN layer's spec as the layer builds it, with the conv
+# state's `dim` at `conv_dim`: 0 for (dim, state_len), 1 for (state_len, dim).
+mamba1_spec = _declared_mamba_spec(lambda shapes, _: {"x": shapes[1][0]})
+mamba2_spec = _declared_mamba_spec(_mamba2_conv_parts)
+gdn_spec = _declared_mamba_spec(_gdn_conv_parts)
+
+
+def remote_layer_spec(
+    spec: KVCacheSpec,
+    tp_size: int,
+    remote_tp_size: int,
+    remote_num_kv_heads: int | None = None,
+) -> KVCacheSpec:
+    """`spec` of a rank at `tp_size`, as a rank at `remote_tp_size` of the
+    same model holds it, with `remote_num_kv_heads` KV heads if given."""
+    if isinstance(spec, AttentionSpec):
+        heads = remote_num_kv_heads or spec.num_kv_heads
+        slots = spec.num_head_slots and spec.num_head_slots * heads // spec.num_kv_heads
+        return replace(spec, num_kv_heads=heads, num_head_slots=slots)
+    if isinstance(spec, ConvComponentSpec):
+        parts = ((name, size * tp_size // remote_tp_size) for name, size in spec.parts)
+        return replace(spec, parts=tuple(parts))
+    if isinstance(spec, MultiComponentSpec) and spec.component_specs:
+        components = tuple(
+            (name, remote_layer_spec(component, tp_size, remote_tp_size))
+            for name, component in spec.component_specs
+        )
+        return replace(spec, component_specs=components, page_size_padded=None)
+    if isinstance(spec, ComponentSpec):
+        return replace(spec, num_heads=spec.num_heads * tp_size // remote_tp_size)
+    return spec
+
+
+def fake_remote_layer_meta_tensors(
+    worker, meta, regions, remote_tp_size: int, block_size_ratio: int
+) -> None:
+    """Give `meta` the views a remote would advertise, where it has none:
+    those of the same model at `remote_tp_size`, with
+    `worker._fake_remote_kv_heads` KV heads if set."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _is_ssm_spec,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    tp_size = worker.transfer_tp_size
+    group_by_layer = worker.kv_cache_config.transfer_group_index_by_layer
+    layout = KVCacheLayout[meta.kv_cache_layout].layer_view_order
+    heads = getattr(worker, "_fake_remote_kv_heads", {}).get(meta.engine_id, {})
+    for local, group, _ in regions:
+        name = next(
+            name
+            for name in worker.region_members[local]
+            if group_by_layer.get(name) == group and name in worker._layer_specs
+        )
+        spec = remote_layer_spec(
+            worker._layer_specs[name], tp_size, remote_tp_size, heads.get(name)
+        )
+        ratio = 1 if _is_ssm_spec(worker._group_spec_types[group]) else block_size_ratio
+        block_len = worker.block_len_per_layer[local] // ratio
+        block = worker._transfer_block(spec, group, block_len, ratio, layout)
+        meta.layer_meta_tensors.setdefault(
+            name, serialize_layer_meta_tensors(spec.slice_for_tp_transfer(block))
+        )

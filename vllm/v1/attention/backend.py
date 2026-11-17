@@ -26,7 +26,6 @@ if TYPE_CHECKING:
         KVCacheLayout,
         KVCacheSpec,
         KVQuantMode,
-        MambaSpec,
     )
 
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, get_kv_quant_mode
@@ -163,11 +162,6 @@ class AttentionBackend(ABC):
 
         (see: https://github.com/vllm-project/vllm/issues/42449)
         """
-        return spec
-
-    @classmethod
-    def customize_mamba_spec(cls, spec: "MambaSpec") -> "MambaSpec":
-        """`customize_spec` for Mamba-like layers; same temporary API."""
         return spec
 
     @classmethod

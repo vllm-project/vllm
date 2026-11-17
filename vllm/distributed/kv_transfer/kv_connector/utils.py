@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache helper for store."""
 
+import math
 import time
-from collections.abc import Iterator
+from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -464,6 +466,107 @@ def get_current_attn_backend(
     return get_current_attn_backends(vllm_config, layer_names)[0]
 
 
+# The offset, shape and strides of a byte view in its block.
+SerializedMetaTensor = tuple[int, tuple[int, ...], tuple[int, ...]]
+# One layer's views, by component.
+SerializedLayerMetaTensors = dict[str, SerializedMetaTensor]
+
+
+def byte_view(cache: torch.Tensor) -> torch.Tensor:
+    """`cache` as bytes on the meta device, from its first element."""
+    size = cache.element_size()
+    assert cache.stride(-1) == 1
+    return torch.empty(0, dtype=torch.int8, device="meta").as_strided(
+        (*cache.shape[:-1], cache.shape[-1] * size),
+        (*(stride * size for stride in cache.stride()[:-1]), 1),
+    )
+
+
+def view_end(view: torch.Tensor) -> int:
+    """The offset after the last byte of a byte view in its storage."""
+    extent = sum((n - 1) * s for n, s in zip(view.shape, view.stride()))
+    return view.storage_offset() + extent + 1
+
+
+def serialize_layer_meta_tensors(
+    views: dict[str, torch.Tensor],
+) -> SerializedLayerMetaTensors:
+    return {
+        name: (view.storage_offset(), tuple(view.shape), tuple(view.stride()))
+        for name, view in views.items()
+    }
+
+
+def deserialize_layer_meta_tensors(
+    serialized: SerializedLayerMetaTensors,
+) -> dict[str, torch.Tensor]:
+    """The serialized byte views as tensors on the meta device."""
+    block = torch.empty(0, dtype=torch.int8, device="meta")
+    return {
+        name: block.as_strided(shape, strides, offset)
+        for name, (offset, shape, strides) in serialized.items()
+    }
+
+
+def pair_shards(
+    views: dict[str, torch.Tensor],
+    tp_size: int,
+    tp_rank: int,
+    other_views: dict[str, torch.Tensor],
+    other_tp_size: int,
+    *,
+    receiving: bool,
+) -> dict[int, list[tuple[torch.Tensor, torch.Tensor]]]:
+    """Pair a TP rank's `KVCacheSpec.slice_for_tp_transfer` views with those of
+    the ranks of another TP size: other rank -> `(shard, other shard)` pairs.
+
+    Dim 1 of each view is cut into equal shards, so that the ranks of either
+    side hold the least common multiple of the two TP sizes between them. It
+    is not cut finer than its length: with fewer entries than shards, each
+    entry is one shard.
+
+    A receiving shard reads the sending shard at the same position
+    `index / count` of its component. The counts differ when one side holds
+    copies of what the other holds once (replicated KV heads, a state every
+    rank holds whole): a receiver then reads one copy, and a sender writes
+    every copy.
+    """
+    num_shards = math.lcm(tp_size, other_tp_size)
+
+    def cut(view: torch.Tensor, size: int) -> tuple[torch.Tensor, ...]:
+        count = num_shards // size
+        if view.shape[1] % count:
+            count = view.shape[1]
+        return view.unflatten(1, (count, -1)).unbind(1)
+
+    pairs = defaultdict(list)
+    for name, view in views.items():
+        if name not in other_views:
+            raise NotImplementedError(
+                f"The other rank has no {name!r}: the two do not shard this "
+                "layer the same way."
+            )
+        ours, theirs = cut(view, tp_size), cut(other_views[name], other_tp_size)
+        count, other_count = tp_size * len(ours), other_tp_size * len(theirs)
+        for index, shard in enumerate(ours, tp_rank * len(ours)):
+            for other_index in range(other_count):
+                reader, source = (index, count), (other_index, other_count)
+                if not receiving:
+                    reader, source = source, reader
+                if reader[0] * source[1] // reader[1] != source[0]:
+                    continue
+                other_rank, i = divmod(other_index, len(theirs))
+                if shard.shape != theirs[i].shape:
+                    raise NotImplementedError(
+                        f"Shard {index} of {count} of {name!r} is "
+                        f"{tuple(shard.shape)} here but shard {other_index} of "
+                        f"{other_count} is {tuple(theirs[i].shape)} on the other "
+                        "rank: the two do not shard this layer the same way."
+                    )
+                pairs[other_rank].append((shard, theirs[i]))
+    return pairs
+
+
 def contiguous_byte_ranges(
     src: torch.Tensor, dst: torch.Tensor
 ) -> list[tuple[int, int, int]]:
@@ -501,6 +604,23 @@ def contiguous_byte_ranges(
         (s * elem, d * elem, contiguous * elem)
         for s, d in zip(src_offsets.tolist(), dst_offsets.tolist())
     ]
+
+
+def coalesce_byte_ranges(
+    ranges: Iterable[tuple[int, int, int]],
+) -> list[tuple[int, int, int]]:
+    """Merge `(src_offset, dst_offset, num_bytes)` ranges that follow each
+    other on both sides, e.g. the shards of a layer that one rank holds
+    together on either side."""
+    merged: list[tuple[int, int, int]] = []
+    for src, dst, size in sorted(ranges):
+        if merged:
+            last_src, last_dst, last_size = merged[-1]
+            if (last_src + last_size, last_dst + last_size) == (src, dst):
+                merged[-1] = (last_src, last_dst, last_size + size)
+                continue
+        merged.append((src, dst, size))
+    return merged
 
 
 # ---- Per-engine transfer info ----

@@ -308,12 +308,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
             num_computed_blocks = None
             num_remote_blocks = None
-            if (
-                meta.remote.num_tokens is not None
-                and meta.local_num_computed_blocks
-                and all(group >= 0 for group in local_region_groups)
-                and all(group >= 0 for group in remote_region_groups)
-            ):
+            if meta.remote.num_tokens is not None and meta.local_num_computed_blocks:
                 transfer_groups = self.kv_cache_config.transfer_group_ids
                 num_computed_blocks = [
                     meta.local_num_computed_blocks[transfer_groups[group]]
@@ -330,8 +325,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             ):
                 raise NotImplementedError(
                     "Region-mapped pulls with DCP or different logical block sizes "
-                    "require remote_num_tokens, per-group prefix counts "
-                    "and unshared regions"
+                    "require remote_num_tokens and per-group prefix counts"
                 )
             read_specs = [
                 ReadSpec(
