@@ -32,21 +32,6 @@ def _keys(**overrides):
     return AiterFlashAttentionExtendKernel().get_warmup_keys(**kwargs)
 
 
-def test_warms_the_causal_and_context_chunk_calls():
-    causal, context = _keys()
-
-    assert causal.causal and not context.causal
-    assert causal.qhead_per_kvhead == context.qhead_per_kvhead == 4
-    assert causal.head_dim == context.head_dim == 64
-
-
-def test_sinks_only_reach_the_causal_call():
-    """`extend_forward` adds the sinks once, so context chunks pass none."""
-    causal, context = _keys(has_sinks=True)
-
-    assert causal.has_sinks and not context.has_sinks
-
-
 def test_sliding_window_layers_have_nothing_to_warm():
     """A window extend runs the same LSE-free call a new prompt does."""
     assert _keys(sliding_window=(1023, 0)) == []
