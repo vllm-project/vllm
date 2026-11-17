@@ -10,6 +10,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import has_flashinfer_topk_varlen_gvr2
 from vllm.utils.math_utils import round_up
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
@@ -474,41 +475,63 @@ def expand_qsa_block_indices(
     )
 
 
+def qsa_prefill_logits_width(
+    max_seq_len: int, compress_ratio: int, max_columns: int
+) -> int:
+    """Prefill logits width: no row scores beyond cdiv(max_seq_len,
+    compress_ratio) compressed columns. Rounded up to 64 to keep the row
+    stride cooperative_topk- and gvr_2-compatible."""
+    width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
+    return min(max(64, width), max_columns)
+
+
+def use_gvr2_topk(block_topk: int, width: int) -> bool:
+    """Whether _topk ranks logits of this width with gvr_2. Both QSA
+    producers emit contiguous fp32 logits and 16B-aligned row slices of a
+    contiguous int32 block_indices, so only k and the width (float4 rows)
+    can rule it out."""
+    return (
+        current_platform.is_device_capability_family(100)
+        and block_topk in (512, 1024, 2048)
+        and width % 4 == 0
+        and has_flashinfer_topk_varlen_gvr2()
+    )
+
+
 def warmup_gvr2_topk(
     block_topk: int,
-    decode_width: int | None = None,
-    max_decode_rows: int = 0,
-    prefill_max_cols: int | None = None,
-    max_prefill_tokens: int = 0,
+    decode_width: int,
+    max_decode_rows: int,
+    prefill_width: int,
+    max_prefill_tokens: int,
 ) -> None:
     """Pre-compile gvr_2 for every geometry serving can produce, and size
     the prefill kernel's zero row_starts buffer.
 
     Compile keys (flashinfer gvr2_topk_host; re-check on pin bumps): decode
     kernel per (k, exact width, num_tokens band, stride); prefill kernel per
-    (k, pow2 width bucket), so prefill_max_cols covers all narrower widths.
+    (k, pow2 width bucket), so prefill_width covers all narrower widths.
     A missed geometry compiles once, eagerly - never during graph capture,
     whose pre-capture eager pass runs each captured shape first.
     """
+    global _gvr2_prefill_zero_starts
     from flashinfer.topk_varlen.kernels.gvr2_topk_host import (
         warmup_prefill,
         warmup_varlen,
     )
 
-    if decode_width is not None and max_decode_rows > 0:
+    if use_gvr2_topk(block_topk, decode_width):
         warmup_varlen(
             top_k=block_topk,
             max_seq_len=decode_width,
             num_rows_list=range(1, max_decode_rows + 1),
             row_stride=decode_width,
         )
-    if max_prefill_tokens > 0:
-        global _gvr2_prefill_zero_starts
+    if use_gvr2_topk(block_topk, prefill_width):
         _gvr2_prefill_zero_starts = torch.zeros(
             max_prefill_tokens, dtype=torch.int32, device="cuda"
         )
-    if prefill_max_cols is not None:
-        warmup_prefill(top_k=block_topk, max_cols=prefill_max_cols)
+        warmup_prefill(top_k=block_topk, max_cols=prefill_width)
 
 
 # All-zero, read-only row_starts for the prefill kernel: its window contract
@@ -569,20 +592,7 @@ def _topk(
     # gvr_2 (self-sampling GVR V2) for tensors it can rank; otherwise the
     # cooperative/persistent chain, as in the DeepSeek indexer.
     block_topk = token_topk // compress_ratio
-    num_tokens, width = logits.shape
-    row_pitch = logits.stride(0) if num_tokens > 1 else width
-    if (
-        current_platform.is_device_capability_family(100)
-        and block_topk in (512, 1024, 2048)
-        and logits.dtype == torch.float32
-        and logits.stride(1) == 1
-        and row_pitch % 4 == 0
-        and row_pitch >= width
-        and logits.data_ptr() % 16 == 0
-        # run_varlen wants a contiguous, 16B-aligned output.
-        and block_indices.is_contiguous()
-        and block_indices.data_ptr() % 16 == 0
-    ):
+    if use_gvr2_topk(block_topk, logits.shape[1]):
         _gvr2_topk(logits, visible_blocks, block_topk, block_indices, prefill)
         return
     use_cooperative_topk = (
@@ -711,11 +721,9 @@ def qsa_select_paged_prefill(
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     rows = q.shape[0]
-    # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
-    # columns. Round up to 64 to keep the logits row stride
-    # cooperative_topk-compatible.
-    logits_width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
-    logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
+    logits_width = qsa_prefill_logits_width(
+        max_seq_len, compress_ratio, page_table.shape[1] * k_cache.shape[1]
+    )
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     # always allocate the worst case to avoid memory fragmentation.

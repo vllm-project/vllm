@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
@@ -45,6 +43,9 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         return runner.block_tables.input_block_tables[group_id]
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
+        qsa_prefill_logits_width,
+        use_gvr2_topk,
+        warmup_gvr2_topk,
         warmup_qsa_mqa_paged_decode,
     )
 
@@ -64,29 +65,22 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     # Compile the gvr_2 top-k engines the QSA top-k dispatch selects by
     # default on SM100, so neither CUDA-graph capture nor serving compiles.
     block_topk = indexer.token_topk // indexer.compress_ratio
-    if current_platform.is_device_capability_family(100) and block_topk in (
-        512,
-        1024,
-        2048,
-    ):
-        from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
-            warmup_gvr2_topk,
-        )
-
-        decode_width = (
-            block_table_for(indexer.compressed_key_cache.prefix).shape[1]
-            * k_cache.shape[1]
-        )
-        max_model_len = worker.vllm_config.model_config.max_model_len
-        prefill_width = min(
-            max(64, round_up(-(-max_model_len // indexer.compress_ratio), 64)),
-            decode_width,
-        )
+    decode_width = (
+        block_table_for(indexer.compressed_key_cache.prefix).shape[1] * k_cache.shape[1]
+    )
+    prefill_width = qsa_prefill_logits_width(
+        worker.vllm_config.model_config.max_model_len,
+        indexer.compress_ratio,
+        decode_width,
+    )
+    # The prefill width is always float4-aligned; warmup_gvr2_topk skips a
+    # decode width the dispatch would not route to gvr_2.
+    if use_gvr2_topk(block_topk, prefill_width):
         warmup_gvr2_topk(
             block_topk,
             decode_width=decode_width,
             max_decode_rows=runner.max_num_reqs * runner.decode_query_len,
-            prefill_max_cols=prefill_width,
+            prefill_width=prefill_width,
             max_prefill_tokens=runner.max_num_tokens,
         )
         logger.info(
