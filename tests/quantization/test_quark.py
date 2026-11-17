@@ -8,7 +8,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -47,7 +47,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.oracle.int8 import Int8MoeBackend
+from vllm.model_executor.layers.fused_moe.oracle.int8 import (
+    Int8MoeBackend,
+    select_int8_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
@@ -113,6 +116,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
+from vllm.utils.import_utils import has_humming
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -1733,6 +1737,32 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
             hidden_states = model(input_ids, positions, None)
             logits = model.compute_logits(hidden_states)
         assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability((7, 5))
+        and has_humming()
+    ),
+    reason="Requires Humming on CUDA SM>=7.5",
+)
+def test_quark_static_int8_rejects_activation_quantization_fallback(monkeypatch):
+    """A weight-only backend must not discard checkpoint activation scales."""
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+    monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", "indexed")
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "0")
+    config = replace(_make_test_moe_config(), moe_backend="humming")
+    backend, experts_cls = select_int8_moe_backend(
+        config, kInt8StaticChannelSym, kInt8StaticTensorSym
+    )
+    assert backend == Int8MoeBackend.HUMMING
+    assert (
+        experts_cls.executed_activation_key(kInt8StaticChannelSym, kInt8StaticTensorSym)
+        is None
+    )
+    with pytest.raises(NotImplementedError, match="preserves static INT8"):
+        QuarkW8A8Int8MoEMethod(config, kInt8StaticChannelSym, kInt8StaticTensorSym)
 
 
 @pytest.mark.parametrize(

@@ -2860,7 +2860,9 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     assert close.float().mean() > 0.925
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("per_out_ch_quant", [False, True])
 @pytest.mark.parametrize("weight_on_input", [False, True])
@@ -2868,6 +2870,8 @@ def test_static_int8_modular_matches_legacy(
     workspace_init, dtype, per_out_ch_quant, weight_on_input
 ):
     """Match legacy static scales, bias and router order for both GEMMs."""
+    # TODO: Replace the legacy comparison with a high-precision torch reference
+    # that preserves static quantization and router-weight application order.
     experts, hidden, tokens = 3, 128, 4
     moe = make_dummy_moe_config(
         num_experts=experts, hidden_dim=hidden, intermediate_size=hidden, in_dtype=dtype
