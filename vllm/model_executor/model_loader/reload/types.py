@@ -11,7 +11,7 @@ __all__ = ["LayerTensors", "LayerReloadingInfo"]
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 
-@dataclass
+@dataclass(slots=True)
 class LayerReloadingInfo:
     # model format metadata, recorded by `record_metadata_for_reloading`
     restore_metadata: LayerTensors
