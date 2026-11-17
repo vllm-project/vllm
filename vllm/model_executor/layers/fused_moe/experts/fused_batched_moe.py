@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm import envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -659,6 +660,7 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
+    td_override = envs.VLLM_TRITON_USE_TD
     use_td = (
         use_tensor_descriptor()
         and A.stride(2) == 1
@@ -667,6 +669,12 @@ def invoke_moe_batched_triton_kernel(
         and (BLOCK_M & (BLOCK_M - 1)) == 0
         and (BLOCK_N & (BLOCK_N - 1)) == 0
         and (BLOCK_K & (BLOCK_K - 1)) == 0
+        and (
+            td_override is not None
+            or not current_platform.is_cuda()
+            or not current_platform.has_device_capability(100)
+            or max_num_tokens > BLOCK_M
+        )
     )
     if use_td:
         set_triton_allocator(A.device)
