@@ -194,7 +194,7 @@ def load_image(
         image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
     assert do_rescale == do_normalize
     pixels = np.asarray(image, dtype=np.uint8)
-    patches_np = (
+    patches_np = np.ascontiguousarray(
         pixels.reshape(n_vit_h, p, n_vit_w, p, 3)
         .transpose(0, 2, 4, 1, 3)
         .reshape(n_vit_h * n_vit_w, 3, p, p)
@@ -202,8 +202,7 @@ def load_image(
     if do_normalize:
         patches = torch.from_numpy(_NORMALIZE_LUT[patches_np]).view(torch.bfloat16)
     else:
-        # Single-row or single-column grids can remain read-only views.
-        patches = torch.from_numpy(np.require(patches_np, requirements=["W"]))
+        patches = torch.from_numpy(patches_np)
     return patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w
 
 
