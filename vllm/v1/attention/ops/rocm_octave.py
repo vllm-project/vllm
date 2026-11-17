@@ -97,7 +97,7 @@ def registered_rope_dim(head_size: int) -> int:
     return _rope_dim_by_head_size[head_size]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OctaveFormat:
     head_size: int
     rope_dim: int
