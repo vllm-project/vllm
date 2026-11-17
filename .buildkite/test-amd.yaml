@@ -2809,7 +2809,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - uv pip install --system --no-deps 'ray==2.60.0'
+  - uv pip install --system --no-deps 'ray==2.56.1'
   - pytest -v -s distributed/test_sharded_rdt_engine.py
   - pytest -v -s distributed/test_sharded_rdt_producer.py
   - pytest -v -s distributed/test_sharded_rdt_trainer.py

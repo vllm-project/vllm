@@ -86,7 +86,7 @@ steps:
       env:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
-      - uv pip install --system --no-deps 'ray==2.60.0'
+      - uv pip install --system --no-deps 'ray==2.56.1'
       - pytest -v -s distributed/test_sharded_rdt_engine.py
       - pytest -v -s distributed/test_sharded_rdt_producer.py
       - pytest -v -s distributed/test_sharded_rdt_trainer.py
@@ -309,8 +309,8 @@ steps:
       - requirements/test/rocm.txt
       - vllm/platforms/rocm.py
       commands:
-      # Sharded RDT needs Ray >= 2.60; keep the ROCm image's dependencies.
-      - uv pip install --system --no-deps 'ray==2.60.0'
+      # Sharded RDT needs Ray >= 2.56; keep the ROCm image's dependencies.
+      - uv pip install --system --no-deps 'ray==2.56.1'
       - export NCCL_CUMEM_HOST_ENABLE=0
       - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
       # tp=2 and pp=2 with torchrun: no longer supported with MRV2
