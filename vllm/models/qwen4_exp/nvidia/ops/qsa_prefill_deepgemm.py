@@ -5,8 +5,9 @@
 Prefill requests are planned into groups whose keys fit a fixed K workspace.
 Each group's compressed keys are gathered once into the workspace, packed back
 to back, and its query rows are scored in chunks that keep the logits within
-VLLM_SPARSE_INDEXER_MAX_LOGITS_MB. The workspace holds one maximum-length
-request, so every eligible step can take this path.
+VLLM_SPARSE_INDEXER_MAX_LOGITS_MB. The K workspace takes the same budget, or
+one maximum-length request if larger, so every eligible step can take this
+path; prefill scratch peaks at both together.
 """
 
 import itertools
@@ -31,9 +32,6 @@ if TYPE_CHECKING:
 
 _NUM_HEADS = 4
 _HEAD_DIM = 128
-# Groups of short requests stop growing at this many gathered key bytes; a
-# single request longer than this still fits (see max_gather_keys).
-_GATHER_BYTES = 128 * 1024 * 1024
 # Pinned DeepGEMM pads logits rows to 32-row Q tiles and the row pitch to its
 # 384-column KV tiles, then to 256 floats.
 _Q_TILE = 32
@@ -65,8 +63,9 @@ def can_use_deepgemm_prefill(q: torch.Tensor, k_cache: torch.Tensor) -> bool:
 
 
 def max_gather_keys(max_model_len: int, compress_ratio: int) -> int:
-    """K workspace rows: the group budget, or one max-length request."""
-    return max(cdiv(max_model_len, compress_ratio), _GATHER_BYTES // _HEAD_DIM)
+    """K workspace rows: the logits budget's bytes, or one max-length request."""
+    max_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    return max(cdiv(max_model_len, compress_ratio), max_bytes // _HEAD_DIM)
 
 
 def _logits_width(num_keys: int) -> int:
