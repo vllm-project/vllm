@@ -12,6 +12,7 @@ import contextlib
 import gc
 import os
 import sys
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from types import ModuleType, SimpleNamespace
@@ -196,7 +197,7 @@ def _publish(server, weights, *units):
 def free(server, n=None):
     """Ray freed the oldest `n` served buckets (all by default)."""
     for key in server.outstanding[: n if n is not None else len(server.outstanding)]:
-        server._freed_bucket(*key, read=True)
+        server._freed_bucket(*key)
     del server.outstanding[: n if n is not None else len(server.outstanding)]
 
 
@@ -415,7 +416,7 @@ class TestRelease:
         stale = s.outstanding.pop()
         s.begin_sync([0], 1)
         _publish(s, _weights(1), 0)
-        s._freed_bucket(*stale, read=True)
+        s._freed_bucket(*stale)
         assert 0 in s._unit_names
         assert s._blocks == {}
 
@@ -459,34 +460,54 @@ class TestFailure:
         assert s.end_sync() == [0]
 
 
-def test_a_bucket_is_freed_only_after_ray_stored_and_freed_it(server, monkeypatch):
-    """The free tracker waits for Ray to store the returned tensors before
-    waiting for their free; otherwise it would see them as already freed."""
-    import ray.experimental
-
-    events = []
-
-    class _Store:
-        def __init__(self):
-            self.calls = 0
-
-        def has_tensor(self, t):
-            self.calls += 1
-            return self.calls > 2
-
-    store = _Store()
-    monkeypatch.setattr(trainer_mod, "_ray_stored", store.has_tensor)
-    monkeypatch.setattr(
-        ray.experimental, "wait_tensor_freed", lambda t, timeout: events.append(t)
-    )
+def test_a_bucket_is_freed_when_ray_drops_it(server):
+    """The free is Ray dropping its last reference to the served block: while
+    Ray holds it the block and its unit stay taken, however long that is."""
     s = server(cls=_RDTProducerServer)
     s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
     s.begin_sync([0], 0)
     _publish(s, _weights(), 0)
-    (sent,) = s.bucket(0, 0, 0)
+    ray_store = s.bucket(0, 0, 0)  # what Ray keeps until the consumer drops it
+    block = weakref.ref(ray_store[0])
+    gc.collect()
+    assert s._blocks and s._freed_pending == []
+    del ray_store
+    # the producer kept no reference: Ray's was the last one
+    assert block() is None
     assert s.wait_freed() == [0]
-    assert store.calls == 3 and events == [sent]
     assert s._blocks == {}
+
+
+def test_buckets_freed_as_soon_as_served_all_count(server):
+    """Two consumers, two pulls in flight each, every bucket freed the
+    moment it is served: no free is missed, so every unit is released.
+    (A store-then-free that polling Ray's store saw neither half of left a
+    unit held forever.)"""
+    s = server(cls=_RDTProducerServer, arena_bytes=3 * 16)  # pulls wait for room
+    buckets = [[(N, [[r, r + 2], [0, 4]])] for r in range(0, 8, 2)] + [
+        [(M, [[0, 4]])],
+        [(E, [[0, 1], [0, 6]])],
+        [(E, [[1, 2], [0, 6]])],
+    ]
+    for c in (0, 1):
+        s.register_consumer(c, buckets)
+    for sync_idx in range(3):
+        s.begin_sync([0, 1], sync_idx)
+        _publish(s, _weights(sync_idx), 0, 1)
+
+        def pull(c, seqs, sync_idx):
+            for seq in seqs:
+                s.bucket(c, seq, sync_idx)  # Ray stores and frees at once
+
+        pulls = [
+            _call(pull, c, range(half, len(buckets), 2), sync_idx, timeout=5)
+            for c in (0, 1)
+            for half in (0, 1)
+        ]
+        for f in pulls:
+            f.result(timeout=10)
+        assert sorted(_call(s.end_sync, timeout=10).result(timeout=10)) == [0, 1]
+        assert s._blocks == {}
 
 
 # ------------------------------------------------------------ export ring

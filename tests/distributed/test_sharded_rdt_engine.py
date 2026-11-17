@@ -128,7 +128,7 @@ class _Loopback:
                 target = torch.empty_like(h.sent)
             target.fill_(0xA5)
             target.copy_(h.sent)
-            h.server._freed_bucket(*h.key, read=True)
+            h.server._freed_bucket(*h.key)
             out.append([target])
         return out
 

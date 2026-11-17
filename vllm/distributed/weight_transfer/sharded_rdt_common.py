@@ -51,10 +51,12 @@ Sync (`update_weights`, one per sync):
     pull is applied and fails the sync if a pull did not land in its slot.
 
 Release:
-    A consumer drops each ref once its bucket is applied, which frees the
-    producer's arena block. The producer releases a gathered unit once every live
-    consumer has registered and every bucket reading from the unit has been
-    freed; that is the trainer's credit to gather the next unit.
+    A consumer drops each ref once its bucket is applied, so Ray frees the
+    object and drops its last reference to the producer's arena block, which
+    a finalizer turns into the block's free. The producer releases a gathered
+    unit once every live consumer has registered and every bucket reading
+    from the unit has been freed; that is the trainer's credit to gather the
+    next unit.
 
 Arena: each producer registers an arena of `arena_bytes(...)` at startup and
 admits a bucket only while a block for it can be carved from the arena next
@@ -69,8 +71,8 @@ from typing import Any
 
 import torch
 
-# `register_nixl_memory`, `set_target_for_ref`, `wait_tensor_freed` and
-# concurrent `ray.get` on lists, all in Ray 2.56.
+# `register_nixl_memory`, `set_target_for_ref` and concurrent `ray.get` on
+# lists, all in Ray 2.56.
 RDT_MIN_RAY_VERSION = "2.56.0"
 DEFAULT_BUFFER_BYTES = 1 << 30
 DEFAULT_NUM_BUFFERS = 2

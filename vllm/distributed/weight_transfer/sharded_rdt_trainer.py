@@ -17,6 +17,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from collections import Counter
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -146,19 +147,6 @@ def _sources(gen: int, views: list[torch.Tensor]) -> _Sources:
     )
 
 
-def _ray_stored(tensor: torch.Tensor) -> bool:
-    """Whether Ray holds `tensor` as part of an RDT object.
-
-    Ray stores a task's returned tensors only after the method returns.
-    Before that, the public `ray.experimental.wait_tensor_freed` returns at
-    once, as if the object were already freed. Ray has no public check for this, so it
-    reads the RDT store, which is internal; keep that to this helper.
-    """
-    from ray._private.worker import global_worker
-
-    return global_worker.rdt_manager.rdt_store.has_tensor(tensor)
-
-
 class _RDTProducerServer:
     """One trainer rank's serve surface: an internal Ray actor on the rank's
     GPU. The engine publishes gathered units into it over CUDA IPC; workers
@@ -174,7 +162,6 @@ class _RDTProducerServer:
         units: dict[str, int],
         arena_bytes: int,
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
-        max_outstanding: int = 64,
     ) -> None:
         self._device_index = torch.accelerator.current_device_index()
         self._served = {
@@ -207,9 +194,6 @@ class _RDTProducerServer:
         self._arena: torch.Tensor | None = None
         self._blocks: dict[int, int] = {}
         self._serve_wait, self._served_count = 0.0, 0
-        self._waiters = ThreadPoolExecutor(
-            max_workers=max(1, max_outstanding), thread_name_prefix="rdt-free"
-        )
         self._base_cache: dict[tuple, torch.Tensor] = {}
         # Per unit, the last publish and its rebuilt tensors (an identical
         # publish reuses them), and their generation: a new one whenever a
@@ -220,6 +204,10 @@ class _RDTProducerServer:
         self._unit_gen: dict[int, int] = {}
         self._gens = itertools.count(1)
         self._sources: dict[tuple[int, int], _Sources] = {}
+        # Packs run one at a time: the GIL serializes their Python anyway, and
+        # concurrent packs only convoy on it, which multiplies the cost of
+        # every tensor op. The device sync after a pack is outside it.
+        self._pack_lock = threading.Lock()
 
         # A frozen post-init object graph keeps gen-2 GC from stopping the
         # world mid-serve.
@@ -465,12 +453,17 @@ class _RDTProducerServer:
                 # the unit stays cached until this bucket is freed
                 tensors = [self._cache[name] for name, _ in spec.pieces]
             self._progress()
-        if sources is None or sources.gen != gen:
-            sources = self._sources[consumer_id, seq] = _sources(
-                gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
-            )
-            del tensors
-        flat = self._pack(sources, spec, offset)
+        with self._pack_lock:
+            if sources is None or sources.gen != gen:
+                sources = self._sources[consumer_id, seq] = _sources(
+                    gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
+                )
+                del tensors
+            flat = self._pack(sources, spec, offset)
+        if flat.is_cuda:
+            # Ray synchronizes the device under its cache lock; do it here so
+            # its wait is empty.
+            torch.cuda.current_stream(flat.device).synchronize()
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
 
@@ -494,7 +487,8 @@ class _RDTProducerServer:
         """Pack a bucket into its arena block: the contiguous boxes as bytes,
         with one fused copy, and the strided ones (e.g. TP column slices)
         typed. One strided box or a second dtype would otherwise put every
-        box on the per-tensor path, a kernel each."""
+        box on the per-tensor path, a kernel each. Caller holds `_pack_lock`
+        and synchronizes the device."""
         if self._arena is None:  # warmup_nixl never ran (tests)
             some = (sources.byte_srcs or sources.typed_srcs)[0]
             self._arena = torch.empty(
@@ -517,54 +511,35 @@ class _RDTProducerServer:
                 ],
                 list(sources.typed_srcs),
             )
-        if flat.is_cuda:
-            # Ray synchronizes the device under its cache lock; do it here so
-            # its wait is empty.
-            torch.cuda.current_stream(flat.device).synchronize()
         return flat
 
     def _track_free(self, flat: torch.Tensor, *key: int) -> None:
-        """Account the bucket once Ray frees it (`_await_free`)."""
-        self._waiters.submit(self._await_free, flat, *key)
+        """Account the bucket once Ray frees it, i.e. drops its last
+        reference to `flat`: the consumer has read it, so its arena block and
+        the unit's tensors are no longer read. A finalizer, not a waiter
+        polling Ray's store, which can miss a bucket stored and freed between
+        two looks. Nothing here may reference `flat` past the return.
 
-    def _await_free(
-        self,
-        flat: torch.Tensor,
-        consumer_id: int,
-        unit: int,
-        sync_idx: int,
-        offset: int,
-    ) -> None:
-        """Account a served bucket once Ray frees it: the consumer has read
-        it, so its arena block and the unit's tensors are no longer read."""
-        from ray.experimental import wait_tensor_freed
-
-        # A bucket Ray never stored (it failed to serialize it) was never
-        # read, so its unit stays unreleased and the watchdog fails the sync.
-        deadline = time.monotonic() + self._stall_timeout
-        stored = False
-        while not self._shutdown and time.monotonic() < deadline:
-            stored = _ray_stored(flat)
-            if stored:
-                break
-            time.sleep(0.001)
-        while stored and not self._shutdown:
-            try:
-                wait_tensor_freed(flat, timeout=_STALL_POLL_S)
-                break
-            except TimeoutError:
-                continue
-        del flat
-        self._freed_bucket(consumer_id, unit, sync_idx, offset, read=stored)
+        Ray keeps the returned tensors in the actor's RDT store from the task
+        return (`RDTStore.add_object`) until the owner frees the object
+        (`__ray_free__`: `get_object`, `garbage_collect`, `pop_object`). The
+        owner is the consumer, which frees it only once its `ray.get`, whose
+        NIXL read is complete when it returns, is done and the ref dropped;
+        so the finalizer cannot run before the read. If the consumer dies,
+        Ray frees the object too: its block is then truly free, and its
+        unit's count for that consumer stays short, so the watchdog and the
+        next (degraded) sync handle it as before. If Ray fails to store the
+        return, the consumer's `ray.get` fails the sync."""
+        weakref.finalize(flat, self._freed_bucket, *key)
 
     def _freed_bucket(
-        self, consumer_id: int, unit: int, sync_idx: int, offset: int, *, read: bool
+        self, consumer_id: int, unit: int, sync_idx: int, offset: int
     ) -> None:
-        """A served bucket's arena block at `offset` is free; if it was
-        `read`, it no longer holds its unit."""
+        """A served bucket's arena block at `offset` is free, and the bucket
+        no longer holds its unit."""
         with self._cond:
             self._blocks.pop(offset, None)
-            if read and sync_idx == self._sync_idx and consumer_id in self._freed:
+            if sync_idx == self._sync_idx and consumer_id in self._freed:
                 self._freed[consumer_id][unit] += 1
                 self._release_if_done(unit)
             self._progress()
@@ -592,7 +567,6 @@ class _RDTProducerServer:
             self._sources.clear()
             self._published.clear()
             self._unit_tensors.clear()
-        self._waiters.shutdown(wait=False, cancel_futures=True)
         if self._arena is not None and self._arena.is_cuda:
             with contextlib.suppress(Exception):
                 deregister_nixl_memory(self._arena)
@@ -867,7 +841,6 @@ class ShardedRDTTrainerWeightTransferEngine(
             units=units,
             arena_bytes=self._arena_bytes(),
             stall_timeout_s=ii.stall_timeout_s,
-            max_outstanding=max_outstanding,
         )
         ray.get(self._server.ping.remote())
         ray.get(self._server.warmup_nixl.remote())

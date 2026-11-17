@@ -279,7 +279,7 @@ def test_at_most_lookahead_plus_one_units_are_resident(cpu_ipc, lookahead):
             (t,) = server.bucket(0, seq, 0)
             served.append(t.view(torch.float32).clone())
             for key in server.outstanding:
-                server._freed_bucket(*key, read=True)
+                server._freed_bucket(*key)
             server.outstanding.clear()
 
     worker = threading.Thread(target=consumer)
