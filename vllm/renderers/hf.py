@@ -1124,6 +1124,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 await asyncio.wait(
                     {started, replaced}, return_when=asyncio.FIRST_COMPLETED
                 )
+            except asyncio.CancelledError:
+                # No caller is left to time the render: it must not run later.
+                abandoned.set()
+                result.cancel()
+                raise
             finally:
                 replaced.cancel()
             if started.done():

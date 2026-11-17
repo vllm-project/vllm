@@ -205,3 +205,42 @@ def test_render_queued_behind_stuck_render_moves_to_new_pool(monkeypatch):
     finally:
         release.set()
         renderer.shutdown()
+
+
+def test_cancelled_caller_does_not_render_later(monkeypatch):
+    """A render still queued when its caller is cancelled must not run later:
+    no caller is left to time it or to replace the pool."""
+    rendered: list[list[str]] = []
+
+    def render(model_config, tokenizer, conversation, **kwargs):
+        rendered.append(conversation)
+        return "rendered"
+
+    _patch_render(monkeypatch, 5.0, render)
+    renderer = _build_renderer()
+    release = threading.Event()
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        busy = loop.run_in_executor(renderer._executor, release.wait, 10)
+        cancelled = asyncio.ensure_future(
+            renderer._render_with_timeout(None, None, ["cancelled"])
+        )
+        # One loop step: the task queues its render behind the busy job.
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        release.set()
+        await busy
+        # The pool has one worker, so this job runs after the queued ones.
+        await loop.run_in_executor(renderer._executor, lambda: None)
+        assert rendered == []
+        assert await renderer._render_with_timeout(None, None, ["later"]) == "rendered"
+        assert rendered == [["later"]]
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+        renderer.shutdown()
