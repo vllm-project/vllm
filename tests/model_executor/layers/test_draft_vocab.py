@@ -48,6 +48,12 @@ def test_pruned_head_maps_draft_ids_to_target_ids(default_vllm_config):
 
 
 @pytest.mark.cpu_test
+def test_draft_vocab_larger_than_target_raises(default_vllm_config):
+    with pytest.raises(ValueError, match="larger than the target"):
+        DraftVocab(LogitsProcessor(VOCAB + 1), VOCAB)
+
+
+@pytest.mark.cpu_test
 def test_dspark_reads_d2t_of_subclasses_that_skip_init(default_vllm_config):
     """Gemma4, MiniMax-M3 and Muse Spark DSpark drafters skip the parent
     __init__ and set only `draft_id_to_target_id`; inherited methods use it."""
