@@ -171,6 +171,7 @@ class _RDTProducerServer:
         self._freed_pending: list[int] = []  # released, not yet collected
         # served buckets whose pool blocks Ray has not freed yet
         self._pool_used = 0
+        self._serve_wait, self._served_count = 0.0, 0
         self._waiters = ThreadPoolExecutor(
             max_workers=max(1, max_outstanding), thread_name_prefix="rdt-free"
         )
@@ -227,6 +228,7 @@ class _RDTProducerServer:
             self._sync_idx = int(sync_idx)
             self._live = frozenset(int(c) for c in live_consumer_ids)
             self._freed = {c: Counter() for c in self._live}
+            self._serve_wait, self._served_count = 0.0, 0
             self._inflight_units.clear()
             self._freed_pending.clear()
             self._base_cache.clear()
@@ -291,6 +293,13 @@ class _RDTProducerServer:
             self._wait_for(lambda: bool(self._inflight_units), "every unit's release")
             freed, self._freed_pending = self._freed_pending, []
             self._base_cache.clear()
+            logger.info(
+                "Sharded RDT producer sync %d: served %d buckets, which waited "
+                "%.2f s in total for their unit or pool room",
+                self._sync_idx,
+                self._served_count,
+                self._serve_wait,
+            )
             return freed
 
     def set_gather_error(self, message: str) -> None:
@@ -357,6 +366,7 @@ class _RDTProducerServer:
                 f"consumer {consumer_id} pulled bucket {seq}, which it never "
                 "registered here"
             ) from None
+        t0 = time.perf_counter()
         with self._cond:
             if sync_idx < self._sync_idx:
                 raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
@@ -373,6 +383,8 @@ class _RDTProducerServer:
                 f"unit {spec.unit} of sync {sync_idx} and pool room",
             )
             self._pool_used += spec.nbytes
+            self._serve_wait += time.perf_counter() - t0
+            self._served_count += 1
             tensors = [
                 self._cache[name][slices].contiguous() for name, slices in spec.pieces
             ]
@@ -774,13 +786,19 @@ class ShardedRDTTrainerWeightTransferEngine(
         handle_cache: dict[int, tuple] = {}
         pending: list = []  # publishes not yet confirmed, at most 2 deep
         units = self._iter_owned_units()
+        # seconds waiting for released units, gathering, exporting
+        spent = [0.0, 0.0, 0.0]
+        t_start = time.perf_counter()
         try:
             for unit in self._owned_units:
+                t0 = time.perf_counter()
                 while len(self._inflight) > bound:
                     while pending:
                         self._await_publish(pending.pop(0))
                     self._drop_inflight(self._rpc("wait_freed"))
+                t1 = time.perf_counter()
                 names, tensors = next(units)
+                t2 = time.perf_counter()
                 entries, refs = self._export(
                     unit, names, tensors, handle_cache, pending
                 )
@@ -789,11 +807,25 @@ class ShardedRDTTrainerWeightTransferEngine(
                 pending.append(self._publish_async(unit, entries))
                 while len(pending) >= 2:
                     self._await_publish(pending.pop(0))
+                spent[0] += t1 - t0
+                spent[1] += t2 - t1
+                spent[2] += time.perf_counter() - t2
                 if update_future is not None and update_future.done():
                     update_future.result()  # a worker failed: stop gathering
             while pending:
                 self._await_publish(pending.pop(0))
+            t0 = time.perf_counter()
             self._drop_inflight(self._rpc("end_sync"))
+            logger.info(
+                "Sharded RDT rank %d sync %d: %d units in %.2f s (waiting for "
+                "releases %.2f s, gathering %.2f s, publishing %.2f s, end %.2f s)",
+                self.rank,
+                self._sync_idx,
+                len(self._owned_units),
+                time.perf_counter() - t_start,
+                *spent,
+                time.perf_counter() - t0,
+            )
         except BaseException as e:
             with contextlib.suppress(Exception):
                 self._rpc("set_gather_error", repr(e))
