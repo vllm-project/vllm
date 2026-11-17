@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from vllm.triton_utils import triton
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
@@ -303,8 +304,7 @@ class BenchmarkConfig:
     # Backend-specific tuning
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
-    sparse_mla_force_mqa: bool = False  # Force MQA path for sparse MLA
-    sparse_mla_mha_mode: str = "auto"  # "auto", "dense", or "masked"
+    sparse_mla_route: SparseMLAPrefillRoute | None = None
     sparse_mla_dense_mha_max_seq_len: int | None = None
     sparse_mla_masked_mha_max_seq_len: int | None = None
     sparse_mla_topk_pattern: str = "random"  # "random", "prefix", "sliding_window"

@@ -60,6 +60,15 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+Sparse MLA benchmarks use the metadata builder's prefill route by default.
+The `mha_vs_mqa` comparison mode forces the selected `dense_mha`, `masked_mha`,
+and `mqa` variants. When calling the benchmark runner from Python, set
+`BenchmarkConfig.sparse_mla_route` to `SparseMLAPrefillRoute.DENSE_MHA`,
+`MASKED_MHA`, or `SPARSE_MQA` to force a route, or leave it as `None` to use the
+builder's decision. Import `SparseMLAPrefillRoute` from
+`vllm.v1.attention.backends.mla.sparse_utils`. This replaces
+the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
+
 ## Dataset Overview
 
 <style>

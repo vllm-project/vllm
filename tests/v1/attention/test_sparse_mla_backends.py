@@ -28,6 +28,7 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import (
+    CacheConfig,
     CUDAGraphMode,
     HiSparseConfig,
     SpeculativeConfig,
@@ -43,8 +44,6 @@ from vllm.model_executor.layers.attention import (
 )
 from vllm.model_executor.layers.attention.mla_attention import (
     MLADims,
-    SparseMLAPrefillRoute,
-    _use_masked_mha,
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
@@ -54,10 +53,12 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     _is_masked_mha_available,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
+    _use_masked_mha,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 
 # The sparse-backend correctness tests support CUDA, ROCm and XPU. On ROCm
 # and XPU, the autouse fixture below skips tests that exercise CUDA-specific
@@ -500,87 +501,56 @@ def test_prefill_route(seq_len, overrides, expected):
     assert route is expected
 
 
-@pytest.mark.parametrize("layer_masked", [True, False])
+@pytest.mark.parametrize(
+    "cache_dtype, expected", [("auto", _MASKED), ("fp8_ds_mla", _MQA)]
+)
 def test_masked_route_needs_layer_masked_mha(
-    default_vllm_config, dist_init, workspace_init, monkeypatch, layer_masked
+    default_vllm_config, dist_init, workspace_init, cache_dtype, expected
 ):
-    """The global KV dtype allocates the mask workspace, but a layer group whose
-    own KV dtype rules masked MHA out (e.g. a quantized MTP draft cache) must
-    not take it."""
-    num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim = 64, 192, 64, 256
-    if not _is_masked_mha_available(
-        num_heads, 512, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, "auto"
-    ):
+    """A quantized layer cache rules out masked MHA despite the global workspace."""
+    if not _is_masked_mha_available(128, 512, 128, 64, 128, "auto"):
         pytest.skip("masked MHA needs SM100 and FA4")
-    batch_spec = BatchSpec(seq_lens=[4096], query_lens=[4096])
     vllm_config = create_vllm_config(
-        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
-        tensor_parallel_size=1,
+        model_name="deepseek-ai/DeepSeek-V3.2",
         max_model_len=4096,
         num_gpu_blocks=128,
         block_size=64,
-        hf_config_override={"index_topk": 2048},
+        dtype="bfloat16",
     )
-    model_config = vllm_config.model_config
-    model_config.hf_text_config = SimpleNamespace(
-        index_topk=2048,
-        q_lora_rank=None,
-        kv_lora_rank=512,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        model_type="deepseek_v2",
-    )
-    del model_config.hf_config.index_topk
-    model_config.dtype = torch.bfloat16
-    model_config.model_arch_config.total_num_attention_heads = num_heads
-    monkeypatch.setattr(
-        model_config,
-        "get_num_attention_heads",
-        MethodType(lambda self, parallel_config: num_heads, model_config),
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_num_kv_heads",
-        MethodType(lambda self, parallel_config: 1, model_config),
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_head_size",
-        MethodType(lambda self: 512 + qk_rope_head_dim, model_config),
-    )
-    prefill_backend = get_mla_prefill_backend(vllm_config)(
-        num_heads=num_heads,
-        scale=1.0 / math.sqrt(qk_nope_head_dim + qk_rope_head_dim),
-        kv_lora_rank=512,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        vllm_config=vllm_config,
-    )
-    vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(
-            prefill_backend=prefill_backend,
-            impl=SimpleNamespace(masked_mha_available=layer_masked),
-            get_attn_backend=lambda: FlashMLASparseBackend,
+    with set_current_vllm_config(vllm_config), torch.device(DEVICE_TYPE):
+        layer = mla_attention.MLAAttention(
+            num_heads=128,
+            scale=192**-0.5,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            kv_b_proj=ColumnParallelLinear(512, 128 * 256, bias=False),
+            cache_config=CacheConfig(block_size=64, cache_dtype=cache_dtype),
+            prefix="placeholder",
+            attn_backend=FlashMLASparseBackend,
+            use_sparse=True,
+            topk_indices_buffer=torch.empty((4096, 2048), dtype=torch.int32),
         )
-    )
-    builder = FlashMLASparseBackend.get_builder_cls()(
-        create_standard_kv_cache_spec(vllm_config),
-        ["placeholder"],
-        vllm_config,
-        torch.device(DEVICE_TYPE),
-    )
-    metadata = builder.build(
-        common_prefix_len=0,
-        common_attn_metadata=create_common_attn_metadata(
-            batch_spec, 64, torch.device(DEVICE_TYPE), arange_block_indices=True
-        ),
-    )
-
+        builder = FlashMLASparseBackend.get_builder_cls()(
+            layer.get_kv_cache_config(vllm_config).spec,
+            ["placeholder"],
+            vllm_config,
+            torch.device(DEVICE_TYPE),
+        )
+        metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=create_common_attn_metadata(
+                BatchSpec(seq_lens=[4096], query_lens=[4096]),
+                64,
+                torch.device(DEVICE_TYPE),
+                arange_block_indices=True,
+            ),
+        )
     assert builder.topk_mask_workspace is not None
     assert metadata.prefill is not None
-    assert metadata.prefill.route is (_MASKED if layer_masked else _MQA)
+    assert metadata.prefill.route is expected
 
 
 def test_unified_mla_prepares_batch_without_slot_mapping(monkeypatch):

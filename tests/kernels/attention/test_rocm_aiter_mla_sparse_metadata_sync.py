@@ -27,9 +27,9 @@ if not is_aiter_found_and_supported():
     )
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.attention.mla_attention import SparseMLAPrefillRoute
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 
 
 class _FakeAiter(ModuleType):

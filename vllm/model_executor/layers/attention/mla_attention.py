@@ -294,6 +294,7 @@ from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackend,
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     get_dcp_local_seq_lens,
@@ -1803,22 +1804,6 @@ class QueryLenSupport(Enum):
     VARLEN = "varlen"
 
 
-class SparseMLAPrefillRoute(Enum):
-    """How a sparse MLA step runs its prefill tokens.
-
-    - DENSE_MHA: every prefill fits in the top-k, so MHA over all keys.
-    - MASKED_MHA: MHA with the top-k as a per-query key mask.
-    - SPARSE_MQA: the prefill tokens run in forward_mqa, like the decodes.
-
-    Set once per step by SparseMLACommonMetadataBuilder._prefill_route;
-    readers use it as is instead of re-deriving it.
-    """
-
-    DENSE_MHA = "dense_mha"
-    MASKED_MHA = "masked_mha"
-    SPARSE_MQA = "sparse_mqa"
-
-
 def dynamic_per_batched_tensor_quant(
     x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
 ):
@@ -2045,127 +2030,6 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
         qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
         v_head_dim=hf_text_config.v_head_dim,
     )
-
-
-_MaskedMHARanges = tuple[tuple[int, int], ...]
-
-_MASKED_MHA_THRESHOLDS: dict[
-    tuple[int, int],
-    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
-] = {
-    (192, 128): {
-        "FLASHMLA_SPARSE": {
-            1: (((2048, 1536), (4096, 4096)), None),
-            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
-            4: (
-                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
-                None,
-            ),
-            8: (
-                (
-                    (2048, 512),
-                    (4096, 512),
-                    (8192, 1024),
-                    (16384, 2048),
-                    (32768, 16384),
-                ),
-                None,
-            ),
-        },
-        "FLASHINFER_MLA_SPARSE": {
-            8: (
-                (
-                    (2048, 512),
-                    (4096, 1024),
-                    (8192, 1024),
-                    (16384, 2048),
-                    (32768, 32768),
-                ),
-                None,
-            ),
-        },
-    },
-    (256, 256): {
-        "FLASHMLA_SPARSE": {
-            1: (((8 * 1024, 0),), ()),
-            2: (
-                ((20 * 1024, 0),),
-                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
-            ),
-            4: (
-                ((48 * 1024, 0),),
-                (
-                    (8 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (24 * 1024, 16 * 1024),
-                    (34 * 1024, 32 * 1024),
-                ),
-            ),
-            8: (
-                ((112 * 1024, 0),),
-                (
-                    (8 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (32 * 1024, 16 * 1024),
-                    (48 * 1024, 32 * 1024),
-                ),
-            ),
-        },
-        "FLASHINFER_MLA_SPARSE": {
-            4: (
-                ((36 * 1024, 0),),
-                (
-                    (12 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (24 * 1024, 16 * 1024),
-                    (28 * 1024, 24 * 1024),
-                ),
-            ),
-            8: (
-                ((64 * 1024, 0),),
-                (
-                    (20 * 1024, 4 * 1024),
-                    (24 * 1024, 8 * 1024),
-                    (32 * 1024, 16 * 1024),
-                    (48 * 1024, 32 * 1024),
-                    (56 * 1024, 40 * 1024),
-                    (64 * 1024, 48 * 1024),
-                    (72 * 1024, 56 * 1024),
-                ),
-            ),
-        },
-    },
-}
-
-
-def _use_masked_mha(
-    *,
-    backend_name: str,
-    tensor_parallel_size: int,
-    qk_head_dim: int,
-    v_head_dim: int,
-    query_len: int,
-    seq_len: int,
-    has_context: bool,
-) -> bool:
-    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
-        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
-        backend_name = "FLASHINFER_MLA_SPARSE"
-    thresholds = (
-        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
-        .get(backend_name, {})
-        .get(tensor_parallel_size)
-    )
-    if thresholds is None:
-        return False
-    pure_prefill_ranges, context_ranges = thresholds
-    ranges = pure_prefill_ranges
-    if has_context and context_ranges is not None:
-        ranges = context_ranges
-    for max_seq_len, min_query_len in ranges:
-        if seq_len <= max_seq_len:
-            return query_len >= min_query_len
-    return False
 
 
 @functools.cache

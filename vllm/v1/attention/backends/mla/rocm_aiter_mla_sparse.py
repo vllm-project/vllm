@@ -12,7 +12,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import SparseMLAPrefillRoute
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadata,
@@ -33,6 +32,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    SparseMLAPrefillRoute,
     align_blocks_to_rows,
     flat_kv_row_view,
     triton_filter_and_convert_dcp_index,
@@ -685,6 +685,13 @@ class ROCMAiterMLASparseMetadataBuilder(
         )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
         self._num_compute_units = current_platform.num_compute_units()
+        self.max_model_len_tensor = torch.tensor(
+            [self.model_config.max_model_len], device=device, dtype=torch.int32
+        )
+        # this is ignored by `flash_mla_with_kvcache` if indices not None
+        self.dummy_block_table = torch.empty(
+            (1, 1), dtype=torch.int32, device=self.device
+        )
 
         self.req_id_per_token_buffer = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
