@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
+import itertools
 import math
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+from transformers import Qwen4ExpTextConfig
 
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
@@ -27,6 +33,7 @@ from vllm.models.qwen4_exp.amd.qsa_indexer import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -141,12 +148,17 @@ def _make_attn(*, use_fused: bool) -> SimpleNamespace:
 
 
 def _make_indexer(
-    monkeypatch: pytest.MonkeyPatch, *, use_fused: bool, num_tokens: int = 2
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    use_fused: bool,
+    skip_topk: bool = True,
+    num_tokens: int = 2,
 ) -> QSAIndexer:
     """A QSAIndexer whose unfused path runs for real, with no projection weights.
 
     Both branches have to be reachable: a fused-path test is only meaningful if
-    the unfused one it replaces would otherwise have executed.
+    the unfused one it replaces would otherwise have executed. The step leaves
+    the selection unwritten, so the top-k must not run.
     """
     heads, head_dim = 2, 4
     indexer = QSAIndexer.__new__(QSAIndexer)
@@ -157,7 +169,10 @@ def _make_indexer(
     indexer.compress_ratio = 2
     indexer.indexer_dtype = torch.bfloat16
     indexer.use_fused_pre_indexer = use_fused
-    indexer.skip_topk = True
+    indexer.skip_topk = skip_topk
+    monkeypatch.setattr(
+        indexer, "_select", lambda *args, **kwargs: pytest.fail("ran the top-k")
+    )
     indexer.index_qk_proj = lambda hidden_states: (
         torch.zeros(hidden_states.shape[0], (heads + 1) * head_dim),
         None,
@@ -201,11 +216,22 @@ def _make_indexer(
     return indexer
 
 
+# The two ways a step leaves the selection unwritten but still writes the
+# caches: an MTP draft step reusing the first step's selection, and a step
+# whose attention runs dense.
+skips_selection = pytest.mark.parametrize(
+    ("skip_topk", "skip_scoring"),
+    [(True, False), (False, True)],
+    ids=["mtp-reuse", "dense"],
+)
+
+
+@skips_selection
 @pytest.mark.usefixtures("default_vllm_config")
 def test_qsa_fused_prepare_replaces_the_unfused_chain(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, skip_topk: bool, skip_scoring: bool
 ) -> None:
-    indexer = _make_indexer(monkeypatch, use_fused=True)
+    indexer = _make_indexer(monkeypatch, use_fused=True, skip_topk=skip_topk)
     attn = _make_attn(use_fused=True)
     calls = []
     main_outputs = (torch.empty(0), torch.empty(0))
@@ -234,6 +260,7 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
         qkv=qkv,
         slot_mapping=slot_mapping,
         gate_out=gate_out,
+        skip_scoring=skip_scoring,
     )
 
     assert actual is rows
@@ -262,11 +289,12 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
     assert passed["main_k_norm_weight"] is attn.k_norm.weight
 
 
+@skips_selection
 @pytest.mark.usefixtures("default_vllm_config")
 def test_qsa_unsupported_config_keeps_the_unfused_chain(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, skip_topk: bool, skip_scoring: bool
 ) -> None:
-    indexer = _make_indexer(monkeypatch, use_fused=False)
+    indexer = _make_indexer(monkeypatch, use_fused=False, skip_topk=skip_topk)
     monkeypatch.setattr(
         qsa_indexer,
         "qsa_prepare",
@@ -286,11 +314,89 @@ def test_qsa_unsupported_config_keeps_the_unfused_chain(
         torch.tensor([7, 8]),
         rows,
         attn=_make_attn(use_fused=False),
+        skip_scoring=skip_scoring,
     )
 
     assert actual is rows
     assert main_outputs is None
     assert len(updates) == 1
+
+
+@pytest.mark.parametrize(
+    ("kv_quant_mode", "aiter_enabled", "dense"),
+    [
+        pytest.param(KVQuantMode.NONE, True, True, id="bf16"),
+        pytest.param(KVQuantMode.FP8_PER_TENSOR, True, True, id="fp8"),
+        # Only the Octave kernels read Octave slots.
+        pytest.param(KVQuantMode.OCTAVE_K3V4, True, False, id="octave"),
+        pytest.param(KVQuantMode.NONE, False, False, id="no-aiter"),
+    ],
+)
+def test_qsa_rocm_builder_marks_steps_that_select_every_token_dense(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kv_quant_mode: KVQuantMode,
+    aiter_enabled: bool,
+    dense: bool,
+) -> None:
+    """With an indexer budget of 2048 and compress ratio 4, a row at position
+    `p <= 2050` selects every token of its prefix, so a step whose sequences
+    all fit runs dense attention over a bf16 or fp8 cache when AITER is on.
+    Longer, decode-only and speculative steps keep the sparse path, as do
+    Octave caches, AITER off and GPUs other than gfx950."""
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpROCmQSAMetadataBuilder
+
+    # Runner probes, patched so that one runner covers both sides of each gate.
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: aiter_enabled)
+    Qwen4ExpTextConfig(
+        architectures=["Qwen4ExpForCausalLM"],
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=256,
+        indexer_budget=2048,
+        indexer_compress_ratio=4,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+    device = torch.device("cpu")
+
+    def builder_for(
+        *, speculative: bool = False, gfx950: bool = True
+    ) -> Qwen4ExpROCmQSAMetadataBuilder:
+        monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: gfx950)
+        config = VllmConfig(model_config=model_config)
+        if speculative:
+            config.speculative_config = SpeculativeConfig(
+                method="ngram", num_speculative_tokens=3
+            )
+        spec = AttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            kv_quant_mode=kv_quant_mode,
+        )
+        return Qwen4ExpROCmQSAMetadataBuilder(spec, ["attn"], config, device)
+
+    def is_dense(
+        builder: Qwen4ExpROCmQSAMetadataBuilder,
+        seq_lens: list[int],
+        query_lens: list[int],
+    ) -> bool:
+        common = create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=query_lens), 16, device
+        )
+        return getattr(builder.build(0, common), "use_dense_attention", False)
+
+    builder = builder_for()
+    # A 512-token chunk ending at position 2050, next to a decode row.
+    step = ([2051, 300], [512, 1])
+    assert [
+        is_dense(builder, *step),
+        is_dense(builder, [2052, 300], [512, 1]),
+        is_dense(builder, [2051, 300], [1, 1]),
+        is_dense(builder_for(speculative=True), *step),
+        is_dense(builder_for(gfx950=False), *step),
+    ] == [dense, False, False, False, False]
 
 
 @pytest.mark.parametrize(
@@ -531,3 +637,130 @@ def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
         kv_cache_dtype=kv_cache_dtype,
     )
     assert impl.kv_cache_dtype == kv_cache_dtype
+
+
+@requires_qsa_kernels
+# Qwen3.8-Flash-Next's 24 query and 2 KV heads per rank at TP 1, 2, 4 and 8.
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads"),
+    [(24, 2), (12, 1), (6, 1), (3, 1)],
+    ids=["tp1", "tp2", "tp4", "tp8"],
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize(
+    ("seq_lens", "query_lens"),
+    [
+        pytest.param([1024], [1024], id="short-prefill"),
+        # A chunk ending at the last dense position, a whole prefill and a
+        # decode row.
+        pytest.param([2051, 700, 900], [300, 700, 1], id="mixed"),
+    ],
+)
+def test_qsa_dense_attention_matches_sparse_on_steps_that_select_every_token(
+    seq_lens: list[int],
+    query_lens: list[int],
+    kv_cache_dtype: str,
+    num_heads: int,
+    num_kv_heads: int,
+) -> None:
+    pytest.importorskip("aiter.ops.triton.unified_attention")
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAImpl
+    from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
+
+    torch.manual_seed(0)
+    num_rows, num_reqs = sum(query_lens), len(seq_lens)
+    token_to_req = torch.cat(
+        [torch.full((n,), r, dtype=torch.int32) for r, n in enumerate(query_lens)]
+    ).cuda()
+    positions = torch.cat(
+        [torch.arange(s - n, s) for s, n in zip(seq_lens, query_lens)]
+    ).cuda()
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
+    compressed_page, compressed_pages = 64, 9
+    selection = qsa_ops.qsa_select_paged_tokens(
+        torch.randn(num_rows, 4, 128, device="cuda", dtype=torch.bfloat16),
+        torch.randn(
+            num_reqs * compressed_pages,
+            compressed_page,
+            1,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+        ),
+        torch.randperm(num_reqs * compressed_pages, device="cuda")
+        .to(torch.int32)
+        .view(num_reqs, compressed_pages),
+        token_to_req,
+        positions,
+        seq_lens_t,
+        2048,
+        4,
+    )
+    # Every row selects exactly its causal prefix, the premise of the dense path.
+    width = selection.shape[1]
+    columns = torch.arange(width, device="cuda", dtype=torch.int32)
+    selected = torch.where(selection >= 0, selection, width).sort(dim=1).values
+    assert torch.equal(
+        selected, torch.where(columns <= positions[:, None], columns, width)
+    )
+
+    # Qwen3.8-Flash-Next's head size and its block size at TP2.
+    head_dim, page_size, pages = 256, 1600, 2
+    impl = Qwen4ExpQSAImpl(
+        num_heads, head_dim, head_dim**-0.5, num_kv_heads, kv_cache_dtype
+    )
+    kv_cache = torch.randn(
+        num_reqs * pages, num_kv_heads, page_size, 2 * head_dim, device="cuda"
+    ).to(torch.bfloat16)
+    # FP8 scales other than one; powers of two keep the folded reference exact.
+    k_scale, v_scale = (1.0, 1.0) if kv_cache_dtype == "auto" else (0.25, 4.0)
+    if kv_cache_dtype == "fp8":
+        kv_cache = kv_cache.to(current_platform.fp8_dtype()).view(torch.uint8)
+    query = torch.randn(
+        num_rows, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    metadata = Qwen4ExpQSAMetadata(
+        num_actual_tokens=num_rows,
+        max_query_len=max(query_lens),
+        block_table=torch.randperm(num_reqs * pages, device="cuda")
+        .to(torch.int32)
+        .view(num_reqs, pages),
+        slot_mapping=torch.empty(0, device="cuda"),
+    )
+
+    def layer(k: float, v: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            topk_indices_buffer=selection,
+            _k_scale=torch.tensor(k, device="cuda"),
+            _v_scale=torch.tensor(v, device="cuda"),
+            _k_scale_float=k,
+            _v_scale_float=v,
+        )
+
+    dense = impl.forward_dense(
+        layer(k_scale, v_scale),
+        query,
+        kv_cache,
+        metadata,
+        torch.empty_like(query),
+        query_start_loc=torch.tensor(
+            [0, *itertools.accumulate(query_lens)], dtype=torch.int32, device="cuda"
+        ),
+        seq_lens=seq_lens_t,
+        max_seq_len=max(seq_lens),
+    )
+    # The AMD sparse path takes unit FP8 scales only; fold the scales into its
+    # query and output instead.
+    sparse = (
+        impl.forward(
+            layer(1.0, 1.0),
+            query * k_scale,
+            kv_cache,
+            metadata,
+            torch.empty_like(query),
+            token_to_req=token_to_req,
+        )
+        * v_scale
+    )
+
+    torch.testing.assert_close(dense, sparse, rtol=2e-2, atol=2e-2)
