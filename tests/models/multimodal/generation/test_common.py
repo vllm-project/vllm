@@ -1437,3 +1437,37 @@ def test_custom_inputs_models_heavy(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
     )
+
+
+@pytest.mark.core_model
+def test_molmo2_request_processor_kwargs(vllm_runner):
+    """Generate with a request override and verify the processed image span."""
+    from PIL import Image
+
+    from vllm import SamplingParams
+
+    model_id = "allenai/Molmo2-8B"
+    with vllm_runner(
+        model_id,
+        enforce_eager=True,
+        max_model_len=2048,
+        max_num_batched_tokens=2048,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=1 << 29,
+        attention_config={"backend": "TRITON_ATTN"},
+        mm_encoder_attn_backend="TORCH_SDPA",
+        limit_mm_per_prompt={"image": 1},
+    ) as runner:
+        result = runner.llm.generate(
+            {
+                "prompt": "<|image|>Describe.",
+                "multi_modal_data": {"image": Image.new("RGB", (1600, 1200))},
+                "mm_processor_kwargs": {"max_crops": 1},
+            },
+            SamplingParams(temperature=0, max_tokens=1, ignore_eos=True),
+        )[0]
+        assert result.outputs[0].finish_reason == "length"
+        assert len(result.outputs[0].token_ids) == 1
+        image_patch_id = runner.llm.llm_engine.model_config.hf_config.image_patch_id
+        assert result.prompt_token_ids.count(image_patch_id) == 392
