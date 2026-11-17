@@ -14,7 +14,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -84,17 +84,16 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -128,7 +127,7 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
-@dataclass
+@dataclass(slots=True)
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
@@ -156,6 +155,22 @@ class _RegionPairs:
     remote_ple_region: int | None = None
 
 
+@dataclass(slots=True)
+class _RemoteStage:
+    """The KV regions of one PP stage of a remote engine (of the whole engine
+    when it runs PP=1), paired with this worker's regions."""
+
+    pp_rank: int
+    pairs: _RegionPairs
+    # The local layers that transfers with the stage cover.
+    layers: list[str]
+    # Number of blocks and cache group of each of the stage's paired regions.
+    region_num_blocks: list[int]
+    region_group_ids: list[int]
+    # Remote TP rank -> prepped descriptor list of that rank's paired regions.
+    xfer_side_handles: dict[int, int] = field(default_factory=dict)
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -164,7 +179,8 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Only NixlPushConnector supports PP with HMA or packed KV caches.
+    # Push additionally supports MLA HMA and packed PP; attention-only HMA
+    # pull uses the shared layer pairing without these paths.
     _supports_pp_hma = False
 
     def _compute_desc_ids(
@@ -503,15 +519,18 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta.region_members = [layer_names for *_, layer_names in regions]
         nixl_agent_meta.packed_member_layouts = {}
 
-    def _pair_regions(self, nixl_agent_meta: NixlAgentMetadata) -> _RegionPairs:
+    def _pair_regions(
+        self, nixl_agent_meta: NixlAgentMetadata, remote_pp_stage: bool = False
+    ) -> _RegionPairs:
         """Pair a peer's regions with the local ones through the layers both
         hold.
 
         A layer's regions pair in order on both sides (two when K and V
-        register apart). The peer must hold every local layer; layers only
-        the peer holds are skipped on a PP stage, which holds a slice of them.
-        A peer's packed rows are first rewritten as one region per layer when
-        this worker registers its layers apart.
+        register apart). The peer must hold every local layer, unless it is
+        a `remote_pp_stage`; layers only the peer holds are skipped on a PP
+        stage, which holds a slice of them. A peer's packed rows are first
+        rewritten as one region per layer when this worker registers its
+        layers apart.
         """
         engine_id = nixl_agent_meta.engine_id
         num_regions = len(nixl_agent_meta.kv_caches_base_addr)
@@ -575,7 +594,7 @@ class NixlBaseConnectorWorker:
                     groups_match = False
                 triples[(remote, local, group)] = None
         missing = self._regions_by_layer.keys() - layers
-        if missing:
+        if missing and not remote_pp_stage:
             raise RuntimeError(
                 f"Engine {engine_id} does not hold the KV layers "
                 f"{sorted(missing, key=_region_sort_key)}."
@@ -697,29 +716,29 @@ class NixlBaseConnectorWorker:
 
         self.kv_cache_config = kv_cache_config
         transfer_block_sizes = [
-            group.kv_cache_spec.block_size
+            group.block_size
             for group in kv_cache_config.transfer_groups
-            if get_representative_spec_type(group.kv_cache_spec)
-            not in (MambaSpec, CircularBufferSpec)
+            if get_representative_spec_type(group) is not MambaSpec
+            and not issubclass(group.manager_cls, CircularBufferManager)
         ]
         self.block_size = (
             math.lcm(*transfer_block_sizes)
             if transfer_block_sizes
             else cast(int, vllm_config.cache_config.block_size)
         )
-        # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
-        self._layer_specs: dict[str, KVCacheSpec] = {}
-        for group in kv_cache_config.transfer_groups:
-            group_spec = group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                self._layer_specs.update(group_spec.kv_cache_specs)
-            else:
-                self._layer_specs.update(dict.fromkeys(group.layer_names, group_spec))
+        self._layer_specs: dict[str, KVCacheSpec] = {
+            name: spec
+            for group in kv_cache_config.transfer_groups
+            for name, spec in group.kv_cache_specs.items()
+        }
+        # From the groups, not this worker's layers: a PP stage may hold no
+        # layer of a group (a draft's, before the last stage), yet requests
+        # still carry that group's blocks.
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
-                not isinstance(spec, FullAttentionSpec)
-                for spec in self._layer_specs.values()
+                not issubclass(g.manager_cls, FullAttentionManager)
+                for g in kv_cache_config.transfer_groups
             )
         )
 
@@ -733,7 +752,7 @@ class NixlBaseConnectorWorker:
             isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
         )
         self._is_csa_linear = any(
-            get_representative_spec_type(group.kv_cache_spec) is CircularBufferSpec
+            issubclass(group.manager_cls, CircularBufferManager)
             for group in kv_cache_config.kv_cache_groups
         )
         self._ple_group_index: int | None = None
@@ -744,7 +763,7 @@ class NixlBaseConnectorWorker:
                 if group.layer_names
                 and all(
                     isinstance(spec, MambaSpec) and spec.tp_replicated
-                    for spec in iter_layer_specs(group.kv_cache_spec)
+                    for spec in group.kv_cache_specs.values()
                 )
             ]
             if len(ple_groups) > 1 or any(
@@ -938,27 +957,26 @@ class NixlBaseConnectorWorker:
         self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
         self._dram_src_handles_by_block_size: dict[int, int | None] = {}
 
-        # PP>1 (push mode): this worker holds a contiguous layer slice and
-        # transfers into the PP=1 remote's regions that hold its layers.
+        # PP>1: this worker holds a contiguous layer slice. Push transfers it
+        # into the PP=1 remote's regions that hold its layers; a PP=1 puller
+        # reads each stage's regions into the local ones holding its layers.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         if self.pp_size > 1:
-            if self._is_hma_required and not self._supports_pp_hma:
+            if (
+                self._is_hma_required
+                and not self._supports_pp_hma
+                and (vllm_config.model_config.use_mla or self._is_csa_linear)
+            ):
                 raise NotImplementedError(
-                    "NixlConnector (pull) does not support pipeline_parallel_size "
-                    "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
-                    "for PP + HMA."
+                    "NixlConnector (pull) supports pipeline_parallel_size > 1 with "
+                    "hybrid KV cache layouts (HMA) only for attention KV without "
+                    "MLA or CSA-linear caches; use NixlPushConnector for those."
                 )
             # Mamba/SSM hybrid PP stages are not validated yet.
             if self._has_mamba:
                 raise NotImplementedError(
-                    "NixlPushConnector does not support pipeline_parallel_size > 1 "
+                    "NIXL connectors do not support pipeline_parallel_size > 1 "
                     "with Mamba/SSM hybrid KV cache layouts yet."
-                )
-            # Decode-side PP is unsupported (completions counted per consumer rank).
-            if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
-                raise NotImplementedError(
-                    "NixlPushConnector consumer (decode) does not support "
-                    "pipeline_parallel_size > 1."
                 )
         # Keep heartbeat handshakes to a PP-sharded producer notif-only.
         self._hb_handshake_notif_only = False
@@ -972,17 +990,12 @@ class NixlBaseConnectorWorker:
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
         self._dram_src_handles_by_tp_ratio: dict[tuple[int, int], list[int | None]] = {}
-        # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
-        self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
-
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        self.dst_region_num_blocks: dict[EngineId, list[int]] = {}
-        self.dst_region_group_ids: dict[EngineId, list[int]] = {}
-        # Engine -> how its regions pair with ours.
-        self._dst_pairs: dict[EngineId, _RegionPairs] = {}
-        self.dst_region_mem_types: dict[EngineId, list[str]] = {}
+        # engine_id -> pp_rank -> how that stage's regions pair with ours and its
+        # dst handles. A PP=1 remote is a single stage 0.
+        self._remote_stages: dict[EngineId, dict[int, _RemoteStage]] = {}
         self._registered_descs: list[Any] = []
         self._kv_unregistered = False
 
@@ -1062,9 +1075,8 @@ class NixlBaseConnectorWorker:
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
-        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
-            get_representative_spec_type(g.kv_cache_spec)
+            get_representative_spec_type(g)
             for g in self.kv_cache_config.transfer_groups
         )
         # MLA drafts running at DCP=1 under a DCP target: a DCP peer holds
@@ -1099,6 +1111,16 @@ class NixlBaseConnectorWorker:
         # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
         # block row of a shared allocation.
         self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
+        if (
+            self._TRANSFER_MODE == "pull"
+            and self.pp_size > 1
+            and self._has_packed_cache
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support PP with packed KV cache layout "
+                f"{self.kv_cache_layout}. Use a supported non-packed layout; "
+                "NixlPushConnector has separate packed PP restrictions."
+            )
         # The layers of each region, which pair regions with a peer's.
         self.region_members = []
         self._regions_by_layer = {}
@@ -1135,10 +1157,12 @@ class NixlBaseConnectorWorker:
             )
 
     def _sync_block_size_with_kernel(self) -> None:
-        backends, specs = get_current_attn_backends_and_specs(
+        backends, specs, layer_names = get_current_attn_backends_and_specs(
             self.vllm_config, self.kv_cache_config, self.attn_backends
         )
-        kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        kernel_block_size = select_common_block_size(
+            self.block_size, backends, specs, layer_names
+        )
         check_compressed_kernel_split(
             self.vllm_config, self.kv_cache_config, kernel_block_size
         )
@@ -1318,7 +1342,12 @@ class NixlBaseConnectorWorker:
                     )
                 else:
                     remote_agent_name = self.add_remote_agent(
-                        metadata, remote_rank, remote_tp_size, metadata.dcp_size
+                        metadata,
+                        remote_rank,
+                        remote_tp_size,
+                        metadata.dcp_size,
+                        remote_pp_rank=remote_pp_rank,
+                        remote_pp_size=remote_pp_size,
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
@@ -1639,7 +1668,7 @@ class NixlBaseConnectorWorker:
             and not self._has_mamba
         )
         if split_packed_rows and any(
-            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            not isinstance(spec, MLAAttentionSpec)
             for spec in self._layer_specs.values()
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
@@ -1696,9 +1725,7 @@ class NixlBaseConnectorWorker:
                 if isinstance(layer_spec, MambaSpec)
                 else logical_num_blocks * self._physical_blocks_per_logical_kv_block
             )
-            is_mla_region = isinstance(
-                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            )
+            is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
             )
@@ -1805,7 +1832,20 @@ class NixlBaseConnectorWorker:
                     ]
                 else:
                     segment_bytes = num_blocks * block_stride
-                    if cache.nbytes % segment_bytes != 0:
+                    # Include every dimension so head-major views retain one
+                    # region per head. Round up to the last block to preserve
+                    # padding past its payload (e.g. DSA latent + indexer rows).
+                    view_bytes = cache.nbytes
+                    if cache.ndim > 1:
+                        view_span = (
+                            sum(
+                                (size - 1) * stride
+                                for size, stride in zip(cache.shape, cache.stride())
+                            )
+                            + 1
+                        ) * cache.element_size()
+                        view_bytes = cdiv(view_span, block_stride) * block_stride
+                    if view_bytes % segment_bytes != 0:
                         raise AssertionError(
                             "KV cache view cannot be partitioned into NIXL regions: "
                             f"layer={layer_name}, cache_nbytes={cache.nbytes}, "
@@ -1814,7 +1854,7 @@ class NixlBaseConnectorWorker:
                             f"cache_shape={tuple(cache.shape)}, "
                             f"cache_stride={tuple(cache.stride())}"
                         )
-                    num_segments = cache.nbytes // segment_bytes
+                    num_segments = view_bytes // segment_bytes
                     region_block_len = (
                         block_stride if num_segments > 1 else physical_page_size
                     )
@@ -1946,9 +1986,6 @@ class NixlBaseConnectorWorker:
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
-        self.dst_region_group_ids[self.engine_id] = self.region_group_ids
-        self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
         if self._has_mamba:
             logger.info(
@@ -2468,9 +2505,14 @@ class NixlBaseConnectorWorker:
         remote_tp_rank: int = 0,
         remote_tp_size: int = 1,
         remote_dcp_size: int = 1,
+        remote_pp_rank: int = 0,
+        remote_pp_size: int = 1,
     ) -> str:
         """Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
+
+        A PP-sharded remote registers each stage separately: every stage holds a
+        slice of the layers and is read into the local regions holding them.
 
         In particular, handle both homogeneous and heterogeneous TP. The former
         requires local rank_i to read from remote rank_i.
@@ -2513,14 +2555,15 @@ class NixlBaseConnectorWorker:
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if (0, remote_tp_rank) in self._remote_agents.get(engine_id, {}):
+        remote_ranks = (remote_pp_rank, remote_tp_rank)
+        if remote_ranks in self._remote_agents.get(engine_id, {}):
             logger.debug(
                 "Remote agent with engine_id %s and rank"
                 "%s already exchanged metadata, skip handshake.",
                 engine_id,
-                remote_tp_rank,
+                remote_ranks,
             )
-            return self._remote_agents[engine_id][(0, remote_tp_rank)]
+            return self._remote_agents[engine_id][remote_ranks]
 
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
@@ -2535,6 +2578,8 @@ class NixlBaseConnectorWorker:
                 "Attention-HMA push does not support decode TP greater than "
                 "prefill TP yet"
             )
+        if remote_pp_size > 1:
+            self._check_remote_pp_supported(nixl_agent_meta)
         if (
             self._packed_member_layouts
             and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
@@ -2544,17 +2589,20 @@ class NixlBaseConnectorWorker:
                 "Packed KV block rows differ between P and D. Use the same "
                 "VLLM_KV_CACHE_LAYOUT and block size on both sides."
             )
-        pairs = self._pair_regions(nixl_agent_meta)
-        if self._dst_pairs.setdefault(engine_id, pairs) != pairs:
-            raise RuntimeError(
-                f"The TP ranks of engine {engine_id} lay out their KV regions "
-                "differently."
+        pairs = self._pair_regions(nixl_agent_meta, remote_pp_stage=remote_pp_size > 1)
+        if remote_pp_size > 1 and not pairs.groups_match:
+            raise NotImplementedError(
+                "Pulling KV from a pipeline-parallel producer requires the same "
+                "KV cache groups on both sides."
             )
         # Keep the peer's regions that pair; descriptor ids index them.
         self._select_remote_regions(nixl_agent_meta, pairs.remote_regions)
         # The push WRITE path is not validated with split remote blocks.
         if self._has_mamba and self.use_mla and self._TRANSFER_MODE == "pull":
             self._split_remote_blocks(nixl_agent_meta)
+        stage = self._add_remote_stage(
+            nixl_agent_meta, pairs, remote_pp_rank, remote_pp_size
+        )
 
         ### Register remote engine in TransferTopology (idempotent).
         physical_blocks_per_logical = (
@@ -2598,22 +2646,7 @@ class NixlBaseConnectorWorker:
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
         block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
 
-        if engine_id not in self.dst_num_blocks:
-            num_remote_regions = len(nixl_agent_meta.kv_caches_base_addr)
-            self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-            self.dst_region_num_blocks[engine_id] = (
-                nixl_agent_meta.region_num_blocks
-                or [nixl_agent_meta.num_blocks] * num_remote_regions
-            )
-            self.dst_region_group_ids[engine_id] = nixl_agent_meta.region_group_ids or (
-                self.region_group_ids
-                if len(self.region_group_ids) == num_remote_regions
-                else [0] * num_remote_regions
-            )
-            self.dst_region_mem_types[engine_id] = (
-                nixl_agent_meta.region_mem_types
-                or [self.nixl_memory_type] * num_remote_regions
-            )
+        self.dst_num_blocks.setdefault(engine_id, nixl_agent_meta.num_blocks)
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
@@ -2720,18 +2753,103 @@ class NixlBaseConnectorWorker:
             )
             blocks_data = np.concatenate([blocks_data, mamba])
 
-        remote_mem_types = set(self.dst_region_mem_types[engine_id])
+        remote_mem_types = set(
+            nixl_agent_meta.region_mem_types or [self.nixl_memory_type]
+        )
         if len(remote_mem_types) != 1:
             raise NotImplementedError(
                 "NIXL pull does not yet support a mixed-memory producer"
             )
-        self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
-            self.nixl_wrapper.prep_xfer_dlist(
-                remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
-            )
+        stage.xfer_side_handles[remote_tp_rank] = self.nixl_wrapper.prep_xfer_dlist(
+            remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
         )
 
         return remote_agent_name
+
+    def _add_remote_stage(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        pairs: _RegionPairs,
+        pp_rank: int,
+        pp_size: int,
+    ) -> _RemoteStage:
+        """Register one PP stage of a remote engine (the whole engine when
+        `pp_size` is 1) once for all its TP ranks. `nixl_agent_meta` lists
+        only the paired regions."""
+        engine_id = nixl_agent_meta.engine_id
+        num_regions = len(nixl_agent_meta.kv_caches_base_addr)
+        stage = _RemoteStage(
+            pp_rank=pp_rank,
+            pairs=pairs,
+            layers=sorted(
+                {
+                    name
+                    for members in nixl_agent_meta.region_members
+                    for name in members
+                    if name in self._regions_by_layer
+                }
+            ),
+            region_num_blocks=nixl_agent_meta.region_num_blocks
+            or [nixl_agent_meta.num_blocks] * num_regions,
+            region_group_ids=nixl_agent_meta.region_group_ids
+            or (
+                self.region_group_ids
+                if len(self.region_group_ids) == num_regions
+                else [0] * num_regions
+            ),
+        )
+        stages = self._remote_stages.setdefault(engine_id, {})
+        # Another TP rank of the stage may have registered it already.
+        if stages.setdefault(pp_rank, stage).pairs != pairs:
+            raise RuntimeError(
+                f"The TP ranks of PP stage {pp_rank} of engine {engine_id} lay "
+                "out their KV regions differently."
+            )
+        # Checked whenever every stage is known, so a retried handshake
+        # checks again.
+        if len(stages) == pp_size and sorted(
+            name for s in stages.values() for name in s.layers
+        ) != sorted(self._regions_by_layer):
+            raise RuntimeError(
+                f"The {pp_size} PP stages of engine {engine_id} do not hold "
+                "every local KV layer exactly once."
+            )
+        return stages[pp_rank]
+
+    def _single_remote_stage(self, engine_id: EngineId) -> _RemoteStage:
+        """The only stage of a remote engine that runs PP=1."""
+        (stage,) = self._remote_stages[engine_id].values()
+        return stage
+
+    def _check_remote_pp_supported(self, nixl_agent_meta: NixlAgentMetadata) -> None:
+        """Refuse layouts that per-stage pulls from a pipeline-parallel producer
+        do not support. Under HMA a stage may hold no layer of a cache group (a
+        draft's group on the stages before the last); it then has no pair of
+        that group, so its reads skip the group."""
+        if (
+            self._has_packed_cache
+            or KVCacheLayout[nixl_agent_meta.kv_cache_layout].is_block_outermost
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support PP with packed KV cache layouts "
+                f"(local {self.kv_cache_layout}, "
+                f"remote {nixl_agent_meta.kv_cache_layout}). "
+                "Use supported non-packed layouts on both endpoints; "
+                "NixlPushConnector has separate packed PP restrictions."
+            )
+        if (
+            self.pp_size > 1
+            or self._has_mamba
+            or (self._is_hma_required and (self.use_mla or self._is_csa_linear))
+            or self.dcp_size > 1
+            or nixl_agent_meta.dcp_size > 1
+            or self._mixed_mem_types
+        ):
+            raise NotImplementedError(
+                "Pulling KV from a pipeline-parallel producer requires a PP=1 "
+                "consumer without Mamba, DCP or mixed-memory KV caches, and HMA "
+                "only for attention KV without MLA or CSA-linear caches."
+            )
 
     def _validate_remote_agent_handshake(
         self,
@@ -2811,7 +2929,10 @@ class NixlBaseConnectorWorker:
         )
         if (
             (self.dcp_size > 1 or remote_dcp_size > 1)
-            and not self._dst_pairs[remote_engine_id].groups_match
+            and not all(
+                stage.pairs.groups_match
+                for stage in self._remote_stages[remote_engine_id].values()
+            )
             and (
                 self._physical_blocks_per_logical_kv_block != 1
                 or remote_physical_per_logical != 1
@@ -3713,8 +3834,8 @@ class NixlBaseConnectorWorker:
                 paired_remote.append(list(remote))
                 covered.append(range(len(local)))
                 continue
-            spec = self.kv_cache_config.transfer_groups[g].kv_cache_spec
-            num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_logical)
+            block_size = self.kv_cache_config.transfer_groups[g].block_size
+            num_sub_blocks = cdiv(num_tokens, block_size // local_per_logical)
             local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
             local_padding = -num_sub_blocks % local_per_logical
             remote_padding = -num_sub_blocks % remote_physical_per_logical
@@ -3742,8 +3863,8 @@ class NixlBaseConnectorWorker:
         # Mamba blocks have no logical<>physical discrepancy (block-size=1)
         physical_block_ids = []
         for i, group in enumerate(block_ids):
-            spec = self.kv_cache_config.transfer_groups[i].kv_cache_spec
-            if _is_ssm_spec(get_representative_spec_type(spec)):
+            transfer_group = self.kv_cache_config.transfer_groups[i]
+            if _is_ssm_spec(get_representative_spec_type(transfer_group)):
                 physical_block_ids.append(group)
             else:
                 physical_block_ids.append(
@@ -4146,8 +4267,9 @@ class NixlBaseConnectorWorker:
         assert engine_id in self._remote_agents
 
         # Notif-only engines (push-mode D side) have no descriptor state.
-        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
-            self.nixl_wrapper.release_dlist_handle(handle)
+        for stage in self._remote_stages.pop(engine_id, {}).values():
+            for handle in stage.xfer_side_handles.values():
+                self.nixl_wrapper.release_dlist_handle(handle)
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
@@ -4162,10 +4284,6 @@ class NixlBaseConnectorWorker:
 
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
-        self.dst_region_num_blocks.pop(engine_id, None)
-        self.dst_region_group_ids.pop(engine_id, None)
-        self._dst_pairs.pop(engine_id, None)
-        self.dst_region_mem_types.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
         self.draft_tp_mappings.pop(engine_id, None)
         if self.transfer_topo is not None:

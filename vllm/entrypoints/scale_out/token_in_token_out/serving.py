@@ -38,6 +38,7 @@ from vllm.entrypoints.openai.chat_completion.stream_processor import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     PromptTokenUsageInfo,
     UsageInfo,
@@ -261,6 +262,15 @@ class ServingTokens(GenerateBaseServing):
                 "because detokenization is disabled. Check stop strings on "
                 "the coordinator, or use stop_token_ids."
             )
+        if sampling_params.bad_words and not self.has_tokenizer:
+            # bad_words are tokenized in the input processor, which skips
+            # them without a tokenizer, so they would silently never apply.
+            return self.create_error_response(
+                "sampling_params.bad_words requires a tokenizer, but this "
+                "server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Send the request to a server that "
+                "loads a tokenizer, or remove bad_words."
+            )
         if request.output_mode != "tokens" and not self.has_tokenizer:
             # The no-op detokenizer returns "", so without this check the
             # request would succeed with empty text.
@@ -451,7 +461,7 @@ class ServingTokens(GenerateBaseServing):
             request_id,
             lora_request=lora_request,
             trace_headers=trace_headers,
-            priority=request.priority,
+            priority=self._get_priority(request, raw_request),
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
             reasoning_ended=request.reasoning_ended,
@@ -568,6 +578,7 @@ class ServingTokens(GenerateBaseServing):
             num_generated_tokens += len(output.token_ids)
 
         derender_choices: list[GenerateDerenderChoice] = []
+        completion_tokens_details: CompletionTokenUsageInfo | None = None
         if derender_mode:
             history_tool_call_cnt = (
                 request.parse_context.history_tool_call_cnt
@@ -575,7 +586,10 @@ class ServingTokens(GenerateBaseServing):
                 else 0
             )
             try:
-                parsed = await self.online_derenderer.derender_text_choices(
+                (
+                    parsed,
+                    completion_tokens_details,
+                ) = await self.online_derenderer.derender_text_choices(
                     final_res.outputs,
                     derender_request,
                     history_tool_call_cnt,
@@ -608,6 +622,7 @@ class ServingTokens(GenerateBaseServing):
             created_time,
             num_generated_tokens,
             request_metadata,
+            completion_tokens_details,
         )
         response: (
             GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
@@ -651,6 +666,7 @@ class ServingTokens(GenerateBaseServing):
         created_time: int,
         num_generated_tokens: int,
         request_metadata: RequestResponseMetadata,
+        completion_tokens_details: CompletionTokenUsageInfo | None = None,
     ) -> dict[str, Any]:
         """Build the fields shared by every non-streaming response level."""
         assert final_res.prompt_token_ids is not None
@@ -662,6 +678,7 @@ class ServingTokens(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=completion_tokens_details,
         )
         if (
             self.enable_prompt_tokens_details
@@ -715,6 +732,12 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
+        output_token_ids: list[list[int]] | None = (
+            [[] for _ in range(sampling_params.n)]
+            if processors is not None
+            and self.online_derenderer.include_reasoning_tokens_details
+            else None
+        )
         last_res: RequestOutput | None = None
         derender_mode = request.output_mode == "derender"
         assert derender_mode == (processors is not None)
@@ -770,6 +793,8 @@ class ServingTokens(GenerateBaseServing):
                         if finish_reason_sent[i]:
                             continue
                         processor = processors[i]
+                        if output_token_ids is not None:
+                            output_token_ids[i].extend(delta_token_ids)
                         delta, finish_reason = processor.step(
                             output.text,
                             as_list(delta_token_ids),
@@ -871,6 +896,13 @@ class ServingTokens(GenerateBaseServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=num_prompt_tokens + total_completion_tokens,
+                completion_tokens_details=(
+                    self.online_derenderer.stream_completion_tokens_details(
+                        processors, output_token_ids
+                    )
+                    if processors is not None and output_token_ids is not None
+                    else None
+                ),
             )
 
             if self.enable_prompt_tokens_details and num_cached_tokens is not None:
