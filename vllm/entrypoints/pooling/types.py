@@ -253,6 +253,7 @@ class OfflineEncodeInputsContext(OfflineInputsContext):
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     pooling_params: PoolingParams
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
 
     def to_encode_context(
         self,

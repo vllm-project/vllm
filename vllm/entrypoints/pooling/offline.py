@@ -495,6 +495,11 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 "pooling model."
             )
 
+        if chat_template_content_format not in ("auto", "string", "openai"):
+            raise ValueError(
+                "chat_template_content_format must be 'auto', 'string', or 'openai'."
+            )
+
         score_type: str | None = SCORE_TYPE_MAP.get(self.pooling_task, None)  # type: ignore[arg-type]
         if (
             score_type == "cross-encoder"
