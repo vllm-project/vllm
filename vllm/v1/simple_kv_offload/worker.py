@@ -219,16 +219,8 @@ class SimpleCPUOffloadWorker:
         )
 
         assert self.disk_path is not None
-        num_hot_slots = 0
-        # Zero disables the hot pool; fixed staging is still required for I/O.
-        # A positive budget bounds both staging pools and the hot pool together.
-        if self.cpu_capacity_bytes != 0:
-            alignment_bytes = 3 * 4096 * len(unique_gpu_caches)
-            num_hot_slots = (
-                self.cpu_capacity_bytes - alignment_bytes
-            ) // total_bytes_per_block - 2 * self.disk_buffer_slots
-            if num_hot_slots < 0:
-                raise ValueError("Hybrid host budget cannot fit default staging pools")
+        # Hot KV payload only; staging and alignment overhead are separate.
+        num_hot_slots = self.cpu_capacity_bytes // total_bytes_per_block
         rank_path = f"{self.disk_path}.rank_{device.index or 0}"
         self._backend = HybridBackend()
         self._backend.init(

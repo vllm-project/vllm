@@ -509,7 +509,7 @@ Example (OpenAI-compatible completions request):
 Select `kv_offload_backend="hybrid"` on `SimpleCPUOffloadConnector` to store
 offloaded KV blocks on SSD and retain selected copies in pinned host DRAM.
 Configure it through `kv_connector_extra_config`, for example with a 2 GiB
-host buffer budget:
+hot cache:
 
 ```bash
 vllm serve <model> \
@@ -520,7 +520,9 @@ vllm serve <model> \
     "kv_connector_extra_config": {
       "kv_offload_backend": "hybrid",
       "disk_path": "/mnt/nvme/kv",
-      "cpu_bytes_to_use": 2147483648
+      "cpu_hot_cache": 2147483648,
+      "disk_buffer_slots": 2,
+      "max_load_slots": 8
     }
   }'
 ```
@@ -531,17 +533,20 @@ Byte-valued settings use integer bytes; 1 GiB is `1073741824` bytes.
 | --- | --- | --- |
 | `kv_offload_backend` | `"cpu"` | Set to `"hybrid"` to enable the DRAM/SSD backend. |
 | `disk_path` | Required | SSD file path prefix, not a directory or raw device. Use a distinct path per engine; files are temporary and do not persist KV across runs. |
-| `cpu_bytes_to_use` | `8589934592` (8 GiB) | Total host buffer budget, shared across model workers; includes hot copies and transfer buffers, not total process RAM. `0` disables hot storage but retains required transfer buffers. |
-| `cpu_bytes_to_use_per_rank` | Unset | Explicit host budget per worker, overriding the evenly divided `cpu_bytes_to_use`. |
+| `cpu_hot_cache` | `8589934592` (8 GiB) | Hot KV data capacity per worker in bytes, rounded down to complete blocks. Must be non-negative; `0` disables the hot pool. Fixed staging and alignment overhead are allocated separately. |
 | `disk_capacity_bytes` | `107374182400` (100 GiB) | SSD capacity per worker; must be positive. |
 | `hot_cache_tokens_per_request` | `2048` | First N tokens eligible for DRAM copies, rounded down to complete KV blocks. An upper limit, not a guaranteed allocation. `0` disables retention, not the allocated pool. |
-| `disk_buffer_slots` | `2` | Fixed transfer slots per direction: two for load and two for store by default. Each holds one KV block. Minimum effective value is `1`. |
-| `max_load_slots` | `max(8, disk_buffer_slots)` | Maximum load slots after borrowing hot-cache capacity; actual usage can be lower. Must be at least `disk_buffer_slots`; setting them equal disables borrowing. |
+| `disk_buffer_slots` | `2` | Fixed staging slots per direction: N load slots and N store slots, each holding one KV block. Allocated even when the hot cache is disabled. Minimum effective value is `1`. |
+| `max_load_slots` | `max(8, disk_buffer_slots)` | Maximum load slots after borrowing hot-cache capacity; actual usage can be lower. Must be at least `disk_buffer_slots`; setting them equal disables borrowing. Without a hot pool, load slots remain at `disk_buffer_slots`. |
 | `num_cpu_blocks` | Automatically sized | Explicit number of SSD slots, bounded by `disk_capacity_bytes`. See [explicit pool sizing](#explicit-pool-sizing-for-simplecpuoffloadconnector). |
-| `use_page_cache` | `false` | Use OS page-cache I/O instead of `O_DIRECT`. `true` is allowed only with a zero per-worker host budget; page-cache memory is outside this budget. |
-| `lazy_offload` | `false` | Enable inherited lazy offload. Must remain `false` with a positive host budget. |
+| `use_page_cache` | `false` | Use OS page-cache I/O instead of `O_DIRECT`. `true` is allowed only with `cpu_hot_cache=0`. |
+| `lazy_offload` | `false` | Enable inherited lazy offload. Must remain `false` when `cpu_hot_cache` is positive. |
 
-Prefix caching is required. With a positive host budget, Hybrid currently
+`cpu_bytes_to_use` and `cpu_bytes_to_use_per_rank` apply only to the `"cpu"`
+backend. For Hybrid, use `cpu_hot_cache`; total host buffer memory includes
+the hot pool, both fixed staging pools, and alignment overhead.
+
+Prefix caching is required. With a positive `cpu_hot_cache`, Hybrid currently
 supports one GPU, no data parallelism, and one full-attention KV cache group;
 the SSD filesystem must support `O_DIRECT`.
 

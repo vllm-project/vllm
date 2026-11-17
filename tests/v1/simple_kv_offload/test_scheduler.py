@@ -393,7 +393,7 @@ def test_connector_reports_configured_cache_source(
     }
     if backend == "hybrid":
         extra_config.update(
-            cpu_bytes_to_use_per_rank=0,
+            cpu_hot_cache=0,
             disk_path=str(tmp_path / "kv-offload.bin"),
             disk_capacity_bytes=_BYTES_PER_BLOCK * 4,
         )
@@ -432,7 +432,7 @@ def test_connector_explicit_cpu_blocks_align_uneven_stages(
     }
     if backend == "hybrid":
         extra.update(
-            cpu_bytes_to_use_per_rank=0,
+            cpu_hot_cache=0,
             disk_path=str(tmp_path / "offload.bin"),
             disk_capacity_bytes=_BYTES_PER_BLOCK * 8,
         )

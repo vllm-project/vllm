@@ -137,7 +137,7 @@ def test_hybrid_mode_rejects_non_positive_capacity() -> None:
         _make_connector(
             extra_config={
                 "kv_offload_backend": "hybrid",
-                "cpu_bytes_to_use_per_rank": 0,
+                "cpu_hot_cache": 0,
                 "disk_path": "/tmp/fake",
                 "disk_capacity_bytes": 0,
             }

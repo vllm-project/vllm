@@ -9,7 +9,14 @@ from contextlib import contextmanager
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
+from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheTensor
 from vllm.v1.simple_kv_offload.hybrid_backend import HybridBackend
 
 if not current_platform.is_cuda_alike():
@@ -55,6 +62,55 @@ def transfer(backend, src, dst, *, is_store, hot_blocks=None):
     backend.synchronize()
     assert len(events) == 1
     assert events[0][0] == 7 and events[0][1].query()
+
+
+@pytest.mark.parametrize("hot_bytes", [0, 4095, 4096, 6 * 4096 + 17])
+@pytest.mark.parametrize("staging_slots", [1, 4])
+def test_hot_budget_is_independent_of_staging(tmp_path, hot_bytes, staging_slots):
+    """Even a sub-block hot budget must preserve the configured SSD staging."""
+    gpu = torch.arange(8 * 4096, device="cuda").remainder(127).to(torch.int8)
+    config = create_vllm_config(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "kv_offload_backend": "hybrid",
+            "cpu_hot_cache": hot_bytes,
+            "disk_buffer_slots": staging_slots,
+            "disk_path": str(tmp_path / "kv"),
+            "disk_capacity_bytes": 8 * 4096,
+        },
+    )
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+    )
+    cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=gpu.nbytes,
+                layers=["k"],
+                layer_stride=gpu.nbytes,
+                block_stride=4096,
+            )
+        ],
+        kv_cache_groups=[make_kv_cache_group(["k"], spec)],
+    )
+    connector = SimpleCPUOffloadConnector(config, KVConnectorRole.WORKER, cache_config)
+    try:
+        connector.register_kv_caches({"k": gpu})
+        assert connector.worker_handler is not None
+        backend = connector.worker_handler._backend
+        assert isinstance(backend, HybridBackend)
+        assert sum(t.nbytes for t in backend._hot_caches.values()) == (
+            hot_bytes // 4096 * 4096
+        )
+        for pool in (backend._store_buffer_caches, backend._load_buffer_caches):
+            assert sum(t.nbytes for t in pool.values()) == staging_slots * 4096
+        transfer(backend, [0, 1, 2, 3], [3, 2, 1, 0], is_store=True, hot_blocks=[3])
+        transfer(backend, [3, 2, 1, 0], [4, 5, 6, 7], is_store=False)
+        assert torch.equal(gpu[: 4 * 4096], gpu[4 * 4096 :])
+    finally:
+        connector.shutdown()
 
 
 @pytest.mark.parametrize("hot_rows", [0, 4])
