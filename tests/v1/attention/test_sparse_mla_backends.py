@@ -4436,8 +4436,8 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
 
 
 def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
-    """Verification rows resolve in one swap_in; FP8 attention sees them batched
-    over the hot cache as the kernel's 64-token pages."""
+    """Verification rows resolve in one swap_in; FP8 attention sees them batched,
+    each index addressing the hot-cache row HiSparse resolved it to."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -4449,20 +4449,32 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         .expand(-1, 4)
     )
     kernel_shapes: list[torch.Size] = []
-    kv_shapes: list[torch.Size] = []
+    kernel_rows: list[torch.Tensor] = []
+    # Hot blocks interleave with other layers' rows, as in HiSparse's layout.
+    block_size, block_stride_rows, row_width = 64, 100, 4
+    hot_storage = torch.arange(
+        3 * block_stride_rows * row_width, dtype=torch.float32, device=device
+    )
+    hot_cache = hot_storage.as_strided(
+        (3, block_size, row_width), (block_stride_rows * row_width, row_width, 1)
+    )
+    physical_rows = torch.tensor([5, 105, 263, 205], dtype=torch.int32)
 
     def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
-        return logical_topk_indices + 10
+        return physical_rows.expand_as(logical_topk_indices).contiguous()
 
-    def run_kernel(self, *, q, kv_c_and_k_pe_cache, **kwargs):  # noqa: ARG001
+    def run_kernel(self, *, q, kv_c_and_k_pe_cache, topk_indices, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
-        kv_shapes.append(kv_c_and_k_pe_cache.shape)
+        page_size = kv_c_and_k_pe_cache.shape[1]
+        kernel_rows.append(
+            kv_c_and_k_pe_cache[topk_indices // page_size, topk_indices % page_size]
+        )
         return q[..., :1], None
 
     swap_in_mock = MagicMock(side_effect=swap_in)
     cache = _StubHiSparseCacheHandle(
         runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(2, 128, 4, device=device)),
+            hot=SimpleNamespace(attention_cache=hot_cache),
             max_swap_rows=num_tokens,
         ),
         source_block_table=torch.empty(
@@ -4506,7 +4518,10 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         swap_in_mock.call_args.kwargs["logical_topk_indices"], topk
     )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
-    assert kv_shapes == [(4, 64, 4)]
+    expected_rows = hot_storage.view(-1, row_width)[physical_rows.long()]
+    torch.testing.assert_close(
+        kernel_rows[0], expected_rows.expand(num_decodes, query_len, -1, -1)
+    )
     assert output.shape == (num_tokens, 2, 1)
 
 
