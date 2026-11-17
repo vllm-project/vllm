@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
-
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -113,18 +112,22 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             and self.model_config.tokenize_backend == "recipe"
         ):
             # Official recipe ranges first: when render_messages handed the
-            # prompt to the reference encoder, its special ranges replace the
-            # regex scan below.
+            # prompt to the reference encoder, it encodes the prompt span by
+            # span; the segmented fallback below only runs without them.
             ranges = prompt.get("_recipe_special_ranges")
-            if ranges is not None:
+            # Drop the reference conversation so the returned TokensPrompt does
+            # not carry it downstream.
+            recipe_conversation = prompt.pop("_recipe_conversation", None)
+            if ranges is not None and recipe_conversation is not None:
                 encoder = DeepSeekRecipeEncoder.get(
                     _backend_tokenizer_of(self.get_tokenizer()),
                     self._recipe_spec,
                 )
                 if encoder is not None:
-                    token_ids = encoder.encode(prompt["prompt"], ranges)
-                    if token_ids is not None:
-                        return self._build_tokens_prompt(token_ids, prompt)
+                    token_ids = encoder.encode(
+                        prompt["prompt"], ranges, recipe_conversation
+                    )
+                    return self._build_tokens_prompt(token_ids, prompt)
             token_ids = _encode_prompt_with_recipe(
                 prompt["prompt"], self.get_tokenizer()
             )
@@ -183,9 +186,11 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             else None
         )
         if rendered_recipe is not None:
-            prompt_raw, ranges = rendered_recipe
+            prompt_raw, ranges, recipe_conversation = rendered_recipe
             prompt = self._build_prompt((prompt_raw, None), mm_data, mm_uuids)
             prompt["_recipe_special_ranges"] = ranges
+            # Per-request recipe state, consumed by _tokenize_prompt below.
+            prompt["_recipe_conversation"] = recipe_conversation
             return conversation, prompt
 
         rendered = self._apply_chat_template(
@@ -215,9 +220,11 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             else None
         )
         if rendered_recipe is not None:
-            prompt_raw, ranges = rendered_recipe
+            prompt_raw, ranges, recipe_conversation = rendered_recipe
             prompt = self._build_prompt((prompt_raw, None), mm_data, mm_uuids)
             prompt["_recipe_special_ranges"] = ranges
+            # Per-request recipe state, consumed by _tokenize_prompt below.
+            prompt["_recipe_conversation"] = recipe_conversation
             return conversation, prompt
 
         rendered = await self._apply_chat_template_async(
