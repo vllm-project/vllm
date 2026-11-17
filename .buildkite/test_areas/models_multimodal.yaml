@@ -206,6 +206,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Multimodal FlashInfer Autotuning"
   key: multi-modal-flashinfer-autotuning
+  automatic_shard: true
   device: b200-k8s
   num_devices: 2
   timeout_in_minutes: 30
