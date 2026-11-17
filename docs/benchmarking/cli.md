@@ -1601,6 +1601,15 @@ vllm bench serve \
 
 </details>
 
+### Decisions Benchmark
+
+To benchmark [structured decisions](../models/structured_decisions_models.md), set
+`--backend vllm-systemone --endpoint /v1/systemone` or
+`--backend openai-decisions --endpoint /v1/decisions` with any text dataset.
+Each prompt is sent as the state with one choice, one yes/no and one score
+question; pass `--extra-body '{"questions": ...}'` to ask your own. Results are
+reported as for embeddings, with each question counted as one input.
+
 ### Reranker Benchmark
 
 Benchmark the performance of rerank requests in vLLM.

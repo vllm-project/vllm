@@ -11,6 +11,7 @@ import time
 import traceback
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -901,7 +902,9 @@ async def _run_pooling_request(
 
                 output.success = True
                 output.generated_text = ""
-                output.prompt_len = usage.get("prompt_tokens", 0)
+                output.prompt_len = usage.get(
+                    "prompt_tokens", usage.get("input_tokens", 0)
+                )
             else:
                 output.success = False
                 output.error = response.reason or ""
@@ -1181,6 +1184,56 @@ async def async_request_vllm_pooling(
     )
 
 
+_TOPICS = ["technology", "finance", "health", "other"]
+_LEVELS = ["unclear", "mixed", "clear"]
+SYSTEMONE_QUESTIONS = {
+    "topic": {"type": "choice", "criteria": dict.fromkeys(_TOPICS)},
+    "actionable": {"type": "noul", "instructions": "Is an action requested?"},
+    "clarity": {"type": "score", "criteria": _LEVELS},
+}
+DECISIONS_QUESTIONS = [
+    {
+        "type": "choice",
+        "instructions": "Which topic fits?",
+        "choices": [{"value": topic} for topic in _TOPICS],
+    },
+    {"type": "predicate", "instructions": "Is an action requested?"},
+    {
+        "type": "score",
+        "instructions": "How clear is the text?",
+        "levels": [{"label": level} for level in _LEVELS],
+    },
+]
+
+
+async def _async_request_decisions(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+    *,
+    input_field: str,
+    questions: Any,
+) -> RequestFuncOutput:
+    payload = {
+        "model": request_func_input.model_name or request_func_input.model,
+        input_field: request_func_input.prompt,
+        "questions": questions,
+        **(request_func_input.extra_body or {}),
+    }
+    headers = _get_headers("application/json")
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        request_func_input.api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+        num_input_sequences=len(payload["questions"]),
+        prompt_len=request_func_input.prompt_len,
+    )
+
+
 # TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm": async_request_openai_completions,
@@ -1198,6 +1251,12 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     # (Infinity embedding server does not support vlm2vec)
     "vllm-pooling": async_request_vllm_pooling,
     "vllm-rerank": async_request_vllm_rerank,
+    "vllm-systemone": partial(
+        _async_request_decisions, input_field="state", questions=SYSTEMONE_QUESTIONS
+    ),
+    "openai-decisions": partial(
+        _async_request_decisions, input_field="input", questions=DECISIONS_QUESTIONS
+    ),
 }
 
 POOLING_BACKENDS = {
@@ -1209,6 +1268,8 @@ POOLING_BACKENDS = {
     "infinity-embeddings-clip",
     "vllm-pooling",
     "vllm-rerank",
+    "vllm-systemone",
+    "openai-decisions",
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
