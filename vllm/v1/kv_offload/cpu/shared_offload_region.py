@@ -19,6 +19,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.logger import init_logger
+from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
@@ -257,6 +258,7 @@ class SharedOffloadRegion:
                 finally:
                     os.close(reservation)
                 self._map_segments()
+            exclude_from_core_dump(self.mmap_obj)
             if barrier is not None:
                 barriers_remaining -= 1
                 barrier()
