@@ -59,7 +59,6 @@ def test_no_sync_with_spec_decode(
     with vllm_runner(
         model,
         block_size=None,
-        trust_remote_code=False,
         max_model_len=256,
         speculative_config={
             "method": method,
