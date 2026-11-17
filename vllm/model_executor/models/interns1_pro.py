@@ -35,6 +35,7 @@ from transformers import AutoProcessor, PreTrainedConfig
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
+    get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
@@ -75,6 +76,7 @@ from .qwen3_vl import (
 from .qwen3_vl_moe import Qwen3MoeLLMModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
     maybe_prefix,
@@ -461,14 +463,17 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
         self.model = InternS1ProMoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
