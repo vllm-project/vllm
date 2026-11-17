@@ -16,7 +16,9 @@ Startup fails with a `ValueError` unless:
 - the runner is `generate` and the model is **MoE**;
 - **prefix caching is enabled** (the default). `--no-enable-prefix-caching` fails; the old v0.21 advice to disable it is wrong.
 
-Rejected at startup: adaptive speculative verification, PP > 1, DCP/PCP > 1, and the `NixlConnector`, `NixlPullConnector`, `NixlPushConnector`, `MoRIIOConnector`, `MooncakeConnector` KV connectors. Regular speculative decoding works.
+Rejected at startup: adaptive speculative verification, PP > 1 and DCP/PCP > 1. Regular speculative decoding works.
+
+KV connectors are not rejected, including the prefill/decode ones (`NixlConnector`, `MoRIIOConnector`, `MooncakeConnector`, ...). In a prefill/decode deployment, however, the decode engine holds no rows for the KV the prefill engine computed. It accepts that KV only up to `routed_experts_prompt_start` and computes the rest of the prompt again, so the output is correct but the prefill work past that position is lost.
 
 ### Backend row restoration
 
@@ -79,6 +81,24 @@ Route every request of a session (a multi-turn rollout, or a group of samples sh
 - Set `routed_experts_prompt_start` to the number of tokens whose rows the client already holds. A hit then needs rows only for the positions it returns, and a shared KV store can serve the earlier turns on another engine.
 
 Sessions whose rows are written as objects to a shared Mooncake store, readable from every replica and released per session, are developed on the `aux-pr/` branches of the [aoshen02/vllm](https://github.com/aoshen02/vllm/tree/aux-pr/7-rename-recomputed-positions) fork. Switch to them when requests of a session cannot be pinned to one engine or replicas share KV through a store.
+
+## Weight updates and cache resets
+
+Any reset of the prefix cache drops every row of the engine. That includes `sleep` at level 1 or 2, `pause_generation(clear_cache=True)` and `reset_prefix_cache`. A turn sent after the reset has rows only for what it computes again.
+
+What happens to the KV is your choice, through `reset_connector`:
+
+| Call | GPU prefix cache | KV connector tier (e.g. CPU offload) | Rows |
+| --- | --- | --- | --- |
+| `pause_generation(clear_cache=False)`, weights updated in place, `resume_generation()` | kept | kept | kept |
+| `sleep(level=1, reset_connector=False)` | cleared | kept | cleared |
+| `sleep(level=1)` (default `reset_connector=True`) | cleared | cleared | cleared |
+
+- **No reset.** Updating weights while paused with `clear_cache=False` keeps the cache and the rows, so later turns of a session keep their hits. The reused KV and rows were computed by the weights in place when each position was first computed.
+- **Sleep, keeping the connector.** With `reset_connector=False`, the KV of earlier turns can still be loaded back from the connector tier, but its rows are gone. Set `routed_experts_prompt_start` to the number of tokens whose rows the client already holds: positions before it need no rows, so they load from the tier and only the new part of the prompt is computed. Without it, the hit reaches past `routed_experts_prompt_start` into blocks whose rows this engine no longer holds, so it is refused and the prompt is computed again.
+- **Sleep with the default.** Every session computes its whole prefix again on the next turn.
+
+Keeping the cache or the connector tier across an update means later turns reuse KV, and rows, computed by the previous weights. This is a training decision, not a correctness requirement of vLLM: keep them if your algorithm accepts that staleness, reset with the defaults if it does not. The defaults reset because vLLM cannot know which one you want.
 
 ## Sizing `max_bytes`
 
