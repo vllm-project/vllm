@@ -1374,9 +1374,11 @@ class Glm5NextForConditionalGeneration(
     # per-layer quant-scheme resolution. The identity ``gate_up_proj`` entry
     # inherited from ``Glm4vForConditionalGeneration`` (pre-fused gate_up_proj)
     # would otherwise route the module to ``global_quant_config`` and mismatch
-    # at load for mixed-precision Quark checkpoints.
+    # at load for mixed-precision Quark checkpoints. The same holds for the MLA
+    # ``fused_qkv_a_proj``, which the MXFP4 Quark checkpoint keeps in block FP8.
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     }
 
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
