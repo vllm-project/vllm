@@ -244,7 +244,8 @@ def _lm_head_method_factory(quantization: str) -> Callable[[], OnlineLinearBase]
         return _LM_HEAD_METHODS[quantization]
     raise ValueError(
         f"Unsupported draft_lm_head_quantization {quantization!r}; supported "
-        f"formats: {sorted([*_LM_HEAD_METHODS, *platform_methods])}"
+        # A platform format shadowing a core name is listed once.
+        f"formats: {sorted({*_LM_HEAD_METHODS, *platform_methods})}"
     )
 
 
