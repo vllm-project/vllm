@@ -103,7 +103,7 @@ class LaraMiniAttention(nn.Module):
                 max_position=config.max_position_embeddings,
                 rope_parameters=config.rope_parameters,
             )
-            if is_sliding or config.full_attention_uses_rope
+            if is_sliding
             else None
         )
         self.attn = Attention(
