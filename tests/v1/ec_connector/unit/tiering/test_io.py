@@ -8,6 +8,8 @@ import pytest
 
 from vllm.distributed.ec_transfer.ec_connector.tiering import io
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _paths(tmp_path: Path) -> tuple[Path, Path]:
     entry_path = tmp_path / "nested" / "entry.ec"

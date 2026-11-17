@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,14 +62,17 @@ def _get_bool(config: dict[str, Any], key: str, default: bool) -> bool:
     return value
 
 
-def _get_positive_float(
-    config: dict[str, Any], key: str, default: float
-) -> float:
-    """Read a positive numeric field as a float."""
+def _get_positive_float(config: dict[str, Any], key: str, default: float) -> float:
+    """Read a finite positive numeric field as a float."""
     value = config.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or value <= 0
+        or not isfinite(value)
+    ):
         raise ValueError(
-            f"filesystem backpressure '{key}' must be a positive number"
+            f"filesystem backpressure '{key}' must be a finite positive number"
         )
     return float(value)
 

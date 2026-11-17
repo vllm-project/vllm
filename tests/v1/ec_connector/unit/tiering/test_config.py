@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +10,8 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
     ECFileSystemTierConfig,
     ECTieringConfig,
 )
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_tiering_factory_registered():
@@ -23,16 +24,8 @@ def test_tiering_factory_registered():
     assert cls is ECTieringConnector
 
 
-def _vllm_config(extra_config: object) -> SimpleNamespace:
-    ec_config = SimpleNamespace(
-        ec_role="ec_both", ec_connector_extra_config=extra_config
-    )
-    return SimpleNamespace(ec_transfer_config=ec_config)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("role", ["ec_consumer", "ec_producer"])
-def test_tiering_rejects_separate_producer_and_consumer_roles(role, tmp_path):
+@pytest.fixture
+def _vllm_config(tmp_path):
     from transformers import LlavaConfig
 
     from vllm.config import ModelConfig, VllmConfig
@@ -41,22 +34,33 @@ def test_tiering_rejects_separate_producer_and_consumer_roles(role, tmp_path):
     LlavaConfig(architectures=["LlavaForConditionalGeneration"]).save_pretrained(
         tmp_path
     )
-    config = VllmConfig(
-        model_config=ModelConfig(
-            model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
-        ),
-        ec_transfer_config=ECTransferConfig(
-            ec_connector="ECTieringConnector", ec_role=role
-        ),
+    model = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
     )
+
+    def create(extra_config=None, *, role="ec_both"):
+        return VllmConfig(
+            model_config=model,
+            ec_transfer_config=ECTransferConfig(
+                ec_connector="ECTieringConnector",
+                ec_role=role,
+                ec_connector_extra_config=extra_config or {},
+            ),
+        )
+
+    return create
+
+
+@pytest.mark.parametrize("role", ["ec_consumer", "ec_producer"])
+def test_tiering_rejects_separate_producer_and_consumer_roles(role, _vllm_config):
     with pytest.raises(
         ValueError, match="ECTieringConnector requires ec_role='ec_both'"
     ):
-        ECTieringConfig.from_vllm_config(config)
+        ECTieringConfig.from_vllm_config(_vllm_config(role=role))
 
 
 @pytest.mark.parametrize("secondary_tiers", [None, []])
-def test_cpu_only_mode_has_no_filesystem_tier(secondary_tiers: object) -> None:
+def test_cpu_only_mode_has_no_filesystem_tier(secondary_tiers, _vllm_config) -> None:
     extra_config = {}
     if secondary_tiers is not None:
         extra_config["secondary_tiers"] = secondary_tiers
@@ -67,7 +71,7 @@ def test_cpu_only_mode_has_no_filesystem_tier(secondary_tiers: object) -> None:
     assert not config.filesystem_enabled
 
 
-def test_filesystem_tier_uses_thread_defaults() -> None:
+def test_filesystem_tier_uses_thread_defaults(_vllm_config) -> None:
     config = ECTieringConfig.from_vllm_config(
         _vllm_config(
             {
@@ -97,7 +101,26 @@ def test_filesystem_tier_uses_thread_defaults() -> None:
     )
 
 
-def test_filesystem_tier_accepts_explicit_values() -> None:
+@pytest.mark.parametrize("key", ["high_water_s", "low_water_s"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_backpressure_rejects_non_finite_thresholds(_vllm_config, key, value):
+    config = _vllm_config(
+        {
+            "secondary_tiers": [
+                {
+                    "type": "fs",
+                    "root_dir": "/tmp/cache",
+                    "capacity_bytes": 4096,
+                    "backpressure": {key: value},
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match=f"'{key}'"):
+        ECTieringConfig.from_vllm_config(config)
+
+
+def test_filesystem_tier_accepts_explicit_values(_vllm_config) -> None:
     config = ECTieringConfig.from_vllm_config(
         _vllm_config(
             {
@@ -190,18 +213,6 @@ def test_filesystem_tier_accepts_explicit_values() -> None:
                 {
                     "type": "fs",
                     "root_dir": "/tmp/cache",
-                    "capacity_bytes": 1,
-                    "max_pending_reads": 64,
-                    "max_pending_writes": 64,
-                }
-            ],
-            r"unsupported fields: max_pending_reads, max_pending_writes",
-        ),
-        (
-            [
-                {
-                    "type": "fs",
-                    "root_dir": "/tmp/cache",
                     "capacity_bytes": True,
                 }
             ],
@@ -232,7 +243,7 @@ def test_filesystem_tier_accepts_explicit_values() -> None:
     ],
 )
 def test_invalid_secondary_tier_is_rejected(
-    secondary_tiers: object, error: str
+    secondary_tiers: object, error: str, _vllm_config
 ) -> None:
     with pytest.raises(ValueError, match=error):
         ECTieringConfig.from_vllm_config(

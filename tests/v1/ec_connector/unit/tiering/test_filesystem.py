@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import errno
 import os
 import subprocess
 import sys
@@ -396,8 +397,9 @@ def test_failed_eviction_retains_capacity_and_resumes_stores_after_retry(
         manager.shutdown()
 
 
+@pytest.mark.parametrize("deleted_during_scan", [False, True])
 def test_manager_recovers_published_entries_from_current_namespace(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, deleted_during_scan
 ) -> None:
     cache_key = f"{1:064x}"
     entry_path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, cache_key)
@@ -420,6 +422,16 @@ def test_manager_recovers_published_entries_from_current_namespace(
     outside_path.write_bytes(b"outside")
     symlink_path.symlink_to(outside_path)
 
+    if deleted_during_scan:
+        stat = Path.stat
+
+        def delete_before_stat(path, *args, **kwargs):
+            if path == entry_path and kwargs.get("follow_symlinks", True):
+                path.unlink(missing_ok=True)
+            return stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", delete_before_stat)
+
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
@@ -429,9 +441,35 @@ def test_manager_recovers_published_entries_from_current_namespace(
         executor=_FakeExecutor(),
     )
 
-    assert manager.contains(cache_key)
+    assert manager.contains(cache_key) == (not deleted_during_scan)
     assert not manager.contains(symlink_key)
-    assert manager.used_bytes == 4
+    assert manager.used_bytes == (0 if deleted_during_scan else 4)
+    manager.shutdown()
+
+
+@pytest.mark.parametrize("operation", ["stat", "scandir"])
+@pytest.mark.parametrize("error", [errno.EIO, errno.EACCES])
+def test_recovery_rejects_incomplete_capacity_index(
+    tmp_path, monkeypatch, operation, error
+):
+    """An unreadable existing entry must not become free capacity."""
+    path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"data")
+    original = Path.stat if operation == "stat" else os.scandir
+
+    def fail(target, *args, **kwargs):
+        expected = path if operation == "stat" else path.parent
+        if Path(target) == expected and kwargs.get("follow_symlinks", True):
+            raise OSError(error, "recovery unavailable")
+        return original(target, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path if operation == "stat" else os, operation, fail)
+        with pytest.raises(OSError, match="recovery unavailable"):
+            manager = ECFileSystemTierManager(tmp_path, _NAMESPACE_DIGEST, 4, 1, 1)
+            manager.shutdown()
+    assert path.read_bytes() == b"data"
 
 
 def test_manager_evicts_oldest_recovered_entry_over_capacity(

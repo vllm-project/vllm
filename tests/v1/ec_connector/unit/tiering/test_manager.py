@@ -382,7 +382,7 @@ def indexed_scheduler(tmp_path, request, monkeypatch):
         scheduler.shutdown()
 
 
-def image_request(*identifiers, request_id="gpu-hint", num_embeds=2):
+def image_request(*identifiers, request_id="gpu-hint", num_embeds=2, modalities=None):
     from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
@@ -395,13 +395,125 @@ def image_request(*identifiers, request_id="gpu-hint", num_embeds=2):
         mm_features=[
             MultiModalFeatureSpec(
                 data=None,
-                modality="image",
+                modality=modalities[i] if modalities is not None else "image",
                 identifier=identifier,
                 mm_position=PlaceholderRange(offset=num_embeds * i, length=num_embeds),
             )
             for i, identifier in enumerate(identifiers)
         ],
     )
+
+
+@pytest.mark.parametrize("deleted_before_open", [False, True])
+def test_restart_restores_exact_bytes_or_recomputes_after_deletion(
+    indexed_scheduler, monkeypatch, deleted_before_open
+):
+    """Exercise write-through and restart promotion with real mmap and file I/O."""
+    from threading import Event
+
+    from vllm.distributed.ec_transfer.ec_connector.tiering import executor
+    from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
+        ECTieringScheduler,
+    )
+
+    first = indexed_scheduler
+    config = first._vllm_config
+    entry = first._primary.alloc("persisted", 2, (2, 32))
+    expected = bytes(range(128))
+    views = first._primary.block_views(entry.block_ids)
+    offset = 0
+    for view in views:
+        view[:] = expected[offset : offset + len(view)]
+        offset += len(view)
+    first._primary.mark_ready("persisted")
+    first._tiering_manager.register_cpu_save("persisted", "image", 2)
+    first._tiering_manager.on_cpu_save_completed("persisted")
+    first._filesystem.drain()
+    first._tiering_manager.poll()
+    del views, view
+    first.shutdown()
+
+    started, release = Event(), Event()
+    reads = []
+    load = executor.load_entry
+
+    def blocked_load(*args, **kwargs):
+        reads.append(args[0])
+        started.set()
+        assert release.wait(timeout=10)
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(executor, "load_entry", blocked_load)
+    restored = ECTieringScheduler(config)
+    requests = [image_request("persisted", request_id=str(i)) for i in range(2)]
+    try:
+        restored.on_new_request(requests[0])
+        assert started.wait(timeout=10)
+        restored.on_new_request(requests[1])
+        for request in requests:
+            assert not restored.ensure_cache_available(request, 0, set())
+        if deleted_before_open:
+            reads[0].unlink()
+        release.set()
+        restored._filesystem.drain()
+        # Retry each owner twice to guard against reloading the missing file.
+        for request in requests * 2:
+            assert restored.ensure_cache_available(request, 0, set())
+            assert restored.has_cache_item("persisted") == (not deleted_before_open)
+        entry = restored._primary.get("persisted")
+        if deleted_before_open:
+            assert entry is None
+        else:
+            assert entry.shape == (2, 32)
+            assert b"".join(restored._primary.block_views(entry.block_ids)) == expected
+        for request in requests:
+            restored.update_state_after_alloc(request, 0)
+        assert len(reads) == 1
+        assert set(restored._pending_loads) == (
+            set() if deleted_before_open else {"persisted"}
+        )
+        assert set(restored._pending_saves) == (
+            {"persisted"} if deleted_before_open else set()
+        )
+    finally:
+        release.set()
+        for request in requests:
+            restored.request_finished(request)
+        restored.shutdown()
+
+
+@pytest.mark.parametrize("filesystem_enabled", [False, True])
+@pytest.mark.parametrize("arrival_prefetch", [False, True])
+def test_prompt_embeds_bypass_tiering_while_image_transfers_remain_enabled(
+    indexed_scheduler, filesystem_enabled, arrival_prefetch
+):
+    from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
+        ECTieringScheduler,
+    )
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    request = image_request("A", "supplied-text", modalities=("image", "prompt_embeds"))
+    scheduler = indexed_scheduler
+    if not filesystem_enabled:
+        config = scheduler._vllm_config
+        config.ec_transfer_config.ec_connector_extra_config["secondary_tiers"] = []
+        scheduler = ECTieringScheduler(config)
+    try:
+        if arrival_prefetch:
+            scheduler.on_new_request(request)
+        if filesystem_enabled:
+            assert not scheduler.ensure_cache_available(request, 0)
+            scheduler._filesystem.drain()
+        assert scheduler.ensure_cache_available(request, 0)
+        for index in range(2):
+            scheduler.update_state_after_alloc(request, index)
+        metadata = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+        assert set(metadata.loads) == ({"A"} if filesystem_enabled else set())
+        assert set(metadata.saves) == (set() if filesystem_enabled else {"A"})
+        assert scheduler._cache.get("supplied-text") is None
+    finally:
+        scheduler.request_finished(request)
+        scheduler.shutdown()
 
 
 def test_mixed_images_prefetch_both_and_gpu_hits_bypass_file_waits(

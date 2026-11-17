@@ -86,6 +86,8 @@ class ECTieringScheduler(ECCPUScheduler):
         if self._tiering_manager is None or not self._is_consumer:
             return
         for feature in request.mm_features:
+            if feature.modality == "prompt_embeds":
+                continue
             # A GPU hit at arrival can be evicted before admission.
             num_tokens = feature.mm_position.get_num_embeds()
             shape = (
@@ -130,6 +132,10 @@ class ECTieringScheduler(ECCPUScheduler):
         )
 
     def update_state_after_alloc(self, request: Request, index: int) -> None:
+        feature = request.mm_features[index]
+        # Caller-supplied text embeddings use the runner's passthrough path.
+        if feature.modality == "prompt_embeds":
+            return
         super().update_state_after_alloc(request, index)
         if self._tiering_manager is None:
             return
@@ -139,7 +145,6 @@ class ECTieringScheduler(ECCPUScheduler):
         )
         if not self._is_producer:
             return
-        feature = request.mm_features[index]
         if feature.identifier not in self._pending_saves:
             return
         self._tiering_manager.register_cpu_save(
@@ -184,6 +189,8 @@ class ECTieringScheduler(ECCPUScheduler):
         }
         all_ready = True
         for feature in request.mm_features:
+            if feature.modality == "prompt_embeds":
+                continue
             position = feature.mm_position
             if position.offset + position.length <= num_computed_tokens:
                 if feature.identifier not in needed_identifiers:

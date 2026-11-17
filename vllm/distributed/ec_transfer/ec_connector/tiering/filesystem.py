@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter, OrderedDict, deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
@@ -40,6 +41,24 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+
+def _iter_entry_files(namespace_path: Path) -> Iterator[Path]:
+    directories = [namespace_path]
+    while directories:
+        try:
+            entries = os.scandir(directories.pop())
+        except FileNotFoundError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(Path(entry.path))
+                    elif entry.name.endswith(EC_FILE_SUFFIX) and not entry.is_symlink():
+                        yield Path(entry.path)
+                except FileNotFoundError:
+                    continue
 
 
 @dataclass(frozen=True)
@@ -491,9 +510,7 @@ class ECFileSystemTierManager:
             self._namespace_digest,
         )
         recovered: list[tuple[int, str, ECFileEntry]] = []
-        for path in namespace_path.rglob(f"*{EC_FILE_SUFFIX}"):
-            if path.is_symlink():
-                continue
+        for path in _iter_entry_files(namespace_path):
             cache_key = path.name.removesuffix(EC_FILE_SUFFIX)
             try:
                 expected_path = get_ec_entry_path(
@@ -501,8 +518,11 @@ class ECFileSystemTierManager:
                     self._namespace_digest,
                     cache_key,
                 )
+            except ValueError:
+                continue
+            try:
                 stat_result = path.stat()
-            except (OSError, ValueError):
+            except FileNotFoundError:
                 continue
             if path != expected_path or not S_ISREG(stat_result.st_mode):
                 continue
