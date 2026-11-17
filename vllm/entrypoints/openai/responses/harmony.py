@@ -361,7 +361,9 @@ def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
 
 
 def _parse_final_message(
-    message: Message, incomplete: bool = False
+    message: Message,
+    incomplete: bool = False,
+    logprobs: list | None = None,
 ) -> ResponseOutputItem:
     """Parse final channel messages into output message items."""
     contents = []
@@ -370,7 +372,7 @@ def _parse_final_message(
             text=content.text,
             annotations=[],  # TODO
             type="output_text",
-            logprobs=None,  # TODO
+            logprobs=logprobs,
         )
         contents.append(output_text)
     return ResponseOutputMessage(
@@ -430,6 +432,7 @@ def _parse_mcp_call(
 def _parse_message_no_recipient(
     message: Message,
     incomplete: bool = False,
+    logprobs: list[dict[int, object]] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message with no recipient based on its channel."""
     if message.channel == "analysis":
@@ -439,7 +442,7 @@ def _parse_message_no_recipient(
         # Per Harmony format, preambles (commentary with no recipient) and
         # final channel content are both intended to be shown to end-users.
         # See: https://cookbook.openai.com/articles/openai-harmony
-        return [_parse_final_message(message, incomplete=incomplete)]
+        return [_parse_final_message(message, incomplete=incomplete, logprobs=logprobs)]
 
     raise VLLMValidationError(f"Unknown channel: {message.channel}")
 
@@ -453,6 +456,7 @@ def harmony_to_response_output(
     message: Message,
     function_tool_names: frozenset[str],
     incomplete: bool = False,
+    message_logprobs: list[dict[int, object]] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
@@ -491,6 +495,12 @@ def harmony_to_response_output(
 
     # No recipient - handle based on channel for non-tool messages
     else:
-        output_items.extend(_parse_message_no_recipient(message, incomplete=incomplete))
+        output_items.extend(
+            _parse_message_no_recipient(
+                message,
+                incomplete=incomplete,
+                logprobs=message_logprobs,
+            )
+        )
 
     return output_items
