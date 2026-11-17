@@ -42,6 +42,11 @@ pub enum ChatContentPart {
         detail: Option<ImageDetail>,
         uuid: Option<String>,
     },
+    /// Placeholder metadata for an image delivered through an EC connector.
+    ImageEmbeds {
+        image_embeds: crate::multimodal::ImageMetadata,
+        uuid: String,
+    },
     /// One video URL/data URL content block.
     VideoUrl {
         video_url: String,
@@ -64,7 +69,6 @@ pub enum ChatContentPart {
     ToolReference { name: String },
     // ImageData...
     // VideoData...
-    // ImageEmbeds...
 }
 
 impl ChatContentPart {
@@ -118,6 +122,7 @@ impl ChatContentPart {
         match self {
             Self::Text { text } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
+            Self::ImageEmbeds { .. } => Err(Error::UnsupportedMultimodalContent("image_embeds")),
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
             Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
@@ -135,6 +140,7 @@ impl ChatContentPart {
         match self {
             Self::Text { .. } | Self::ToolReference { .. } => false,
             Self::ImageUrl { .. }
+            | Self::ImageEmbeds { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }
             | Self::AudioUrl { .. } => true,
