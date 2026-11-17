@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL: bool = True
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1451,6 +1452,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
+        in ("true", "1")
+    ),
+    # AITER MegaMoE (--moe-backend aiter_mega_moe): run batches of at most 512
+    # tokens per rank (over all DP ranks) on AITER's single-kernel MegaMoE
+    # (quant, dispatch, GEMM1, GEMM2 and combine in one launch) where AITER
+    # supports the layout; larger batches keep the 4-kernel MegaMoEV2 path.
+    # By default is enabled.
+    "VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL": lambda: (
+        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_SINGLE_KERNEL", "True").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
