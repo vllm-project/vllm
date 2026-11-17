@@ -962,7 +962,7 @@ def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:
     return np.concatenate([addresses, sizes])
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_runs"])
 def _copy_runs_kernel(runs_ptr, num_runs, WORD: tl.constexpr, BLOCK: tl.constexpr):
     # runs_ptr holds `[3, num_runs]` source addresses, destination addresses
     # and sizes in words; program (i, j) copies the j-th BLOCK of run i.
@@ -1032,9 +1032,10 @@ def copy_kv_cache_blocks_inplace(
     device = block_views[0].device
     block_ids = indices_np.T
     # Copy GPU blocks directly in one kernel: gathering the sources into a
-    # temporary can take GiBs. The kernel copies runs concurrently, so chained
-    # copies keep the indexed copy, which reads all sources first.
-    if device.type == "cuda" and not np.intersect1d(*block_ids).size:
+    # temporary can take GiBs. The kernel copies runs concurrently, which is
+    # safe because copy-on-write destinations are freshly allocated blocks.
+    if device.type == "cuda":
+        assert not np.intersect1d(*block_ids).size, "Chained block copies"
         runs = np.concatenate(
             [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
         )

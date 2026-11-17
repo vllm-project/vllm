@@ -37,9 +37,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
-from vllm.model_executor.warmup.kv_cache_block_copy_warmup import (
-    kv_cache_block_copy_warmup,
-)
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
@@ -55,6 +52,8 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -317,7 +316,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     replayssm_lifecycle_warmup(worker.model_runner)
-    kv_cache_block_copy_warmup(worker.model_runner)
+    if enable_jit_warmup and worker.vllm_config.cache_config.enable_prefix_caching:
+        # Copy-on-write first copies blocks mid-serving.
+        blocks = torch.zeros(2, 1, dtype=torch.int64, device=worker.device)
+        copy_kv_cache_blocks_inplace([blocks], 2, [KVCacheBlockCopy(0, 1)])
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
