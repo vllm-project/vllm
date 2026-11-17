@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tool_parsers.minicpm5xml_tool_parser import MiniCPM5XMLToolParser
 
@@ -943,3 +944,105 @@ def test_nullable_string_keeps_raw_text(
     else:
         calls = parser.extract_tool_calls(text, request).tool_calls
     assert [json.loads(call.function.arguments) for call in calls] == [{"v": expected}]
+
+
+# get_weather is missing required `city`. One delta keeps that block as content
+# and still emits sum_values. Smaller chunks must not open get_weather.
+_INVALID_WEATHER_THEN_SUM = (
+    '<function name="get_weather">'
+    '<param name="date">Mon</param>'
+    "</function>\n"
+    '<function name="sum_values"><param name="nums">[1, 2]</param></function>'
+)
+
+
+def _invalid_weather_then_sum_chunks(kind: str) -> list[str]:
+    text = _INVALID_WEATHER_THEN_SUM
+    if kind == "single":
+        return [text]
+    if kind == "three":
+        return [
+            '<function name="get_weather">',
+            '<param name="date">Mon</param>',
+            (
+                "</function>\n"
+                '<function name="sum_values"><param name="nums">[1, 2]</param>'
+                "</function>"
+            ),
+        ]
+    return [text[i : i + 3] for i in range(0, len(text), 3)]
+
+
+@pytest.mark.parametrize("kind", ["single", "three", "by_three"])
+def test_streaming_rejected_block_is_content_not_a_tool_call(
+    parser: ToolParser, kind: str
+) -> None:
+    """A block that fails validation stays content for every chunk split.
+
+    Opening the call before `</function>` streams arguments with the closing
+    brace removed. When `city` is missing, those arguments are not JSON, and
+    a 3-character split disagrees with one delta of the same text.
+    """
+    request = make_request(make_tools_weather() + make_tools_sum())
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _invalid_weather_then_sum_chunks(kind),
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert reconstructor.other_content == (
+        '<function name="get_weather"><param name="date">Mon</param></function>\n'
+    )
+    assert [tc.function.name for tc in reconstructor.tool_calls] == ["sum_values"]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "nums": [1, 2]
+    }
+
+
+def test_streaming_less_than_is_not_held_once_disambiguated(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        ["value <", " 3"],
+        request,
+    )
+    assert reconstructor.other_content == "value < 3"
+    assert reconstructor.tool_calls == []
+
+
+class _MiniCPM5StreamingParser(DelegatingParser):
+    tool_parser_cls = MiniCPM5XMLToolParser
+
+
+def _parse_finished_chunks(chunks: list[str]) -> str:
+    streaming_parser = _MiniCPM5StreamingParser(MagicMock())
+    request = make_request(make_tools_weather())
+    parts: list[str] = []
+    for index, chunk in enumerate(chunks):
+        delta = streaming_parser.parse_delta(
+            chunk,
+            [],
+            request,
+            prompt_token_ids=[] if index == 0 else None,
+            finished=index == len(chunks) - 1,
+        )
+        if delta is not None and delta.content:
+            parts.append(delta.content)
+        if delta is not None and delta.tool_calls:
+            raise AssertionError(delta.tool_calls)
+    return "".join(parts)
+
+
+@pytest.mark.parametrize("text", ["value <", "value <f", "value <fun", "<fun"])
+def test_finished_stream_flushes_held_function_prefix(text: str) -> None:
+    """Generation can end on a prefix of `<function`. That suffix is content."""
+    assert _parse_finished_chunks([text]) == text
+
+
+def test_finished_stream_flushes_prose_that_looks_like_a_function_tag() -> None:
+    """`<` plus `function later.` is prose. Finish must emit the held tail."""
+    assert (
+        _parse_finished_chunks(["Call it a <", "function later."])
+        == "Call it a <function later."
+    )

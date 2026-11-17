@@ -84,37 +84,6 @@ def _strip_thinking_content(text: str) -> str:
     return visible if visible else text
 
 
-def _streaming_args_snapshot(args_json: str, *, is_complete: bool) -> str:
-    """Return the streamed arguments prefix, omitting the closing brace until done."""
-    if is_complete or not args_json.endswith("}"):
-        return args_json
-    return args_json[:-1]
-
-
-def _streaming_args_diff(
-    prev_args: str, args_json: str, *, is_complete: bool
-) -> str | None:
-    """Compute the next arguments fragment for OpenAI-style streaming accumulation."""
-    if prev_args == "{}":
-        prev_args = ""
-
-    target = _streaming_args_snapshot(args_json, is_complete=is_complete)
-    if not prev_args:
-        return target or None
-    if target == prev_args:
-        return None
-    if target.startswith(prev_args):
-        return target[len(prev_args) :] or None
-
-    # Recover from a previously closed partial JSON snapshot.
-    if prev_args.endswith("}"):
-        prev_open = prev_args[:-1]
-        if target.startswith(prev_open):
-            return target[len(prev_open) :] or None
-
-    return None
-
-
 def _parse_arguments(json_value: str) -> tuple[Any, bool]:
     try:
         try:
@@ -407,36 +376,6 @@ def _parse_function_block(
     return {"name": func_name, "parameters": arguments}
 
 
-def _parse_partial_params(
-    block: str,
-    func_name: str,
-    name_to_allowed_props: dict[str, set[str]],
-    param_types: dict[str, ParameterTypes],
-) -> dict[str, Any]:
-    arguments: dict[str, Any] = {}
-    seen_keys: set[str] = set()
-    allowed_props = name_to_allowed_props.get(func_name, set())
-    for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
-        key = pm.group(1).strip()
-        if not key or key in seen_keys:
-            continue
-        val_text = pm.group(2) or ""
-        if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
-            val_text = val_text[len("<![CDATA[") : -len("]]>")]
-        else:
-            val_text = val_text.strip()
-        _add_argument(
-            func_name,
-            key,
-            val_text,
-            arguments,
-            seen_keys,
-            allowed_props,
-            param_types,
-        )
-    return arguments
-
-
 class MiniCPM5XMLToolParser(ToolParser):
     """MiniCPM5 XML tool parser."""
 
@@ -449,10 +388,12 @@ class MiniCPM5XMLToolParser(ToolParser):
         self.tool_call_start_token = "<function"
         self.tool_call_end_token = "</function>"
         self._processed_len = 0
+        self._unsent_text = ""
         self._parameter_types_cache = ParameterTypesCache()
 
     def _reset_stream_state(self) -> None:
         self._processed_len = 0
+        self._unsent_text = ""
         self.current_tool_id = -1
         self.current_tool_name_sent = False
         self.prev_tool_call_arr = []
@@ -546,60 +487,6 @@ class MiniCPM5XMLToolParser(ToolParser):
                 content=model_output,
             )
 
-    def _emit_tool_args_delta(
-        self,
-        tool_index: int,
-        args_json: str,
-        *,
-        is_complete: bool = False,
-    ) -> DeltaMessage | None:
-        prev_args = (
-            self.streamed_args_for_tool[tool_index]
-            if tool_index < len(self.streamed_args_for_tool)
-            else ""
-        )
-        arg_diff = _streaming_args_diff(
-            prev_args,
-            args_json,
-            is_complete=is_complete,
-        )
-        if not arg_diff:
-            return None
-        while len(self.streamed_args_for_tool) <= tool_index:
-            self.streamed_args_for_tool.append("")
-        self.streamed_args_for_tool[tool_index] = prev_args + arg_diff
-        return DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=tool_index,
-                    function=DeltaFunctionCall(
-                        arguments=arg_diff,
-                    ).model_dump(exclude_none=True),
-                )
-            ],
-        )
-
-    def _start_tool_call(self, func_name: str) -> DeltaMessage:
-        self.current_tool_id += 1
-        self.current_tool_name_sent = True
-        while len(self.streamed_args_for_tool) <= self.current_tool_id:
-            self.streamed_args_for_tool.append("")
-        while len(self.prev_tool_call_arr) <= self.current_tool_id:
-            self.prev_tool_call_arr.append({})
-        self.prev_tool_call_arr[self.current_tool_id] = {"name": func_name}
-        return DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=self.current_tool_id,
-                    id=make_tool_call_id(),
-                    type="function",
-                    function=DeltaFunctionCall(
-                        name=func_name,
-                    ).model_dump(exclude_none=True),
-                )
-            ],
-        )
-
     def _process_complete_block_streaming(
         self,
         block: str,
@@ -621,86 +508,44 @@ class MiniCPM5XMLToolParser(ToolParser):
 
         args_json = json.dumps(parsed["parameters"], ensure_ascii=False)
         func_name = parsed["name"]
-
-        if not self.current_tool_name_sent:
-            self.current_tool_id += 1
-            tool_index = self.current_tool_id
-            while len(self.streamed_args_for_tool) <= tool_index:
-                self.streamed_args_for_tool.append("")
-            while len(self.prev_tool_call_arr) <= tool_index:
-                self.prev_tool_call_arr.append({})
-            self.streamed_args_for_tool[tool_index] = args_json
-            self.prev_tool_call_arr[tool_index] = {
-                "name": func_name,
-                "arguments": parsed["parameters"],
-            }
-            if not self.prev_tool_call_arr:
-                self.prev_tool_call_arr = [{"arguments": {}}]
-            return DeltaMessage(
-                tool_calls=[
-                    DeltaToolCall(
-                        index=tool_index,
-                        id=make_tool_call_id(),
-                        type="function",
-                        function=DeltaFunctionCall(
-                            name=func_name,
-                            arguments=args_json,
-                        ).model_dump(exclude_none=True),
-                    )
-                ],
-            )
-
+        self.current_tool_id += 1
         tool_index = self.current_tool_id
-        self.prev_tool_call_arr[tool_index]["arguments"] = parsed["parameters"]
-        delta = self._emit_tool_args_delta(
-            tool_index,
-            args_json,
-            is_complete=True,
-        )
+        while len(self.streamed_args_for_tool) <= tool_index:
+            self.streamed_args_for_tool.append("")
+        while len(self.prev_tool_call_arr) <= tool_index:
+            self.prev_tool_call_arr.append({})
+        self.streamed_args_for_tool[tool_index] = args_json
+        self.prev_tool_call_arr[tool_index] = {
+            "name": func_name,
+            "arguments": parsed["parameters"],
+        }
         self.current_tool_name_sent = False
-        if delta:
-            if not self.prev_tool_call_arr:
-                self.prev_tool_call_arr = [{"arguments": {}}]
-            return delta
-        return DeltaMessage(content="")
-
-    def _process_partial_block_streaming(
-        self,
-        block: str,
-        request: ChatCompletionRequest,
-    ) -> DeltaMessage | None:
-        tool_names, name_to_allowed_props, _ = _build_tool_maps(request.tools)
-        if _PARAM_MISSING_NAME_REGEX.search(block):
-            return None
-
-        match = _FUNC_NAME_V1_REGEX.search(block)
-        if not match:
-            return None
-        func_name = (match.group(1) or "").strip()
-        if func_name not in tool_names:
-            return None
-
-        if not self.current_tool_name_sent:
-            return self._start_tool_call(func_name)
-
-        arguments = _parse_partial_params(
-            block,
-            func_name,
-            name_to_allowed_props,
-            self._parameter_types_cache.for_tools(request.tools),
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=tool_index,
+                    id=make_tool_call_id(),
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name=func_name,
+                        arguments=args_json,
+                    ).model_dump(exclude_none=True),
+                )
+            ],
         )
-        if not arguments:
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Emit text held back because it might start `<function`.
+
+        Called when generation ends. An empty delta is not a finish signal:
+        the next chunk may still complete the tag.
+        """
+        held = self._unsent_text
+        if not held:
             return None
-        args_json = json.dumps(arguments, ensure_ascii=False)
-        self.prev_tool_call_arr[self.current_tool_id]["arguments"] = arguments
-        delta = self._emit_tool_args_delta(
-            self.current_tool_id,
-            args_json,
-            is_complete=False,
-        )
-        if delta and not self.prev_tool_call_arr:
-            self.prev_tool_call_arr = [{"arguments": {}}]
-        return delta
+        self._unsent_text = ""
+        self._processed_len += len(held)
+        return DeltaMessage(content=held)
 
     def extract_tool_calls_streaming(
         self,
@@ -749,14 +594,14 @@ class MiniCPM5XMLToolParser(ToolParser):
                         content_parts.append(remainder[:safe_len])
                         self._processed_len += safe_len
                 else:
+                    # Hold an unfinished `<function` block. A name or argument
+                    # delta sent before validation cannot be retracted, and
+                    # the partial snapshot omits the closing brace.
                     if func_idx > 0:
                         content_parts.append(remainder[:func_idx])
                         self._processed_len += func_idx
-                    _collect(
-                        self._process_partial_block_streaming(
-                            remainder[func_idx:], request
-                        )
-                    )
+
+            self._unsent_text = current_text[self._processed_len :]
 
             if content_parts or tool_calls:
                 return DeltaMessage(
