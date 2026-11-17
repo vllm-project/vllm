@@ -41,6 +41,7 @@ def _mixed_precision_config() -> ModelOptMixedPrecisionConfig:
     return config
 
 
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_nvfp4_embedding_matches_reference_dequant():
     torch.manual_seed(0)
@@ -92,6 +93,7 @@ def test_nvfp4_embedding_matches_reference_dequant():
         layer.quant_method.apply(layer, torch.zeros(1, hidden, dtype=torch.bfloat16))
 
 
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_nvfp4_embedding_rejects_tied_lm_head():
     # OPT ties its word embeddings to the LM head, which would read packed bytes.
@@ -112,6 +114,7 @@ def test_nvfp4_embedding_rejects_tied_lm_head():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton path needs a GPU")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("hidden", [64, 2080])
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_nvfp4_embedding_triton_matches_torch(dtype, hidden):
     torch.manual_seed(0)

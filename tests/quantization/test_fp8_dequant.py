@@ -38,9 +38,12 @@ from vllm.model_executor.utils import get_live_param
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="FP8 linear kernels need a GPU"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="FP8 linear kernels need a GPU"
+    ),
+    pytest.mark.skip_global_cleanup,
+]
 
 _DEVICE = torch.device("cuda")
 # q_a / kv_a-like shards of unequal sizes; the last ends in a partial block
@@ -51,15 +54,15 @@ _SCALE = {"block": "weight_scale_inv", "tensor": "weight_scale"}
 
 
 @pytest.fixture
+@override_parallel_groups(SingleRankGroup())
 def model_config():
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 
-    with override_parallel_groups(SingleRankGroup()):
-        config = ModelConfig(
-            "facebook/opt-125m", dtype="bfloat16", skip_tokenizer_init=True
-        )
-        with set_current_vllm_config(VllmConfig(model_config=config)):
-            yield config
+    config = ModelConfig(
+        "facebook/opt-125m", dtype="bfloat16", skip_tokenizer_init=True
+    )
+    with set_current_vllm_config(VllmConfig(model_config=config)):
+        yield config
 
 
 def _block_fp8(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:

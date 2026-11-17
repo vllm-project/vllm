@@ -360,6 +360,7 @@ def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
 @pytest.mark.skipif(
     not is_fp4_marlin_supported(), reason="No NVFP4 W4A16 kernel on this platform."
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_nvfp4_weight_only_linear_matches_dequantized_weight(
     default_vllm_config,
@@ -425,6 +426,7 @@ def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> No
     "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
 )
 @pytest.mark.parametrize("requantize", [False, True])
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_moe_stages_quantized_weights_for_humming(
     scheme, requantize, tmp_path, workspace_init
@@ -780,6 +782,7 @@ def _write_minimal_llama_config(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="MXFP8 requantization requires CUDA or ROCm.",
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_prequantized_compatibility(
     checkpoint_config_factory,
@@ -841,6 +844,7 @@ def test_online_prequantized_compatibility(
     or not is_quant_method_supported("fp8"),
     reason="Requires FP8 support on CUDA or ROCm.",
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_block_fp8_requantization_removes_source_scales(
     default_vllm_config, workspace_init
@@ -871,6 +875,7 @@ def test_online_block_fp8_requantization_removes_source_scales(
         assert layer.weight_scale_inv.numel() > 0
 
 
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_ignore_keeps_checkpoint_quantization_linear(
     default_vllm_config, monkeypatch
@@ -901,6 +906,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_quantization_configures_prequantized_moe(
     default_vllm_config,
@@ -2160,6 +2166,7 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_quantization(
     model_name: str,
@@ -2540,6 +2547,7 @@ def test_online_quantization_loads_real_weights(
     ],
     ids=["linear_regex", "direct_fused_regex", "legacy_fused_regex"],
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_quantization_targets(
     default_vllm_config,
@@ -2574,6 +2582,7 @@ def test_online_quantization_targets(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_quantization_records_global_config(
     default_vllm_config,

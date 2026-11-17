@@ -1373,7 +1373,6 @@ def test_models_fse_init(
     use_fse: bool,
     exclude: list[str],
     monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
     _print_warning_once.cache_clear()
@@ -1528,16 +1527,6 @@ def test_models_fse_init(
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
-
-    def reset_aiter() -> None:
-        rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
-        importlib.reload(envs)
-        rocm_aiter_ops.refresh_env_variables()
-
-    # Also on failure: `skip_global_cleanup` skips the conftest cleanup. Runs after
-    # the environment patches below are undone.
-    request.addfinalizer(reset_aiter)
 
     warning_logger = fused_moe_utils.logger
 
@@ -1553,6 +1542,7 @@ def test_models_fse_init(
         importlib.reload(envs)
         mp.setattr(envs, "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", use_fse)
         rocm_aiter_ops.refresh_env_variables()
+        from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 
         mp.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
         rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
@@ -1799,6 +1789,10 @@ def test_models_fse_init(
                     in (warning.call_args.args[0])
                 )
                 assert "excludes shared experts" in warning.call_args.args[1]
+
+    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
+    importlib.reload(envs)
+    rocm_aiter_ops.refresh_env_variables()
 
 
 def _modelopt_mxfp8_config(exclude_modules=(), moe_quant_algo="NVFP4"):

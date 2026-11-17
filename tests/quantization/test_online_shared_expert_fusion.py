@@ -151,9 +151,9 @@ class _StubAttention(torch.nn.Module):
 
 
 @pytest.fixture
+@override_parallel_groups(SingleRankGroup())
 def single_rank_parallel_state():
-    with override_parallel_groups(SingleRankGroup()):
-        yield
+    yield
 
 
 @pytest.fixture(autouse=True)

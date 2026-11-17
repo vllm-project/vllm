@@ -284,6 +284,7 @@ def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
         pytest.param(240, 208, id="padding"),
     ],
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_moe_matches_quark(
     moe_backend: MoEBackend,
@@ -493,6 +494,7 @@ def test_online_mxfp4_moe_matches_quark(
     not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
 @pytest.mark.parametrize("linear_backend", ["emulation", "aiter", "marlin"])
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_dense_matches_quark(
     linear_backend: str, default_vllm_config, monkeypatch
