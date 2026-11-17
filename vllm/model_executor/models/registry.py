@@ -627,6 +627,7 @@ _MULTIMODAL_MODELS = {
         "vllm.models.qwen3_5",
         "Qwen3_5ForConditionalGeneration",
     ),
+    "Qwen3_5ForSlotDecision": ("qwen3_5_slot", "Qwen3_5ForSlotDecision"),
     "Qwen3_5MoeForConditionalGeneration": (
         "vllm.models.qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
@@ -682,6 +683,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "ricursive_dflash2",
         "RicursiveDFlash2ForCausalLM",
     ),
+    "DSpineDraftModel": ("qwen3_dspine", "DSpineQwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
     # DFlash{arch} unless it already starts or ends with "DFlash" (see
