@@ -298,6 +298,10 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+To free the pool's host memory while the engine sleeps, stop the external
+`mooncake_client`; see
+[Sleep Mode](sleep_mode.md#free-a-kv-connectors-host-memory).
+
 ### Tenant Isolation
 
 Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
