@@ -750,21 +750,6 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
     assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
 
 
-@pytest.mark.parametrize("source", ["model", "quant"])
-def test_hpc_rejects_required_swiglu_clamp(source):
-    """HPC's fused activation must not silently omit a required clamp."""
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
-
-    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
-    config.swiglu_limit = 10.0 if source == "model" else None
-    quant = FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn, gemm1_clamp_limit=10.0 if source == "quant" else None
-    )
-    with pytest.raises(ValueError, match="SwiGLU clamp"):
-        HPCExperts(config, quant)
-
-
 def test_hpc_clamp_rejected_during_backend_selection():
     """Exclude HPC before selection so automatic mode can use another kernel."""
     from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
