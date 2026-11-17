@@ -73,6 +73,8 @@ vLLM version: 0.34.0rc1.dev142+g96710245e.rocm100, which corresponds to upstream
 
 | PR | 状态 | 备注 |
 |---|---|---|
+| [aiter #7917](https://github.com/ROCm/aiter/pull/7917) MoE v2 stage 2 跳过 `inter_dim` padding | open，draft | DSv4.1 TP4 a8w4 `fused_moe` 约 −4.5～−7.5%（256–16384 tok）；E2E TPOT 约 −1.7～−3.9%；可去掉 vLLM `intermediate_pad=0` 强制 |
+| [aiter #7918](https://github.com/ROCm/aiter/pull/7918) MoE stage 1 XCD remap 只覆盖 valid rows | open，draft | 叠在 #7656 上：`xcd_swizzle=1` 时 fused_moe 最高约 −8%（4096 tok −7.8%）；2048–16384 行受益 |
 | [#63326](https://github.com/vllm-project/vllm/pull/63326) Engram WKV chain 与 decoder 重叠 | open，draft | TP4 mean TPOT 约 −2.3%（12 点，未叠 #63367）；#66587；拟与已合入的 #63367 重测 |
 | [#66856](https://github.com/vllm-project/vllm/pull/66856) 把 `wo_a` MXFP8 quant 融进 epilogue | open，draft | 宣称约 +1.2%；依赖 #66572 一类 q/quant 融合栈 |
 | [#65243](https://github.com/vllm-project/vllm/pull/65243) 去掉 MoRI finalize 多余 copy | open，draft | 每层少一次 copy；单独 E2E 多在噪声内 |
