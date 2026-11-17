@@ -437,6 +437,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py

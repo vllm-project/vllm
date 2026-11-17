@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-15
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -22,10 +22,11 @@ meta:
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
-  # The first release after v0.33.0, which K3.1 missed. A number, not "nightly":
+  # The first release after v0.34.0, which carries only part of K3.1
+  # (vllm-project/vllm#65685 merged after its cut). A number, not "nightly":
   # the renderer reads "nightly" as 0.0.0 and would offer a `kimi-k31-cu129` tag
   # that doesn't exist.
-  min_vllm_version: "0.34.0"
+  min_vllm_version: "0.35.0"
   nightly_required: true
   # NVIDIA's is the day-0 CUDA 13 (cu130) build only. AMD's is the ROCm 10.0
   # 5c14fe8 build, the one the MI355X AgentX preset was measured on.
