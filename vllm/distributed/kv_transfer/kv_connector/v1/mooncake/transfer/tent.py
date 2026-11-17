@@ -36,6 +36,12 @@ logger = init_logger(__name__)
 # flight when the engine has not stopped touching them.
 DEFAULT_TRANSFER_TIMEOUT_S = 60.0
 
+# Both errors below report a missing TENT installation, so they share the fix.
+_TENT_BUILD_HINT = (
+    "Build Mooncake v0.3.14 or later from source with -DUSE_TENT=ON; the "
+    "PyPI wheels ship no top-level 'tent' module."
+)
+
 # How long `shutdown` waits for transfers that are still running.
 SHUTDOWN_TIMEOUT_S = 5.0
 
@@ -113,9 +119,8 @@ class TentTransferBackend(TransferBackend):
         if missing:
             raise RuntimeError(
                 "This Mooncake build does not expose "
-                f"{', '.join(missing)}, which the TENT backend needs. Build "
-                "Mooncake with -DUSE_TENT=ON from a tree that provides the "
-                "batch status bindings."
+                f"{', '.join(missing)}, which the TENT backend needs. "
+                f"{_TENT_BUILD_HINT}"
             )
         self._pending = int(self._tent.TransferStatusEnum.PENDING)
         self._timeout_s = float(transfer_timeout_s)
@@ -345,8 +350,6 @@ def _import_tent_module() -> Any:
     if importlib.util.find_spec("tent") is not None:
         return importlib.import_module("tent")
     raise RuntimeError(
-        "transfer_engine='tent' requires the 'tent' Python module, which this "
-        "Mooncake build does not ship. Build Mooncake with -DUSE_TENT=ON, make "
-        "the resulting 'tent' module importable, or select "
-        "transfer_engine='te'."
+        "transfer_engine='tent' requires the 'tent' Python module. "
+        f"{_TENT_BUILD_HINT} Alternatively, select transfer_engine='te'."
     )
