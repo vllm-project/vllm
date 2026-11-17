@@ -247,6 +247,9 @@ class GatedResidual(nn.Module):
                     self.hc_lowrank,
                 )
 
+    # hc_norm.weight requires grad, so outside no_grad the fold would keep its
+    # fp32 intermediates alive through the buffer's autograd graph.
+    @torch.no_grad()
     def process_weights_after_loading(self) -> None:
         if self.hc_two_stage_max_tokens:
             w_down_inject = self.input_mix_weight_down_block_inject.weight

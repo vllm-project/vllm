@@ -2818,7 +2818,7 @@ class rocm_aiter_ops:
     ) -> int:
         """Largest token count the two-stage skinny decode kernels take for
         this shape, or 0 when they cannot be built for it. Above it, AITER
-        would switch to a tiled path that needs a 64-row merged weight."""
+        would switch to a tiled path that pads the token count to 64."""
         from aiter.ops.flydsl.kernels.hyper_connection_gated_residual.k1 import (
             DECODE_MAX_M,
             skinny_decode_supported,
