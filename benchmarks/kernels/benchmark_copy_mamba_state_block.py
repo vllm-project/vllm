@@ -404,7 +404,7 @@ def bench_one(
     temporal_tiles: int,
     iters_warmup: int,
     iters_timed: int,
-) -> float:
+) -> None:
     # Give every request distinct src/dst block ids so concurrent copies don't
     # share cache lines. State tensors hold at least 2*num_reqs blocks.
     num_blocks = 2 * num_reqs
@@ -490,7 +490,6 @@ def bench_one(
         f"copy/req={bytes_per_req / 1024 / 1024:6.2f} MiB  "
         f"avg={avg_us:8.2f} us  BW~{gbps:6.1f} GB/s"
     )
-    return avg_us
 
 
 def main():
