@@ -1961,7 +1961,13 @@ class ModelConfig:
             A dictionary containing the non-default generation config.
 
         """
-        if self.generation_config in {"auto", "vllm"}:
+        src = self.generation_config
+
+        if src == "vllm":
+            # `--generation-config vllm` means "use vLLM's defaults", so the
+            # model's generation_config.json must not leak in here either.
+            config_dict: dict[str, Any] = {}
+        elif src == "auto":
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -1970,16 +1976,16 @@ class ModelConfig:
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
+            config_dict = {} if config is None else config.to_diff_dict()
         else:
             config = try_get_generation_config(
-                self.generation_config,
+                src,
                 trust_remote_code=self.trust_remote_code,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
-
-        config_dict = {} if config is None else config.to_diff_dict()
+            config_dict = {} if config is None else config.to_diff_dict()
 
         # Apply the user override to the full generation config so that special
         # tokens (e.g. eos_token_id / stop_token_ids) honor the override too,
@@ -2012,14 +2018,9 @@ class ModelConfig:
         """
         src = self.generation_config
 
-        if src == "vllm":
-            # The "vllm" source loads no generation config, so the override is
-            # the only source of sampling parameters here.
-            config = dict(self.override_generation_config)
-        else:
-            # try_get_generation_config() already merges
-            # override_generation_config, so no second update is needed.
-            config = self.try_get_generation_config()
+        # try_get_generation_config() applies the `vllm`/`auto` source rules and
+        # merges override_generation_config, so both paths live there.
+        config = self.try_get_generation_config()
 
         available_params = [
             "repetition_penalty",

@@ -3734,6 +3734,15 @@ def test_override_generation_config_special_tokens():
     sampling_params.update_from_generation_config(generation_config, eos_token_id=1)
     assert 106 in sampling_params.all_stop_token_ids
 
+    # `--generation-config vllm` means "vLLM defaults only", so the model's
+    # generation_config.json must not contribute special tokens either.
+    model_config = ModelConfig(
+        model_id,
+        generation_config="vllm",
+        override_generation_config={"eos_token_id": [106]},
+    )
+    assert model_config.try_get_generation_config() == {"eos_token_id": [106]}
+
 
 @pytest.mark.parametrize(
     "pt_load_map_location",
