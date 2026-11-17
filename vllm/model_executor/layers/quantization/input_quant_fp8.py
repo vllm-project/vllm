@@ -244,6 +244,10 @@ class QuantFP8(CustomOp):
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().amax(dim=-1, keepdim=True).float()
+        # Like the CUDA kernel, ignore NaN when computing the scale. Garbage in
+        # CUDA graph padding rows can be NaN, and a NaN scale makes DeepGEMM's
+        # UE8M0 scale packing hit a device assert.
+        absmax = torch.nan_to_num(absmax, nan=0.0)
         scales_raw = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
         scales = (
             torch.exp2(torch.ceil(torch.log2(scales_raw)))

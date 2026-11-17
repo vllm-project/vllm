@@ -208,3 +208,28 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     assert (scales_zero_ue8m0 >= _FP8_MIN_SCALING_FACTOR).all(), (
         "Clamped scales were not larger than or equal to _FP8_MIN_SCALING_FACTOR."
     )
+
+
+@pytest.mark.parametrize("use_ue8m0", [True, False])
+@torch.inference_mode()
+def test_quantfp8_group_nan_input(default_vllm_config, use_ue8m0: bool) -> None:
+    # A NaN group (e.g. garbage in CUDA graph padding rows) must not produce a
+    # NaN scale: DeepGEMM traps on non-UE8M0 activation scales.
+    x = torch.randn((4, 256), dtype=torch.bfloat16, device="cuda")
+    x[1, 3] = float("nan")
+    quant_op = QuantFP8(
+        static=False,
+        group_shape=GroupShape(1, 128),
+        column_major_scales=False,
+        use_ue8m0=use_ue8m0,
+    )
+    _, scales = quant_op.forward_native(x.clone())
+    assert torch.isfinite(scales).all()
+    if use_ue8m0:
+        assert ((scales.view(torch.int32) & 0x807FFFFF) == 0).all()
+    # Groups without NaN are unaffected.
+    x[1, 3] = 0.0
+    _, ref = quant_op.forward_native(x.clone())
+    mask = torch.ones_like(scales, dtype=torch.bool)
+    mask[1, 0] = False
+    torch.testing.assert_close(scales[mask], ref[mask])
