@@ -254,7 +254,7 @@ def apply_flattened(
     Linear methods and kernels may assume 2D activations, but callers such as
     the Transformers modeling backend pass `[batch, seq, hidden]` activations.
     """
-    if x.ndim <= 2 or not x.is_contiguous():
+    if not isinstance(x, torch.Tensor) or x.ndim <= 2 or not x.is_contiguous():
         return fn(x)
     return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
 
