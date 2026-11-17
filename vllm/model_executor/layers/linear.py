@@ -24,6 +24,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -247,14 +248,18 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
 
 def apply_flattened(
-    fn: Callable[[torch.Tensor], torch.Tensor], x: torch.Tensor
+    fn: Callable[[Any], torch.Tensor], x: torch.Tensor | QuantizedActivation
 ) -> torch.Tensor:
     """Call `fn` on `x` flattened to 2D, if that can be done without a copy.
 
     Linear methods and kernels may assume 2D activations, but callers such as
     the Transformers modeling backend pass `[batch, seq, hidden]` activations.
     """
-    if not isinstance(x, torch.Tensor) or x.ndim <= 2 or not x.is_contiguous():
+    if isinstance(x, QuantizedActivation):
+        if len(x.orig_shape) <= 2:
+            return fn(x)
+        return fn(x.flatten()).view(*x.orig_shape[:-1], -1)
+    if x.ndim <= 2 or not x.is_contiguous():
         return fn(x)
     return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
 
