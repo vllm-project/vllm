@@ -126,7 +126,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         attn_in: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
-        use_sequence_parallel = (
+        sequence_parallel_active = (
             self.use_sequence_parallel or hidden_states.shape[0] < full_num_tokens
         )
 
@@ -138,7 +138,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states = (
                 attn_in if attn_in is not None else self.input_layernorm(hidden_states)
             )
-        elif use_sequence_parallel:
+        elif sequence_parallel_active:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         else:
             # The previous layer's MLP/MoE output is left un-reduced; fuse its
@@ -148,7 +148,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             )
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        if use_sequence_parallel:
+        if sequence_parallel_active:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
@@ -158,7 +158,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 hidden_states, residual, self.post_attention_layernorm
             )
 
-        if use_sequence_parallel and not self.use_sequence_parallel:
+        if sequence_parallel_active and not self.use_sequence_parallel:
             # These MLP/expert weights retain their existing TP/EP layout.
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
             hidden_states = self.mlp(hidden_states)
@@ -227,7 +227,7 @@ class DeepseekV32Model(torch.nn.Module):
         speculative_config = vllm_config.speculative_config
         attention_config = vllm_config.attention_config
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
-        self.use_sp_attention = (
+        self.shardq_sequence_parallel = (
             parallel_config.use_sequence_parallel_attention
             and vllm_config.lora_config is None
             and attention_config.hisparse_config is None
@@ -264,10 +264,10 @@ class DeepseekV32Model(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[0]
-        use_sequence_parallel = (
+        sequence_parallel_active = (
             self.use_sequence_parallel
             or is_sequence_parallel_active(
-                self.use_sp_attention, full_num_tokens, self.sp_min_tokens
+                self.shardq_sequence_parallel, full_num_tokens, self.sp_min_tokens
             )
         )
 
@@ -296,7 +296,7 @@ class DeepseekV32Model(torch.nn.Module):
         # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
-        if use_sequence_parallel:
+        if sequence_parallel_active:
             if (
                 self.use_sequence_parallel
                 and envs.VLLM_MOE_SKIP_PADDING
@@ -338,7 +338,7 @@ class DeepseekV32Model(torch.nn.Module):
                 }
             )
 
-        if use_sequence_parallel:
+        if sequence_parallel_active:
             hidden_states, _ = self.norm(hidden_states, residual)
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]

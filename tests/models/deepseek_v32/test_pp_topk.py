@@ -104,7 +104,8 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
     model.layers = nn.ModuleList([layer])
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
-    model.use_sp_attention = False
+    model.shardq_sequence_parallel = False
+    model.sp_min_tokens = 1024
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {"topk_indices": model.topk_indices_buffer}
     monkeypatch.setattr(
