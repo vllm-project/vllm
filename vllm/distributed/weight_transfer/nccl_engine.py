@@ -85,8 +85,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     packed_wire_segments: bool = True
-    """Send tensors over the packed buffer as dim-0 segments, so neither
-    side needs a buffer of their size. The workers are told at init; a worker
+    """Send tensors over the packed buffer as dim-0 segments, so no packed
+    buffer on either side needs their size. The workers are told at init; a worker
     that predates segments must run with `False`."""
     use_load_plan: bool = False
     """Have the workers write received tensors of the target model through a

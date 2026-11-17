@@ -37,8 +37,9 @@ def wire_segments(
     """Dim-0 row ranges a tensor travels as, or `None` to send it whole.
 
     A tensor over the buffer (e.g. one layer's expert stack) is split along
-    dim 0 into segments that fit it, so no side needs a buffer of its size and
-    a chunk holds at most twice the buffer. A tensor whose single row exceeds
+    dim 0 into segments that fit it, so no chunk buffer needs its size (a
+    chunk holds at most twice the buffer); the consumer joins the segments
+    into one tensor of the full size. A tensor whose single row exceeds
     the buffer travels whole.
     """
     nbytes = math.prod(shape) * dtype.itemsize
@@ -245,7 +246,7 @@ def packed_nccl_broadcast_consumer(
     caller_stream = torch.accelerator.current_stream()
     for stream in streams:
         stream.wait_stream(caller_stream)
-    prev_received: torch.Event | None = None
+    prev_done: torch.Event | None = None  # the previous chunk's last work
     slot_done: list[torch.Event | None] = [None] * num_buffers
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
@@ -260,15 +261,15 @@ def packed_nccl_broadcast_consumer(
         with torch.cuda.stream(streams[slot]):
             packed = torch.empty(chunk_bytes(pieces), dtype=torch.uint8, device=device)
             group.broadcast(packed, src=src)
-            # post_unpack_func may keep the unpacked views and read them from a
-            # later pack's callback, on another slot stream. Chaining the ready
-            # events orders every callback after all earlier receives, and
-            # record_stream keeps the allocator from reissuing this buffer once
-            # it is freed while the broadcast or such a read is still pending.
-            if prev_received is not None:
-                streams[slot].wait_event(prev_received)
-            prev_received = torch.Event()
-            prev_received.record(streams[slot])
+            # post_unpack_func may keep the unpacked tensors (and a split
+            # tensor's earlier rows are copied on another slot) and read them
+            # from a later chunk's callback, on another slot stream. Waiting
+            # for the previous chunk's work orders every unpack and callback
+            # after all earlier chunks' copies, and record_stream keeps the
+            # allocator from reissuing this buffer once it is freed while the
+            # broadcast or such a read is still pending.
+            if prev_done is not None:
+                streams[slot].wait_event(prev_done)
             for stream in (*streams, caller_stream):
                 packed.record_stream(stream)
             out = []
@@ -300,9 +301,8 @@ def packed_nccl_broadcast_consumer(
                 out.append((names[index], view))
             if out:
                 post_unpack_func(out)
-            event = torch.Event()
-            event.record(streams[slot])
-            slot_done[slot] = event
+            prev_done = slot_done[slot] = torch.Event()
+            prev_done.record(streams[slot])
 
     # Drain every slot before returning.
     for stream in streams:

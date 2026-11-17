@@ -842,6 +842,43 @@ class TestSegmentedRoundtrip:
         if segments:  # no chunk exceeds twice the buffer
             assert max(t.numel() for t in group.broadcasted_tensors) <= 2 * 512
 
+    def test_split_tensor_waits_for_rows_copied_on_another_slot(self):
+        """A tensor split across chunks on two slots: the callback that gets
+        it (second slot) runs after the first slot's row copies, even when
+        those are slow."""
+        big = torch.randn(8, 64, device="cuda")  # rows of 256 B
+        producer_group = MockCommunicationGroup()
+        packed_nccl_broadcast_producer(
+            iterator=iter([("big", big)]),
+            group=producer_group,
+            src=0,
+            post_iter_func=lambda x: x[1],
+            buffer_size_bytes=1000,  # chunks: rows 0-6 | rows 6-8
+            segments=True,
+        )
+        assert len(producer_group.broadcasted_tensors) == 2
+        group = MockConsumerCommunicationGroup(producer_group.broadcasted_tensors)
+        got: list[torch.Tensor] = []
+        view, calls = pt._view, []
+
+        def slow_first_chunk(buf, piece):
+            calls.append(piece)
+            if len(calls) == 1:  # queued on the first slot, before its copies
+                torch.cuda._sleep(SLEEP_CYCLES)
+            return view(buf, piece)
+
+        with patch.object(pt, "_view", slow_first_chunk):
+            packed_nccl_broadcast_consumer(
+                iterator=iter([("big", ([8, 64], torch.float32))]),
+                group=group,
+                src=0,
+                post_unpack_func=lambda items: got.extend(t.clone() for _, t in items),
+                buffer_size_bytes=1000,
+                segments=True,
+            )
+        torch.accelerator.synchronize()
+        assert len(got) == 1 and torch.equal(got[0], big)
+
     def test_split_tensor_is_joined_without_a_second_copy(self):
         """The consumer writes segments into one tensor of the full size:
         peak growth is about one tensor plus the receive buffers, not two."""
