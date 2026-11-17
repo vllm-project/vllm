@@ -407,7 +407,7 @@ def _make_dual_stream(vllm_config: VllmConfig) -> torch.cuda.Stream | None:
     return torch.cuda.Stream()
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class _DualStreamState:
     """Dual-stream state of one decoder layer.
 
