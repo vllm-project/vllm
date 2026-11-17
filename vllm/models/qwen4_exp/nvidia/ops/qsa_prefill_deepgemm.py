@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unscaled FP8 QSA prefill through contiguous DeepGEMM MQA logits.
 
-Prefill requests are planned into groups whose keys fit a fixed K workspace.
-Each group's compressed keys are gathered once into the workspace, packed back
-to back, and its query rows are scored in chunks that keep the logits within
-VLLM_SPARSE_INDEXER_MAX_LOGITS_MB. The K workspace takes the same budget, or
-one maximum-length request if larger, so every eligible step can take this
-path; prefill scratch peaks at both together.
+Prefill requests are planned into groups. Each group's compressed keys are
+gathered once, packed back to back, and its query rows are scored in chunks.
+VLLM_SPARSE_INDEXER_MAX_LOGITS_MB bounds the gathered keys and a chunk's
+logits combined (the DeepSeek indexer applies it to logits only), so the
+profiling run's touch of that budget covers both. Only a request too long to
+fit with one Q tile of logits exceeds it, and every eligible step still takes
+this path.
 """
 
 import itertools
@@ -25,7 +26,6 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from ...common.qsa_indexer import QSAIndexerMetadata
@@ -62,8 +62,9 @@ def can_use_deepgemm_prefill(q: torch.Tensor, k_cache: torch.Tensor) -> bool:
     )
 
 
-def max_gather_keys(max_model_len: int, compress_ratio: int) -> int:
-    """K workspace rows: the logits budget's bytes, or one max-length request."""
+def max_group_keys(max_model_len: int, compress_ratio: int) -> int:
+    """Most keys one group gathers: the budget's worth, or one max-length
+    request."""
     max_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     return max(cdiv(max_model_len, compress_ratio), max_bytes // _HEAD_DIM)
 
@@ -78,19 +79,23 @@ def _logits_bytes(rows: int, width: int) -> int:
     return round_up(rows, _Q_TILE) * pitch * 4
 
 
+def _scratch_bytes(rows: int, keys: int, longest: int) -> int:
+    """Gathered keys plus the logits of `rows` query rows over them."""
+    return keys * _HEAD_DIM + _logits_bytes(rows, _logits_width(longest))
+
+
 def plan_prefill_chunks(
     query_lens: list[int],
     key_lens: list[int],
-    max_keys: int,
-    max_logits_bytes: int,
+    max_bytes: int,
 ) -> list[tuple[int, int, int, int]]:
     """Split prefill requests into (req_start, req_end, row_start, row_end).
 
-    Requests are grouped while their keys fit `max_keys` and the whole group's
-    logits fit `max_logits_bytes`. A request that cannot share a group is
-    alone, and its rows are split to fit the logits; it always fits the K
-    workspace. Rows are relative to the group's first row, so a chunk with
-    row_start > 0 reuses the keys gathered for the group's first chunk.
+    Requests are grouped while the group's keys and all its logits fit
+    `max_bytes`. A request that cannot share a group is alone, and its rows
+    are split so its keys and each chunk's logits fit, down to one Q tile.
+    Rows are relative to the group's first row, so a chunk with row_start > 0
+    reuses the keys gathered for the group's first chunk.
     """
     chunks = []
     num_requests = len(query_lens)
@@ -101,16 +106,15 @@ def plan_prefill_chunks(
             next_rows = rows + query_lens[end]
             next_keys = keys + key_lens[end]
             next_longest = max(longest, key_lens[end])
-            if next_keys > max_keys or (
-                _logits_bytes(next_rows, _logits_width(next_longest)) > max_logits_bytes
-            ):
+            if _scratch_bytes(next_rows, next_keys, next_longest) > max_bytes:
                 break
             rows, keys, longest, end = next_rows, next_keys, next_longest, end + 1
         if end == start:
-            rows, longest, end = query_lens[start], key_lens[start], start + 1
-        assert sum(key_lens[start:end]) <= max_keys
+            rows, keys, longest = query_lens[start], key_lens[start], key_lens[start]
+            end = start + 1
         row_bytes = _logits_bytes(_Q_TILE, _logits_width(longest)) // _Q_TILE
-        step = max(_Q_TILE, max_logits_bytes // row_bytes // _Q_TILE * _Q_TILE)
+        logits_bytes = max_bytes - keys * _HEAD_DIM
+        step = max(_Q_TILE, logits_bytes // row_bytes // _Q_TILE * _Q_TILE)
         for row in range(0, rows, step):
             chunks.append((start, end, row, min(row + step, rows)))
         start = end
@@ -122,7 +126,7 @@ class QSAPrefillChunk:
     # Rows of the prefill query slice scored by this chunk.
     row_start: int
     row_end: int
-    # Prefill requests whose keys are packed in the workspace.
+    # Prefill requests whose keys are packed for this chunk.
     req_start: int
     req_end: int
     # Host upper bounds on the packed keys and the longest request.
@@ -138,7 +142,6 @@ class QSAPrefillChunk:
 class QSAIndexerPrefillMetadata:
     # Exclusive cumsum of exact per-request compressed lengths, [requests + 1].
     cu_keys: torch.Tensor
-    max_num_keys: int
     chunks: list[QSAPrefillChunk]
 
 
@@ -146,7 +149,6 @@ def prepare_deepgemm_prefill(
     metadata: "QSAIndexerMetadata",
     query_start_loc_cpu: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
-    max_keys: int,
 ) -> QSAIndexerPrefillMetadata:
     """Plan the step's prefill chunks and their DeepGEMM schedules.
 
@@ -169,10 +171,10 @@ def prepare_deepgemm_prefill(
     row_keys = cu_keys[(metadata.token_to_req[rows].long() - num_decodes).clamp(0)]
     visible = metadata.visible_blocks[rows]
 
-    max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    max_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     chunks = []
     for req_start, req_end, row_start, row_end in plan_prefill_chunks(
-        query_lens, key_lens, max_keys, max_logits_bytes
+        query_lens, key_lens, max_bytes
     ):
         chunk_rows = slice(
             first_rows[req_start] + row_start, first_rows[req_start] + row_end
@@ -196,11 +198,7 @@ def prepare_deepgemm_prefill(
                 schedule=get_mqa_logits_metadata(ks, ke, num_keys, _NUM_HEADS),
             )
         )
-    return QSAIndexerPrefillMetadata(
-        cu_keys=cu_keys,
-        max_num_keys=max(chunk.num_keys for chunk in chunks),
-        chunks=chunks,
-    )
+    return QSAIndexerPrefillMetadata(cu_keys=cu_keys, chunks=chunks)
 
 
 # Unit MX scales and FP32 head weights, allocated during memory profiling.
@@ -212,11 +210,10 @@ def reserve_deepgemm_prefill(
     max_keys: int,
     max_tokens: int,
 ) -> None:
-    """Touch the prefill peak during memory profiling.
+    """Allocate the unit scales and weights during memory profiling.
 
-    Allocates the unit scales and weights, grows the shared workspace to the
-    K workspace, and touches one full Q tile of the widest logits, which can
-    exceed the logits budget for a max-length request.
+    The caller touches the budget; this also touches the one case past it, a
+    request whose keys and one Q tile of its logits exceed the budget.
     """
     global _constants
     if _constants is None:
@@ -230,11 +227,8 @@ def reserve_deepgemm_prefill(
             (max_tokens, _NUM_HEADS), dtype=torch.float32, device=device
         )
         _constants = scales, weights
-    prefill_key_workspace(max_keys)
     _ = torch.empty(
-        _logits_bytes(_Q_TILE, _logits_width(max_keys)),
-        dtype=torch.uint8,
-        device=device,
+        _scratch_bytes(_Q_TILE, max_keys, max_keys), dtype=torch.uint8, device=device
     )
 
 
@@ -248,12 +242,6 @@ def _get_constants(rows: int, keys: int) -> tuple[torch.Tensor, torch.Tensor]:
             f"reserved {weights.shape[0]} rows and {scales.shape[0]} scales"
         )
     return scales, weights
-
-
-def prefill_key_workspace(num_keys: int) -> torch.Tensor:
-    return current_workspace_manager().get_simultaneous(
-        ((num_keys, _HEAD_DIM), torch.float8_e4m3fn)
-    )[0]
 
 
 @triton.jit(do_not_specialize=["stride_table_req"])
@@ -305,9 +293,9 @@ def gather_prefill_keys(
     page_table: torch.Tensor,
     metadata: QSAIndexerPrefillMetadata,
     chunk: QSAPrefillChunk,
-    packed: torch.Tensor,
-) -> None:
-    """Pack the chunk's requests' compressed keys from the start of `packed`."""
+) -> torch.Tensor:
+    """Pack the chunk's requests' compressed keys back to back."""
+    packed = k_cache.new_empty((chunk.num_keys, _HEAD_DIM))
     page_size = k_cache.shape[1]
     _gather_prefill_keys_kernel[
         (
@@ -325,6 +313,7 @@ def gather_prefill_keys(
         CP=64,
         num_warps=4,
     )
+    return packed
 
 
 def deepgemm_prefill_logits(
@@ -366,12 +355,11 @@ def warmup_deepgemm_prefill(k_cache: torch.Tensor, num_heads: int) -> None:
         ke=ke,
         schedule=get_mqa_logits_metadata(ks, ke, 1, _NUM_HEADS),
     )
-    packed = prefill_key_workspace(1)
     # Groups after the first slice the offsets and block table at addresses
     # Triton may not see as 16-byte aligned, and it compiles each separately.
     for table_offset, keys_offset in itertools.product(range(2), repeat=2):
         table = torch.zeros((2, 1), device=q.device, dtype=torch.int32)
         cu_keys = torch.tensor([0, 0, 1], device=q.device, dtype=torch.int32)
-        metadata = QSAIndexerPrefillMetadata(cu_keys[keys_offset:], 1, [chunk])
-        gather_prefill_keys(k_cache, table[table_offset:], metadata, chunk, packed)
+        metadata = QSAIndexerPrefillMetadata(cu_keys[keys_offset:], [chunk])
+        packed = gather_prefill_keys(k_cache, table[table_offset:], metadata, chunk)
     deepgemm_prefill_logits(q, packed, chunk)

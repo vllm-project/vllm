@@ -638,19 +638,12 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
         self.storage_block_size = kv_cache_spec.num_states
         self.use_deepgemm_prefill = False
         if current_platform.is_cuda() and not self.is_circular_buffer:
-            from ..nvidia.ops.qsa_prefill_deepgemm import (
-                deepgemm_prefill_supported,
-                max_gather_keys,
-            )
+            from ..nvidia.ops.qsa_prefill_deepgemm import deepgemm_prefill_supported
 
-            model_config = vllm_config.model_config
             self.use_deepgemm_prefill = deepgemm_prefill_supported(
                 kv_cache_spec.dtype,
-                model_config.hf_text_config.indexer_n_heads,
+                vllm_config.model_config.hf_text_config.indexer_n_heads,
                 kv_cache_spec.head_size,
-            )
-            self.max_gather_keys = max_gather_keys(
-                model_config.max_model_len, self.compress_ratio
             )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_buffer = torch.empty(
@@ -761,7 +754,6 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
                 metadata,
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.seq_lens_cpu_upper_bound,
-                self.max_gather_keys,
             )
         return metadata
 

@@ -60,7 +60,7 @@ from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .ops.qsa_prefill_deepgemm import (
     deepgemm_prefill_supported,
-    max_gather_keys,
+    max_group_keys,
     reserve_deepgemm_prefill,
 )
 from .qsa_indexer import QSAIndexer
@@ -525,8 +525,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             # on demand, so touch its peak here for the memory profiler (as
             # sparse_attn_indexer does): the prefill logits budget or the
             # worst-case decode logits [decode tokens, compressed columns],
-            # plus the top-k workspace. The DeepGEMM prefill path also keeps
-            # its gathered keys in the shared workspace, sized here.
+            # plus the top-k workspace. The DeepGEMM prefill path keeps its
+            # gathered keys and logits together within the prefill budget.
             logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
             cfg = get_current_vllm_config_or_none()
             if cfg is not None:
@@ -548,7 +548,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 ):
                     reserve_deepgemm_prefill(
                         output.device,
-                        max_gather_keys(
+                        max_group_keys(
                             cfg.model_config.max_model_len, self.indexer.compress_ratio
                         ),
                         cfg.scheduler_config.max_num_batched_tokens,

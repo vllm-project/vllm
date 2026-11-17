@@ -840,14 +840,18 @@ def test_qsa_deepgemm_prefill_plan() -> None:
         plan_prefill_chunks,
     )
 
-    # A 1000-key logits row has a 1280-float pitch; the budget holds 64 rows.
-    max_logits_bytes = 64 * 1280 * 4
-    # Short requests group until the next one would pass the K cap. The long
-    # request is alone and its rows split at the logits budget, keeping the
-    # keys gathered for its first chunk.
-    assert plan_prefill_chunks(
-        [10, 10, 10, 100], [400, 400, 400, 1000], 1000, max_logits_bytes
-    ) == [(0, 2, 0, 20), (2, 3, 0, 10), (3, 4, 0, 64), (3, 4, 64, 100)]
+    # A 1000-key logits row has a 1280-float pitch; past its 1000 * 128 bytes
+    # of keys, the budget holds 64 rows of its logits.
+    max_bytes = 1000 * 128 + 64 * 1280 * 4
+    # Short requests group while their keys and logits fit. The long request
+    # is alone and its rows split to fit beside its keys, keeping the keys
+    # gathered for its first chunk.
+    assert plan_prefill_chunks([10, 10, 10, 100], [800, 800, 800, 1000], max_bytes) == [
+        (0, 2, 0, 20),
+        (2, 3, 0, 10),
+        (3, 4, 0, 64),
+        (3, 4, 64, 100),
+    ]
 
 
 @requires_qsa_kernels
@@ -902,15 +906,9 @@ def test_qsa_prefill_selection_correctness(
         prepare_deepgemm_prefill,
         reserve_deepgemm_prefill,
     )
-    from vllm.v1.worker.workspace import (
-        init_workspace_manager,
-        is_workspace_manager_initialized,
-    )
 
     indexer_prefill_metadata = None
     if can_use_deepgemm_prefill(q, cache):
-        if not is_workspace_manager_initialized():
-            init_workspace_manager(q.device)
         # The constants persist across cases; reserve the largest any case uses.
         reserve_deepgemm_prefill(q.device, 8192, rows)
         metadata = QSAIndexerMetadata(
@@ -934,17 +932,14 @@ def test_qsa_prefill_selection_correctness(
             compress_ratio=compress_ratio,
         )
         # seq_len_slack makes the host lengths an over-estimate, as under
-        # async spec decode. force_chunk also caps the K workspace at the
-        # longest request, so each request is its own group and the second
-        # one's keys are packed from a nonzero offset.
-        seq_lens_cpu = sequence_lengths.cpu() + seq_len_slack
-        max_keys = int(seq_lens_cpu.max()) // compress_ratio if force_chunk else 8192
+        # async spec decode.
         indexer_prefill_metadata = prepare_deepgemm_prefill(
-            metadata, query_start_loc.cpu(), seq_lens_cpu, max_keys
+            metadata, query_start_loc.cpu(), sequence_lengths.cpu() + seq_len_slack
         )
         if force_chunk:
-            # One group per request; the 33-row request splits at 32 rows and
-            # reuses its gathered keys.
+            # With no budget, each request is its own group, so the second
+            # one's keys are packed from a nonzero offset; the 33-row request
+            # splits at one Q tile and reuses its gathered keys.
             assert [
                 (c.req_start, c.row_start, c.row_end, c.gather)
                 for c in indexer_prefill_metadata.chunks

@@ -628,20 +628,23 @@ def qsa_select_paged_prefill(
         can_use_deepgemm_prefill,
         deepgemm_prefill_logits,
         gather_prefill_keys,
-        prefill_key_workspace,
     )
 
     dg_metadata = indexer_prefill_metadata
     if dg_metadata is not None and can_use_deepgemm_prefill(q, k_cache):
         # Padding rows past the last query token belong to no chunk; their
         # zero visible blocks keep expand_qsa_block_indices from reading them.
-        packed = prefill_key_workspace(dg_metadata.max_num_keys)
         topk_workspace = torch.empty(
             (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
         )
+        packed = None
         for chunk in dg_metadata.chunks:
             if chunk.gather:
-                gather_prefill_keys(k_cache, page_table, dg_metadata, chunk, packed)
+                # The budget covers one group's keys: free the last group's
+                # before gathering the next.
+                del packed
+                packed = gather_prefill_keys(k_cache, page_table, dg_metadata, chunk)
+            assert packed is not None
             logits = deepgemm_prefill_logits(q, packed, chunk)
             chunk_rows = slice(chunk.row_start, chunk.row_end)
             _topk(
