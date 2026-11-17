@@ -175,27 +175,20 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
     def _routed_experts(
         topk_ids: torch.Tensor, num_experts: int
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Experts used by this batch and topk_ids renumbered onto them, or
-        None to dequantize every expert."""
-        # Past a quarter of the experts, the gather costs about as much as the
-        # full dequantization saves.
-        limit = num_experts // 4
-        if topk_ids.size(0) == 1:
-            # One token (single-sequence decode), following #40055: sort() keeps
-            # the shape static and needs no host sync, so this also runs under
-            # graph capture. Repeated ids would only cost a duplicate gather.
-            if not 0 < topk_ids.numel() <= limit:
-                return None
-            flat = topk_ids.view(-1)
-            order = flat.argsort()
-            return flat[order], order.argsort()
-        # torch.unique syncs with the host, hence not under graph capture.
-        if torch.cuda.is_current_stream_capturing():
+        """One gathered expert per routed slot and topk_ids renumbered onto
+        them, or None to dequantize every expert.
+
+        The decision and every shape depend only on topk_ids' shape, so this
+        needs no host sync and also runs under graph capture. An expert routed
+        to several slots is gathered once per slot.
+        """
+        # Past a quarter of the experts, the saving shrinks and depends on the
+        # GPU (break-even near 0.4x the experts on MI250X, 0.65x on MI355X).
+        if not 0 < topk_ids.numel() <= num_experts // 4:
             return None
-        used, local_ids = torch.unique(topk_ids, return_inverse=True)
-        if not 0 < used.numel() <= limit:
-            return None
-        return used, local_ids
+        flat = topk_ids.reshape(-1)
+        order = flat.argsort()
+        return flat[order], order.argsort()
 
     def apply(
         self,
@@ -225,8 +218,8 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         w1_scale, w2_scale = self.w1_scale_val, self.w2_scale_val
         # Dequantizing every local expert writes the whole layer in bf16/fp16
-        # on each call. When the batch routes to few experts, dequantize only
-        # those and renumber topk_ids onto them.
+        # on each call. When the batch has few top-k slots, dequantize only
+        # their experts and renumber topk_ids onto them.
         if (
             expert_map is None
             and self._lora_context is None
