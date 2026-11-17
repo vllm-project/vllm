@@ -62,8 +62,10 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # Gathered units a rank may hold beyond the ones its consumers still read:
-# at most `gather_lookahead + 1` units are resident on the trainer.
-DEFAULT_GATHER_LOOKAHEAD = 1
+# at most `gather_lookahead + 1` units are resident on the trainer. Two lets
+# a gather-bound rank (FSDP) gather ahead of the pulls for ~one more unit of
+# memory per rank, however many consumers pull from it.
+DEFAULT_GATHER_LOOKAHEAD = 2
 
 # Seconds without progress (publish, serve, free) before a producer fails the
 # sync. A consumer that dies mid-sync never frees its buckets, so its units

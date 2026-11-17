@@ -111,12 +111,12 @@ To adapt a trainer that is not a plain `nn.Module` (a Megatron export, a raw sha
 | `trainer_actor_namespace` | `None` | Ray namespace for the producer actors; the workers resolve them by name there |
 | `buffer_bytes` | 1 GiB | Most bytes one pull moves, and the size of a gather unit |
 | `num_buffers` | 2 | Pulls each worker keeps in flight |
-| `gather_lookahead` | 1 | Units the gather loop runs ahead of the workers; at most `gather_lookahead + 1` units are resident on a trainer rank |
+| `gather_lookahead` | 2 | Units the gather loop runs ahead of the workers; at most `gather_lookahead + 1` units are resident on a trainer rank |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a worker that dies mid-sync, not a latency target |
 
 Each trainer rank's GPU holds its arena, `(num_buffers × workers pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. A tensor piece larger than `buffer_bytes` is served outside the arena, from a temporary copy that lives for that pull. With EP every worker may pull from every rank, so the arena grows with the number of workers.
 
-For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 1), that is a 5 GiB arena plus up to two gathered units (≤ 2 GiB) per trainer rank, and a receive arena of at most 2 GiB per worker. `num_buffers=4` with `gather_lookahead=2` is faster but holds a 9 GiB arena and up to three gathered units per trainer rank, and a receive arena of at most 4 GiB per worker.
+For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 2), that is a 5 GiB arena plus up to three gathered units (≤ 3 GiB) per trainer rank, and a receive arena of at most 2 GiB per worker. The lookahead's memory does not depend on the number of workers; measured, lookahead 2 over 1 costs 2.4–3.1 GiB of peak trainer memory on 235B (one more unit plus allocator slack) and makes `fsdp=2` 7.5% faster. For more speed at more memory, `num_buffers=4` holds a 9 GiB arena per trainer rank (4 GiB more, and growing with the number of workers) and a receive arena of at most 4 GiB per worker; on 235B `pp=2` it transfers about 11% faster than the defaults.
 
 ## Limitations
 
