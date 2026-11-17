@@ -6,7 +6,8 @@ from copy import copy
 import torch
 
 from vllm.config import CacheConfig
-from vllm.config.vllm import VllmConfig
+from vllm.config.vllm import VllmConfig, get_current_vllm_config_or_none
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -17,6 +18,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+logger = init_logger(__name__)
 
 
 @functools.lru_cache
@@ -48,6 +51,26 @@ def create_encoder_only_attention_backend(
     return attn_backend
 
 
+def _warn_given_attn_backend(attn_backend: type[AttentionBackend]) -> None:
+    vllm_config = get_current_vllm_config_or_none()
+    requested = "auto"
+    if vllm_config is not None:
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is not None:
+            requested = attention_config.backend.name
+        if attention_config.backend_per_kind:
+            requested += f" (per kind: {attention_config.backend_per_kind})"
+    module, qualname = attn_backend.full_cls_name()
+    logger.warning_once(
+        "EncoderOnlyAttention uses the model's attention backend %s.%s instead "
+        "of the selected one (--attention-backend: %s); the selector's "
+        "validation is skipped for it.",
+        module,
+        qualname,
+        requested,
+    )
+
+
 class EncoderOnlyAttention(Attention):
     """Encoder attention is a special case that doesn't need a KV Cache."""
 
@@ -64,8 +87,14 @@ class EncoderOnlyAttention(Attention):
         """`attn_backend` replaces the selected backend (e.g. a model's own
         subclass); it is wrapped for non-causal metadata like the default.
         A given backend skips the backend selector and its validation, and
-        overrides `--attention-backend`. Its `get_name()` must be the name of
-        a registered `AttentionBackendEnum` member."""
+        overrides `--attention-backend`: checking that it supports the head
+        size, dtype, KV cache dtype and platform is the caller's
+        responsibility. A warning names the backend that is used. Its
+        `get_name()` must be the name of a registered `AttentionBackendEnum`
+        member.
+
+        Of the in-tree models, only the BERT classes (`BertModel`,
+        `BertPoolingModel` and their layers) pass `attn_backend` through."""
         dtype = torch.get_default_dtype()
 
         if cache_config is not None:
@@ -80,6 +109,8 @@ class EncoderOnlyAttention(Attention):
                 kv_cache_dtype,
                 attn_type=AttentionType.ENCODER_ONLY,
             )
+        else:
+            _warn_given_attn_backend(attn_backend)
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_ONLY, (
