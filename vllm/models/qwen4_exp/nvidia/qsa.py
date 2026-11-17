@@ -230,7 +230,9 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
     ) -> torch.Tensor:
         """Run sparse attention over the owner's indexer-selected K/V rows."""
         num_tokens = attn_metadata.num_actual_tokens
-        output.zero_()
+        # No zero fill: the kernel writes every actual row (empty selections
+        # included), and padding rows only feed row-wise ops, never sampled
+        # outputs — same contract as the other attention backends.
         if num_tokens == 0:
             return output
 

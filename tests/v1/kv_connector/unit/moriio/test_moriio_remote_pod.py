@@ -48,7 +48,7 @@ def test_router_hosts_win_over_serve_config():
 
 @pytest.mark.parametrize("finished_before_alloc", [True, False])
 @pytest.mark.parametrize(
-    ("dp_rank", "host", "port"), [(3, "10.0.0.1", 7003), (9, "10.0.0.2", 7001)]
+    ("dp_rank", "host", "port"), [(3, "10.0.0.1", 7006), (9, "10.0.0.2", 7002)]
 )
 def test_release_reaches_the_peer_pod(finished_before_alloc, dp_rank, host, port):
     """The router sent only the master's address; global DP rank 9 is local
