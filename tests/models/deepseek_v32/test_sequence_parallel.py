@@ -177,7 +177,7 @@ def test_pp_stage_sends_tp_reduced_residual_stream(monkeypatch):
     model.layers = nn.ModuleList([_PartialSumLayer()])
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
-    model.attention_sequence_parallel = False
+    model.use_sp_attention = False
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {}
 
