@@ -7,6 +7,7 @@ import pybase64 as base64
 import pytest
 import torch
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
@@ -610,7 +611,11 @@ async def test_parse_chat_messages_silent_video_uuid_bookkeeping(
     qwen25omni_model_config_audio_video, tmp_path
 ):
     """A dropped audio track keeps mm_data/mm_uuids aligned via a placeholder
-    UUID so the engine cache can match it."""
+    UUID so the engine cache can match it.
+
+    The UUID is namespaced even when the video has none: that is how the
+    processor tells this sentinel from a data-less reference to a cached audio.
+    """
     silent = _make_video_data_url(with_audio=False, tmp_path=tmp_path)
     kwargs = {"use_audio_in_video": True}
 
@@ -632,7 +637,7 @@ async def test_parse_chat_messages_silent_video_uuid_bookkeeping(
         assert mm_data is not None and mm_uuids is not None
         assert mm_data["audio"] == [None], f"{mode}: {mm_data['audio']}"
         assert len(mm_uuids["audio"]) == 1
-        assert mm_uuids["audio"][0], f"{mode}: placeholder uuid missing"
+        assert mm_uuids["audio"][0].startswith("vllm-audio-in-video:"), mode
 
 
 @pytest.mark.asyncio
@@ -770,6 +775,34 @@ async def test_parse_chat_messages_video_audio_without_uuid_stays_content_hashed
     for mode, (mm_data, mm_uuids) in parsed.items():
         assert mm_data["audio"][0] is not None, mode
         assert mm_uuids["audio"] == [None], mode
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_audio_ignores_audio_clip_size_cap(
+    qwen25omni_model_config_audio_video, tmp_path, monkeypatch
+):
+    """The audio clip size cap must not reject a video's audio track.
+
+    The payload is the whole video container, which only the video limits may
+    reject. The same payload sent as a standalone audio part stays capped.
+    """
+    url = _make_video_data_url(with_audio=True, tmp_path=tmp_path)
+    # 1 KiB, well below the size of the generated video.
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1 / 1024)
+
+    parsed = await _parse_sync_and_async(
+        _video_messages(url), qwen25omni_model_config_audio_video
+    )
+    for mode, (mm_data, _) in parsed.items():
+        assert mm_data["audio"][0] is not None, mode
+
+    audio_part = {"type": "audio_url", "audio_url": {"url": url}}
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        parse_chat_messages(
+            [{"role": "user", "content": [audio_part]}],
+            qwen25omni_model_config_audio_video,
+            content_format="string",
+        )
 
 
 @pytest.mark.asyncio

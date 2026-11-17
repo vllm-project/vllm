@@ -630,12 +630,12 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         # for flexible control.
         self.kwargs = kwargs
 
-    def get_max_bytes(self) -> int:
+    def get_max_bytes(self) -> int | None:
         return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
 
     def _validate_encoded_size(self, size: int) -> None:
         max_bytes = self.get_max_bytes()
-        if size > max_bytes:
+        if max_bytes is not None and size > max_bytes:
             raise VLLMValidationError(
                 "Maximum file size exceeded",
                 parameter="audio_filesize_mb",
@@ -708,8 +708,8 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         media_type: str,
         data: str,
     ) -> tuple[npt.NDArray, float]:
-        max_encoded_chars = 4 * ((self.get_max_bytes() + 2) // 3)
-        if len(data) > max_encoded_chars:
+        max_bytes = self.get_max_bytes()
+        if max_bytes is not None and len(data) > 4 * ((max_bytes + 2) // 3):
             raise VLLMValidationError(
                 "Maximum file size exceeded",
                 parameter="audio_filesize_mb",
@@ -734,6 +734,18 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             data = buffer.getvalue()
 
         return pybase64.b64encode(data).decode("utf-8")
+
+
+class VideoAudioMediaIO(AudioMediaIO):
+    """Load the audio track of a video.
+
+    The encoded payload is a whole video container rather than an audio clip,
+    so `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` does not apply: like `VideoMediaIO`,
+    it has no per-file size cap. The audio decode limits still apply.
+    """
+
+    def get_max_bytes(self) -> None:
+        return None
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):

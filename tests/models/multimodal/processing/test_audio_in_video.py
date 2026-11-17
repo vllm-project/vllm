@@ -215,9 +215,11 @@ def test_audio_in_video_metadata_only(
     assert all(isinstance(token, str) for token in video_placeholders)
     prompt = "".join(token for token in video_placeholders if token is not None)
     kwargs = {"use_audio_in_video": True}
+    # The encoder parses the real video, which keys the extracted audio track
+    # under a UUID derived from the video's; the decoder must resolve the same.
     uuids = {
-        modality: [f"source-{i}" for i in range(num_videos)]
-        for modality in ("video", "audio")
+        "video": [f"source-{i}" for i in range(num_videos)],
+        "audio": [f"vllm-audio-in-video:source-{i}" for i in range(num_videos)],
     }
     mm_data = create_mm_data(num_videos)
     if has_image:
@@ -546,31 +548,76 @@ def test_nemotron_silent_video_degrades_per_video():
 
 
 @pytest.mark.parametrize("model_id", MODELS)
-def test_silent_video_reports_clear_error(model_id: str) -> None:
+@pytest.mark.parametrize("num_extra_audios", [0, 1])
+def test_silent_video_reports_clear_error(model_id: str, num_extra_audios: int) -> None:
     """A video without an audio track must fail with an actionable message.
 
-    The renderer keeps `mm_data`/`mm_uuids` aligned by inserting a
-    `(None, uuid)` audio item. Neither the processor cache (which reports a
-    misleading "Cache miss") nor the prompt updates (`assert audio is not
-    None`) can consume that item, so the processor rejects the request before
-    either path runs.
+    The renderer keeps `mm_data`/`mm_uuids` aligned by inserting a `None`
+    audio item under a `vllm-audio-in-video:` UUID. Neither the processor
+    cache (which reports a misleading "Cache miss") nor the prompt updates
+    (`assert audio is not None`) can consume that item, so the processor
+    rejects the request before either path runs, whether or not the request
+    also carries separate audio parts.
     """
     ctx = build_model_context(
         model_id,
-        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        limit_mm_per_prompt={"audio": 1 + num_extra_audios, "image": 0, "video": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     video_token_id = processor.info.get_hf_config().video_token_id
 
     rng = np.random.RandomState(0)
     video = random_video(rng, min_frames=8, max_frames=9, min_wh=64, max_wh=65)
+    extra_audios = [
+        random_audio(rng, min_len=8000, max_len=8001, sr=16000)
+        for _ in range(num_extra_audios)
+    ]
 
     with pytest.raises(VLLMValidationError, match="has no audio track"):
         processor(
             [video_token_id],
-            mm_items=processor.info.parse_mm_data({"video": [video], "audio": [None]}),
+            mm_items=processor.info.parse_mm_data(
+                {"video": [video], "audio": [None, *extra_audios]}
+            ),
+            mm_uuid_items={
+                "audio": ["vllm-audio-in-video:silent", *[None] * num_extra_audios]
+            },
             hf_processor_mm_kwargs={"use_audio_in_video": True},
         )
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_cached_video_audio_reuse_is_not_a_silent_video(model_id: str) -> None:
+    """A data-less reference to a cached video and its audio must be reused.
+
+    `None` items with UUIDs refer to media already in the processor cache, so
+    a 1:1 pairing of `None` video and audio items is not a silent video: only
+    the renderer's `vllm-audio-in-video:` UUID marks one.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = LruKeyReplicatedSenderCache(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+
+    def run(mm_data: dict[str, list]):
+        return processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(mm_data),
+            mm_uuid_items={"video": ["video-0"], "audio": ["audio-0"]},
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+            cache=cache,
+        )
+
+    cached = run(create_mm_data(1))
+    reused = run({"video": [None], "audio": [None]})
+
+    assert reused["prompt_token_ids"] == cached["prompt_token_ids"]
+    assert reused["mm_hashes"] == cached["mm_hashes"]
+    assert reused["mm_placeholders"] == cached["mm_placeholders"]
 
 
 @pytest.mark.parametrize("model_id", MODELS)
@@ -604,8 +651,8 @@ def test_audio_only_none_audio_is_not_a_silent_video(model_id: str) -> None:
 def test_video_with_extra_audio_is_not_a_silent_video(model_id: str) -> None:
     """A video plus a separate audio part must not hit the silent-video guard.
 
-    The extra audio part can itself be a uuid reuse (`None`), so the guard's
-    1:1 audio/video pairing check must not fire when the counts differ.
+    The extra audio part can itself be a uuid reuse (`None`). Without the
+    renderer's `vllm-audio-in-video:` UUID it is not a silent-video sentinel.
     """
     ctx = build_model_context(
         model_id,

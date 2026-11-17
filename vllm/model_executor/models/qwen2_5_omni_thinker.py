@@ -105,6 +105,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.multimodal.utils import (
+    VIDEO_AUDIO_UUID_PREFIX,
     get_mm_embedding_modality_masks,
     get_use_audio_in_video,
     resolve_mm_processor_kwarg,
@@ -695,10 +696,11 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         """Reject a silent video before the cache or the prompt updates run.
 
         The renderer keeps `mm_data`/`mm_uuids` aligned for a video without an
-        audio track by inserting a `(None, uuid)` audio item. Neither the
-        processor cache (which reports a misleading "Cache miss") nor the
-        prompt updates (`assert audio is not None`) can consume that item, so
-        report the cause while it is still known.
+        audio track by inserting a `(None, uuid)` audio item whose UUID starts
+        with `VIDEO_AUDIO_UUID_PREFIX`. Neither the processor cache (which
+        reports a misleading "Cache miss") nor the prompt updates
+        (`assert audio is not None`) can consume that item, so report the
+        cause while it is still known.
         """
         if (
             "audio" in inputs.mm_data_items
@@ -708,14 +710,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
             )
         ):
             audio_items = inputs.mm_data_items["audio"]
-            video_items = inputs.mm_data_items["video"]
-            # Only a 1:1 audio/video pairing can be the renderer's
-            # `(None, uuid)` sentinel for a silent video. Extra audio parts
-            # (e.g. audio-only uuid reuse alongside a video) must keep working.
-            if (
-                isinstance(audio_items, AudioProcessorItems)
-                and len(audio_items) == len(video_items)
-                and any(audio is None for audio in audio_items.get_all())
+            audio_uuids = (inputs.mm_uuid_items or {}).get("audio") or ()
+            # A `None` audio item is also a data-less reference to a cached
+            # audio, so only the renderer's prefixed UUID marks a silent video.
+            if isinstance(audio_items, AudioProcessorItems) and any(
+                audio is None
+                and uuid is not None
+                and uuid.startswith(VIDEO_AUDIO_UUID_PREFIX)
+                for audio, uuid in zip(audio_items.get_all(), audio_uuids)
             ):
                 raise VLLMValidationError(
                     "A video in this request has no audio track, but "
