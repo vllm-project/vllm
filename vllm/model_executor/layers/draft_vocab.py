@@ -495,9 +495,9 @@ class DraftVocab:
 
     Args:
         logits_processor: Logits processor of the draft lm_head.
-        vocab_size: Target vocabulary size. A smaller draft vocabulary gets a
-            `draft_id_to_target_id` parameter for the model to register and
-            load.
+        vocab_size: Width of the target-vocabulary logits. A smaller draft
+            vocabulary gets a `draft_id_to_target_id` parameter for the model to
+            register and load.
         keep_quantized_head: Keep a quantized lm_head's loaded tensors in
             `keep_head_weights`, for `speculative_config.draft_token_map`.
 
@@ -511,6 +511,11 @@ class DraftVocab:
     ):
         self.logits_processor = logits_processor
         self.vocab_size = vocab_size
+        if logits_processor.vocab_size > vocab_size:
+            raise ValueError(
+                f"The draft vocabulary ({logits_processor.vocab_size}) is larger "
+                f"than the target vocabulary ({vocab_size})."
+            )
         self.draft_id_to_target_id: nn.Parameter | None = None
         if logits_processor.vocab_size < vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
