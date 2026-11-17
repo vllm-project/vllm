@@ -2,11 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from importlib.metadata import version
 
 import pytest
 import torch
-from packaging.version import Version
 
 import vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion as fusion_module
 import vllm.config
