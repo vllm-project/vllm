@@ -529,7 +529,7 @@ def _chunk_job(start_block: int, end_block: int) -> NixlPushChunkJob:
 def _chunk_worker() -> _StubWriterWorker:
     """A chunked-push worker for request "req-p", whose D side "req-d" has
     registered blocks 100 and 101 and is handshaked. WRITEs are recorded as
-    (local blocks, remote blocks, notif_msg)."""
+    (local blocks, remote blocks, notify)."""
     w = _StubWriterWorker.fresh()
     w._chunked_push = True
     w._pending_d_registrations["req-p"] = _registration_data(
@@ -543,8 +543,8 @@ def _chunk_worker() -> _StubWriterWorker:
     w._lease_extension = 20
     w.writes = []
 
-    def xfer(req_id, meta, *, notif_msg=None, track_request=True):
-        w.writes.append((meta.local_block_ids, meta.remote.block_ids, notif_msg))
+    def xfer(req_id, meta, *, notify=True):
+        w.writes.append((meta.local_block_ids, meta.remote.block_ids, notify))
         return [len(w.writes)]
 
     w._xfer_blocks_for_req = xfer
@@ -583,13 +583,13 @@ def test_last_chunk_waits_for_earlier_writes_and_carries_notification():
     w.nixl_wrapper.check_xfer_state.return_value = "PROC"
     _publish(w, _chunk_job(0, 1), _chunk_job(1, 2))
     w._process_chunk_jobs()
-    assert w.writes == [(([1],), ([100],), b"")]
+    assert w.writes == [(([1],), ([100],), False)]
     assert "decode-engine" in w._engine_last_active
 
     w.nixl_wrapper.check_xfer_state.return_value = "DONE"
     w._poll_chunk_transfers()
     w._process_chunk_jobs()
-    assert w.writes[1:] == [(([2],), ([101],), None)]
+    assert w.writes[1:] == [(([2],), ([101],), True)]
 
 
 def test_handed_off_request_is_reported_once_it_finishes():
@@ -640,7 +640,7 @@ def test_request_with_an_unwritten_chunk_is_pushed_whole(cause):
         assert w._ensure_handshake.call_count == 2
     w.nixl_wrapper.check_xfer_state.return_value = "DONE"
     w._poll_chunk_transfers()
-    assert all(notif_msg == b"" for _, _, notif_msg in w.writes)
+    assert not any(notify for _, _, notify in w.writes)
 
     w._set_chunk_finished("req-p", ([1, 2],))
     w._process_chunk_handoffs()
@@ -698,7 +698,7 @@ def test_retired_request_settles_its_writes_and_drops_its_jobs(preempted):
         # The recomputed prompt is pushed again from the first block.
         _publish(w, _chunk_job(0, 2))
         w._process_chunk_jobs()
-        assert w.writes[1:] == [(([1, 2],), ([100, 101],), None)]
+        assert w.writes[1:] == [(([1, 2],), ([100, 101],), True)]
 
 
 @pytest.mark.parametrize("handed_off", [True, False])
@@ -1102,7 +1102,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w.transfer_topo = None
     w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
     w.writes = []
-    w._xfer_blocks_for_req = lambda req_id, meta: w.writes.append(req_id)
+    w._xfer_blocks_for_req = lambda req_id, meta, notify=True: w.writes.append(req_id)
     return w
 
 
@@ -1120,6 +1120,16 @@ def test_active_push_refreshes_engine_last_active():
 
     assert w._engine_last_active["decode-engine"] > stale
     assert w.writes == ["req"]
+
+
+def test_whole_push_publishes_its_write_handles():
+    w = _eviction_worker(engine_ttl=3600.0)
+    w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
+    w._xfer_blocks_for_req = lambda req_id, meta, notify=True: [1000, 1001]
+
+    _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
+
+    assert w._sending_transfers["req"] == [1000, 1001]
 
 
 def test_stale_engine_evicted_on_push():
@@ -1871,15 +1881,13 @@ class TestPushWriterMlaReplication:
             ),
         )
 
-        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+        handles = w._xfer_blocks_for_req(req_id="p-req", meta=meta)
 
         # Every handshook D rank must receive a real WRITE of the latent...
         assert sorted(written) == [0, 1]
         # ...and no rank may be fobbed off with a bare completion notif.
         assert w.nixl_wrapper.send_notif.call_count == 0
-        # All of the request's WRITE handles must be tracked together, so the
-        # engine thread never sees a partial set and double-frees the request.
-        assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]
+        assert sorted(handles) == [1000, 1001]
 
     def test_csa_linear_writes_every_group_to_each_target(self):
         from types import SimpleNamespace
@@ -1943,7 +1951,7 @@ class TestPushWriterMlaReplication:
             ),
         )
 
-        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+        handles = w._xfer_blocks_for_req(req_id="p-req", meta=meta)
 
         assert [write["read_spec"].remote_rank for write in writes] == [0, 1]
         assert [write["read_spec"].local_block_ids for write in writes] == [
@@ -1951,7 +1959,7 @@ class TestPushWriterMlaReplication:
             list(block_ids),
         ]
         assert [write["local_xfer_side_handle"] for write in writes] == [2000, 2001]
-        assert sorted(w._sending_transfers["p-req"]) == [3000, 3001]
+        assert sorted(handles) == [3000, 3001]
 
 
 class TestPushPrefixCaching:

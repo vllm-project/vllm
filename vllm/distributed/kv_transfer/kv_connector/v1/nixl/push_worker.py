@@ -597,37 +597,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     ) -> list[TransferHandle]:
         """WRITE the job's blocks that fall in D's uncached suffix, with the
         request's completion notification if `notify`."""
-        # Keep the engine alive while it receives pushes, as _do_start_push_kv
-        # does.
-        self._engine_last_active[reg_data["decode_engine_id"]] = time.perf_counter()
         remote_groups = self._as_grouped_block_ids(reg_data["local_block_ids"])
         ranges = self._chunk_block_ranges(job, len(remote_groups[0]))
         if ranges is None:
             return []
         local_range, remote_range = ranges
-        local = (job.block_ids[local_range],)
-        remote = (list(remote_groups[0][remote_range]),)
-
-        physical_local = self._logical_to_kernel_block_ids(
-            local, self._physical_blocks_per_logical_kv_block
-        )
-        push_meta = ReqMeta(
-            local_block_ids=local,
-            local_physical_block_ids=physical_local,
-            tp_size=self.world_size,
-            remote=RemoteMeta(
-                block_ids=remote,
-                host="",
-                port=0,
-                engine_id=reg_data["decode_engine_id"],
-                request_id=reg_data["request_id"],
-            ),
-        )
-        return self._xfer_blocks_for_req(
-            req_id=job.request_id,
-            meta=push_meta,
-            notif_msg=None if notify else b"",
-            track_request=False,
+        return self._push_blocks(
+            job.request_id,
+            (job.block_ids[local_range],),
+            (list(remote_groups[0][remote_range]),),
+            reg_data,
+            notify=notify,
         )
 
     @staticmethod
@@ -824,8 +804,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``local_block_ids`` are P's logical block IDs; ``remote_block_ids``
         # (D's, from the PUSH_REG notif) are also logical.
         decode_engine_id = registration_data["decode_engine_id"]
-        remote_block_ids = registration_data["local_block_ids"]
-        decode_request_id = registration_data["request_id"]
 
         # Runs on the background executor; defer the WRITE until it's ready.
         fut = self._ensure_handshake(
@@ -853,31 +831,20 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             fut.add_done_callback(_on_handshake)
             return
-        # Keep the engine alive while it is actively receiving pushes, mirroring
-        # how pull-mode transfers touch _engine_last_active in start_load_kv.
-        self._engine_last_active[decode_engine_id] = time.perf_counter()
-
-        logical_local = self._as_grouped_block_ids(local_block_ids)
-        logical_remote = self._as_grouped_block_ids(remote_block_ids)
-        physical_local = self._logical_to_kernel_block_ids(
-            logical_local, self._physical_blocks_per_logical_kv_block
-        )
-
-        push_meta = ReqMeta(
-            local_block_ids=logical_local,
-            local_physical_block_ids=physical_local,
-            tp_size=self.world_size,
-            remote=RemoteMeta(
-                block_ids=logical_remote,
-                host="",
-                port=0,
-                engine_id=decode_engine_id,
-                request_id=decode_request_id,
-            ),
-        )
 
         t0 = time.perf_counter()
-        self._xfer_blocks_for_req(req_id=request_id, meta=push_meta)
+        handles = self._push_blocks(
+            request_id,
+            self._as_grouped_block_ids(local_block_ids),
+            self._as_grouped_block_ids(registration_data["local_block_ids"]),
+            registration_data,
+        )
+        # Publish all the request's WRITE handles in one locked update: a
+        # partial set would let ``_pop_done_transfers`` finish the request
+        # early, then double-report it as the remaining writes land.
+        if handles:
+            with self._sending_transfers_lock:
+                self._sending_transfers[request_id].extend(handles)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         if elapsed_ms > 200.0:
             logger.warning(
@@ -885,6 +852,42 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 request_id,
                 elapsed_ms,
             )
+
+    def _push_blocks(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        registration_data: dict[str, Any],
+        *,
+        notify: bool = True,
+    ) -> list[TransferHandle]:
+        """WRITE P's logical `local_block_ids` into D's logical
+        `remote_block_ids` and return the transfer handles."""
+        decode_engine_id = registration_data["decode_engine_id"]
+        # Keep the engine alive while it is actively receiving pushes, mirroring
+        # how pull-mode transfers touch _engine_last_active in start_load_kv.
+        self._engine_last_active[decode_engine_id] = time.perf_counter()
+
+        physical_local = self._logical_to_kernel_block_ids(
+            local_block_ids, self._physical_blocks_per_logical_kv_block
+        )
+
+        push_meta = ReqMeta(
+            local_block_ids=local_block_ids,
+            local_physical_block_ids=physical_local,
+            tp_size=self.world_size,
+            remote=RemoteMeta(
+                block_ids=remote_block_ids,
+                host="",
+                port=0,
+                engine_id=decode_engine_id,
+                request_id=registration_data["request_id"],
+            ),
+        )
+        return self._xfer_blocks_for_req(
+            req_id=request_id, meta=push_meta, notify=notify
+        )
 
     @staticmethod
     def _as_grouped_block_ids(block_ids: BlockIds) -> BlockIds:
@@ -903,10 +906,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         req_id: str,
         meta: ReqMeta,
         *,
-        notif_msg: bytes | None = None,
-        track_request: bool = True,
+        notify: bool = True,
     ) -> list[TransferHandle]:
-        """Issue WRITE transfers to one or more remote TP ranks."""
+        """Issue WRITE transfers to one or more remote TP ranks and return their
+        handles. The WRITEs carry the request's completion notification if
+        `notify`."""
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
         plan = self.tp_mappings[engine_id]
@@ -915,7 +919,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Expand D's logical IDs using the ratio learned during the
         # NIXL handshake. ``meta`` is freshly built by
-        # ``_do_start_push_kv`` so mutating it here is safe.
+        # ``_push_blocks`` so mutating it here is safe.
         meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids,
             remote_info.remote_physical_blocks_per_logical,
@@ -995,17 +999,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
-                notif_msg=notif_msg,
+                notify=notify,
             )
             if handle is not None:
                 handles.append(handle)
-
-        # Publish all the request's WRITE handles in one locked update: a
-        # partial set would let ``_pop_done_transfers`` finish the request
-        # early, then double-report it as the remaining writes land.
-        if handles and track_request:
-            with self._sending_transfers_lock:
-                self._sending_transfers[req_id].extend(handles)
         return handles
 
     def _xfer_blocks(
@@ -1016,7 +1013,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
-        notif_msg: bytes | None = None,
+        notify: bool = True,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -1030,8 +1027,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
 
-        if notif_msg is None:
-            notif_msg = f"{remote_request_id}:{self.world_size}".encode()
+        notif_id = f"{remote_request_id}:{self.world_size}".encode() if notify else b""
 
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
@@ -1091,7 +1087,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 local_block_descs_ids,
                 remote_xfer_side_handle,
                 remote_block_descs_ids,
-                notif_msg=notif_msg,
+                notif_msg=notif_id,
             )
             self.nixl_wrapper.transfer(handle)
             # Caller tracks the handle (atomically with the request's other
