@@ -390,8 +390,8 @@ class ParallelConfig:
     slots, the rest take the copying fallback path. The arena reserves slots x
     `shm_tensor_arena_slot_mb` of `/dev/shm`, and on CUDA-alike platforms the
     readers page-lock all of it (`cudaHostRegister`), so that much host memory
-    is resident and pinned per node. Only used with
-    `enable_shm_tensor_arena`."""
+    is resident and pinned for each engine (every data-parallel replica has its
+    own arena). Only used with `enable_shm_tensor_arena`."""
     shm_tensor_arena_slot_mb: int = Field(default=256, ge=1)
     """Size of one shared-memory tensor arena slot, in MiB (at least 8, the
     smallest tensor the arena takes). A tensor larger than a slot takes the
