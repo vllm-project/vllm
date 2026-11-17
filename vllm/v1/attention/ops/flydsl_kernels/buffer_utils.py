@@ -3,7 +3,7 @@
 """Buffer-resource (V#) views shared by the FlyDSL decode kernels.
 
 The descriptor sits in SGPRs and each access adds a 32-bit voffset, so offsets
-into one view must stay below 4 GiB; move the base with ``base_byte_offset``
+into one view must stay below 4 GiB; move the base with `base_byte_offset`
 for anything further away.
 """
 
@@ -15,11 +15,11 @@ _VIEW_ELEMS = 0xFFFFFFFF
 
 
 def buffer_view(tensor, elem, unit_elems=1, base_byte_offset=None):
-    """Buffer view of a kernel tensor argument, indexed in ``elem`` elements.
+    """Buffer view of a kernel tensor argument, indexed in `elem` elements.
 
-    ``view[i]`` loads or stores one element. With ``unit_elems > 1``,
-    :func:`load_vec` / :func:`store_vec` access ``unit_elems`` consecutive
-    elements starting at any element index ``i``.
+    `view[i]` loads or stores one element. With `unit_elems > 1`,
+    `load_vec` / `store_vec` access `unit_elems` consecutive
+    elements starting at any element index `i`.
     """
     it = fx.get_iter(tensor)
     if base_byte_offset is not None:
@@ -38,7 +38,7 @@ def _copy_atom(elem, n, cache_modifier=0):
 
 
 def load_vec(view, index, n, cache_modifier=0):
-    """Load ``n`` elements at element ``index`` of a ``unit_elems=n`` view."""
+    """Load `n` elements at element `index` of a `unit_elems=n` view."""
     elem = view.element_type
     frag = fx.make_rmem_tensor(n, elem)
     fx.copy(_copy_atom(elem, n, cache_modifier), fx.slice(view, (index, None)), frag)
@@ -46,7 +46,7 @@ def load_vec(view, index, n, cache_modifier=0):
 
 
 def store_vec(view, index, value, n):
-    """Store the ``n``-element vector ``value`` at element ``index``."""
+    """Store the `n`-element vector `value` at element `index`."""
     elem = view.element_type
     frag = fx.make_rmem_tensor(n, elem)
     frag.store(value)

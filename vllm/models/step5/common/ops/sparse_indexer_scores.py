@@ -129,8 +129,8 @@ def decode_summary_scores(
 
     Only the 128-region rounded live prefix is written. Consumers must use
     lengths/topk_lengths to ignore the unspecified score tail. Each group of
-    ``row_groups`` query rows is one token of ``slots``; each ``query_len``
-    tokens are one request of ``block_table``/``seq_lens``.
+    `row_groups` query rows is one token of `slots`; each `query_len`
+    tokens are one request of `block_table`/`seq_lens`.
     """
     # query: [tokens, groups, 8, 256] and weights: [tokens, groups, 8], each
     # group's heads contiguous; groups may be the outer storage dimension.

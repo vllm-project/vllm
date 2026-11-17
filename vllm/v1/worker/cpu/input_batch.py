@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ class InputBuffers:
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
 
 
-@dataclass
+@dataclass(slots=True)
 class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]

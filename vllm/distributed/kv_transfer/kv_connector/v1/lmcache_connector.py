@@ -259,6 +259,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         lmcache_kv_events.add_events(blocks)
         return lmcache_kv_events
 
+    def shutdown(self):
+        # Not forwarded to the LMCache engine's shutdown() for now: it closes
+        # ZMQ sockets from a thread other than the one blocked receiving on
+        # them, which can abort the whole process in libzmq (#67121). Forward
+        # it again once a fixed LMCache release is required.
+        pass
+
     # ==============================
     # Scheduler-side methods
     # ==============================

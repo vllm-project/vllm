@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -16,6 +16,7 @@ use crate::request::ChatRequest;
 use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection, ToolStrictLevel};
 
 pub mod hf;
+mod tokenizerless;
 
 /// Options for creating a new chat output processor.
 pub struct NewChatOutputProcessorOptions<'a> {
@@ -71,6 +72,12 @@ pub struct LoadModelBackendsOptions {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for the model.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only, rejecting chat requests and
+    /// text prompts (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     /// JSON Merge Patch applied to the model config before loading any backend.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.

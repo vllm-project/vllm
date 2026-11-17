@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiMo-V2.6 has head_dim 192 but v_head_dim 128, so only backends that keep
-V's width out of the K path can serve it. An explicit ``--attention-backend``
+V's width out of the K path can serve it. An explicit `--attention-backend`
 from that set has to be honored; any other request has to fall back to the
 DiffKV auto-pick with a warning rather than mount a backend that cannot serve
 the shape.
@@ -34,7 +34,7 @@ def bf16_default_dtype():
 
 @pytest.fixture(autouse=True)
 def restore_diffkv_head_size_v():
-    """``set_head_size_v`` writes backend class state.
+    """`set_head_size_v` writes backend class state.
 
     Leaving it modified would make these tests order dependent, so snapshot and
     restore it on every backend that can be selected here.
@@ -112,8 +112,8 @@ def test_explicit_symmetric_backend_falls_back_to_diffkv(dist_init) -> None:
 def test_layer_v_head_dim_reaches_the_backend(dist_init) -> None:
     """The backend must be told V's width before its impl is built.
 
-    The DiffKV backends default to ``head_size_v = 128``, which is this model's
-    own V width, so a missing ``set_head_size_v`` call is invisible at the
+    The DiffKV backends default to `head_size_v = 128`, which is this model's
+    own V width, so a missing `set_head_size_v` call is invisible at the
     model's geometry. That attribute is what the metadata builder and forward
     read, so assert it carries the layer's width instead of the default.
     """
@@ -151,7 +151,7 @@ def test_cache_write_matches_pytorch_reference(dist_init) -> None:
 
     The layer hands the kernel two views of one layer buffer, and V has its own
     width, so the check is what lands in that buffer: K in the first
-    ``head_dim`` slots of a row, V in the remaining ``v_head_dim``. Same shape
+    `head_dim` slots of a row, V in the remaining `v_head_dim`. Same shape
     as the aiter FA check in tests/kernels/attention/test_rocm_aiter_fa.py, for
     the asymmetric case those backends cannot serve.
     """

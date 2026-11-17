@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4 model — hardware-isolated entry point.
 
-The actual implementation lives under ``nvidia/`` and ``amd/``; this module
+The actual implementation lives under `nvidia/` and `amd/`; this module
 picks the right one for the current platform and re-exports the public
 classes used by the model registry and quantization config lookup.
 """
