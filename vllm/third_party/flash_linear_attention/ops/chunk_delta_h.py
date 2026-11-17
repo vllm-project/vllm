@@ -42,7 +42,10 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(
+    do_not_specialize=["T"],
+    do_not_specialize_on_alignment=["cu_seqlens", "chunk_offsets", "checkpoint_offsets"],
+)
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
     v,
