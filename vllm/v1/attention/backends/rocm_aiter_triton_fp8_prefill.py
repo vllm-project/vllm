@@ -24,6 +24,8 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 _HEAD_DIM = 256
+# Below this query length, quantizing q/k/v costs more than the kernel saves.
+_MIN_CAUSAL_SEQLEN_Q = 4096
 _KERNEL_KWARGS = frozenset(
     {
         "cu_seqlens_q",
@@ -146,6 +148,7 @@ def _eligible(
     cu_seqlens_q=None,
     cu_seqlens_k=None,
     kv_is_fp8=False,
+    max_seqlen_q=0,
 ) -> tuple[bool, str]:
     if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
         return False, "q/k/v must be [tokens, heads, head_dim]"
@@ -180,6 +183,8 @@ def _eligible(
     if causal and cu_seqlens_k is not cu_seqlens_q:
         # aiter writes LSE 0 for causal rows with no key; a value check would sync.
         return False, "causal with separate cu_seqlens_q and cu_seqlens_k"
+    if causal and not kv_is_fp8 and max_seqlen_q < _MIN_CAUSAL_SEQLEN_Q:
+        return False, f"max_seqlen_q {max_seqlen_q} below {_MIN_CAUSAL_SEQLEN_Q}"
     return True, ""
 
 
@@ -245,6 +250,7 @@ def _triton_or_orig(
             cu_seqlens_q,
             cu_seqlens_k,
             kv_is_fp8,
+            max_seqlen_q,
         )
     )
     if not ok:

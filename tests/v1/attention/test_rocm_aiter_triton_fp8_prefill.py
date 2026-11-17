@@ -35,11 +35,13 @@ FP8_MAX = torch.finfo(FP8).max
 
 
 @pytest.fixture
-def fp8():
+def fp8(monkeypatch):
     mod = importlib.import_module(
         "vllm.v1.attention.backends.rocm_aiter_triton_fp8_prefill"
     )
     mod._load_kernel.cache_clear()
+    # The small shapes here are below the length gate, which has its own test.
+    monkeypatch.setattr(mod, "_MIN_CAUSAL_SEQLEN_Q", 0)
     yield mod
     mod._load_kernel.cache_clear()
 
@@ -285,6 +287,23 @@ def test_ineligible_calls_fall_back_unchanged(fp8, kernel, name):
     assert kernel == []
     assert len(orig.calls) == 1
     _assert_same_args(orig.calls[0], args)
+
+
+def test_short_causal_prefill_stays_on_ck(monkeypatch, fp8, kernel):
+    """Causal prefill below the length gate runs CK; context chunks are not gated."""
+    monkeypatch.setattr(fp8, "_MIN_CAUSAL_SEQLEN_Q", 64)
+    orig = _Orig()
+
+    fp8.triton_fp8_prefill_attn(orig=orig, **_inputs(seq_lens=[37]))
+    assert kernel == [] and len(orig.calls) == 1
+
+    fp8.triton_fp8_prefill_attn(orig=orig, **_inputs(seq_lens=[64]))
+    assert len(kernel) == 1 and len(orig.calls) == 1
+
+    short = _inputs(seq_lens=[37])
+    short["causal"] = False
+    fp8.triton_fp8_prefill_attn(orig=orig, **short)
+    assert len(kernel) == 2 and len(orig.calls) == 1
 
 
 @pytest.mark.parametrize("failure", ["import_error", "signature_drift", "dao_ai_impl"])
