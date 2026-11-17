@@ -31,11 +31,10 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.online.loading import quantize_on_load
-from vllm.model_executor.model_loader.reload import finish_reload, start_reload
+from vllm.model_executor.model_loader.reload import direct, finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
-    log_direct_reload_support,
     record_checkpoint_layout,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -658,24 +657,16 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
         monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     else:
         monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    model = _cold_start(_checkpoint())
+    # the configuration model loaders set while loading
     config = _config(**overrides)
-    log_direct_reload_support(model, config)  # cold start records, never raises
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    model = _cold_start(_checkpoint())  # records the reasons, never raises
     if match is None:
         start_reload(model)
     else:
+        # a refused model records no layout (torchao's tensors have no
+        # plain storage)
+        assert not hasattr(model, "_ckpt_param_names")
         with pytest.raises(RuntimeError, match=match) as err:
             start_reload(model)
         assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
-
-
-def test_refused_model_records_no_layout(monkeypatch):
-    # `load_model` checks before post-load processing; a model direct reload
-    # refuses records nothing (torchao's tensors have no plain storage)
-    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
-    with _DEVICE:
-        model = _ToyModel()
-    model.load_weights(_checkpoint().items())
-    log_direct_reload_support(model, _config(lora_config=object()))
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-    assert not hasattr(model, "_ckpt_param_names")

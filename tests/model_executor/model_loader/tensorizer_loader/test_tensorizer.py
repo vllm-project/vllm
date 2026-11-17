@@ -309,8 +309,6 @@ def test_vllm_tensorized_model_has_same_outputs(
 @torch.inference_mode()
 def test_deserialized_hf_weights_are_ready_for_forward(tmp_path, monkeypatch):
     """Raw weights need CPU linear post-processing before the first forward."""
-    # the stand-in config lacks the fields direct reload's startup check reads
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     from vllm.model_executor.layers import linear
     from vllm.model_executor.layers import utils as layer_utils
     from vllm.model_executor.model_loader import base_loader
