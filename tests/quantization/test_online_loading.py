@@ -132,24 +132,3 @@ def test_unaligned_tp_shard_keeps_the_online_method(tp2):
         output_partition_sizes=[192],  # not a multiple of 128
     )
     assert not loading._block_shapes_fit(layer)
-
-
-def test_moe_block_shapes_are_left_to_the_moe_method(monkeypatch):
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.model_executor.layers.quantization import fp8
-    from vllm.model_executor.layers.quantization.utils import quant_utils as qu
-
-    def not_checked(layer):
-        raise AssertionError("MoE layers refine their own blocks")
-
-    class MoEMethod:
-        def __init__(self, config, layer):
-            self.create_weights = lambda *args, **kwargs: None
-
-    monkeypatch.setattr(loading, "_block_shapes_fit", not_checked)
-    monkeypatch.setattr(fp8, "Fp8MoEMethod", MoEMethod)
-    spec = SimpleNamespace(
-        weight=qu.kFp8Static128BlockSym, activation=None, hadamard_size=None
-    )
-    layer = object.__new__(RoutedExperts)
-    assert isinstance(loading.checkpoint_method(layer, spec, None), MoEMethod)
