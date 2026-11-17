@@ -54,11 +54,15 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         layer._already_called_process_weights_after_loading = True
 ```
 
+For RL weight updates, prefer [Direct Weight Reload](direct_reload.md)
+(`VLLM_RELOAD_MODE=direct`), which reloads in place without layerwise
+buffering; use layerwise reload for the configurations it refuses.
+
 ## Example Usages
 
 ### High Level Weight Transfer API
 
-The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) run layerwise reloading automatically inside their `start_weight_update`/`finish_weight_update` lifecycle.
+The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) reload inside their `start_weight_update`/`finish_weight_update` lifecycle, in the mode `VLLM_RELOAD_MODE` selects: layerwise by default, or [direct](direct_reload.md).
 
 ### Mid Level `reload_weights` API
 

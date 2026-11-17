@@ -387,16 +387,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
-    /// If set to True, only enable the Tokens In<>Out endpoint.
-    /// This is intended for use in a Disaggregated Everything setup.
-    #[arg(
-        long,
-        visible_alias = "no-tokens-only",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub tokens_only: Option<Unsupported>,
-
     /// Log level for uvicorn.
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
