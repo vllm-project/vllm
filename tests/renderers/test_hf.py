@@ -1051,9 +1051,9 @@ class TestSafeApplyChatTemplateToolReference:
             model_config, tokenizer, TEXT_PARTS_TEMPLATE, "jira_add_comment"
         )
         assert (
-            '<|im_start|>tool\n{"name": "jira_add_comment", '
-            '"description": "Add a comment to a Jira issue.", '
-            '"parameters": {"type": "object", "properties": {}}}<|im_end|>'
+            '<|im_start|>tool\n{"name":"jira_add_comment",'
+            '"description":"Add a comment to a Jira issue.",'
+            '"parameters":{"type":"object","properties":{}}}<|im_end|>'
         ) in result
 
     def test_unknown_tool_rendered_by_name(self, model_config, tokenizer):
@@ -1068,7 +1068,8 @@ class TestSafeApplyChatTemplateToolReference:
 
     def test_search_keeps_prompt_prefix(self, model_config, tokenizer):
         """Claude Code adds the found tool to `tools` and reorders its deferred
-        placeholder on the request after a search; the prefix must still hold."""
+        placeholder on the request after a search; the prefix must still hold.
+        Deferred tools are not rendered, as on GLM-5.3 and Fireworks."""
         template = (
             "{% for tool in tools %}{{ tool['function']['name'] }}\n{% endfor %}"
             + TEXT_PARTS_TEMPLATE
@@ -1107,7 +1108,7 @@ class TestSafeApplyChatTemplateToolReference:
             ],
         )
         assert result.startswith(prefix)
-        assert '"name": "jira_add_comment"' in result
+        assert '"name":"jira_add_comment"' in result
 
 
 EFFORT_VALIDATING_TEMPLATE = (

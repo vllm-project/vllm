@@ -638,10 +638,9 @@ def _expand_tool_references(
     """Render `tool_reference` parts as the referenced tool's definition, so
     templates that skip unknown part types still show the loaded schema.
 
-    Returns the conversation and the tools to pass to the template. Referenced
-    tools are left out, since their definition is now in the conversation, and
-    other deferred tools are moved last. A search that loads deferred tools then
-    leaves the rendered tool list unchanged, keeping the prompt prefix cached.
+    Returns the conversation and the tools to pass to the template, without
+    deferred tools: they load through tool search, so the rendered tool list
+    stays the same across a search and the prompt prefix stays cached.
     """
     definitions: dict[str, str] = {}
     for tool in tools or []:
@@ -649,10 +648,10 @@ def _expand_tool_references(
         if "name" not in fn:
             continue
         definitions[fn["name"]] = json.dumps(
-            {k: fn[k] for k in ("name", "description", "parameters") if k in fn}
+            {k: fn[k] for k in ("name", "description", "parameters") if k in fn},
+            separators=(",", ":"),
         )
 
-    referenced: set[str] = set()
     expanded: list[ConversationMessage] = []
     for msg in conversation:
         content = msg.get("content")
@@ -666,7 +665,6 @@ def _expand_tool_references(
         for part in content:
             if isinstance(part, dict) and part.get("type") == "tool_reference":
                 name = part.get("name", "")
-                referenced.add(name)
                 part = {"type": "text", "text": definitions.get(name, name)}
             parts.append(part)
         new_msg = dict(msg)
@@ -676,14 +674,9 @@ def _expand_tool_references(
             new_msg["content"] = parts
         expanded.append(new_msg)  # type: ignore[arg-type]
 
-    if not tools or not any(_is_deferred(t) for t in tools):
-        return expanded, tools
-    template_tools = [t for t in tools if not _is_deferred(t)] + [
-        t
-        for t in tools
-        if _is_deferred(t) and t.get("function", t).get("name") not in referenced
-    ]
-    return expanded, template_tools
+    if tools:
+        tools = [t for t in tools if not _is_deferred(t)]
+    return expanded, tools
 
 
 def _convert_developer_to_system(
