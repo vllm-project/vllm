@@ -20,7 +20,11 @@
 //!
 //! `self` bodies are reasoning, `commentary`/`user` bodies are visible text,
 //! and any other recipient names a tool whose body is one ATEM block with one
-//! or more `<atem:invoke>` calls. Parameters admitting strings retain their
+//! or more `<atem:invoke>` calls. Muse Glimmer may also write an ATEM block
+//! inside its `to=user` answer; that is a tool call too, while the same text
+//! in reasoning or commentary stays text. With a JSON `response_format`
+//! ([`UnifiedParser::set_json_answer`]), `commentary` bodies are returned as
+//! reasoning so the visible text is the constrained answer alone. Parameters admitting strings retain their
 //! raw text; other values are JSON-decoded when possible and kept as raw
 //! strings otherwise. Each invoke's arguments are reassembled as a compact
 //! JSON object preserving parameter order.
@@ -65,9 +69,11 @@ const PARAMETER_CLOSE: &str = "</atem:parameter>";
 /// start of the next segment's header when `<|eom|>` is missing.
 const BODY_MARKERS: &[&str] = &[EOM, EOT, START, MESSAGE, RECIPIENT_PREFIX];
 
-/// Recipient whose segments are dropped: `developer` is a prompt role, not a
-/// valid assistant recipient.
-const DEVELOPER_RECIPIENT: &str = "developer";
+/// Markers that end a run of tool-segment text outside an ATEM block.
+const TOOL_MARKERS: &[&str] = &[EOM, EOT, ATEM_OPEN];
+
+/// Body markers of the `to=user` answer, which may also open an ATEM block.
+const ANSWER_MARKERS: &[&str] = &[EOM, EOT, START, MESSAGE, RECIPIENT_PREFIX, ATEM_OPEN];
 
 type MuseInput<'i> = Partial<&'i str>;
 
@@ -106,12 +112,16 @@ enum MuseMode {
     /// Inside a `to=self` segment (private reasoning), or a bare `<|message|>`
     /// segment without recipient.
     Reasoning,
-    /// Inside a `to=commentary`/`to=user` segment (visible text).
+    /// Inside a `to=commentary` segment (visible text).
     Text,
-    /// Inside a tool segment, buffering one ATEM block through its close tag.
+    /// Inside the `to=user` answer: visible text, or an ATEM block buffered
+    /// through its close tag.
+    Answer { scan: MarkerScanState },
+    /// Inside a tool segment: text outside an ATEM block is dropped up to the
+    /// segment boundary, and an ATEM block is buffered through its close tag.
     Tool { scan: MarkerScanState },
     /// Dropping text until the next segment boundary: noise after a complete
-    /// ATEM block, or the body of a `to=developer` segment.
+    /// ATEM block.
     Skip,
     /// After `<|eot|>`: ignore the rest (EOS leakage guard).
     Done,
@@ -134,6 +144,8 @@ pub struct MuseUnifiedParser {
     parameters: HashMap<String, Value>,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
+    /// Route `commentary` bodies to reasoning (JSON `response_format`).
+    commentary_is_reasoning: bool,
 }
 
 impl MuseUnifiedParser {
@@ -153,6 +165,7 @@ impl MuseUnifiedParser {
                 .map(|tool| (tool.name.clone(), tool.parameters.clone()))
                 .collect(),
             emitted_call_count: 0,
+            commentary_is_reasoning: false,
         })
     }
 
@@ -169,8 +182,11 @@ impl MuseUnifiedParser {
             MuseEvent::SegmentHeader { recipient } => {
                 self.mode = match recipient.as_deref() {
                     None | Some("self") => MuseMode::Reasoning,
-                    Some("commentary" | "user") => MuseMode::Text,
-                    Some(DEVELOPER_RECIPIENT) => MuseMode::Skip,
+                    Some("commentary") if self.commentary_is_reasoning => MuseMode::Reasoning,
+                    Some("commentary") => MuseMode::Text,
+                    Some("user") => MuseMode::Answer {
+                        scan: MarkerScanState::default(),
+                    },
                     Some(_) => MuseMode::Tool {
                         scan: MarkerScanState::default(),
                     },
@@ -231,6 +247,10 @@ impl UnifiedParser for MuseUnifiedParser {
         true
     }
 
+    fn set_json_answer(&mut self) {
+        self.commentary_is_reasoning = true;
+    }
+
     // TODO: add a `structural_tag_builder` covering the full output envelope
     // (self/commentary/user recipients and ATEM tool calls) for strict tool
     // calling and JSON response formats.
@@ -258,11 +278,14 @@ impl UnifiedParser for MuseUnifiedParser {
             MuseMode::Header { .. } | MuseMode::Text => {
                 output.push_text(self.buffer.take().text);
             }
-            MuseMode::Reasoning => output.push_reasoning(self.buffer.take()),
-            MuseMode::Skip | MuseMode::Done => self.buffer.clear(),
-            MuseMode::Tool { .. } => {
+            MuseMode::Answer { .. } | MuseMode::Tool { .. }
+                if self.buffer.text.starts_with(ATEM_OPEN) =>
+            {
                 return Err(UnifiedParserError::IncompleteToolCall { parser: "Muse" });
             }
+            MuseMode::Answer { .. } => output.push_text(self.buffer.take().text),
+            MuseMode::Reasoning => output.push_reasoning(self.buffer.take()),
+            MuseMode::Skip | MuseMode::Done | MuseMode::Tool { .. } => self.buffer.clear(),
         }
 
         self.mode = MuseMode::default();
@@ -303,7 +326,8 @@ fn parse_next_muse_event(input: &mut MuseInput<'_>, mode: &mut MuseMode) -> Moda
         .parse_next(input),
         MuseMode::Reasoning => body_event(input, MuseEvent::Reasoning),
         MuseMode::Text => body_event(input, MuseEvent::Text),
-        MuseMode::Tool { scan } => tool_block_event(input, scan),
+        MuseMode::Answer { scan } => answer_event(input, scan),
+        MuseMode::Tool { scan } => tool_event(input, scan),
         MuseMode::Skip => body_event(input, MuseEvent::Skip),
         MuseMode::Done => parse_done_event(input),
     }
@@ -337,6 +361,23 @@ fn body_event(input: &mut MuseInput<'_>, body: MuseEvent) -> ModalResult<MuseEve
     .parse_next(input)
 }
 
+/// Parse an event inside the `to=user` answer, where an ATEM block is a tool
+/// call.
+fn answer_event(input: &mut MuseInput<'_>, scan: &mut MarkerScanState) -> ModalResult<MuseEvent> {
+    alt((
+        literal(EOM).value(MuseEvent::SegmentEnd),
+        literal(EOT).value(MuseEvent::TurnEnd),
+        inline_header_event,
+        preceded(peek(literal(ATEM_OPEN)), |input: &mut MuseInput<'_>| {
+            tool_block_event(input, scan)
+        }),
+        literal(RECIPIENT_PREFIX).value(MuseEvent::Text),
+        (|input: &mut MuseInput<'_>| safe_text_len_mul(input, ANSWER_MARKERS))
+            .value(MuseEvent::Text),
+    ))
+    .parse_next(input)
+}
+
 /// Parse safe body text before the next body marker.
 fn safe_body_event(input: &mut MuseInput<'_>) -> ModalResult<usize> {
     safe_text_len_mul(input, BODY_MARKERS)
@@ -359,6 +400,21 @@ fn inline_header_event(input: &mut MuseInput<'_>) -> ModalResult<MuseEvent> {
             recipient: Some(recipient.to_string()),
         }),
         literal(MESSAGE).value(MuseEvent::SegmentHeader { recipient: None }),
+    ))
+    .parse_next(input)
+}
+
+/// Parse an event inside a tool segment. Text outside an ATEM block is dropped
+/// and the segment ends at its boundary, as in the Python parser, so a body
+/// without a block cannot swallow the rest of the turn.
+fn tool_event(input: &mut MuseInput<'_>, scan: &mut MarkerScanState) -> ModalResult<MuseEvent> {
+    alt((
+        literal(EOM).value(MuseEvent::SegmentEnd),
+        literal(EOT).value(MuseEvent::TurnEnd),
+        preceded(peek(literal(ATEM_OPEN)), |input: &mut MuseInput<'_>| {
+            tool_block_event(input, scan)
+        }),
+        (|input: &mut MuseInput<'_>| safe_text_len_mul(input, TOOL_MARKERS)).value(MuseEvent::Skip),
     ))
     .parse_next(input)
 }
@@ -907,11 +963,15 @@ mod tests {
     /// Stream `text` under every two-way split and several fixed chunk sizes,
     /// asserting each run emits the same events as one batch parse.
     fn assert_streaming_matches_batch(text: &str) {
-        let batch = test_parser().parse_complete(text).unwrap();
+        assert_streaming_matches_batch_with(text, test_parser);
+    }
+
+    fn assert_streaming_matches_batch_with(text: &str, new_parser: fn() -> MuseUnifiedParser) {
+        let batch = new_parser().parse_complete(text).unwrap();
 
         // Exhaustive two-way splits cover every marker cut at every boundary.
         for (first, second) in two_way_splits(text) {
-            let output = collect_stream(&mut test_parser(), &[&first, &second]);
+            let output = collect_stream(&mut new_parser(), &[&first, &second]);
             assert_eq!(output.events, batch.events, "split: {first:?} + {second:?}");
         }
 
@@ -919,9 +979,98 @@ mod tests {
         for size in 1..=9 {
             let chunks = char_chunks(text, size);
             let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-            let output = collect_stream(&mut test_parser(), &chunk_refs);
+            let output = collect_stream(&mut new_parser(), &chunk_refs);
             assert_eq!(output.events, batch.events, "chunk size {size}");
         }
+    }
+
+    /// A parser for a request whose `response_format` constrains the answer to JSON.
+    fn json_answer_parser() -> MuseUnifiedParser {
+        let mut parser = test_parser();
+        parser.set_json_answer();
+        parser
+    }
+
+    #[test]
+    fn muse_commentary_is_reasoning_under_a_json_answer() {
+        let text = format!(
+            " to=self{MESSAGE}plan{EOM}{commentary}\
+             {START}assistant to=user{MESSAGE}{{\"result\": 4}}{EOT}",
+            commentary = segment("commentary", "working"),
+        );
+
+        let output = json_answer_parser().parse_complete(&text).unwrap();
+        assert_eq!(output.reasoning_text(), "planworking");
+        assert_eq!(output.normal_text(), r#"{"result": 4}"#);
+        assert_streaming_matches_batch_with(&text, json_answer_parser);
+
+        // Without a JSON answer the update stays visible.
+        let output = test_parser().parse_complete(&text).unwrap();
+        assert_eq!(output.normal_text(), r#"working{"result": 4}"#);
+    }
+
+    #[test]
+    fn muse_atem_block_in_the_answer_is_a_tool_call() {
+        let call = atem(&[("get_weather", &[("location", "Paris")][..])]);
+        let text = format!(
+            " to=self{MESSAGE}plan{EOM}\
+             {START}assistant to=user{MESSAGE}Let me check. {call}{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+        assert_eq!(output.normal_text(), "Let me check. ");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, r#"{"location": "Paris"}"#);
+        assert_streaming_matches_batch(&text);
+    }
+
+    #[test]
+    fn muse_atem_text_in_commentary_or_reasoning_stays_text() {
+        let call = atem(&[("get_weather", &[][..])]);
+        let text = format!(
+            " to=self{MESSAGE}{call}{EOM}\
+             {START}assistant to=commentary{MESSAGE}{call}{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+        assert!(output.calls().is_empty());
+        assert_eq!(output.reasoning_text(), call);
+        assert_eq!(output.normal_text(), call);
+        assert_streaming_matches_batch(&text);
+    }
+
+    #[test]
+    fn muse_tool_segment_without_atem_block_ends_at_its_boundary() {
+        // Any recipient other than a role opens a tool segment; plain text in
+        // it must not swallow the answer.
+        let text = format!(
+            " to=developer{MESSAGE}not for the user{EOM}\
+             {START}assistant to=user{MESSAGE}answer{EOT}"
+        );
+        let output = test_parser().parse_complete(&text).unwrap();
+        assert!(output.calls().is_empty());
+        assert!(output.reasoning_text().is_empty());
+        assert_eq!(output.normal_text(), "answer");
+        assert_streaming_matches_batch(&text);
+
+        let output =
+            test_parser().parse_complete(&format!(" to=developer{MESSAGE}cut off")).unwrap();
+        assert!(output.events.is_empty());
+    }
+
+    #[test]
+    fn muse_truncated_atem_block_in_the_answer_is_an_incomplete_call() {
+        let mut parser = test_parser();
+        let error = parser
+            .parse_complete(&format!(
+                " to=user{MESSAGE}<atem:function_calls>\n<atem:invoke"
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            UnifiedParserError::IncompleteToolCall { .. }
+        ));
     }
 
     #[test]
@@ -1117,8 +1266,7 @@ mod tests {
     fn muse_mixed_channels_match_python_routing() {
         let text = concat!(
             "<|message|>Think.<|eom|>",
-            "<|start|>assistant to=commentary<|message|>Checking. ",
-            "to=developer<|message|>internal<|eom|>",
+            "<|start|>assistant to=commentary<|message|>Checking. <|eom|>",
             "<|start|>assistant to=weather.get<|message|>",
             "<atem:function_calls><atem:invoke name=\"weather.get\">",
             "<atem:parameter name=\"city\">Paris</atem:parameter>",
@@ -1162,19 +1310,6 @@ mod tests {
         "#]]
         .assert_debug_eq(&output);
         assert_streaming_matches_batch(text);
-    }
-
-    #[test]
-    fn muse_drops_developer_segment() {
-        let text = format!(
-            " to=developer{MESSAGE}not for the user{EOM}\
-             {START}assistant to=user{MESSAGE}answer{EOT}"
-        );
-
-        let output = test_parser().parse_complete(&text).unwrap();
-
-        assert!(output.reasoning_text().is_empty());
-        assert_eq!(output.normal_text(), "answer");
     }
 
     #[test]
