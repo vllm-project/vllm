@@ -48,7 +48,7 @@ def parse_args():
         default="bfloat16",
         choices=["bfloat16", "float16", "float32", "auto"],
     )
-    p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    p.add_argument("--gpu-memory-utilization", type=float, default=None)
     p.add_argument("--max-model-len", type=int, default=None)
     p.add_argument(
         "--disable-flashinfer-autotune",
@@ -204,13 +204,13 @@ def run_one_mode(args, mode) -> dict:
         str(args.buffer_len),
         "--dtype",
         args.dtype,
-        "--gpu-memory-utilization",
-        str(args.gpu_memory_utilization),
         "--mamba-ssm-cache-dtype",
         args.mamba_ssm_cache_dtype,
         "--baseline-ssm-config",
         args.baseline_ssm_config,
     ]
+    if args.gpu_memory_utilization is not None:
+        cmd += ["--gpu-memory-utilization", str(args.gpu_memory_utilization)]
     cmd.append(
         "--disable-flashinfer-autotune"
         if args.disable_flashinfer_autotune

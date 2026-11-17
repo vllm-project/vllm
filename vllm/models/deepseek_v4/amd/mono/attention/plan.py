@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Geometry of the attention stages (``front``, ``back``): the KV record, the
+"""Geometry of the attention stages (`front`, `back`): the KV record, the
 split attention's chunks and the scratch (mailbox) layout; the model's widths
-and a TP rank's share of them are in ``..dims``."""
+and a TP rank's share of them are in `..dims`."""
 
 from vllm.models.deepseek_v4.amd.mono.dims import (
     HEAD_DIM,
@@ -70,7 +70,7 @@ def front_scratch(s: int, d: Dims) -> dict:
 
 
 def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
-    """K2's scratch regions, laid out past ``start``: published data (plain)
+    """K2's scratch regions, laid out past `start`: published data (plain)
     and flag pairs."""
     ck = (
         64 if d.head_tiles == 2 and s * cdiv(d.keys, 64) <= 256 else 128

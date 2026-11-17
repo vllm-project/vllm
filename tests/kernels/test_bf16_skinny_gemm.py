@@ -34,7 +34,7 @@ EXPECTED_SELECTIONS = {
     (2112, 7168): (set(), set(range(1, 17))),
     (2304, 1536): (set(), set(range(1, 17))),
     (4608, 1536): (set(), set(range(1, 17))),
-    (3584, 7168): ({1}, set(range(2, 9))),
+    (3584, 7168): ({1}, set()),
     (6288, 7168): (set(range(1, 5)), set()),
     (12448, 7168): (set(range(1, 4)), set()),
     (7168, 768): (set(), set(range(1, 17))),
@@ -164,6 +164,14 @@ EXPECTED_CUTE_CONFIGS = {
     (10240, 7168, 2): (32, 2, 4, 8),
     (10240, 7168, 3): (64, 4, 1, 8),
     (10240, 7168, 4): (64, 4, 1, 8),
+    # Kimi K3.1 DSA packed projections: q_a/kv_a/wk/weights, q_b/wq (TP1, TP8).
+    (2272, 7168, 1): (224, 4, 2, 8),
+    (2272, 7168, 2): (224, 4, 2, 8),
+    (2272, 7168, 3): (128, 2, 2, 8),
+    (2272, 7168, 4): (224, 4, 1, 8),
+    (2272, 7168, 5): (128, 2, 1, 8),
+    (6400, 1536, 1): (64, 4, 2, 8),
+    (22528, 1536, 1): (32, 8, 2, 8),
 }
 
 EXPECTED_RESIDUAL_CUTE_CONFIGS = {
@@ -662,8 +670,8 @@ def test_build_plan_matches_selector() -> None:
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). Mirrors
 # KIMI_K3_PROJECTIONS_SM100, measured on B200; intentionally different from
-# EXPECTED_SELECTIONS (e.g. 3584x7168 routes dsv3 at M2..8 on SM103 but only
-# wins with CuTe at M1..3 on SM100).
+# EXPECTED_SELECTIONS (e.g. 3584x7168 uses CuTe at M1 only on SM103 but wins
+# with CuTe at M1..3 on SM100).
 EXPECTED_SELECTIONS_SM100 = {
     (1536, 128): (set(), {1, 16}),
     (3072, 128): (set(), {8}),
@@ -943,7 +951,7 @@ def _require_sm103_and_cute() -> None:
 def _glm52_device_plan(
     weight: torch.Tensor, num_tokens: int, backend: str
 ) -> dict[int, glm52_gemm.ResolvedCall]:
-    """Plan from the device's own table, checked to route M to ``backend``."""
+    """Plan from the device's own table, checked to route M to `backend`."""
     plan = glm52_gemm.build_glm52_plan(weight, torch.bfloat16)
     assert plan is not None and plan[num_tokens][0] == backend
     return plan

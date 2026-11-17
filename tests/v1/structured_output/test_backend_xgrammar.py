@@ -593,19 +593,14 @@ class TestXgrammarBackend:
             # Check that grammar rejects json with space after colon
             assert not self._accepts_json(backend, '{"yes_space_after_me": true}')
 
-            # FIXME(arpera):
-            # Comma + separators=(",", ":") is wrong on xgrammar <=0.2.8
-            # Seehttps://github.com/mlc-ai/xgrammar/issues/945
-            # Re-enable both tests once vLLM pins xgrammar with the fix (>=0.2.9).
-            #
-            # # Check that grammar accepts json with NO space after comma
-            # assert self._accepts_json(
-            #     backend,
-            #     '{"never_space_after_comma":"accepted","good_boy":":3"}',
-            # )
-            #
-            # # Check that grammar rejects json with space after comma
-            # assert not self._accepts_json(
-            #     backend,
-            #     '{"where_space_after_comma":42, "wow_thats_cool":4242}',
-            # )
+            # Check that grammar accepts json with NO space after comma
+            assert self._accepts_json(
+                backend,
+                '{"never_space_after_comma":"accepted","good_boy":":3"}',
+            )
+
+            # Check that grammar rejects json with space after comma
+            assert not self._accepts_json(
+                backend,
+                '{"where_space_after_comma":42, "wow_thats_cool":4242}',
+            )

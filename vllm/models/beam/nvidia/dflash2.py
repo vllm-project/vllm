@@ -38,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv
+from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv, _score_edges
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -46,8 +46,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
-
-from .dflash2_ops import candidate_edges
 
 logger = init_logger(__name__)
 
@@ -297,7 +295,7 @@ class DFlash2BeamCandidateSelector(nn.Module):
     ) -> torch.Tensor:
         """Edge scores `[requests, steps, top_k (predecessor), top_k]`."""
         assert hidden_states.dtype == torch.bfloat16
-        return candidate_edges(
+        return _score_edges(
             self.predecessor_codebook,
             self.successor_codebook,
             candidate_ids,

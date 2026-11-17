@@ -43,7 +43,7 @@ EXTRA_ENGINE_KWARGS: dict = (
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
-#   3. Use the model "huggyllama/llama-7b".
+#   3. Use the model "vllm-project/llama-7b".
 MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
 MM_BEAM_WIDTHS = [2]
