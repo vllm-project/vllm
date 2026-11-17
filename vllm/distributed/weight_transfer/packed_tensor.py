@@ -11,9 +11,7 @@ from typing import Any, NamedTuple
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.utils.math_utils import round_down, round_up
 
 # Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
@@ -54,40 +52,43 @@ class Chunk(NamedTuple):
     pieces: list[Piece]
 
 
-def _chunks(
+def chunks(
     specs: Iterable[tuple[Sequence[int], torch.dtype]], buffer_size: int
 ) -> Iterator[Chunk]:
-    """The chunks, lazily. The tensors form one byte stream, each starting
-    `ALIGN`-aligned, cut every `buffer_size` bytes (rounded down to `ALIGN`):
-    every chunk but the last is that size. A tensor that crosses a cut is
-    split there."""
-    limit = buffer_size - buffer_size % ALIGN
-    assert limit > 0, f"packed buffer size must be at least {ALIGN} bytes"
+    """The chunks `specs` travel as, lazily. The tensors form one byte
+    stream, each starting `ALIGN`-aligned, cut every `buffer_size` bytes
+    (rounded down to `ALIGN`): every chunk but the last is that size. A
+    tensor that crosses a cut is split there. The producer and every
+    consumer derive it from the metadata alone, so they always agree.
+
+    A chunk is yielded as soon as it is full, before the next spec is
+    pulled. The last chunk can have no bytes, when the stream ends on a cut
+    and only empty tensors follow."""
+    limit = round_down(buffer_size, ALIGN)
+    if limit <= 0:
+        raise ValueError(
+            f"packed buffer size must be at least {ALIGN} bytes, got {buffer_size}"
+        )
     pieces: list[Piece] = []
     used = 0  # bytes of the current chunk taken, padding included
     for position, (shape, dtype) in enumerate(specs):
         nbytes, start = _nbytes(shape, dtype), 0
-        used += -used % ALIGN
+        used = round_up(used, ALIGN)
         while True:
-            if used == limit:
+            if used == limit:  # the alignment padding filled the chunk
                 yield Chunk(limit, pieces)
                 pieces, used = [], 0
             end = min(nbytes, start + limit - used)
             pieces.append(Piece(position, start, end, used))
             used += end - start
             start = end
+            if used == limit:
+                yield Chunk(limit, pieces)
+                pieces, used = [], 0
             if start == nbytes:
                 break
     if pieces:
         yield Chunk(used, pieces)
-
-
-def chunk_layout(
-    specs: Iterable[tuple[Sequence[int], torch.dtype]], buffer_size: int
-) -> list[Chunk]:
-    """The chunks `specs` travel as. The producer and every consumer derive
-    it from the metadata alone, so they always agree."""
-    return list(_chunks(specs, buffer_size))
 
 
 def packed_nccl_broadcast_producer(
@@ -100,8 +101,8 @@ def packed_nccl_broadcast_producer(
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
-    Each chunk (`chunk_layout`) is one `_foreach_copy_` of its pieces into a
-    buffer, then one broadcast.
+    Each chunk (`chunks`) is one `_foreach_copy_` of its pieces into one of
+    `num_buffers` reused buffers, then one broadcast.
 
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
@@ -115,38 +116,62 @@ def packed_nccl_broadcast_producer(
                     Both producer and consumer must use the same value.
 
     """
-    flat: dict[int, torch.Tensor] = {}  # each tensor's bytes, until all are sent
+    tensors: dict[int, torch.Tensor] = {}  # each tensor, until all is copied
+    flat: dict[int, torch.Tensor] = {}  # a split tensor's contiguous bytes
 
     def specs() -> Iterator[tuple[Sequence[int], torch.dtype]]:
         for i, item in enumerate(iterator):
             t = post_iter_func(item)
-            flat[i] = t.contiguous().view(-1).view(torch.uint8)
+            tensors[i] = t
             yield t.shape, t.dtype
 
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
-    held: list[Any] = [None] * num_buffers  # alive until their broadcast ends
-    for k, (nbytes, pieces) in enumerate(_chunks(specs(), buffer_size_bytes)):
-        device = flat[pieces[0].position].device
-        buf = torch.empty(nbytes, dtype=torch.uint8, device=device)
-        views = [buf[p.offset : p.offset + p.end - p.start] for p in pieces]
-        srcs = [flat[p.position][p.start : p.end] for p in pieces]
-        for p in pieces:
-            if p.end == flat[p.position].numel():
-                del flat[p.position]
+    bufs: list[torch.Tensor] = []  # allocated on the first chunk with bytes
+    for k, (nbytes, pieces) in enumerate(chunks(specs(), buffer_size_bytes)):
         slot = k % num_buffers
+        dsts, srcs = [], []
+        for p in pieces:
+            t = tensors[p.position]
+            if p.end > p.start:
+                if not bufs:
+                    limit = round_down(buffer_size_bytes, ALIGN)
+                    bufs = [
+                        torch.empty(limit, dtype=torch.uint8, device=t.device)
+                        for _ in range(num_buffers)
+                    ]
+                dst = bufs[slot][p.offset : p.offset + p.end - p.start]
+                if p.start == 0 and p.end == t.nbytes:
+                    # whole, so at an aligned offset: copy it as is, strided
+                    dsts.append(dst.view(t.dtype).view(t.shape))
+                    srcs.append(t)
+                else:
+                    if p.position not in flat:
+                        flat[p.position] = t.contiguous().view(-1).view(torch.uint8)
+                    dsts.append(dst)
+                    srcs.append(flat[p.position][p.start : p.end])
+            if p.end == t.nbytes:
+                del tensors[p.position]
+                flat.pop(p.position, None)
+        if not nbytes:  # only empty tensors: nothing to send
+            continue
         prev = done[slot]
         if prev is not None:
             prev.synchronize()
         # the sources may come from work the caller queued while iterating
         streams[slot].wait_stream(caller_stream)
         with torch.cuda.stream(streams[slot]):
-            torch._foreach_copy_(views, srcs)
-            group.broadcast(buf, src=src)
+            torch._foreach_copy_(dsts, srcs)
+            # the sources may be freed once dropped: not reissued until
+            # the copies end
+            for t in srcs:
+                t.record_stream(streams[slot])
+            del dsts, srcs
+            group.broadcast(bufs[slot][:nbytes], src=src)
             event = torch.Event()
             event.record(streams[slot])
-        done[slot], held[slot] = event, (buf, srcs)
+        done[slot] = event
     for stream in streams:
         stream.synchronize()
 
@@ -192,7 +217,7 @@ def packed_nccl_broadcast_consumer(
     slot_done: list[torch.Event | None] = [None] * num_buffers
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
-    for k, (chunk_nbytes, pieces) in enumerate(_chunks(specs, buffer_size_bytes)):
+    for k, (chunk_nbytes, pieces) in enumerate(chunks(specs, buffer_size_bytes)):
         slot = k % num_buffers
         # Wait for this slot's previous pack. Not streams[slot].synchronize():
         # on ROCm, streams can share a hardware queue, and synchronizing one
@@ -202,7 +227,8 @@ def packed_nccl_broadcast_consumer(
             done.synchronize()
         with torch.cuda.stream(streams[slot]):
             packed = torch.empty(chunk_nbytes, dtype=torch.uint8, device=device)
-            group.broadcast(packed, src=src)
+            if chunk_nbytes:  # a chunk of only empty tensors is not sent
+                group.broadcast(packed, src=src)
             # post_unpack_func may keep the unpacked tensors and read them
             # from a later chunk's callback, on another slot stream, and a
             # split tensor's earlier bytes are copied on another slot. Waiting

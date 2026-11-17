@@ -6,17 +6,25 @@ Unit tests for packed_nccl_broadcast_producer and packed_nccl_broadcast_consumer
 These utilities enable efficient batched tensor transfer over NCCL.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
 from vllm.distributed.weight_transfer.packed_tensor import (
+    ALIGN,
     DEFAULT_PACKED_NUM_BUFFERS,
-    chunk_layout,
+    Chunk,
+    Piece,
+    _get_streams,
+    _nbytes,
+    chunks,
     packed_ipc_consumer,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
+from vllm.utils.math_utils import round_down, round_up
 
 
 class MockCommunicationGroup:
@@ -95,7 +103,14 @@ class TestPackedBroadcastProducer:
 SLEEP_CYCLES = 2_000_000_000
 
 
-def roundtrip(params: list[tuple[str, torch.Tensor]], buffer_size_bytes: int):
+def roundtrip(
+    params: list[tuple[str, torch.Tensor]],
+    buffer_size_bytes: int,
+    num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+) -> MockCommunicationGroup:
+    """Send `params` through the producer and consumer (twice: the second
+    time behind a slow fill of the destinations) and check every tensor
+    arrives intact. Returns the producer's group."""
     producer_group = MockCommunicationGroup()
     packed_nccl_broadcast_producer(
         iterator=iter(params),
@@ -103,6 +118,7 @@ def roundtrip(params: list[tuple[str, torch.Tensor]], buffer_size_bytes: int):
         src=0,
         post_iter_func=lambda x: x[1],
         buffer_size_bytes=buffer_size_bytes,
+        num_buffers=num_buffers,
     )
     dst = {name: torch.empty_like(t) for name, t in params}
 
@@ -129,6 +145,7 @@ def roundtrip(params: list[tuple[str, torch.Tensor]], buffer_size_bytes: int):
             src=0,
             post_unpack_func=post_unpack_func,
             buffer_size_bytes=buffer_size_bytes,
+            num_buffers=num_buffers,
         )
         torch.accelerator.synchronize()
         for name, t in params:
@@ -139,15 +156,16 @@ def roundtrip(params: list[tuple[str, torch.Tensor]], buffer_size_bytes: int):
     # The host waits for a slot's previous chunk before reusing it, so the
     # first load can only be queued before the fill ends when the first
     # tensor is complete within the first `num_buffers` chunks.
-    layout = chunk_layout(((t.shape, t.dtype) for _, t in params), buffer_size_bytes)
+    layout = chunks(((t.shape, t.dtype) for _, t in params), buffer_size_bytes)
     first_load = next(
         k
         for k, (_, pieces) in enumerate(layout)
         if any(p.end == params[p.position][1].nbytes for p in pieces)
     )
     fill_pending = consume(sleep=True)
-    if first_load < DEFAULT_PACKED_NUM_BUFFERS:
+    if first_load < num_buffers:
         assert fill_pending, "the fill finished before the first load"
+    return producer_group
 
 
 # --- Integration Tests: Producer-Consumer Roundtrip ---
@@ -703,16 +721,12 @@ class TestPackedIpcRoundtrip:
 
 # --- Chunk layout ---
 
-from unittest.mock import patch  # noqa: E402
-
-from vllm.distributed.weight_transfer import packed_tensor as pt  # noqa: E402
-
 
 def _flat(t: torch.Tensor) -> torch.Tensor:
     return t.contiguous().view(-1).view(torch.uint8)
 
 
-def _layout_bytes(layout: list[pt.Chunk], tensors: list[torch.Tensor]) -> list[bytes]:
+def _layout_bytes(layout: list[Chunk], tensors: list[torch.Tensor]) -> list[bytes]:
     """Each chunk's bytes when `tensors` are packed with `layout` (CPU)."""
     out = []
     for nbytes, pieces in layout:
@@ -746,19 +760,20 @@ class TestChunkLayout:
         `ALIGN`-aligned, cut into chunks of the buffer size (rounded down to
         `ALIGN`); only the last chunk is shorter."""
         tensors = _mixed_tensors()
-        layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), limit)
+        layout = list(chunks(((t.shape, t.dtype) for t in tensors), limit))
         stream = b""
         for t in tensors:
-            stream += b"\0" * (-len(stream) % pt.ALIGN) + _flat(t).numpy().tobytes()
-        size = limit - limit % pt.ALIGN
+            stream = stream.ljust(round_up(len(stream), ALIGN), b"\0")
+            stream += _flat(t).numpy().tobytes()
+        size = round_down(limit, ALIGN)
         expected = [stream[i : i + size] for i in range(0, len(stream), size)]
         assert _layout_bytes(layout, tensors) == expected
         # a tensor inside one chunk starts aligned, so it views as its dtype
         for _, pieces in layout:
-            assert all(p.offset % pt.ALIGN == 0 for p in pieces)
+            assert all(p.offset % ALIGN == 0 for p in pieces)
 
     def test_tensor_over_the_buffer_is_split_at_chunk_boundaries(self):
-        layout = pt.chunk_layout([((10, 100), torch.float32)], 1000)  # 4000 B
+        layout = chunks([((10, 100), torch.float32)], 1000)  # 4000 B
         assert [(p.start, p.end, p.offset) for _, ps in layout for p in ps] == [
             (0, 992, 0),
             (992, 1984, 0),
@@ -767,50 +782,42 @@ class TestChunkLayout:
             (3968, 4000, 0),
         ]
 
+    def test_stream_ending_on_a_cut_then_empty_tensors(self):
+        """The empty tensors after a full last chunk make a chunk of no
+        bytes."""
+        specs = [((4,), torch.float32), ((0, 4), torch.float32), ((0,), torch.int8)]
+        assert list(chunks(specs, 16)) == [
+            Chunk(16, [Piece(0, 0, 16, 0)]),
+            Chunk(0, [Piece(1, 0, 0, 0), Piece(2, 0, 0, 0)]),
+        ]
+
+    def test_buffer_under_the_alignment_is_rejected(self):
+        with pytest.raises(ValueError, match="at least 16 bytes"):
+            next(chunks([((4,), torch.float32)], ALIGN - 1))
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestChunkedRoundtrip:
-    def _roundtrip(self, tensors, limit, num_buffers=2):
-        producer_group = MockCommunicationGroup()
-        pairs = [(f"t{i}", t) for i, t in enumerate(tensors)]
-        packed_nccl_broadcast_producer(
-            iterator=iter(pairs),
-            group=producer_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=limit,
-            num_buffers=num_buffers,
-        )
-        consumer_group = MockConsumerCommunicationGroup(
-            producer_group.broadcasted_tensors
-        )
-        got: dict[str, torch.Tensor] = {}
-
-        def post_unpack_func(items):
-            for name, t in items:
-                got[name] = t.clone()
-
-        packed_nccl_broadcast_consumer(
-            iterator=iter([(n, (list(t.shape), t.dtype)) for n, t in pairs]),
-            group=consumer_group,
-            src=0,
-            post_unpack_func=post_unpack_func,
-            buffer_size_bytes=limit,
-            num_buffers=num_buffers,
-        )
-        torch.accelerator.synchronize()
-        for name, t in pairs:
-            assert got[name].dtype == t.dtype and got[name].shape == t.shape
-            assert torch.equal(got[name], t), name
-        return producer_group
-
     def test_roundtrip_with_split_and_odd_sized_tensors(self):
         tensors = [t.cuda() for t in _mixed_tensors(1)]
         tensors.insert(2, torch.randn(50, 16, device="cuda"))  # 3200 B
         tensors.insert(3, torch.randint(0, 9, (5,), dtype=torch.uint8).cuda())
         tensors.append(torch.randn(30, 6, device="cuda", dtype=torch.float64).t())
-        group = self._roundtrip(tensors, limit=512)
+        params = [(f"t{i}", t) for i, t in enumerate(tensors)]
+        group = roundtrip(params, buffer_size_bytes=512)
         assert max(t.numel() for t in group.broadcasted_tensors) <= 512
+
+    @pytest.mark.parametrize("num_buffers", [1, 2, 3])
+    def test_roundtrip_ending_with_a_chunk_of_no_bytes(self, num_buffers):
+        """A chunk of only empty tensors is not broadcast; they still
+        arrive."""
+        params = [
+            ("full", torch.randn(8, device="cuda")),  # 32 B: two full chunks
+            ("empty", torch.empty(0, 4, device="cuda")),
+            ("none", torch.empty(0, device="cuda", dtype=torch.int8)),
+        ]
+        group = roundtrip(params, buffer_size_bytes=16, num_buffers=num_buffers)
+        assert [t.numel() for t in group.broadcasted_tensors] == [16, 16]
 
     def test_split_tensor_waits_for_bytes_copied_on_another_slot(self):
         """A tensor split across chunks on two slots: the callback that gets
@@ -829,17 +836,19 @@ class TestChunkedRoundtrip:
         assert len(producer_group.broadcasted_tensors) == 2
         group = MockConsumerCommunicationGroup(producer_group.broadcasted_tensors)
         got: list[torch.Tensor] = []
-        first_slot = pt._get_streams(torch.accelerator.current_device_index(), 2)[0]
-        nbytes, slept = pt._nbytes, list[bool]()
+        first_slot = _get_streams(torch.accelerator.current_device_index(), 2)[0]
+        slept: list[bool] = []
 
         def slow_first_slot(shape, dtype):
             # queued on the first slot after its receive, before its copies
             if not slept and torch.cuda.current_stream() == first_slot:
                 slept.append(True)
                 torch.cuda._sleep(SLEEP_CYCLES)
-            return nbytes(shape, dtype)
+            return _nbytes(shape, dtype)
 
-        with patch.object(pt, "_nbytes", slow_first_slot):
+        with patch(
+            "vllm.distributed.weight_transfer.packed_tensor._nbytes", slow_first_slot
+        ):
             packed_nccl_broadcast_consumer(
                 iterator=iter([("big", ([8, 64], torch.float32))]),
                 group=group,
@@ -899,7 +908,7 @@ class _ChunkGroup:
 
 
 def _packed_chunks(tensors, limit):
-    layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), limit)
+    layout = list(chunks(((t.shape, t.dtype) for t in tensors), limit))
     cpu = [t.cpu() for t in tensors]
     return [
         torch.frombuffer(bytearray(b), dtype=torch.uint8).cuda()

@@ -2289,7 +2289,6 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed, use_load_
         "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
-        # segments are sent only when on; the trainer turns them on if packed
         "use_load_plan": use_load_plan,
         **({"metadata": [("w", "float32", [4])]} if use_load_plan else {}),
     }

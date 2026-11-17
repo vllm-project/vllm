@@ -37,7 +37,7 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
-    chunk_layout,
+    chunks,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -650,14 +650,16 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         if self.packed:
             # Nothing is kept: receive each chunk into one buffer, unread. A
             # rank that lags here stalls the whole broadcast ring.
-            layout = chunk_layout(
-                ((m.shape, m.dtype) for m in meta),
-                self.packed_buffer_size_bytes,
-            )
-            sizes = [chunk.nbytes for chunk in layout]
-            buf = torch.empty(max(sizes, default=0), dtype=torch.uint8, device=device)
-            for n in sizes:  # on the current stream
-                self.model_update_group.broadcast(buf[:n], src=src)
+            buf: torch.Tensor | None = None  # the first chunk is the largest
+            for nbytes, _ in chunks(
+                ((m.shape, m.dtype) for m in meta), self.packed_buffer_size_bytes
+            ):
+                if not nbytes:  # only empty tensors: not sent
+                    continue
+                if buf is None:
+                    buf = torch.empty(nbytes, dtype=torch.uint8, device=device)
+                # on the current stream
+                self.model_update_group.broadcast(buf[:nbytes], src=src)
             torch.accelerator.current_stream().synchronize()
         else:
             stream = torch.cuda.current_stream()
