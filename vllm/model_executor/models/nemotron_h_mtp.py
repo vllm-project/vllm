@@ -334,9 +334,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
         return hidden_states
 
 
-class NemotronHMTP(
-    nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbeddings
-):
+class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbeddings):
     """NemotronH MTP model.
 
     The draft block is trained on the target decoder's input stream. On a

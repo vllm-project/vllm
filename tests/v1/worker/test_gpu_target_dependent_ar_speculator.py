@@ -385,8 +385,12 @@ def test_nemotron_h_mtp_merges_multimodal_embeddings():
     """NemotronH MTP is trained on the target input stream, so image and audio
     embeddings must replace placeholder token embeddings."""
     table = torch.arange(8, dtype=torch.float32).repeat(3, 1).T  # [8, 3]
-    drafter = object.__new__(NemotronHMTP)
-    drafter.get_input_embeddings = lambda ids: table[ids]
+
+    class _EmbeddingStub(NemotronHMTP):
+        def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return table[input_ids]
+
+    drafter = object.__new__(_EmbeddingStub)
     input_ids = torch.tensor([1, 5, 6, 2])
 
     text_only = NemotronHMTP.embed_input_ids(drafter, input_ids)
