@@ -6,6 +6,10 @@ restores them when a later request shares a prefix that has left GPU memory.
 
 ## Requirements
 
+- An AMD ROCm GPU: MORI (https://github.com/ROCm/mori) is a HIP library and
+  has no CUDA or XPU build, so embedded and standalone modes only run on
+  ROCm. Attempting either mode elsewhere raises a `RuntimeError` naming the
+  current platform instead of silently falling back.
 - MORI built with UMBP (`BUILD_UMBP=ON`), importable as `mori`.
 - Prefix caching enabled.
 

@@ -35,7 +35,12 @@ from ..data import (
     TransferJobState,
     TransferJobStatus,
 )
-from .base import IUMBPRuntime, UMBPSchedulerHandle, UMBPWorkerHandle
+from .base import (
+    IUMBPRuntime,
+    UMBPSchedulerHandle,
+    UMBPWorkerHandle,
+    mori_unavailable_error,
+)
 from .embedded import _MoriWorkerHandle, _resolve_embedded_options
 from .factory import UMBPRuntimeConfig
 
@@ -177,9 +182,7 @@ def _build_client(options: dict[str, Any]) -> Any:
             UMBPStandaloneProcessConfig,
         )
     except ImportError as exc:
-        raise RuntimeError(
-            "Standalone UMBP requires MORI built with BUILD_UMBP=ON"
-        ) from exc
+        raise mori_unavailable_error() from exc
 
     address = normalize_endpoint(options["endpoint"])
     client_config = UMBPConfig()
