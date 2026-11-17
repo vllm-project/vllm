@@ -184,10 +184,35 @@ def _warmup_skinny_gemm(model: torch.nn.Module) -> None:
             continue
         plan = get_skinny_gemm_plan(*module.weight.shape)
         if plan is not None:
-            configs.update(plan.values())
+            configs.update(c for c in plan.values() if isinstance(c, SkinnyGemmConfig))
     if configs:
         # Compiled by cutedsl_warmup() below.
         shape_dynamic_skinny_gemm.request_warmup_configs(torch.bfloat16, configs)
+
+
+def _warmup_triton_skinny_gemm(model: torch.nn.Module) -> None:
+    """Compile planned Triton skinny GEMMs before CUDA graph capture."""
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+    from vllm.model_executor.kernels.linear.triton_skinny_gemm import (
+        TritonSkinnyGemmConfig,
+        triton_skinny_gemm,
+    )
+
+    seen: set[torch.Size] = set()
+    for module in model.modules():
+        weight = getattr(module, "weight", None)
+        if not getattr(module, "use_skinny_gemm", False) or weight.shape in seen:
+            continue
+        seen.add(weight.shape)
+        plan = get_skinny_gemm_plan(*weight.shape) or {}
+        for m, config in plan.items():
+            if isinstance(config, TritonSkinnyGemmConfig):
+                x = torch.zeros(
+                    m, weight.shape[1], dtype=weight.dtype, device=weight.device
+                )
+                triton_skinny_gemm(x, weight, config)
 
 
 def _warmup_bf16x3_router_gemm(
@@ -337,6 +362,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
     _warmup_gemm_rs_ar()
+    _warmup_triton_skinny_gemm(worker.get_model())
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
