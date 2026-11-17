@@ -13,7 +13,10 @@ from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
-from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
@@ -78,20 +81,20 @@ AnyPoolingResponse: TypeAlias = (
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, slots=True)
 class ChunkedEmbeddingMetadata:
     prompt_index: int
     chunk_index: int
 
 
-@dataclass
+@dataclass(slots=True)
 class LateChunkingSlot:
     """Per-document source ranges shared by frontend rendering and output contexts."""
 
     metadata: LateChunkingMetadata | None = None
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, slots=True)
 class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -130,7 +133,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     late_interaction_doc_keys: list[str] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
@@ -141,20 +144,21 @@ class OfflineInputsContext:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineEncodeInputsContext(OfflineInputsContext):
     prompts: PromptType | Sequence[PromptType]
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     chat_template: str | None
     pooling_params: PoolingParams
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflinePluginInputsContext(OfflineInputsContext):
     prompts: DataPrompt
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
@@ -167,7 +171,7 @@ AnyOfflineInputsContext: TypeAlias = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineOutputsContext:
     outputs: list[PoolingRequestOutput]
 
@@ -200,6 +204,7 @@ class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
     chat_template: str | None
+    chat_template_content_format: ChatTemplateContentFormatOption
     max_tokens_per_query: int
     max_tokens_per_doc: int
 

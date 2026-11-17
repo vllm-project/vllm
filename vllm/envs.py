@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
+    VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -690,9 +691,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # have a TD path: unified attention (`triton_attn` backend), the fused
     # MoE kernels (`fused_moe_kernel` for unquantized weights,
     # `fused_moe_kernel_gptq_awq` for grouped int4_w4a16 weights, batched
-    # MoE) and the compressed-tensors `triton_scaled_mm`.  Enables HW 2D
-    # block reads on Intel XPU; the non-TD branch is dead-code-eliminated
-    # at Triton compile time so other platforms see no overhead.
+    # MoE), the compressed-tensors `triton_scaled_mm` and the Mamba2 SSD
+    # prefill kernels (`_chunk_scan_fwd_kernel`, `_chunk_state_fwd_kernel`).
+    # Enables HW 2D block reads on Intel XPU; the non-TD branch is
+    # dead-code-eliminated at Triton compile time so other platforms see no
+    # overhead.
     # Tri-state override: unset (default) auto-enables TD on XPU only;
     # ``1`` forces TD on (on CUDA the MoE TD paths need sm100+; the int4
     # WNA16 MoE kernel stays on the pointer path below sm100 and for shapes
@@ -1284,9 +1287,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
-    # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs
-    # TP=1 and NVLink-connected PP GPUs on one node, and fails startup without.
-    # "auto" uses copy engines when every PP rank can, and NCCL otherwise.
+    # "copy_engine" uses copy engines instead of NCCL kernels: CUDA copy engines
+    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs each PP
+    # chain's GPUs directly connected: on one node, or with CUDA across nodes in
+    # one multi-node NVLink domain with an IMEX channel. It fails startup
+    # without. "auto" uses copy engines when every rank can, and NCCL otherwise;
+    # on ROCm it keeps NCCL.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
     ),
@@ -1359,6 +1365,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
+    # Muse Spark on ROCm with TP + expert parallelism: forwards of at least this
+    # many tokens keep the residual stream sharded by token across the TP ranks.
+    # Disabled by =0.
+    "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1745,8 +1757,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel. Supported CUDA grouped routers
-    # fuse this into routing; the existing backend opt-in is still required.
+    # treats topk_id == -1 as a skip sentinel. Grouped routers apply it too;
+    # on ROCm AITER only with the model's opt-in under DeepEP v2.
     # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
     # routing instead of routing from logits; 0 restores the kernel's routing.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
@@ -2414,7 +2426,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
-    # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
+    # Direct DCP ops default on when applicable. Set to 1 to bypass feature
+    # heuristics (but not topology safety), or 0 to disable.
     "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_DIRECT_DCP_A2A")
     ),
