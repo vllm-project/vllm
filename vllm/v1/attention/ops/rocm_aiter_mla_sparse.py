@@ -824,7 +824,7 @@ def _accepts_parameters(function: Callable, required: set[str]) -> bool:
 
 @functools.lru_cache
 def _aiter_paged_mqa_logits() -> Callable | None:
-    # Picks the kernel and launch knobs per shape (ROCm/aiter#6140).
+    # Picks the kernel and launch knobs per shape.
     try:
         from aiter.paged_mqa_logits import paged_mqa_logits
     except ImportError:
