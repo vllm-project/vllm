@@ -2895,6 +2895,47 @@ def test_session_object_writer_retries_refused_puts_until_the_stall_deadline(
         assert list(client.objects) == ["job/s/tail/0"]
 
 
+def test_session_object_writer_never_writes_an_object_again():
+    client, store = fake_store()
+    put_batch = client.put_batch
+    state = {"space": 1, "refused": False}
+
+    def partial_put(keys, values, config):
+        if state["refused"]:
+            assert client.batch_remove(["job/s/a"], True) == [0]
+            state.update(space=len(keys), refused=False)
+        written = min(state["space"], len(keys))
+        state["space"] -= written
+        put_batch(keys[:written], values[:written], config)
+        if written < len(keys):
+            state["refused"] = True
+            return -200
+        return 0
+
+    client.put_batch = partial_put
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=1,
+        fields=lambda rows: {"routed_experts": rows},
+    )
+    writer._put((["job/s/a", "job/s/b"], [b"a", b"b"]))
+    writer.drain(timeout_s=10)
+    writer.close()
+    assert list(client.objects) == ["job/s/b"]
+
+
+def test_session_object_writer_counts_each_written_object_as_progress():
+    client, writer = _timed_writer(lambda keys: time.sleep(0.05), 0.3, 1)
+    keys = [f"job/s/{index}" for index in range(20)]
+    writer._put((keys, [b"x"] * len(keys)))
+    try:
+        writer.drain(timeout_s=30)
+    finally:
+        assert _run_within(writer.close) is None
+    assert list(client.objects) == keys
+
+
 def _run_within(call, timeout_s=30.0):
     errors = []
 
