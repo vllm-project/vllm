@@ -423,11 +423,39 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 /// the HTTP render route.
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error() || matches!(error, vllm_chat::Error::Multimodal(_)) {
+    if error.is_request_validation_error()
+        || matches!(
+            error,
+            vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)
+        )
+    {
         Status::invalid_argument(message)
     } else if error.is_unavailable() {
         Status::unavailable(message)
     } else {
         Status::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use llm_multimodal::MediaConnectorError;
+
+    use super::*;
+
+    /// A media fetch that failed on the host's side is still the request's
+    /// error here, as in HTTP render; only chat routes tell it apart.
+    #[test]
+    fn media_fetch_timeout_is_invalid_argument() {
+        let error = vllm_chat::Error::from(MediaConnectorError::Timeout {
+            url: "https://example.com/a.png".to_string(),
+            budget: Duration::from_secs(5),
+        });
+        assert_eq!(
+            chat_error_to_status(error).code(),
+            tonic::Code::InvalidArgument
+        );
     }
 }
