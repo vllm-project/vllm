@@ -19,10 +19,10 @@ use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_chat::{
-    AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, AssistantToolCall,
-    ChatContent, ChatContentPart, ChatEvent, ChatEventStream, ChatMessage, ChatOptions,
-    ChatRequest, ChatRequestProcessor, ChatTool, ChatToolChoice, DetokenizeChunk,
-    GenerationPromptMode, ResolvedToolContext, SamplingParams,
+    AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
+    ChatEvent, ChatEventStream, ChatMessage, ChatOptions, ChatRequest, ChatRequestProcessor,
+    ChatTool, ChatToolChoice, DetokenizeChunk, GenerationPromptMode, ResolvedToolContext,
+    SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -111,18 +111,6 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         result.map(Response::new)
     }
 
-    async fn derender_chat(
-        &self,
-        request: Request<pb::DerenderChatRequest>,
-    ) -> Result<Response<pb::DerenderChatResponse>, Status> {
-        let span = info_span!("grpc_render", rpc = "DerenderChat");
-        let result = derender_chat(self.state.as_ref(), request.into_inner())
-            .instrument(span.clone())
-            .await;
-        log_failure(&span, &result);
-        result.map(Response::new)
-    }
-
     type DerenderChatStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::DerenderChatStreamResponse, Status>> + Send>>;
 
@@ -171,9 +159,20 @@ async fn render_chat(
         .text_request;
     let prepared = state.text_processor().prepare(text_request).map_err(text_error_to_status)?;
     let text_request = prepared.text_request;
-    let media = (prepared.generate_request.mm_features.into_iter().flatten())
+    let media: Vec<pb::MediaItem> = (prepared.generate_request.mm_features.into_iter().flatten())
         .map(|feature| media::feature_to_proto(feature, !omit_media_kwargs))
         .try_collect()?;
+    // Fail here rather than in Inference.Generate, which rejects the same media.
+    media::check_inline_kwargs_size(
+        media
+            .iter()
+            .filter_map(|item| match &item.source {
+                Some(pb::media_item::Source::Features(feature)) => feature.kwargs.as_ref(),
+                _ => None,
+            })
+            .map(Vec::len)
+            .sum(),
+    )?;
 
     // A parser-built output grammar replaces the request's constraint. Echo an
     // unchanged constraint as sent, so a JSON schema keeps its exact text.
@@ -204,53 +203,9 @@ async fn render_chat(
     })
 }
 
-async fn derender_chat(
-    state: &impl RenderContext,
-    mut request: pb::DerenderChatRequest,
-) -> Result<pb::DerenderChatResponse, Status> {
-    let output = request.output.take().unwrap_or_default();
-    let reported_finish_info = output.finish_info.clone();
-    // A stop string reported by Generate cuts the text as well.
-    let reported_stop_string = reported_stop_string(&output).cloned();
-    let (chat_request, prompt_token_ids) =
-        prepare_derender(state, request, reported_stop_string).await?;
-    let mut chunk = chunk_from_proto(output)?;
-    // Unlike in a stream, an omitted `finish_info` ends the output.
-    chunk.finish_reason.get_or_insert(FinishReason::Length);
-    let collected = state
-        .chat_processor()
-        .detokenize(
-            chat_request,
-            state.text_processor(),
-            prompt_token_ids,
-            chunk,
-        )
-        .await
-        .map_err(chat_error_to_status)?;
-
-    let finish_info = detokenized_finish_info(
-        reported_finish_info,
-        &collected.finish_reason,
-        collected.usage.output_token_count as u32,
-        &collected.token_ids,
-    )?;
-    let message = collected.message;
-    Ok(pb::DerenderChatResponse {
-        content: message.text(),
-        reasoning: message.reasoning().unwrap_or_default(),
-        tool_calls: message
-            .tool_calls()
-            .map(|call| pb::ChatToolCall {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-            })
-            .collect(),
-        num_reasoning_tokens: collected.usage.reasoning_tokens as u32,
-        logprobs: logprobs_to_proto(collected.logprobs),
-        finish_info: Some(finish_info),
-    })
-}
+// ========================================================================================
+// Derender
+// ========================================================================================
 
 /// Start a DerenderChatStream from its first message. The returned response
 /// stream owns `inbound`.
@@ -278,7 +233,7 @@ async fn derender_chat_stream(
         stop_strings: start.stop_strings.clone(),
         end_tx: Some(end_tx),
     };
-    let (chat_request, prompt_token_ids) = prepare_derender(state, *start, None).await?;
+    let (chat_request, prompt_token_ids) = prepare_derender(state, *start).await?;
 
     let chunks = stream::unfold(Some(inbound), |inbound| async move {
         let mut inbound = inbound?;
@@ -338,8 +293,6 @@ impl DerenderInbound {
                         "only the first DerenderChatStream message may be `start`",
                     ));
                 }
-                // Closing early ends the output like an omitted `finish_info`
-                // in DerenderChat.
                 None => {
                     return Ok(DetokenizeChunk {
                         finish_reason: Some(FinishReason::Length),
@@ -495,27 +448,20 @@ fn detokenized_finish_info(
     })
 }
 
-/// Check the model and build the chat request of either DerenderChat RPC.
-/// `extra_stop_string` applies on top of the requested stop strings.
+/// Check the model and build the chat request of a DerenderChatStream.
 async fn prepare_derender(
     state: &impl RenderContext,
-    request: pb::DerenderChatRequest,
-    extra_stop_string: Option<String>,
+    start: pb::DerenderChatStart,
 ) -> Result<(ChatRequest, Vec<u32>), Status> {
-    let pb::DerenderChatRequest {
+    let pb::DerenderChatStart {
         chat,
         prompt_token_ids,
         output: _,
-        mut stop_strings,
+        stop_strings,
         include_stop_strings,
         min_new_tokens,
         skip_special_tokens,
-    } = request;
-    if let Some(stop) = extra_stop_string
-        && !stop_strings.contains(&stop)
-    {
-        stop_strings.push(stop);
-    }
+    } = start;
     let chat = chat.unwrap_or_default();
     check_model(state, &chat.model).await?;
     let mut chat_request = to_chat_request(chat)?;
@@ -603,28 +549,32 @@ async fn check_model(state: &impl RenderContext, model: &str) -> Result<(), Stat
 
 fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
     // `ChatRequest::validate` checks a continued final message is an assistant's.
-    let generation_prompt_mode = match chat.generation_prompt_mode() {
-        pb::GenerationPromptMode::Unspecified | pb::GenerationPromptMode::StartNewAssistant => {
-            GenerationPromptMode::StartNewAssistant
-        }
-        pb::GenerationPromptMode::ContinueFinalAssistant => {
-            GenerationPromptMode::ContinueFinalAssistant
-        }
-        pb::GenerationPromptMode::NoGenerationPrompt => GenerationPromptMode::NoGenerationPrompt,
-    };
+    let generation_prompt_mode =
+        match enum_from_proto(chat.generation_prompt_mode, "generation_prompt_mode")? {
+            pb::GenerationPromptMode::Unspecified | pb::GenerationPromptMode::StartNewAssistant => {
+                GenerationPromptMode::StartNewAssistant
+            }
+            pb::GenerationPromptMode::ContinueFinalAssistant => {
+                GenerationPromptMode::ContinueFinalAssistant
+            }
+            pb::GenerationPromptMode::NoGenerationPrompt => {
+                GenerationPromptMode::NoGenerationPrompt
+            }
+        };
     let messages: Vec<_> = chat.messages.into_iter().map(message_from_proto).try_collect()?;
-    let tool_choice = chat.tool_choice.and_then(|choice| choice.choice).and_then(|choice| {
+    let tool_choice = {
         use pb::chat_tool_choice::{Choice, Mode};
-        match choice {
-            Choice::Mode(mode) => match Mode::try_from(mode).unwrap_or_default() {
+        match chat.tool_choice.and_then(|choice| choice.choice) {
+            None => None,
+            Some(Choice::Mode(mode)) => match enum_from_proto(mode, "tool_choice.mode")? {
                 Mode::Unspecified => None,
                 Mode::Auto => Some(ChatToolChoice::Auto),
                 Mode::None => Some(ChatToolChoice::None),
                 Mode::Required => Some(ChatToolChoice::Required),
             },
-            Choice::FunctionName(name) => Some(ChatToolChoice::Function { name }),
+            Some(Choice::FunctionName(name)) => Some(ChatToolChoice::Function { name }),
         }
-    });
+    };
     let tool_context = ResolvedToolContext::new(
         &messages,
         tools_from_proto(chat.tools)?,
@@ -649,9 +599,10 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
             response_format: None,
             template_kwargs: chat
                 .chat_template_kwargs
-                .map(|kwargs| match convert::proto_struct_to_json(&kwargs) {
-                    serde_json::Value::Object(map) => map.into_iter().collect(),
-                    _ => unreachable!("a proto struct converts to a JSON object"),
+                .map(|kwargs| {
+                    (kwargs.fields.iter())
+                        .map(|(key, value)| (key.clone(), convert::proto_value_to_json(value)))
+                        .collect()
                 })
                 .unwrap_or_default(),
         },
@@ -674,7 +625,7 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
 fn truncation_from_proto(truncation: pb::PromptTruncation) -> Result<PromptTruncation, Status> {
     use pb::prompt_truncation::{Limit, Side};
 
-    let side = match truncation.side() {
+    let side = match enum_from_proto(truncation.side, "truncation.side")? {
         Side::Unspecified | Side::Left => TruncationSide::Left,
         Side::Right => TruncationSide::Right,
     };
@@ -726,7 +677,13 @@ fn assistant_block_from_proto(
         Some(Block::ToolCall(call)) => AssistantContentBlock::ToolCall(AssistantToolCall {
             id: call.id,
             name: call.name,
-            arguments: call.arguments,
+            // Like the HTTP chat route and Python, a call without arguments
+            // renders as an empty object.
+            arguments: if call.arguments.is_empty() {
+                "{}".to_string()
+            } else {
+                call.arguments
+            },
         }),
         None => {
             return Err(Status::invalid_argument(
@@ -739,45 +696,52 @@ fn assistant_block_from_proto(
 /// Omitted content renders as empty text.
 fn content_from_proto(content: Option<pb::ChatContent>) -> Result<ChatContent, Status> {
     use pb::chat_content::Content;
-    use pb::chat_content_part::Part;
 
     Ok(match content.and_then(|content| content.content) {
         None => ChatContent::Text(String::new()),
         Some(Content::Text(text)) => ChatContent::Text(text),
-        Some(Content::Parts(parts)) => ChatContent::Parts(
-            parts
-                .parts
-                .into_iter()
-                .filter_map(|part| part.part)
-                .map(|part| match part {
-                    Part::Text(text) => ChatContentPart::text(text),
-                    Part::ImageUrl(image) => ChatContentPart::ImageUrl {
-                        detail: match image.detail() {
-                            pb::ImageDetail::Unspecified => None,
-                            pb::ImageDetail::Auto => Some(ImageDetail::Auto),
-                            pb::ImageDetail::Low => Some(ImageDetail::Low),
-                            pb::ImageDetail::High => Some(ImageDetail::High),
-                        },
-                        image_url: image.url,
-                        uuid: image.uuid,
-                    },
-                    Part::VideoUrl(video) => ChatContentPart::VideoUrl {
-                        video_url: video.url,
-                        uuid: video.uuid,
-                    },
-                    Part::AudioUrl(audio) => ChatContentPart::AudioUrl {
-                        audio_url: audio.url,
-                        uuid: audio.uuid,
-                    },
-                    Part::InputAudio(audio) => ChatContentPart::InputAudio {
-                        data: audio.data,
-                        format: audio.format,
-                        uuid: audio.uuid,
-                    },
-                })
-                .collect(),
-        ),
+        Some(Content::Parts(parts)) => {
+            ChatContent::Parts(parts.parts.into_iter().map(part_from_proto).try_collect()?)
+        }
     })
+}
+
+fn part_from_proto(part: pb::ChatContentPart) -> Result<ChatContentPart, Status> {
+    use pb::chat_content_part::Part;
+
+    Ok(match part.part {
+        Some(Part::Text(text)) => ChatContentPart::text(text),
+        Some(Part::ImageUrl(image)) => ChatContentPart::ImageUrl {
+            detail: match enum_from_proto(image.detail, "image_url.detail")? {
+                pb::ImageDetail::Unspecified => None,
+                pb::ImageDetail::Auto => Some(ImageDetail::Auto),
+                pb::ImageDetail::Low => Some(ImageDetail::Low),
+                pb::ImageDetail::High => Some(ImageDetail::High),
+            },
+            image_url: image.url,
+            uuid: image.uuid,
+        },
+        Some(Part::VideoUrl(video)) => ChatContentPart::VideoUrl {
+            video_url: video.url,
+            uuid: video.uuid,
+        },
+        Some(Part::AudioUrl(audio)) => ChatContentPart::AudioUrl {
+            audio_url: audio.url,
+            uuid: audio.uuid,
+        },
+        Some(Part::InputAudio(audio)) => ChatContentPart::InputAudio {
+            data: audio.data,
+            format: audio.format,
+            uuid: audio.uuid,
+        },
+        None => return Err(Status::invalid_argument("chat content part is required")),
+    })
+}
+
+/// Read a proto enum field, rejecting values this server does not know.
+fn enum_from_proto<E: TryFrom<i32>>(value: i32, field: &str) -> Result<E, Status> {
+    E::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown {field} value {value}")))
 }
 
 fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
@@ -809,11 +773,43 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 // Errors
 // ========================================================================================
 
+/// Media that cannot be fetched or preprocessed is the request's fault, as in
+/// the HTTP render route.
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error() {
+    if error.is_request_validation_error()
+        || matches!(
+            error,
+            vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)
+        )
+    {
         Status::invalid_argument(message)
+    } else if error.is_unavailable() {
+        Status::unavailable(message)
     } else {
         Status::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use llm_multimodal::MediaConnectorError;
+
+    use super::*;
+
+    /// A media fetch that failed on the host's side is still the request's
+    /// error here, as in HTTP render; only chat routes tell it apart.
+    #[test]
+    fn media_fetch_timeout_is_invalid_argument() {
+        let error = vllm_chat::Error::from(MediaConnectorError::Timeout {
+            url: "https://example.com/a.png".to_string(),
+            budget: Duration::from_secs(5),
+        });
+        assert_eq!(
+            chat_error_to_status(error).code(),
+            tonic::Code::InvalidArgument
+        );
     }
 }

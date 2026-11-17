@@ -12,21 +12,18 @@ import "inference.proto";
 //
 // A client renders a chat request with RenderChat, builds its own
 // GenerateRequest from the RenderChatResponse fields, runs it with
-// Inference.Generate, and parses the output token IDs with DerenderChat, or
-// streams GenerateStream chunks through DerenderChatStream. Setting
-// `response.output_token_ids = true` and `response.output_text = false` on the
-// GenerateRequest returns exactly what DerenderChat needs.
+// Inference.GenerateStream, and streams the chunks through DerenderChatStream.
+// Setting `response.output_token_ids = true` and `response.output_text = false`
+// on the GenerateRequest returns exactly what DerenderChatStream needs.
 service Render {
   // Renders a chat request into prompt token IDs plus the generation settings
   // that rendering decides.
   rpc RenderChat (RenderChatRequest) returns (RenderChatResponse) {}
-  // Parses the output token IDs of Inference.Generate into assistant content,
-  // reasoning and tool calls.
-  rpc DerenderChat (DerenderChatRequest) returns (DerenderChatResponse) {}
-  // Incremental DerenderChat over the chunks of Inference.GenerateStream. The
-  // responses carry the decoded deltas in order, and one response can cover
-  // several request chunks or part of one; the server ends the stream after
-  // the response carrying `finish_info`.
+  // Parses the output chunks of Inference.GenerateStream into assistant
+  // content, reasoning and tool-call deltas. The responses carry the decoded
+  // deltas in order, and one response can cover several request chunks or
+  // part of one; the server ends the stream after the response carrying
+  // `finish_info`.
   rpc DerenderChatStream (stream DerenderChatStreamRequest) returns (stream DerenderChatStreamResponse) {}
 }
 
@@ -53,7 +50,10 @@ message RenderChatResponse {
   // Send as `engine_reasoning_gate`.
   EngineReasoningGate engine_reasoning_gate = 3;
   // Preprocessed media items, ordered by their placeholder ranges in
-  // `prompt_token_ids`. Send as `media`.
+  // `prompt_token_ids`. Send as `media`. Their inline kwargs total at most
+  // 16 MiB, the most Inference.Generate accepts; larger media fail with
+  // RESOURCE_EXHAUSTED. Such responses exceed the 4 MiB default receive limit
+  // of many gRPC clients.
   repeated MediaItem media = 4;
 }
 
@@ -61,22 +61,30 @@ message RenderChatResponse {
 // Derender
 // ======================================================================================
 
-message DerenderChatRequest {
+message DerenderChatStreamRequest {
+  oneof request {
+    // First message.
+    DerenderChatStart start = 1;
+    // Each later message: `GenerateResponse.outputs` of the next
+    // GenerateStream chunk of the same sequence. Closing the request stream
+    // before a finished chunk ends the output as if it reached `length`.
+    SequenceOutput output = 2;
+  }
+}
+
+message DerenderChatStart {
   // The chat request passed to RenderChat, so that parsers resolve the same
   // way.
   ChatRequest chat = 1;
   // `RenderChatResponse.prompt_token_ids`, used to initialize the parsers.
   repeated uint32 prompt_token_ids = 2;
-  // The complete output from Inference.Generate: `GenerateResponse.outputs` of
-  // a unary call, or the streamed chunks concatenated. Reads `token_ids`,
-  // the logprob fields when present, and `finish_info`; an omitted or
-  // NOT_FINISHED `finish_info` means the output did not end with a stop token.
+  // The first GenerateStream chunk, if already available. Reads `token_ids`,
+  // the logprob fields when present, and `finish_info`.
   SequenceOutput output = 3;
   // Stop strings that end the output: the output is cut where the first one
-  // completes, past the first `min_new_tokens` tokens. A stop string reported
-  // in `output.finish_info` is applied as well and must match, so a client
-  // that passed these to Inference.Generate with `response.output_text = true`
-  // gets the same text either way.
+  // completes, past the first `min_new_tokens` tokens. Text is sent before the
+  // output finishes, so only these apply: a chunk whose `finish_info` reports
+  // a stop string missing from them is rejected.
   repeated string stop_strings = 4;
   // Keep the matched stop string, and a terminal stop token, in the output.
   bool include_stop_strings = 5;
@@ -87,51 +95,26 @@ message DerenderChatRequest {
   optional bool skip_special_tokens = 7;
 }
 
-message DerenderChatResponse {
+// Deltas decoded from the request chunks. Text can lag behind the tokens while
+// it may still be part of a stop string or of tool-call markup.
+message DerenderChatStreamResponse {
   // Final answer text, with reasoning and tool-call markup removed.
   string content = 1;
   // Reasoning text, when a reasoning parser is active.
   string reasoning = 2;
-  repeated ChatToolCall tool_calls = 3;
-  // Number of output tokens attributed to reasoning.
+  repeated ChatToolCallDelta tool_calls = 3;
+  // Number of output tokens attributed to reasoning. Set on the last response
+  // only.
   uint32 num_reasoning_tokens = 4;
   // Decoded logprobs, one entry per output token, when the output carries
   // logprobs.
   repeated TokenLogprobs logprobs = 5;
-  // `output.finish_info` after applying stop strings: `finish_reason` and
+  // Set on the last response only: the finish info of the finished request
+  // chunk, if any, after applying stop strings. `finish_reason` and
   // `stop_reason` say how the returned output ended, `num_output_tokens`
-  // counts the tokens kept, and the other fields are copied.
-  FinishInfo finish_info = 6;
-}
-
-message DerenderChatStreamRequest {
-  oneof request {
-    // First message: the request, with `output` holding the first chunk or
-    // unset. Text is sent before the output finishes, so only these
-    // `stop_strings` apply: a chunk that reports a stop string missing from
-    // them is rejected.
-    DerenderChatRequest start = 1;
-    // Each later message: `GenerateResponse.outputs` of the next
-    // GenerateStream chunk of the same sequence. Closing the request stream
-    // before a finished chunk ends the output as in DerenderChat with an
-    // omitted `finish_info`.
-    SequenceOutput output = 2;
-  }
-}
-
-// Deltas decoded from one request chunk. Text can lag behind the tokens while
-// it may still be part of a stop string or of tool-call markup.
-message DerenderChatStreamResponse {
-  string content = 1;
-  string reasoning = 2;
-  repeated ChatToolCallDelta tool_calls = 3;
-  // Set on the last response only.
-  uint32 num_reasoning_tokens = 4;
-  repeated TokenLogprobs logprobs = 5;
-  // Set on the last response only, as in `DerenderChatResponse.finish_info`
-  // from the finished request chunk, if any. A `stop_string` stop that
-  // Inference.Generate did not report means generation is still running:
-  // cancel it.
+  // counts the tokens kept, and the other fields are copied. A `stop_string`
+  // stop that Inference.GenerateStream did not report means generation is
+  // still running: cancel it.
   FinishInfo finish_info = 6;
 }
 

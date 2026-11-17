@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
-use std::str::FromStr;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use tonic::server::NamedService;
 use tonic::transport::Server as TonicServer;
+use tonic_health::ServingStatus;
 use tonic_health::server::health_reporter;
 use tracing::info;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -18,8 +19,9 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
+use crate::lora::check_lora_module;
 use crate::model_names::ServedModelNames;
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
@@ -39,6 +41,9 @@ pub struct RenderConfig {
     pub hf_config: Option<ModelSource>,
     /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
     pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
@@ -67,7 +72,8 @@ pub struct RenderConfig {
     /// Disable multimodal preprocessing and treat the model as language-only.
     pub language_model_only: bool,
     /// Dtype multimodal tensors are produced in; must match the engine's.
-    pub dtype: RenderDtype,
+    /// `None` follows the model config, like vLLM's `--dtype auto`.
+    pub dtype: Option<ModelDtype>,
     /// Maximum multimodal items per prompt for each modality.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     pub tls: Option<TlsConfig>,
@@ -88,48 +94,13 @@ impl RenderConfig {
     }
 }
 
-/// Model dtype selection for the render server, which has no engine to report
-/// it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum RenderDtype {
-    /// Follow the model config, like vLLM's `--dtype auto`.
-    #[default]
-    Auto,
-    Fixed(ModelDtype),
-}
-
-impl FromStr for RenderDtype {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(match value {
-            "auto" => Self::Auto,
-            "half" | "float16" => Self::Fixed(ModelDtype::Float16),
-            "bfloat16" => Self::Fixed(ModelDtype::BFloat16),
-            "float" | "float32" => Self::Fixed(ModelDtype::Float32),
-            _ => {
-                return Err(format!(
-                    "unsupported dtype `{value}`; expected auto, half, float16, bfloat16, float, or float32"
-                ));
-            }
-        })
-    }
-}
-
-impl RenderDtype {
-    /// Resolve the dtype from the checkpoint's config dtype the way vLLM's
-    /// `auto` does: float32 or missing dtypes run in bfloat16.
-    fn resolve(self, config_dtype: Option<&str>) -> Result<ModelDtype> {
-        match self {
-            Self::Fixed(dtype) => Ok(dtype),
-            Self::Auto => match config_dtype.unwrap_or("float32") {
-                "float16" => Ok(ModelDtype::Float16),
-                "bfloat16" | "float32" => Ok(ModelDtype::BFloat16),
-                other => {
-                    bail!("cannot infer the model dtype from config dtype `{other}`; pass --dtype")
-                }
-            },
-        }
+/// Resolve the model dtype from the checkpoint's config dtype the way vLLM's
+/// `--dtype auto` does on GPUs with bfloat16: float32, missing, and
+/// unrecognized config dtypes run in bfloat16.
+fn auto_model_dtype(config_dtype: Option<ModelDtype>) -> ModelDtype {
+    match config_dtype {
+        Some(ModelDtype::Float16) => ModelDtype::Float16,
+        Some(ModelDtype::BFloat16 | ModelDtype::Float32) | None => ModelDtype::BFloat16,
     }
 }
 
@@ -154,6 +125,23 @@ impl RenderState {
     }
 }
 
+/// Check `--lora-modules` the way `vllm-rs serve` does when it loads them.
+fn validate_lora_modules(
+    served_model_names: &ServedModelNames,
+    lora_modules: &[LoraModulePath],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for module in lora_modules {
+        let name = &module.name;
+        check_lora_module(served_model_names.names(), module)
+            .with_context(|| format!("invalid --lora-modules entry `{name}`"))?;
+        if !seen.insert(name) {
+            bail!("LoRA adapter `{name}` is given more than once");
+        }
+    }
+    Ok(())
+}
+
 async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let loaded = load_model_backends(
         &config.model,
@@ -162,6 +150,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
             skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
@@ -180,19 +169,21 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         &config.served_model_name,
     ))
     .with_accept_any(config.skip_model_name_validation);
-    // Only multimodal preprocessing reads the dtype, so text-only models never
-    // fail on an unusual config dtype.
-    let model_dtype = loaded
-        .chat_backend
-        .multimodal_model_info()
-        .is_some()
-        .then(|| config.dtype.resolve(loaded.text_backend.config_dtype()))
-        .transpose()?;
+    validate_lora_modules(&served_model_names, &config.lora_modules)?;
+    // Only multimodal preprocessing reads the dtype.
+    let model_dtype = (loaded.chat_backend.multimodal_model_info().is_some()).then(|| {
+        (config.dtype).unwrap_or_else(|| auto_model_dtype(loaded.text_backend.config_dtype()))
+    });
+    if let Some(model_dtype) = model_dtype {
+        info!(
+            dtype = model_dtype.as_str(),
+            "multimodal preprocessing enabled"
+        );
+    }
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let mut chat = ChatRequestProcessor::render_only(loaded.chat_backend)
-        .with_max_model_len(config.max_model_len)
+    let chat = ChatRequestProcessor::new(loaded.chat_backend, model_dtype, config.max_model_len)
         .with_parser_selections(
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
@@ -206,13 +197,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
                 .collect(),
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
-    if let Some(model_dtype) = model_dtype {
-        info!(
-            dtype = model_dtype.as_str(),
-            "multimodal preprocessing enabled"
-        );
-        chat = chat.with_model_dtype(model_dtype);
-    }
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -301,20 +285,8 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         let Some((address, grpc_listener)) = grpc_listener else {
             return Ok(());
         };
-        let (health_reporter, health_service) = health_reporter();
-        health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
-        let render_service =
-            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         info!(%address, "starting engine-free Rust render gRPC server");
-        let result = TonicServer::builder()
-            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
-            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
-            .add_service(health_service)
-            .add_service(render_service)
-            .serve_with_incoming_shutdown(grpc_listener, server_shutdown.clone().cancelled_owned())
-            .await
-            .context("render gRPC server failed");
+        let result = serve_render_grpc(state.clone(), grpc_listener, server_shutdown.clone()).await;
         server_shutdown.cancel();
         result
     };
@@ -322,27 +294,67 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
     http_result.and(grpc_result)
 }
 
+/// Serve the gRPC Render service and its health service until `shutdown`.
+pub(crate) async fn serve_render_grpc(
+    state: Arc<RenderState>,
+    listener: MaybeTlsListener,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let (mut health_reporter, health_service) = health_reporter();
+    health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
+    let render_service = grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state))
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+    // Publish NOT_SERVING before the listener stops, then remove the
+    // services, including the overall server status `""` that tonic
+    // registers, so open health watches end and the drain can finish.
+    let stop = async move {
+        let services = [
+            <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
+            "",
+        ];
+        shutdown.cancelled().await;
+        for service in services {
+            health_reporter.set_service_status(service, ServingStatus::NotServing).await;
+        }
+        for service in services {
+            health_reporter.clear_service_status(service).await;
+        }
+    };
+    TonicServer::builder()
+        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+        .add_service(health_service)
+        .add_service(render_service)
+        .serve_with_incoming_shutdown(listener, stop)
+        .await
+        .context("render gRPC server failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn render_dtype_auto_follows_config_like_vllm() {
-        let auto = RenderDtype::Auto;
-        assert_eq!(auto.resolve(Some("float16")).unwrap(), ModelDtype::Float16);
-        assert_eq!(
-            auto.resolve(Some("bfloat16")).unwrap(),
-            ModelDtype::BFloat16
-        );
-        assert_eq!(auto.resolve(Some("float32")).unwrap(), ModelDtype::BFloat16);
-        assert_eq!(auto.resolve(None).unwrap(), ModelDtype::BFloat16);
-        assert!(auto.resolve(Some("float8_e4m3fn")).is_err());
+    fn lora_modules_are_checked_like_serve() {
+        let served = ServedModelNames::new(vec!["qwen".to_string()]);
+        let modules = |specs: &[&str]| -> Vec<LoraModulePath> {
+            specs.iter().map(|spec| spec.parse().unwrap()).collect()
+        };
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "b=org/b"])).is_ok());
+        assert!(validate_lora_modules(&served, &modules(&["qwen=org/a"])).is_err());
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "a=org/b"])).is_err());
+    }
 
-        let fixed: RenderDtype = "half".parse().unwrap();
-        assert_eq!(
-            fixed.resolve(Some("bfloat16")).unwrap(),
-            ModelDtype::Float16
-        );
+    #[test]
+    fn auto_model_dtype_follows_config_like_vllm() {
+        for (config_dtype, expected) in [
+            (Some(ModelDtype::Float16), ModelDtype::Float16),
+            (Some(ModelDtype::BFloat16), ModelDtype::BFloat16),
+            (Some(ModelDtype::Float32), ModelDtype::BFloat16),
+            (None, ModelDtype::BFloat16),
+        ] {
+            assert_eq!(auto_model_dtype(config_dtype), expected);
+        }
     }
 
     #[tokio::test]
@@ -357,6 +369,7 @@ mod tests {
                 tokenizer: None,
                 hf_config: None,
                 skip_tokenizer_init: false,
+                hf_token: None,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 skip_model_name_validation: false,
@@ -377,7 +390,7 @@ mod tests {
                 max_logprobs: None,
                 lora_modules: Vec::new(),
                 language_model_only: false,
-                dtype: RenderDtype::Auto,
+                dtype: None,
                 limit_mm_per_prompt: Default::default(),
                 tls: None,
             },

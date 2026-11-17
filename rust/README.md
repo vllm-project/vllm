@@ -149,14 +149,21 @@ For multimodal models, chat render fetches and preprocesses images, video and
 audio, and returns them as the `features` object that `/inference/v1/generate`
 accepts, in the format the Python render API uses. The tensors are produced in
 `--dtype`, which must match the engine's: `auto` (the default) follows the
-model config, running float32 checkpoints in bfloat16 like vLLM. Set
+model config, running float32 checkpoints in bfloat16 like vLLM, but unlike
+vLLM it does not look at the weights or the GPU, so pass the engine's dtype
+when they decide it. Set `--max-model-len` to the engine's too: some image
+processors size images to fit the context. Large images make `features` big;
+the generate server may need `VLLM_HTTP_MAX_REQUEST_BODY_SIZE` raised above
+its 32 MiB default to accept them. Set
 `"mm_payload": "none"` on a render request to get only item hashes and
 placeholder ranges, for example for cache-aware routing; such a response cannot
 be sent to generate. Pass `--language-model-only` to skip multimodal
 processing, and set `--limit-mm-per-prompt` to the engine's limits so that
-render rejects the same requests. Pass `--lora-modules name=path ...` to accept LoRA adapter names as
-the request `model`; rendering does not load the adapter weights, and the
-adapter name is passed through to generate.
+render rejects the same requests.
+
+Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
+`model`; rendering does not load the adapter weights, and the adapter name is
+passed through to generate.
 
 To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
 in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from
@@ -204,11 +211,14 @@ Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
 `Render.RenderChat` renders a chat request into prompt token IDs plus the
 settings rendering decides (structured-output constraint, reasoning gate,
 preprocessed media), which the client copies into its `vllm.GenerateRequest`
-for `Inference.Generate`. `Render.DerenderChat` takes the output of
-`Inference.Generate` and returns the answer text, reasoning, parsed tool calls,
-finish info and decoded logprobs, applying stop strings itself;
-`Render.DerenderChatStream` does the same over `Inference.GenerateStream`
-chunks. See [`render.proto`](proto/render.proto).
+for `Inference.Generate`. `Render.DerenderChatStream` takes the chat request,
+the prompt token IDs and the decoding options (stop strings,
+`skip_special_tokens`) in its first message, then the `SequenceOutput` of each
+`Inference.GenerateStream` chunk run with `response.output_text = false`, and
+streams back content, reasoning, tool-call and logprob deltas, ending with the
+finish info. It holds back text that may begin a stop string from its first
+message; when a stop string ends the output, the server closes the stream and
+the client must cancel `GenerateStream`. See [`render.proto`](proto/render.proto).
 
 ### Example Request
 

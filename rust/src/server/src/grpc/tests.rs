@@ -54,6 +54,7 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::EngineCoreLlm;
+use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -456,7 +457,7 @@ where
     let llm = EngineCoreLlm::new(client);
     let engine_health = EngineHealth::subscribe(&llm);
 
-    let chat = ChatLlm::from_shared_backend(llm, backend);
+    let chat = ChatLlm::from_shared_backend(llm, backend).with_served_model_name("test-model");
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
@@ -696,6 +697,7 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 async fn unary_generate_returns_collected_text() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
+    let before = render_duration_count();
 
     let response = client
         .generate(pb::GenerateRequest {
@@ -731,8 +733,23 @@ async fn unary_generate_returns_collected_text() {
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
 
+    // The text facade records the render, as for `/v1/completions`.
+    assert_eq!(render_duration_count() - before, 1.0);
+
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+/// `vllm:request_render_duration_seconds` observations of `completion`
+/// renders for the test model.
+fn render_duration_count() -> f64 {
+    let rendered = METRICS.render().expect("render metrics");
+    let prefix = "vllm:request_render_duration_seconds_count{model_name=\"test-model\",\
+                  request_type=\"completion\"} ";
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map_or(0.0, |value| value.parse().expect("numeric sample"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -925,7 +942,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, identifier) in features.iter().zip(["uuid:image-1", "uuid:image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
@@ -1000,7 +1017,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ec_transfer_params: Some(ec_proto_struct(&["uuid:image-2", "uuid:image-1"])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -2441,6 +2458,7 @@ async fn control_sleep_rejects_unknown_level() {
         .sleep(pb::SleepRequest {
             level: Some(3),
             mode: pb::PauseMode::Unspecified.into(),
+            reset_connector: None,
         })
         .await
         .expect_err("level 3 should be rejected");
@@ -3033,11 +3051,15 @@ impl ChatRenderer for FakeRenderBackend {
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         let mut prompt = String::new();
         for message in &request.messages {
-            prompt.push_str(&format!(
-                "{}: {}\n",
-                message.role().as_str(),
-                message.text_content()?
-            ));
+            let mut text = message.text_content()?;
+            if let vllm_chat::ChatMessage::Assistant { content } = message {
+                for block in content {
+                    if let vllm_chat::AssistantContentBlock::ToolCall(call) = block {
+                        text.push_str(&format!(" {}({})", call.name, call.arguments));
+                    }
+                }
+            }
+            prompt.push_str(&format!("{}: {text}\n", message.role().as_str()));
         }
         if request.chat_options.add_generation_prompt() {
             prompt.push_str("assistant:");
@@ -3058,7 +3080,7 @@ fn render_state() -> RenderState {
         max_model_len: Some(1024),
         max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), 1024),
-        chat: ChatRequestProcessor::render_only(backend),
+        chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
     }
 }
@@ -3097,14 +3119,6 @@ fn weather_chat_request() -> pb::ChatRequest {
 
 fn render_token_ids(text: &str) -> Vec<u32> {
     FakeRenderBackend.tokenizer().encode(text, false).expect("encode")
-}
-
-fn render_eos_finish_info() -> pb::FinishInfo {
-    pb::FinishInfo {
-        finish_reason: pb::finish_info::FinishReason::Stop as i32,
-        stop_reason: Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID)),
-        ..Default::default()
-    }
 }
 
 async fn render_chat(
@@ -3187,8 +3201,9 @@ async fn render_chat_echoes_structured_output_without_parsers() {
     assert_eq!(rendered.structured_output, Some(structured_output));
 }
 
-/// Assistant blocks render in the order given, and continuing a final message
-/// that is not an assistant's is the client's error.
+/// Assistant blocks render in the order given, a tool call without arguments
+/// renders them as an empty object, and continuing a final message that is not
+/// an assistant's is the client's error.
 #[tokio::test]
 async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
     use pb::assistant_content_block::Block;
@@ -3203,7 +3218,7 @@ async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
                     block(Block::ToolCall(pb::ChatToolCall {
                         id: "call_1".to_string(),
                         name: "get_weather".to_string(),
-                        arguments: "{}".to_string(),
+                        arguments: String::new(),
                     })),
                     block(Block::Text("two".to_string())),
                 ],
@@ -3227,7 +3242,7 @@ async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
     .await;
     assert_eq!(
         rendered.prompt_token_ids,
-        render_token_ids("user: Hi\nassistant: one two\n")
+        render_token_ids("user: Hi\nassistant: one two get_weather({})\n")
     );
 
     let status = service
@@ -3335,174 +3350,6 @@ async fn render_chat_composes_structured_output_into_parser_grammar() {
     );
 }
 
-#[tokio::test]
-async fn derender_chat_parses_reasoning_and_tool_calls() {
-    let service = render_service();
-    let chat = weather_chat_request();
-    let rendered = render_chat(&service, chat.clone()).await;
-    let mut token_ids = render_token_ids(
-        "<think>Need tool.</think>\
-         <tool_call>\n{\"name\":\"get_weather\", \"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
-    );
-    token_ids.push(RENDER_EOS_TOKEN_ID);
-
-    let mut response = service
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(chat),
-            prompt_token_ids: rendered.prompt_token_ids,
-            output: Some(pb::SequenceOutput {
-                token_ids,
-                finish_info: Some(render_eos_finish_info()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
-        .await
-        .expect("derender chat")
-        .into_inner();
-
-    for call in &mut response.tool_calls {
-        assert!(call.id.starts_with("call_"), "{}", call.id);
-        call.id = "<placeholder>".to_string();
-    }
-    expect_test::expect![[r#"
-        DerenderChatResponse {
-            content: "",
-            reasoning: "Need tool.",
-            tool_calls: [
-                ChatToolCall {
-                    id: "<placeholder>",
-                    name: "get_weather",
-                    arguments: "{\"city\":\"Paris\"}",
-                },
-            ],
-            num_reasoning_tokens: 10,
-            logprobs: [],
-            finish_info: Some(
-                FinishInfo {
-                    num_output_tokens: 90,
-                    finish_reason: Stop,
-                    kv_transfer_params: None,
-                    ec_transfer_params: None,
-                    num_cached_tokens: None,
-                    stop_reason: Some(
-                        EosTokenId(
-                            61456,
-                        ),
-                    ),
-                },
-            ),
-        }
-    "#]]
-    .assert_debug_eq(&response);
-}
-
-#[tokio::test]
-async fn derender_chat_decodes_output_logprobs() {
-    let service = render_service();
-    let chat = weather_chat_request();
-    let rendered = render_chat(&service, chat.clone()).await;
-    let candidate = |id: u32, logprob: f32, rank: u32| pb::candidate_token_info::TokenInfo {
-        id,
-        logprob,
-        rank,
-    };
-
-    let response = service
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(chat),
-            prompt_token_ids: rendered.prompt_token_ids,
-            output: Some(pb::SequenceOutput {
-                token_ids: vec![u32::from(b'h'), u32::from(b'i'), RENDER_EOS_TOKEN_ID],
-                logprobs: vec![-0.1, -0.2, -0.3],
-                ranks: vec![1, 2, 1],
-                candidate_tokens: vec![
-                    pb::CandidateTokenInfo {
-                        tokens: vec![candidate(u32::from(b'h'), -0.1, 1)],
-                    },
-                    pb::CandidateTokenInfo {
-                        tokens: vec![candidate(u32::from(b'o'), -0.15, 1)],
-                    },
-                    pb::CandidateTokenInfo { tokens: vec![] },
-                ],
-                finish_info: Some(render_eos_finish_info()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
-        .await
-        .expect("derender chat")
-        .into_inner();
-
-    assert_eq!(response.content, "hi");
-    expect_test::expect![[r#"
-        [
-            TokenLogprobs {
-                tokens: [
-                    DecodedTokenLogprob {
-                        id: 104,
-                        token: "h",
-                        logprob: -0.1,
-                        rank: 1,
-                    },
-                    DecodedTokenLogprob {
-                        id: 104,
-                        token: "h",
-                        logprob: -0.1,
-                        rank: 1,
-                    },
-                ],
-            },
-            TokenLogprobs {
-                tokens: [
-                    DecodedTokenLogprob {
-                        id: 105,
-                        token: "i",
-                        logprob: -0.2,
-                        rank: 2,
-                    },
-                    DecodedTokenLogprob {
-                        id: 111,
-                        token: "o",
-                        logprob: -0.15,
-                        rank: 1,
-                    },
-                ],
-            },
-            TokenLogprobs {
-                tokens: [
-                    DecodedTokenLogprob {
-                        id: 61456,
-                        token: "",
-                        logprob: -0.3,
-                        rank: 1,
-                    },
-                ],
-            },
-        ]
-    "#]]
-    .assert_debug_eq(&response.logprobs);
-}
-
-#[tokio::test]
-async fn derender_chat_rejects_misaligned_logprobs() {
-    let status = render_service()
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(weather_chat_request()),
-            output: Some(pb::SequenceOutput {
-                token_ids: vec![u32::from(b'h'), u32::from(b'i')],
-                logprobs: vec![-0.1],
-                ranks: vec![1],
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
-        .await
-        .expect_err("misaligned logprobs");
-
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-}
-
 /// Qwen2-VL-like backend whose renderer writes one `<|image_pad|>` per image.
 struct FakeMultimodalRenderBackend {
     model_info: vllm_chat::multimodal::MultimodalModelInfo,
@@ -3575,7 +3422,7 @@ fn multimodal_render_service() -> RenderServiceImpl<RenderState> {
     });
     RenderServiceImpl::new(Arc::new(RenderState {
         text: TextRequestProcessor::new(backend.clone(), 1024),
-        chat: ChatRequestProcessor::render_only(backend).with_model_dtype(ModelDtype::BFloat16),
+        chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
         ..render_state()
     }))
 }
@@ -3622,35 +3469,12 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
-        super::media::from_proto(rendered.media).expect("decode media")
-    else {
-        panic!("expected preprocessed media");
-    };
-    assert!(decoded[0].data.is_some());
-}
-
-/// DerenderChat does not fetch or preprocess the chat request's media.
-#[tokio::test]
-async fn derender_chat_accepts_multimodal_chat() {
-    let service = multimodal_render_service();
-    let rendered = render_chat(&service, image_chat_request()).await;
-
-    let response = service
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(image_chat_request()),
-            prompt_token_ids: rendered.prompt_token_ids,
-            output: Some(pb::SequenceOutput {
-                token_ids: vec![u32::from(b'o'), u32::from(b'k')],
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
-        .await
-        .expect("derender chat")
-        .into_inner();
-
-    assert_eq!(response.content, "ok");
+    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
+    assert!(
+        !decoded.preprocessed.is_empty(),
+        "expected preprocessed media"
+    );
+    assert!(decoded.preprocessed[0].data.is_some());
 }
 
 #[tokio::test]
@@ -3671,6 +3495,10 @@ async fn render_chat_can_omit_media_kwargs() {
     assert!(features.mm_hash.is_some());
 }
 
+// ========================================================================================
+// DerenderChatStream
+// ========================================================================================
+
 fn plain_chat_request() -> pb::ChatRequest {
     pb::ChatRequest {
         messages: vec![user_text("Hi")],
@@ -3686,6 +3514,14 @@ fn plain_output(text: &str, finish_info: Option<pb::FinishInfo>) -> pb::Sequence
     }
 }
 
+fn render_eos_finish_info() -> pb::FinishInfo {
+    pb::FinishInfo {
+        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+        stop_reason: Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID)),
+        ..Default::default()
+    }
+}
+
 fn stop_string_finish_info(stop: &str) -> pb::FinishInfo {
     pb::FinishInfo {
         finish_reason: pb::finish_info::FinishReason::Stop as i32,
@@ -3694,30 +3530,351 @@ fn stop_string_finish_info(stop: &str) -> pb::FinishInfo {
     }
 }
 
-async fn derender_chat(request: pb::DerenderChatRequest) -> pb::DerenderChatResponse {
-    let prompt_token_ids =
-        render_chat(&render_service(), plain_chat_request()).await.prompt_token_ids;
-    render_service()
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(plain_chat_request()),
-            prompt_token_ids,
-            ..request
-        }))
+async fn render_grpc_client() -> (
+    pb::render_client::RenderClient<Channel>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server_task = tokio::spawn(async move {
+        TonicServer::builder()
+            .add_service(super::RenderGrpcService::new(render_service()))
+            .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
+            .await
+            .expect("grpc server");
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
         .await
-        .expect("derender chat")
-        .into_inner()
+        .expect("connect grpc channel");
+    (pb::render_client::RenderClient::new(channel), server_task)
+}
+
+/// A start for `chat` with the prompt that RenderChat returns for it.
+async fn derender_start(chat: pb::ChatRequest) -> pb::DerenderChatStart {
+    let prompt_token_ids = render_chat(&render_service(), chat.clone()).await.prompt_token_ids;
+    pb::DerenderChatStart {
+        chat: Some(chat),
+        prompt_token_ids,
+        ..Default::default()
+    }
+}
+
+fn derender_stream_start(start: pb::DerenderChatStart) -> pb::DerenderChatStreamRequest {
+    pb::DerenderChatStreamRequest {
+        request: Some(pb::derender_chat_stream_request::Request::Start(Box::new(
+            start,
+        ))),
+    }
+}
+
+fn derender_stream_output(output: pb::SequenceOutput) -> pb::DerenderChatStreamRequest {
+    pb::DerenderChatStreamRequest {
+        request: Some(pb::derender_chat_stream_request::Request::Output(Box::new(
+            output,
+        ))),
+    }
+}
+
+async fn collect_derender_stream(
+    mut responses: tonic::Streaming<pb::DerenderChatStreamResponse>,
+) -> Result<Vec<pb::DerenderChatStreamResponse>, tonic::Status> {
+    let mut collected = Vec::new();
+    while let Some(response) = tokio::time::timeout(Duration::from_secs(5), responses.message())
+        .await
+        .expect("timed out waiting for a DerenderChatStream response")?
+    {
+        collected.push(response);
+    }
+    Ok(collected)
+}
+
+/// Send `requests` and close the request stream, returning every response.
+async fn derender_stream(
+    requests: Vec<pb::DerenderChatStreamRequest>,
+) -> Result<Vec<pb::DerenderChatStreamResponse>, tonic::Status> {
+    let (mut client, _server) = render_grpc_client().await;
+    let responses = client.derender_chat_stream(futures::stream::iter(requests)).await?;
+    collect_derender_stream(responses.into_inner()).await
+}
+
+/// Derender `outputs` after `start`, merging the responses into one: text and
+/// logprobs concatenated, tool-call deltas folded per index, and the last
+/// response's finish info.
+async fn derender(
+    start: pb::DerenderChatStart,
+    outputs: Vec<pb::SequenceOutput>,
+) -> Result<pb::DerenderChatStreamResponse, tonic::Status> {
+    let requests = std::iter::once(derender_stream_start(start))
+        .chain(outputs.into_iter().map(derender_stream_output))
+        .collect();
+    let mut merged = pb::DerenderChatStreamResponse::default();
+    for response in derender_stream(requests).await? {
+        merged.content.push_str(&response.content);
+        merged.reasoning.push_str(&response.reasoning);
+        for delta in response.tool_calls {
+            match merged.tool_calls.iter_mut().find(|call| call.index == delta.index) {
+                Some(call) => call.arguments.push_str(&delta.arguments),
+                None => merged.tool_calls.push(delta),
+            }
+        }
+        merged.logprobs.extend(response.logprobs);
+        merged.num_reasoning_tokens = response.num_reasoning_tokens;
+        merged.finish_info = response.finish_info;
+    }
+    Ok(merged)
+}
+
+#[tokio::test]
+async fn derender_chat_stream_parses_reasoning_and_tool_calls() {
+    let mut token_ids = render_token_ids(
+        "<think>Need tool.</think>\
+         <tool_call>\n{\"name\":\"get_weather\", \"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
+    );
+    token_ids.push(RENDER_EOS_TOKEN_ID);
+    // Split mid-markup, so the parsers see partial input.
+    let tail = token_ids.split_off(30);
+
+    let mut response = derender(
+        derender_start(weather_chat_request()).await,
+        vec![
+            pb::SequenceOutput {
+                token_ids,
+                ..Default::default()
+            },
+            pb::SequenceOutput {
+                token_ids: tail,
+                finish_info: Some(render_eos_finish_info()),
+                ..Default::default()
+            },
+        ],
+    )
+    .await
+    .expect("derender");
+
+    for call in &mut response.tool_calls {
+        assert!(call.id.starts_with("call_"), "{}", call.id);
+        call.id = "<placeholder>".to_string();
+    }
+    expect_test::expect![[r#"
+        DerenderChatStreamResponse {
+            content: "",
+            reasoning: "Need tool.",
+            tool_calls: [
+                ChatToolCallDelta {
+                    index: 0,
+                    id: "<placeholder>",
+                    name: "get_weather",
+                    arguments: "{\"city\":\"Paris\"}",
+                },
+            ],
+            num_reasoning_tokens: 10,
+            logprobs: [],
+            finish_info: Some(
+                FinishInfo {
+                    num_output_tokens: 90,
+                    finish_reason: Stop,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    num_cached_tokens: None,
+                    stop_reason: Some(
+                        EosTokenId(
+                            61456,
+                        ),
+                    ),
+                },
+            ),
+        }
+    "#]]
+    .assert_debug_eq(&response);
+}
+
+#[tokio::test]
+async fn derender_chat_stream_decodes_output_logprobs() {
+    let candidate = |id: u32, logprob: f32, rank: u32| pb::candidate_token_info::TokenInfo {
+        id,
+        logprob,
+        rank,
+    };
+
+    let response = derender(
+        derender_start(weather_chat_request()).await,
+        vec![pb::SequenceOutput {
+            token_ids: vec![u32::from(b'h'), u32::from(b'i'), RENDER_EOS_TOKEN_ID],
+            logprobs: vec![-0.1, -0.2, -0.3],
+            ranks: vec![1, 2, 1],
+            candidate_tokens: vec![
+                pb::CandidateTokenInfo {
+                    tokens: vec![candidate(u32::from(b'h'), -0.1, 1)],
+                },
+                pb::CandidateTokenInfo {
+                    tokens: vec![candidate(u32::from(b'o'), -0.15, 1)],
+                },
+                pb::CandidateTokenInfo { tokens: vec![] },
+            ],
+            finish_info: Some(render_eos_finish_info()),
+            ..Default::default()
+        }],
+    )
+    .await
+    .expect("derender");
+
+    assert_eq!(response.content, "hi");
+    expect_test::expect![[r#"
+        [
+            TokenLogprobs {
+                tokens: [
+                    DecodedTokenLogprob {
+                        id: 104,
+                        token: "h",
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                    DecodedTokenLogprob {
+                        id: 104,
+                        token: "h",
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                ],
+            },
+            TokenLogprobs {
+                tokens: [
+                    DecodedTokenLogprob {
+                        id: 105,
+                        token: "i",
+                        logprob: -0.2,
+                        rank: 2,
+                    },
+                    DecodedTokenLogprob {
+                        id: 111,
+                        token: "o",
+                        logprob: -0.15,
+                        rank: 1,
+                    },
+                ],
+            },
+            TokenLogprobs {
+                tokens: [
+                    DecodedTokenLogprob {
+                        id: 61456,
+                        token: "<|im_end|>",
+                        logprob: -0.3,
+                        rank: 1,
+                    },
+                ],
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&response.logprobs);
+}
+
+/// Chunks of GenerateStream decode into deltas as they arrive, ending with
+/// the finish info.
+#[tokio::test]
+async fn derender_chat_stream_yields_deltas_then_finish() {
+    let (mut client, _server) = render_grpc_client().await;
+    let (requests, request_stream) = futures::channel::mpsc::unbounded();
+    requests
+        .unbounded_send(derender_stream_start(
+            derender_start(plain_chat_request()).await,
+        ))
+        .unwrap();
+    let mut responses = client
+        .derender_chat_stream(request_stream)
+        .await
+        .expect("derender stream")
+        .into_inner();
+    let mut next_response = async || {
+        tokio::time::timeout(Duration::from_secs(5), responses.message())
+            .await
+            .expect("timed out waiting for a DerenderChatStream response")
+            .expect("response")
+    };
+
+    let mut deltas = Vec::new();
+    // A NOT_FINISHED finish info does not end the output.
+    for (text, finish_info) in [("Hello", Some(pb::FinishInfo::default())), (" world", None)] {
+        requests
+            .unbounded_send(derender_stream_output(plain_output(text, finish_info)))
+            .unwrap();
+        let response = next_response().await.expect("delta");
+        assert_eq!(response.finish_info, None);
+        deltas.push(response.content);
+    }
+    let mut last = render_token_ids("!");
+    last.push(RENDER_EOS_TOKEN_ID);
+    requests
+        .unbounded_send(derender_stream_output(pb::SequenceOutput {
+            token_ids: last,
+            finish_info: Some(pb::FinishInfo {
+                num_cached_tokens: Some(16),
+                ..render_eos_finish_info()
+            }),
+            ..Default::default()
+        }))
+        .unwrap();
+    let response = next_response().await.expect("final response");
+    deltas.push(response.content);
+
+    assert_eq!(deltas.concat(), "Hello world!");
+    assert!(deltas.iter().all(|delta| !delta.is_empty()), "{deltas:?}");
+    let finish_info = response.finish_info.expect("finish_info");
+    assert_eq!(
+        finish_info.stop_reason,
+        Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID))
+    );
+    assert_eq!(finish_info.num_output_tokens, 13);
+    assert_eq!(finish_info.num_cached_tokens, Some(16));
+    assert_eq!(next_response().await, None);
+}
+
+/// A stop string spanning chunks is held back and cut, and the server ends
+/// the stream while the request stream is still open, so the client can
+/// cancel Generate.
+#[tokio::test]
+async fn derender_chat_stream_ends_at_stop_string() {
+    let (mut client, _server) = render_grpc_client().await;
+    let (requests, request_stream) = futures::channel::mpsc::unbounded();
+    requests
+        .unbounded_send(derender_stream_start(pb::DerenderChatStart {
+            stop_strings: vec!["END".to_string()],
+            ..derender_start(plain_chat_request()).await
+        }))
+        .unwrap();
+    for text in ["Sunny E", "ND and"] {
+        requests
+            .unbounded_send(derender_stream_output(plain_output(text, None)))
+            .unwrap();
+    }
+
+    let responses = client.derender_chat_stream(request_stream).await.expect("derender stream");
+    let responses = collect_derender_stream(responses.into_inner()).await.expect("responses");
+    drop(requests);
+
+    let content: String = responses.iter().map(|response| response.content.as_str()).collect();
+    assert_eq!(content, "Sunny ");
+    let finish_info = responses.last().and_then(|response| response.finish_info.as_ref());
+    assert_eq!(
+        finish_info.and_then(|info| info.stop_reason.clone()),
+        Some(pb::finish_info::StopReason::StopString("END".to_string()))
+    );
 }
 
 /// The output is cut where the first requested stop string completes, as when
 /// Generate ran without detokenizing.
 #[tokio::test]
-async fn derender_chat_cuts_output_at_stop_string() {
-    let response = derender_chat(pb::DerenderChatRequest {
-        output: Some(plain_output("Sunny. Then rain!", None)),
-        stop_strings: vec!["!".to_string(), ".".to_string()],
-        ..Default::default()
-    })
-    .await;
+async fn derender_chat_stream_cuts_output_at_first_stop_string() {
+    let response = derender(
+        pb::DerenderChatStart {
+            stop_strings: vec!["!".to_string(), ".".to_string()],
+            ..derender_start(plain_chat_request()).await
+        },
+        vec![plain_output("Sunny. Then rain!", None)],
+    )
+    .await
+    .expect("derender");
 
     assert_eq!(response.content, "Sunny");
     expect_test::expect![[r#"
@@ -3739,79 +3896,85 @@ async fn derender_chat_cuts_output_at_stop_string() {
     .assert_debug_eq(&response.finish_info);
 }
 
-/// Special tokens are dropped from the text unless `skip_special_tokens` is
-/// false.
+/// A stop string that Generate matched and reported cuts the text, and
+/// `include_stop_strings` keeps it.
 #[tokio::test]
-async fn derender_chat_honors_skip_special_tokens() {
-    let output = || {
-        let mut token_ids = render_token_ids("a");
-        token_ids.push(RENDER_EOS_TOKEN_ID);
-        token_ids.extend(render_token_ids("b"));
-        pb::SequenceOutput {
-            token_ids,
-            ..Default::default()
-        }
+async fn derender_chat_stream_applies_reported_stop_string() {
+    let start = pb::DerenderChatStart {
+        stop_strings: vec!["!".to_string()],
+        ..derender_start(plain_chat_request()).await
     };
-
-    let skipped = derender_chat(pb::DerenderChatRequest {
-        output: Some(output()),
-        ..Default::default()
-    })
-    .await;
-    let kept = derender_chat(pb::DerenderChatRequest {
-        output: Some(output()),
-        skip_special_tokens: Some(false),
-        ..Default::default()
-    })
-    .await;
-
-    assert_eq!(skipped.content, "ab");
-    assert_eq!(kept.content, "a<|im_end|>b");
-}
-
-/// A stop string reported by Generate cuts the text without being requested
-/// again, and `include_stop_strings` keeps it.
-#[tokio::test]
-async fn derender_chat_applies_reported_stop_string() {
     let output = plain_output("Sunny!", Some(stop_string_finish_info("!")));
 
-    let cut = derender_chat(pb::DerenderChatRequest {
-        output: Some(output.clone()),
-        ..Default::default()
-    })
-    .await;
-    let kept = derender_chat(pb::DerenderChatRequest {
-        output: Some(output),
-        include_stop_strings: true,
-        ..Default::default()
-    })
-    .await;
+    let cut = derender(start.clone(), vec![output.clone()]).await.expect("derender");
+    let kept = derender(
+        pb::DerenderChatStart {
+            include_stop_strings: true,
+            ..start
+        },
+        vec![output],
+    )
+    .await
+    .expect("derender");
 
     assert_eq!(cut.content, "Sunny");
     assert_eq!(kept.content, "Sunny!");
 }
 
 #[tokio::test]
-async fn derender_chat_ignores_stop_strings_within_min_new_tokens() {
-    let response = derender_chat(pb::DerenderChatRequest {
-        output: Some(plain_output("a.b.c", None)),
-        stop_strings: vec![".".to_string()],
-        min_new_tokens: 3,
-        ..Default::default()
-    })
-    .await;
+async fn derender_chat_stream_ignores_stop_strings_within_min_new_tokens() {
+    let response = derender(
+        pb::DerenderChatStart {
+            stop_strings: vec![".".to_string()],
+            min_new_tokens: 3,
+            ..derender_start(plain_chat_request()).await
+        },
+        vec![plain_output("a.b.c", None)],
+    )
+    .await
+    .expect("derender");
 
     assert_eq!(response.content, "a.b");
 }
 
+/// Special tokens are dropped from the text unless `skip_special_tokens` is
+/// false.
 #[tokio::test]
-async fn derender_chat_reports_length_without_finish_info() {
-    let response = derender_chat(pb::DerenderChatRequest {
-        output: Some(plain_output("ok", None)),
+async fn derender_chat_stream_honors_skip_special_tokens() {
+    let mut token_ids = render_token_ids("a");
+    token_ids.push(RENDER_EOS_TOKEN_ID);
+    token_ids.extend(render_token_ids("b"));
+    let output = pb::SequenceOutput {
+        token_ids,
         ..Default::default()
-    })
-    .await;
+    };
+    let start = derender_start(plain_chat_request()).await;
 
+    let skipped = derender(start.clone(), vec![output.clone()]).await.expect("derender");
+    let kept = derender(
+        pb::DerenderChatStart {
+            skip_special_tokens: Some(false),
+            ..start
+        },
+        vec![output],
+    )
+    .await
+    .expect("derender");
+
+    assert_eq!(skipped.content, "ab");
+    assert_eq!(kept.content, "a<|im_end|>b");
+}
+
+#[tokio::test]
+async fn derender_chat_stream_closed_early_finishes_with_length() {
+    let response = derender(
+        derender_start(plain_chat_request()).await,
+        vec![plain_output("ok", None)],
+    )
+    .await
+    .expect("derender");
+
+    assert_eq!(response.content, "ok");
     let finish_info = response.finish_info.expect("finish_info");
     assert_eq!(
         finish_info.finish_reason(),
@@ -3823,11 +3986,12 @@ async fn derender_chat_reports_length_without_finish_info() {
 /// Fields that decoding does not change, such as the KV transfer parameters of
 /// a disaggregated prefill, pass through from Generate's finish info.
 #[tokio::test]
-async fn derender_chat_keeps_generate_finish_info() {
+async fn derender_chat_stream_keeps_generate_finish_info() {
     let mut token_ids = render_token_ids("ok");
     token_ids.push(RENDER_EOS_TOKEN_ID);
-    let response = derender_chat(pb::DerenderChatRequest {
-        output: Some(pb::SequenceOutput {
+    let response = derender(
+        derender_start(plain_chat_request()).await,
+        vec![pb::SequenceOutput {
             token_ids,
             finish_info: Some(pb::FinishInfo {
                 num_output_tokens: 3,
@@ -3838,10 +4002,10 @@ async fn derender_chat_keeps_generate_finish_info() {
                 ..render_eos_finish_info()
             }),
             ..Default::default()
-        }),
-        ..Default::default()
-    })
-    .await;
+        }],
+    )
+    .await
+    .expect("derender");
 
     expect_test::expect![[r#"
         Some(
@@ -3876,252 +4040,228 @@ async fn derender_chat_keeps_generate_finish_info() {
     .assert_debug_eq(&response.finish_info);
 }
 
-/// Generate and Detokenize disagree on where the output stopped, for example
-/// when `min_new_tokens` differs from Generate's `min_tokens`.
-#[tokio::test]
-async fn derender_chat_rejects_unmatched_reported_stop_string() {
-    let status = render_service()
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(plain_chat_request()),
-            output: Some(plain_output("a.b", Some(stop_string_finish_info(".")))),
-            min_new_tokens: 3,
-            ..Default::default()
-        }))
-        .await
-        .expect_err("unmatched stop string");
-
-    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
-}
-
-#[tokio::test]
-async fn derender_chat_rejects_empty_stop_string() {
-    let status = render_service()
-        .derender_chat(tonic::Request::new(pb::DerenderChatRequest {
-            chat: Some(plain_chat_request()),
-            stop_strings: vec![String::new()],
-            ..Default::default()
-        }))
-        .await
-        .expect_err("empty stop string");
-
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-}
-
-async fn render_grpc_client() -> (
-    pb::render_client::RenderClient<Channel>,
-    tokio::task::JoinHandle<()>,
-) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
-    let addr = listener.local_addr().expect("local addr");
-    let server_task = tokio::spawn(async move {
-        TonicServer::builder()
-            .add_service(super::RenderGrpcService::new(render_service()))
-            .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
-            .await
-            .expect("grpc server");
-    });
-    let channel = Endpoint::from_shared(format!("http://{addr}"))
-        .expect("grpc endpoint")
-        .connect()
-        .await
-        .expect("connect grpc channel");
-    (pb::render_client::RenderClient::new(channel), server_task)
-}
-
-fn derender_chat_stream_start(
-    prompt_token_ids: Vec<u32>,
-    stop_strings: &[&str],
-) -> pb::DerenderChatStreamRequest {
-    pb::DerenderChatStreamRequest {
-        request: Some(pb::derender_chat_stream_request::Request::Start(Box::new(
-            pb::DerenderChatRequest {
-                chat: Some(plain_chat_request()),
-                prompt_token_ids,
-                stop_strings: stop_strings.iter().map(ToString::to_string).collect(),
-                ..Default::default()
-            },
-        ))),
-    }
-}
-
-fn derender_chat_stream_output(output: pb::SequenceOutput) -> pb::DerenderChatStreamRequest {
-    pb::DerenderChatStreamRequest {
-        request: Some(pb::derender_chat_stream_request::Request::Output(Box::new(
-            output,
-        ))),
-    }
-}
-
-async fn collect_derender_chat_stream(
-    mut responses: tonic::Streaming<pb::DerenderChatStreamResponse>,
-) -> Result<Vec<pb::DerenderChatStreamResponse>, tonic::Status> {
-    let mut collected = Vec::new();
-    while let Some(response) = tokio::time::timeout(Duration::from_secs(5), responses.message())
-        .await
-        .expect("timed out waiting for a DetokenizeStream response")?
-    {
-        collected.push(response);
-    }
-    Ok(collected)
-}
-
-/// Chunks of GenerateStream decode into deltas as they arrive, ending with
-/// the finish info.
-#[tokio::test]
-async fn derender_chat_stream_yields_deltas_then_finish() {
-    let (mut client, _server) = render_grpc_client().await;
-    let prompt_token_ids =
-        render_chat(&render_service(), plain_chat_request()).await.prompt_token_ids;
-    let (requests, request_stream) = futures::channel::mpsc::unbounded();
-    requests
-        .unbounded_send(derender_chat_stream_start(prompt_token_ids, &[]))
-        .unwrap();
-    let mut responses = client
-        .derender_chat_stream(request_stream)
-        .await
-        .expect("detokenize stream")
-        .into_inner();
-    let mut next_response = async || {
-        tokio::time::timeout(Duration::from_secs(5), responses.message())
-            .await
-            .expect("timed out waiting for a DetokenizeStream response")
-            .expect("response")
-    };
-
-    let mut deltas = Vec::new();
-    // A NOT_FINISHED finish info does not end the output.
-    for (text, finish_info) in [("Hello", Some(pb::FinishInfo::default())), (" world", None)] {
-        requests
-            .unbounded_send(derender_chat_stream_output(plain_output(text, finish_info)))
-            .unwrap();
-        let response = next_response().await.expect("delta");
-        assert_eq!(response.finish_info, None);
-        deltas.push(response.content);
-    }
-    let mut last = render_token_ids("!");
-    last.push(RENDER_EOS_TOKEN_ID);
-    requests
-        .unbounded_send(derender_chat_stream_output(pb::SequenceOutput {
-            token_ids: last,
-            finish_info: Some(pb::FinishInfo {
-                num_cached_tokens: Some(16),
-                ..render_eos_finish_info()
-            }),
-            ..Default::default()
-        }))
-        .unwrap();
-    let response = next_response().await.expect("final response");
-    deltas.push(response.content);
-
-    assert_eq!(deltas.concat(), "Hello world!");
-    assert!(deltas.iter().all(|delta| !delta.is_empty()), "{deltas:?}");
-    let finish_info = response.finish_info.expect("finish_info");
-    assert_eq!(
-        finish_info.stop_reason,
-        Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID))
-    );
-    assert_eq!(finish_info.num_output_tokens, 13);
-    assert_eq!(finish_info.num_cached_tokens, Some(16));
-    assert_eq!(next_response().await, None);
-}
-
-/// A stop string spanning chunks is held back and cut, and the server ends
-/// the stream so the client can cancel Generate.
-#[tokio::test]
-async fn derender_chat_stream_ends_at_stop_string() {
-    let (mut client, _server) = render_grpc_client().await;
-    let prompt_token_ids =
-        render_chat(&render_service(), plain_chat_request()).await.prompt_token_ids;
-    let (requests, request_stream) = futures::channel::mpsc::unbounded();
-    requests
-        .unbounded_send(derender_chat_stream_start(prompt_token_ids, &["END"]))
-        .unwrap();
-    requests
-        .unbounded_send(derender_chat_stream_output(plain_output("Sunny E", None)))
-        .unwrap();
-    requests
-        .unbounded_send(derender_chat_stream_output(plain_output("ND and", None)))
-        .unwrap();
-
-    let responses = client.derender_chat_stream(request_stream).await.expect("detokenize stream");
-    // The request stream stays open.
-    let responses = collect_derender_chat_stream(responses.into_inner()).await.expect("responses");
-    drop(requests);
-
-    let content: String = responses.iter().map(|response| response.content.as_str()).collect();
-    assert_eq!(content, "Sunny ");
-    let finish_info = responses.last().and_then(|response| response.finish_info.as_ref());
-    assert_eq!(
-        finish_info.and_then(|info| info.stop_reason.clone()),
-        Some(pb::finish_info::StopReason::StopString("END".to_string()))
-    );
-}
-
-#[tokio::test]
-async fn derender_chat_stream_closed_early_finishes_with_length() {
-    let (mut client, _server) = render_grpc_client().await;
-    let prompt_token_ids =
-        render_chat(&render_service(), plain_chat_request()).await.prompt_token_ids;
-    let requests = vec![
-        derender_chat_stream_start(prompt_token_ids, &[]),
-        derender_chat_stream_output(plain_output("ok", None)),
-    ];
-
-    let responses = client
-        .derender_chat_stream(futures::stream::iter(requests))
-        .await
-        .expect("detokenize stream");
-    let responses = collect_derender_chat_stream(responses.into_inner()).await.expect("responses");
-
-    let content: String = responses.iter().map(|response| response.content.as_str()).collect();
-    assert_eq!(content, "ok");
-    let finish_info = responses.last().and_then(|response| response.finish_info.as_ref());
-    assert_eq!(
-        finish_info.map(pb::FinishInfo::finish_reason),
-        Some(pb::finish_info::FinishReason::Length)
-    );
-}
-
 #[tokio::test]
 async fn derender_chat_stream_rejects_invalid_messages() {
-    let (mut client, _server) = render_grpc_client().await;
-    let prompt_token_ids =
-        render_chat(&render_service(), plain_chat_request()).await.prompt_token_ids;
+    let start = derender_start(plain_chat_request()).await;
     let cases = [
         (
             "output before start",
-            vec![derender_chat_stream_output(plain_output("ok", None))],
+            vec![derender_stream_output(plain_output("ok", None))],
         ),
         (
             "second start",
             vec![
-                derender_chat_stream_start(prompt_token_ids.clone(), &[]),
-                derender_chat_stream_start(prompt_token_ids.clone(), &[]),
+                derender_stream_start(start.clone()),
+                derender_stream_start(start.clone()),
+            ],
+        ),
+        (
+            "empty stop string",
+            vec![derender_stream_start(pb::DerenderChatStart {
+                stop_strings: vec![String::new()],
+                ..start.clone()
+            })],
+        ),
+        (
+            "misaligned logprobs",
+            vec![
+                derender_stream_start(start.clone()),
+                derender_stream_output(pb::SequenceOutput {
+                    token_ids: render_token_ids("hi"),
+                    logprobs: vec![-0.1],
+                    ranks: vec![1],
+                    ..Default::default()
+                }),
             ],
         ),
         // The text before a reported stop string may have been sent already.
         (
             "unrequested reported stop string",
             vec![
-                derender_chat_stream_start(prompt_token_ids.clone(), &[]),
-                derender_chat_stream_output(plain_output(
-                    "ok!",
-                    Some(stop_string_finish_info("!")),
-                )),
+                derender_stream_start(start.clone()),
+                derender_stream_output(plain_output("ok!", Some(stop_string_finish_info("!")))),
+            ],
+        ),
+        // Generate and derender disagree on where the output stopped, as when
+        // `min_new_tokens` differs from Generate's `min_tokens`.
+        (
+            "reported stop string within min_new_tokens",
+            vec![
+                derender_stream_start(pb::DerenderChatStart {
+                    stop_strings: vec![".".to_string()],
+                    min_new_tokens: 3,
+                    ..start.clone()
+                }),
+                derender_stream_output(plain_output("a.b", Some(stop_string_finish_info(".")))),
             ],
         ),
     ];
 
     for (name, requests) in cases {
-        let result = match client.derender_chat_stream(futures::stream::iter(requests)).await {
-            Ok(responses) => collect_derender_chat_stream(responses.into_inner()).await,
-            Err(status) => Err(status),
-        };
-        let status = result.expect_err(name);
+        let status = derender_stream(requests).await.expect_err(name);
         assert_eq!(
             status.code(),
             tonic::Code::InvalidArgument,
             "{name}: {status}"
         );
     }
+}
+
+/// Input the server cannot map is rejected rather than dropped or defaulted.
+#[tokio::test]
+async fn render_chat_rejects_unset_parts_and_unknown_enum_values() {
+    use pb::chat_content_part::Part;
+
+    let unknown = 99;
+    let with_part = |part| pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![pb::ChatContentPart { part }],
+            },
+        ))],
+        ..weather_chat_request()
+    };
+    let cases = [
+        ("unset part", with_part(None)),
+        (
+            "image detail",
+            with_part(Some(Part::ImageUrl(pb::ChatImageUrl {
+                url: TINY_PNG_DATA_URI.to_string(),
+                detail: unknown,
+                ..Default::default()
+            }))),
+        ),
+        (
+            "generation prompt mode",
+            pb::ChatRequest {
+                generation_prompt_mode: unknown,
+                ..weather_chat_request()
+            },
+        ),
+        (
+            "tool choice mode",
+            pb::ChatRequest {
+                tool_choice: Some(pb::ChatToolChoice {
+                    choice: Some(pb::chat_tool_choice::Choice::Mode(unknown)),
+                }),
+                ..weather_chat_request()
+            },
+        ),
+        (
+            "truncation side",
+            pb::ChatRequest {
+                truncation: Some(pb::PromptTruncation {
+                    limit: Some(pb::prompt_truncation::Limit::MaxTokens(4)),
+                    side: unknown,
+                }),
+                ..weather_chat_request()
+            },
+        ),
+    ];
+    let service = render_service();
+
+    for (case, chat) in cases {
+        let status = service
+            .render_chat(tonic::Request::new(pb::RenderChatRequest {
+                chat: Some(chat),
+                ..Default::default()
+            }))
+            .await
+            .expect_err(case);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{case}");
+    }
+}
+
+/// Media that cannot be decoded is the client's error, as in HTTP render.
+#[tokio::test]
+async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
+    use pb::chat_content_part::Part;
+
+    let chat = pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![pb::ChatContentPart {
+                    part: Some(Part::ImageUrl(pb::ChatImageUrl {
+                        url: "data:image/png;base64,bm90IGFuIGltYWdl".to_string(),
+                        ..Default::default()
+                    })),
+                }],
+            },
+        ))],
+        ..Default::default()
+    };
+
+    let status = multimodal_render_service()
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(chat),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("undecodable image");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+/// Tools sent while tool parsing is disabled are the client's error, as in
+/// HTTP chat completions.
+#[tokio::test]
+async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
+    let state = render_state();
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        chat: state.chat.with_parser_selections(
+            vllm_chat::ParserSelection::None,
+            vllm_chat::ParserSelection::None,
+        ),
+        ..state
+    }));
+
+    let status = service
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(weather_chat_request()),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("tools need a tool parser");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+/// Shutdown ends open health watches, including one on the overall server
+/// status, so the render gRPC server's drain finishes.
+#[tokio::test]
+async fn render_grpc_server_shutdown_ends_health_watches() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let server = tokio::spawn(crate::render::serve_render_grpc(
+        Arc::new(render_state()),
+        MaybeTlsListener::plain(Listener::Tcp(listener)),
+        shutdown.clone(),
+    ));
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    // Held until the server stops: dropping the client could close the
+    // connection and end the watch on its own.
+    let mut client = HealthClient::new(channel);
+    let mut watch = client
+        .watch(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .expect("watch overall health")
+        .into_inner();
+    let first = watch.message().await.expect("watch message").expect("status");
+    assert_eq!(first.status, HealthServingStatus::Serving as i32);
+
+    shutdown.cancel();
+
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("server drains")
+        .expect("server task")
+        .expect("server result");
+    drop(client);
 }

@@ -4,7 +4,7 @@
 
 At concurrency 1 with DSpark, every target MoE layer applies its routed experts
 to six rows (384 experts, top-6; at TP4 every rank holds all experts at
-intermediate 576, padded to 640). ``TrtLlmMxfp4ExpertsModular`` runs FlashInfer's
+intermediate 576, padded to 640). The modular TRTLLM experts run FlashInfer's
 TRT-LLM-gen routing kernel and two batched MXFP8 x MXFP4 GEMMs; at this size they
 stream the weights of about 22 experts per layer, so their cost is HBM time plus
 fixed per-kernel latency. This module computes the same values from the same
@@ -17,24 +17,28 @@ or 192 rows, and GEMM1 gathers each tile's rows)::
                                                   ▼
                          GEMM1 ─► h (MXFP8) ─► GEMM2 ─► unweighted permuted rows
                                                           │
-       UnfinalizedMoEOutput (fused all-reduce + mHC) ◄────┘
+       UnfinalizedMoEOutput (fused all-reduce + mHC) ◄────┤
+                                finalize ─► BF16 output ◄─┘
 
-* ``routed_expert_route_cute.py`` builds the expert-major, 8-row-tile
+* `routed_expert_route_cute.py` builds the expert-major, 8-row-tile
   permutation and the per-tile record both GEMMs read, as FlashInfer's routing
   kernel does with precomputed ids and an 8-token tile.
-* ``routed_expert_gemm_cute.py`` holds GEMM1 and GEMM2: persistent 128 x 8
-  ``tcgen05`` block-scaled tiles over the (weight tile, token tile) work items
+* `routed_expert_gemm_cute.py` holds GEMM1 and GEMM2: persistent 128 x 8
+  `tcgen05` block-scaled tiles over the (weight tile, token tile) work items
   of the record, with evict-first hints on the expert weights. GEMM1 skips the
   zero padding tile of the 576-wide slice. Their numerics are those of the
-  TRT-LLM-gen ``t128x8`` tactics.
-* ``routed_expert_front_cute.py`` replaces the DSv4 top-k (Triton), the MXFP8
+  TRT-LLM-gen `t128x8` tactics.
+* `routed_expert_front_cute.py` replaces the DSv4 top-k (Triton), the MXFP8
   quantization of the routed input and the route kernel with one launch whose
   outputs are bitwise those of the three; it is built for the target's 384
   experts and top-6.
+* `routed_expert_finalize_cute.py` reduces GEMM2's rows over the top-k as
+  FlashInfer's small-batch finalize does, for layers that finalize locally (the
+  DSpark draft).
 
 The kernels read the tensors vLLM prepares for the TRT-LLM-gen MXFP4 backend:
-``w13`` [E, 1280, 2560] u8 (interleaved up/gate rows shuffled for 128-row
-epilogue tiles) with [E, 1280, 160] scales in the 128x4 layout, ``w2``
+`w13` [E, 1280, 2560] u8 (interleaved up/gate rows shuffled for 128-row
+epilogue tiles) with [E, 1280, 160] scales in the 128x4 layout, `w2`
 [E, 5120, 320] u8 with [E, 5120, 20] scales, and the per-expert SwiGLU clamp.
 Each kernel is compiled once per device when the layers are bound (shapes,
 expert counts and the routing record are launch arguments) and launched on the
@@ -61,6 +65,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
+from .routed_expert_finalize_cute import RoutedExpertFinalize
 from .routed_expert_front_cute import RoutedExpertFront
 from .routed_expert_gemm_cute import (
     RoutedExpertGemm1,
@@ -94,14 +99,14 @@ WIDTHS = tuple(w for w in (8, 16, 32, 64, 128, 192) if w <= MAX_ROWS)
 
 
 def width(rows: int) -> int:
-    """The kernels' build for calls of ``rows`` rows: the narrowest that
+    """The kernels' build for calls of `rows` rows: the narrowest that
     fits."""
     return next(w for w in WIDTHS if rows <= w)
 
 
 def padding_mask(rows: int) -> torch.Tensor | None:
-    """The CUDA graph padding rows of this forward's first ``rows`` (bool),
-    the mask the stock router applies with ``VLLM_MOE_SKIP_PADDING``; None
+    """The CUDA graph padding rows of this forward's first `rows` (bool),
+    the mask the stock router applies with `VLLM_MOE_SKIP_PADDING`; None
     without one."""
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
         is_padding = get_forward_context().is_padding
@@ -110,24 +115,24 @@ def padding_mask(rows: int) -> torch.Tensor | None:
 
 
 def max_ctas(rows: int, top_k: int, experts: int) -> int:
-    """The most 8-row token tiles any routing of ``rows * top_k`` slots needs."""
+    """The most 8-row token tiles any routing of `rows * top_k` slots needs."""
     slots = rows * top_k
     filled = min(experts, slots)
     return filled + (slots - filled) // TILE
 
 
 def cta_words(ctas: int) -> int:
-    """``ctas`` rounded up to a multiple of four (the record's table width)."""
+    """`ctas` rounded up to a multiple of four (the record's table width)."""
     return (ctas + 3) // 4 * 4
 
 
 def route_words(ctas: int) -> int:
-    """int32 length of the routing record for ``ctas`` token tiles (its
-    layout is in ``routed_expert_route_cute.py``)."""
+    """int32 length of the routing record for `ctas` token tiles (its
+    layout is in `routed_expert_route_cute.py`)."""
     return 4 + 3 * cta_words(ctas) + TILE * ctas
 
 
-@dataclass
+@dataclass(slots=True)
 class FrontConfig:
     """The router's DSv4 top-k parameters the fused front applies."""
 
@@ -137,9 +142,9 @@ class FrontConfig:
     scale: float  # routed scaling factor of the normalized weights
 
 
-@dataclass
+@dataclass(slots=True)
 class Routing:
-    """What GEMM1 and GEMM2 read, from ``route`` or ``front``."""
+    """What GEMM1 and GEMM2 read, from `route` or `front`."""
 
     x_quant: torch.Tensor  # MXFP8 activations [rows, 5120]
     x_scale: torch.Tensor  # their UE8M0 scales, linear layout
@@ -151,8 +156,8 @@ class Routing:
 
 
 class RoutedExpertGemm:
-    """The route kernel (or fused front) and GEMM pair bound to one MoE
-    layer's TRT-LLM-gen MXFP4 experts (see the module docstring)."""
+    """The route kernel (or fused front), GEMM pair and finalize bound to one
+    MoE layer's TRT-LLM-gen MXFP4 experts (see the module docstring)."""
 
     def __init__(
         self,
@@ -177,6 +182,7 @@ class RoutedExpertGemm:
             _route_kernel(self.device_index, built)
         _gemm1_kernel(self.device_index)
         _gemm2_kernel(self.device_index)
+        _finalize_kernel(self.device_index)
         # The modular kernel's input quantization, reused so the activations
         # match its path bit for bit.
         self.prepare_finalize = prepare_finalize
@@ -186,14 +192,14 @@ class RoutedExpertGemm:
         self.clamp = clamp
 
     def set_front(self, config: FrontConfig) -> None:
-        """Use the fused front with the router's ``config``."""
+        """Use the fused front with the router's `config`."""
         for built in WIDTHS:
             _front_kernel(self.device_index, config.bias_vl is not None, built)
         self.front_config = config
 
     def accepts(self, x: torch.Tensor, runner: torch.nn.Module) -> bool:
-        """Whether a call with router input ``x`` can take these kernels: 1 to
-        ``MAX_ROWS`` BF16 rows, and the runner's expert weights still the
+        """Whether a call with router input `x` can take these kernels: 1 to
+        `MAX_ROWS` BF16 rows, and the runner's expert weights still the
         tensors bound here (a weight reload replaces them)."""
         return (
             1 <= x.size(0) <= MAX_ROWS
@@ -210,8 +216,8 @@ class RoutedExpertGemm:
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> Routing:
-        """Quantize ``x`` as the modular kernel does and launch the route kernel
-        on the router's top-k (``topk_weights`` FP32)."""
+        """Quantize `x` as the modular kernel does and launch the route kernel
+        on the router's top-k (`topk_weights` FP32)."""
         rows, top_k = topk_ids.shape
         x_quant, x_scale, *_ = self.prepare_finalize.prepare(
             x,
@@ -246,10 +252,10 @@ class RoutedExpertGemm:
     ) -> Routing:
         """Top-k, MXFP8 quantization and routing record in one launch.
 
-        ``x``: BF16 router input [rows, 5120]; ``logits``: FP32 router logits
-        [rows, 384]; ``input_ids``: [rows] int32 or int64, read only with image
-        routing; ``is_padding``: bool [rows], rows no expert computes (ids -1,
-        weights 0), as the router's padding mask (:func:`padding_mask`).
+        `x`: BF16 router input [rows, 5120]; `logits`: FP32 router logits
+        [rows, 384]; `input_ids`: [rows] int32 or int64, read only with image
+        routing; `is_padding`: bool [rows], rows no expert computes (ids -1,
+        weights 0), as the router's padding mask (`padding_mask`).
         """
         config = self.front_config
         assert config is not None
@@ -290,7 +296,7 @@ class RoutedExpertGemm:
         return Routing(x_quant, x_scale, topk_ids, topk_weights, permuted, record, ctas)
 
     def gemms(self, routing: Routing) -> UnfinalizedMoEOutput:
-        """Launch GEMM1 and GEMM2 right after the kernel that built ``routing``."""
+        """Launch GEMM1 and GEMM2 right after the kernel that built `routing`."""
         return self.gemm2(routing, *self.gemm1(routing))
 
     def gemm1(self, routing: Routing) -> tuple[torch.Tensor, torch.Tensor]:
@@ -349,9 +355,28 @@ class RoutedExpertGemm:
             expanded_idx_to_permuted_idx=routing.permuted,
         )
 
+    def finalize(self, routed: UnfinalizedMoEOutput) -> torch.Tensor:
+        """Reduce GEMM2's rows over the top-k: BF16 [rows, 5120]."""
+        rows, top_k = routed.expert_weights.shape
+        output = torch.empty(
+            (rows, HIDDEN),
+            dtype=torch.bfloat16,
+            device=routed.gemm2_permuted.device,
+        )
+        _finalize_kernel(self.device_index)(
+            _pointer(cutlass.BFloat16, routed.gemm2_permuted, 16),
+            _pointer(cutlass.Int32, routed.expanded_idx_to_permuted_idx, 4),
+            _pointer(cutlass.Float32, routed.expert_weights, 4),
+            _pointer(cutlass.BFloat16, output, 16),
+            Int32(rows),
+            Int32(top_k),
+            current_cu_stream(),
+        )
+        return output
+
 
 def _pointer(dtype: type[cutlass.Numeric], tensor: torch.Tensor, align: int):
-    """A CuTe DSL global-memory pointer to ``tensor``'s data."""
+    """A CuTe DSL global-memory pointer to `tensor`'s data."""
     return make_ptr(
         dtype, tensor.data_ptr(), cute.AddressSpace.gmem, assumed_align=align
     )
@@ -364,8 +389,8 @@ def _fake(dtype: type[cutlass.Numeric], align: int):
 
 @cache
 def _route_kernel(device_index: int, built: int):
-    """``RoutedExpertRoute`` compiled for a device and calls of up to
-    ``built`` rows."""
+    """`RoutedExpertRoute` compiled for a device and calls of up to
+    `built` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertRoute(levels_for(built)),
@@ -381,8 +406,8 @@ def _route_kernel(device_index: int, built: int):
 
 @cache
 def _front_kernel(device_index: int, image: bool, built: int):
-    """``RoutedExpertFront`` compiled for a device, with or without image
-    routing, for calls of up to ``built`` rows."""
+    """`RoutedExpertFront` compiled for a device, with or without image
+    routing, for calls of up to `built` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertFront(image, built),
@@ -409,7 +434,7 @@ def _front_kernel(device_index: int, image: bool, built: int):
 
 @cache
 def _gemm1_kernel(device_index: int):
-    """``RoutedExpertGemm1`` compiled for a device."""
+    """`RoutedExpertGemm1` compiled for a device."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertGemm1(HIDDEN, SLICE, PADDED),
@@ -432,7 +457,7 @@ def _gemm1_kernel(device_index: int):
 
 @cache
 def _gemm2_kernel(device_index: int):
-    """``RoutedExpertGemm2`` compiled for a device."""
+    """`RoutedExpertGemm2` compiled for a device."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertGemm2(HIDDEN, PADDED, 2 * SLICE // 128),
@@ -451,6 +476,22 @@ def _gemm2_kernel(device_index: int):
 
 
 @cache
+def _finalize_kernel(device_index: int):
+    """`RoutedExpertFinalize` compiled for a device."""
+    with torch.accelerator.device_index(device_index):
+        return cute.compile(
+            RoutedExpertFinalize(),
+            _fake(cutlass.BFloat16, 16),
+            _fake(cutlass.Int32, 4),
+            _fake(cutlass.Float32, 4),
+            _fake(cutlass.BFloat16, 16),
+            Int32(1),
+            Int32(TOP_K),
+            make_fake_stream(),
+        )
+
+
+@cache
 def _sm_count(device_index: int) -> int:
     """Streaming multiprocessors of a device: the persistent GEMMs' CTAs."""
     return torch.cuda.get_device_properties(device_index).multi_processor_count
@@ -464,7 +505,7 @@ def check_weights(
     clamp: torch.Tensor | None,
     top_k: int,
 ) -> None:
-    """Raise ``ValueError`` unless the weights have the layout the kernels read
+    """Raise `ValueError` unless the weights have the layout the kernels read
     and the routing fits the route kernel."""
     experts = w13.size(0)
     for tensor, shape in (
@@ -510,11 +551,14 @@ def _unsupported_reason(runner: torch.nn.Module) -> str | None:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
         TrtLlmMxfp4ExpertsModular,
+        TrtLlmMxfp4Mxfp8ExpertsModular,
     )
 
     kernel = runner.routed_experts.quant_method.moe_kernel
     impl = kernel.fused_experts if kernel is not None else None
-    if not isinstance(impl, TrtLlmMxfp4ExpertsModular):
+    if not isinstance(
+        impl, (TrtLlmMxfp4ExpertsModular, TrtLlmMxfp4Mxfp8ExpertsModular)
+    ):
         return f"experts kernel {type(impl).__name__}"
     config = impl.moe_config
     quant = impl.quant_config
@@ -574,7 +618,7 @@ def _front_config(runner: torch.nn.Module) -> FrontConfig | str:
 def front_applies(gemm: RoutedExpertGemm, runner: torch.nn.Module) -> bool:
     """Whether the fused front may replace the router's top-k this call: the
     router's biases are the tensors the front reads, and no routed-expert
-    capture hook (which only ``select_experts`` feeds) is set."""
+    capture hook (which only `select_experts` feeds) is set."""
     config = gemm.front_config
     router = runner.router
     if (
@@ -595,11 +639,12 @@ def front_applies(gemm: RoutedExpertGemm, runner: torch.nn.Module) -> bool:
 
 
 def build_routed_expert_gemms(
-    runners: list[torch.nn.Module],
+    runners: list[torch.nn.Module], fused_front: bool = True
 ) -> list[RoutedExpertGemm | None]:
-    """A ``RoutedExpertGemm`` for each MoE runner that supports it (None for the
-    others), with the fused front where the router allows it. Needs the MoE
-    kernels that the loader's per-layer quantization finalize builds."""
+    """A `RoutedExpertGemm` for each MoE runner that supports it (None for the
+    others); with `fused_front`, with the fused front where the router allows
+    it. Needs the MoE kernels that the loader's per-layer quantization finalize
+    builds."""
     reasons: Counter[str] = Counter()
     gemms: list[RoutedExpertGemm | None] = []
     fronts = 0
@@ -625,7 +670,7 @@ def build_routed_expert_gemms(
                 )
             except ValueError as error:
                 reasons[str(error)] += 1
-        if gemm is not None:
+        if gemm is not None and fused_front:
             front = _front_config(runner)
             if isinstance(front, str):
                 reasons[f"fused front: {front}"] += 1

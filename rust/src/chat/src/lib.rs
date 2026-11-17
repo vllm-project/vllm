@@ -22,7 +22,7 @@ pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
     AssistantToolCall, ChatEvent, ChatTokenUsage,
 };
-use futures::{StreamExt, TryStreamExt as _};
+use futures::{Stream, StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
 pub use multimodal::{mm_request_span, mm_timing_layer};
 use output::apply_output_grammar;
@@ -39,8 +39,8 @@ pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
-    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, MediaPartSource,
-    RenderedPrompt, RendererSelection,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, KimiK3Variant,
+    MediaPartSource, RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -64,23 +64,24 @@ mod stream;
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::time::Instant;
 
-use futures::Stream;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::{GenerateOutput, GeneratePromptInfo, Llm, Logprobs};
+use vllm_metrics::{METRICS, RenderRequestType};
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
     backend: DynChatBackend,
-    /// Effective model dtype reported by the engine.
-    /// Absent for text-only frontends without an engine handshake.
+    /// Effective model dtype that media tensors are encoded in; multimodal
+    /// requests are rejected without one.
     model_dtype: Option<ModelDtype>,
-    /// Effective runtime context length reported by the engine.
-    /// Absent for render-only frontends without an engine handshake.
+    /// Effective runtime context length. Absent for render-only frontends
+    /// without a configured `--max-model-len`.
     max_model_len: Option<usize>,
     /// Tool-call parser selection used when preparing generation requests.
     tool_call_parser: ParserSelection,
@@ -110,49 +111,24 @@ pub struct DetokenizeChunk {
 }
 
 impl ChatRequestProcessor {
-    /// Create a processor using the effective model dtype and context length
-    /// reported by the engine. Multimodal inputs need the model dtype.
-    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
+    /// Create a processor using the engine's effective model dtype and context
+    /// length, from the engine handshake or, without an engine, from
+    /// configuration. Multimodal inputs need the model dtype.
+    pub fn new(
+        backend: DynChatBackend,
+        model_dtype: Option<ModelDtype>,
+        max_model_len: Option<u32>,
+    ) -> Self {
         Self {
             backend,
             model_dtype,
-            max_model_len: Some(max_model_len as usize),
+            max_model_len: max_model_len.map(|len| len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
             reasoning_effort_map: HashMap::new(),
             exclude_tools_when_tool_choice_none: false,
         }
-    }
-
-    /// Create a processor for a frontend without an engine handshake. It
-    /// rejects multimodal requests until [`Self::with_model_dtype`] sets the
-    /// dtype to encode media tensors in.
-    pub fn render_only(backend: DynChatBackend) -> Self {
-        Self {
-            backend,
-            model_dtype: None,
-            max_model_len: None,
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: None,
-            reasoning_effort_map: HashMap::new(),
-            exclude_tools_when_tool_choice_none: false,
-        }
-    }
-
-    /// Configure the downstream engine's model dtype, enabling multimodal
-    /// preprocessing when the backend supports it.
-    pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
-        self.model_dtype = Some(model_dtype);
-        self
-    }
-
-    /// Configure the downstream engine's context length, which bounds the
-    /// token budget image processors may size images by.
-    pub fn with_max_model_len(mut self, max_model_len: Option<u32>) -> Self {
-        self.max_model_len = max_model_len.map(|len| len as usize);
-        self
     }
 
     /// Configure the parser selections used to prepare generation requests.
@@ -236,16 +212,19 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = match media {
-            multimodal::MultimodalInput::Raw(parts) => {
-                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
-                    .await?
-            }
-            multimodal::MultimodalInput::Preprocessed(features) => {
-                info.prepare_preprocessed(features, token_ids.len())?
-            }
-        };
+        let multimodal::MultimodalInput { preprocessed, raw } = media;
+        let mut features = info.prepare_preprocessed(preprocessed, token_ids.len())?;
+        if !raw.is_empty() {
+            let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+            info.append_multimodal(
+                &mut features,
+                raw,
+                token_ids,
+                model_dtype,
+                self.max_model_len,
+            )
+            .await?;
+        }
         Ok(Some(features))
     }
 
@@ -361,32 +340,12 @@ impl ChatRequestProcessor {
         })
     }
 
-    /// Parse output token IDs generated for a prepared request into the final
-    /// assistant message, without an engine.
+    /// Parse output chunks generated elsewhere for a prepared request,
+    /// emitting deltas, without an engine.
     ///
     /// `request` must be the request passed to [`Self::prepare`] and
     /// `prompt_token_ids` the prompt it produced, so that parsers resolve and
     /// initialize the same way as they would during generation.
-    pub async fn detokenize(
-        &self,
-        mut request: ChatRequest,
-        text_processor: &TextRequestProcessor,
-        prompt_token_ids: Vec<u32>,
-        output: DetokenizeChunk,
-    ) -> Result<CollectedAssistantMessage> {
-        request.intermediate = false;
-        self.detokenize_outputs(
-            request,
-            text_processor,
-            prompt_token_ids,
-            futures::stream::iter([output]),
-        )?
-        .collect_message()
-        .await
-    }
-
-    /// Streaming [`Self::detokenize`]: parse output chunks as they arrive,
-    /// emitting deltas.
     ///
     /// The stream ends at the first chunk with a finish reason, or earlier when
     /// a stop string in `request.decode_options` matches, dropping `outputs`.
@@ -398,20 +357,11 @@ impl ChatRequestProcessor {
         prompt_token_ids: Vec<u32>,
         outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
     ) -> Result<ChatEventStream> {
-        request.intermediate = true;
-        self.detokenize_outputs(request, text_processor, prompt_token_ids, outputs)
-    }
-
-    fn detokenize_outputs(
-        &self,
-        mut request: ChatRequest,
-        text_processor: &TextRequestProcessor,
-        prompt_token_ids: Vec<u32>,
-        outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
-    ) -> Result<ChatEventStream> {
         request.validate()?;
         // Decoding skips the text request, which validates these in generation.
         request.decode_options.validate(&request.request_id)?;
+        request.intermediate = true;
+        self.map_reasoning_effort(&mut request);
 
         let mut output_processor = self.new_output_processor(&mut request)?;
         output_processor.initialize(&prompt_token_ids)?;
@@ -435,8 +385,8 @@ impl ChatRequestProcessor {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
-                weight_versions: None,
-                routed_experts: None,
+                weight_versions: Default::default(),
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             })
         });
@@ -506,7 +456,8 @@ impl ChatLlm {
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         let info = text.llm().info();
-        let processor = ChatRequestProcessor::new(backend, info.model_dtype, info.max_model_len);
+        let processor =
+            ChatRequestProcessor::new(backend, info.model_dtype, Some(info.max_model_len));
 
         Self { text, processor }
     }
@@ -516,6 +467,13 @@ impl ChatLlm {
     pub fn from_shared_backend(llm: impl Llm, backend: DynChatTextBackend) -> Self {
         let text = TextLlm::new(llm, backend.clone());
         Self::new(text, backend)
+    }
+
+    /// Set the served model name that labels frontend metrics; see
+    /// [`TextLlm::with_served_model_name`].
+    pub fn with_served_model_name(mut self, served_model_name: impl Into<String>) -> Self {
+        self.text = self.text.with_served_model_name(served_model_name);
+        self
     }
 
     /// Set tool-call parser selection.
@@ -585,6 +543,11 @@ impl ChatLlm {
         self.text.model_id()
     }
 
+    /// Return the served model name that labels frontend metrics.
+    pub fn served_model_name(&self) -> &str {
+        self.text.served_model_name()
+    }
+
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
         self.processor.backend.multimodal_model_info().is_some()
@@ -592,7 +555,8 @@ impl ChatLlm {
 
     /// Prepare media for an already-tokenized request.
     /// Raw content is preprocessed; inline features are checked against model
-    /// capabilities, modality limits, and the final prompt positions.
+    /// capabilities, modality limits, and the final prompt positions. With
+    /// both, raw content expands only the tokens after the last feature range.
     pub async fn prepare_media(
         &self,
         media: impl Into<multimodal::MultimodalInput>,
@@ -624,11 +588,19 @@ impl ChatLlm {
         request: ChatRequest,
         n: NonZeroU32,
     ) -> Result<Vec<ChatEventStream>> {
+        // Like Python's `render_chat`, record successful renders: templating,
+        // multimodal preprocessing, and tokenization.
+        let render_start = Instant::now();
         let PreparedChatRequest {
             text_request,
             output_processors,
             prompt_text,
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
+        METRICS.renderer.observe_request_render_duration(
+            self.served_model_name(),
+            RenderRequestType::Chat,
+            render_start.elapsed(),
+        );
         let request_id = text_request.request_id.clone();
         let prepared = self.text.request_processor().prepare(text_request)?;
         let sampling = prepared.effective_sampling();
@@ -702,7 +674,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark1x, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -713,6 +685,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark1x, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
     }
 }

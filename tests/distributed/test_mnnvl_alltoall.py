@@ -16,8 +16,25 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import get_ep_group
-from vllm.platforms import current_platform
+from vllm.distributed.device_communicators.all2all import (
+    AgRsAll2AllManager,
+    All2AllManagerBase,
+    FlashInferNVLinkOneSidedManager,
+)
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase,
+)
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -28,6 +45,146 @@ from vllm.utils.network_utils import get_open_port
 from ..utils import init_test_distributed_environment
 
 DEVICE = current_platform.device_type
+
+
+@pytest.fixture
+def cuda_host(monkeypatch):
+    """Resolve the all2all default as it would on a 10.0 datacenter Blackwell
+    host: GB200 on a Grace CPU, HGX B200 on x86."""
+    from vllm.config.parallel import _is_gb200_gb300_or_vr200, _is_hgx_b200_or_b300
+
+    def clear_platform_probes() -> None:
+        _is_gb200_gb300_or_vr200.cache_clear()
+        _is_hgx_b200_or_b300.cache_clear()
+
+    def apply(cpu_arch: CpuArchEnum) -> None:
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+        monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+        # `is_device_capability_family` is a classmethod, so it reads the
+        # capability off the class rather than the instance patched above.
+        monkeypatch.setattr(
+            type(current_platform),
+            "get_device_capability",
+            staticmethod(lambda device_id=0: DeviceCapability(major=10, minor=0)),
+        )
+        clear_platform_probes()
+
+    yield apply
+    clear_platform_probes()
+
+
+_needs_one_sided = pytest.mark.skipif(
+    not has_flashinfer_nvlink_one_sided(),
+    reason="FlashInfer NVLink one-sided not available",
+)
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "data_parallel_size_local", "expected_backend"),
+    [
+        # GB200: NVLink spans hosts, so rank placement does not matter.
+        pytest.param(
+            CpuArchEnum.ARM, 1, "flashinfer_nvlink_one_sided", marks=_needs_one_sided
+        ),
+        # HGX B200: only when the EP group is one node.
+        pytest.param(
+            CpuArchEnum.X86, 8, "flashinfer_nvlink_one_sided", marks=_needs_one_sided
+        ),
+        (CpuArchEnum.X86, 1, "allgather_reducescatter"),
+    ],
+)
+def test_default_ep_communicator_uses_platform_all2all_backend(
+    monkeypatch, cuda_host, cpu_arch, data_parallel_size_local, expected_backend
+):
+    def init_device_communicator(
+        self,
+        cpu_group,
+        device,
+        device_group,
+        unique_name,
+        global_ranks,
+        global_world_size,
+        *,
+        use_all2all,
+    ):
+        self.cpu_group = cpu_group
+        self.device = device
+        self.device_group = device_group
+        self.unique_name = unique_name
+        self.world_size = 1
+        self.use_all2all = unique_name.startswith("ep:") and use_all2all
+        self.all2all_backend = get_current_vllm_config().parallel_config.all2all_backend
+        self.all2all_manager = None
+
+    def init_all2all_manager(self, cpu_group, tcp_store_group=None):
+        # The real base __init__ needs DP/TP groups, which aren't initialized
+        # here. Set only what the manager subclasses read on construction.
+        self.cpu_group = cpu_group
+        self.rank = 0
+        self.world_size = 1
+
+    cuda_host(cpu_arch)
+    monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
+    monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
+
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            enable_expert_parallel=True,
+            data_parallel_size=8,
+            data_parallel_size_local=data_parallel_size_local,
+            distributed_executor_backend="mp",
+        )
+    )
+    with set_current_vllm_config(vllm_config):
+        device_comm_cls = CudaCommunicator
+        device_communicator = device_comm_cls(
+            cpu_group=object(),
+            device=torch.device("cuda:0"),
+            device_group=object(),
+            unique_name="ep:test",
+            use_all2all=True,
+        )
+
+    assert device_communicator.all2all_backend == expected_backend
+    if expected_backend == "flashinfer_nvlink_one_sided":
+        assert isinstance(
+            device_communicator.all2all_manager, FlashInferNVLinkOneSidedManager
+        )
+    else:
+        assert isinstance(device_communicator.all2all_manager, AgRsAll2AllManager)
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "expected_backend"),
+    [
+        (CpuArchEnum.ARM, "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.X86, "allgather_reducescatter"),
+    ],
+)
+def test_engine_args_all2all_backend_default_round_trips(
+    monkeypatch, cuda_host, cpu_arch, expected_backend
+):
+    """`EngineArgs` mirrors this field from `ParallelConfig` and
+    `create_engine_config()` passes the value straight back, so the default has
+    to survive that round trip as a plain string. Anything else (a `FieldInfo`,
+    a sentinel the config does not accept) fails every launch that omits
+    `--all2all-backend`."""
+    cuda_host(cpu_arch)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+
+    backend = EngineArgs().all2all_backend
+    assert backend == "auto"
+
+    config = ParallelConfig(
+        all2all_backend=backend,
+        enable_expert_parallel=True,
+        data_parallel_size=8,
+        distributed_executor_backend="mp",
+    )
+    assert config.all2all_backend == expected_backend
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -181,7 +338,7 @@ def _make_forward_context(
 ):
     """Keep the vLLM config and mock-DP forward context active together.
 
-    Returns a context manager suitable for ``with`` statements.
+    Returns a context manager suitable for `with` statements.
     The real DPMetadata (with sp_local_sizes etc.) is created internally
     by set_forward_context from num_tokens_across_dp; the attn_metadata
     placeholder just satisfies the "attn_metadata is not None" guard.
@@ -192,7 +349,7 @@ def _make_forward_context(
 
     class _AttnMeta:
         """Minimal placeholder so set_forward_context's
-        ``attn_metadata is not None`` guard (forward_context.py:334)
+        `attn_metadata is not None` guard (forward_context.py:334)
         is satisfied. The real DPMetadata is built from num_tokens_across_dp."""
 
         dp_metadata = None
@@ -248,13 +405,13 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Two-sided manager lifecycle (init, cleanup, reinit, ensure_init)
+# Test 1: Two-sided manager lifecycle (create, reuse, cleanup, recreate)
 # ---------------------------------------------------------------------------
 #
-# Tests FlashInferNVLinkTwoSidedManager which wraps FlashInfer's MnnvlMoe.
-# initialize() allocates MNNVL shared workspaces via MnnvlMoe.get_moe_workspaces,
-# which uses pidfd_getfd() to share memory file descriptors across processes —
-# hence the SYS_PTRACE requirement.
+# Tests FlashInferNVLinkTwoSidedManager which wraps FlashInfer's
+# NVLinkTwoSidedAlltoAll. get_communication() allocates MNNVL shared
+# workspaces, which uses pidfd_getfd() to share memory file descriptors across
+# processes — hence the SYS_PTRACE requirement.
 #
 # Uses EP group (get_ep_group) because the two-sided manager is constructed
 # with an EP-scoped communicator in production. With tp=world_size the EP
@@ -263,48 +420,44 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 
 
 def _two_sided_lifecycle_worker(rank, world_size):
+    from flashinfer.moe_ep import NVLinkTwoSidedAlltoAll
+
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkTwoSidedManager,
     )
 
     cpu_group = get_ep_group().cpu_group
-    num_gpus = torch.accelerator.device_count()
     manager = FlashInferNVLinkTwoSidedManager(cpu_group)
+    sizes = dict(max_num_tokens=64, top_k=2, num_experts=8, hidden_size=128)
 
-    # Not initialized yet
-    assert not manager.initialized
+    # Nothing created yet
+    assert not manager.communications
     assert manager.rank == rank
     assert manager.world_size == world_size
 
-    # Initialize
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=num_gpus)
-    assert manager.initialized
-    assert manager.workspace_tensor is not None
-    assert manager.prepare_workspace_tensor is not None
-    assert manager.mapping is not None
+    # Create
+    communication = manager.get_communication(**sizes)
+    assert isinstance(communication, NVLinkTwoSidedAlltoAll)
+    assert communication.ep_rank == rank
+    assert communication.ep_size == world_size
+    assert communication.params.invalid_expert_id == sizes["num_experts"]
 
     torch.distributed.barrier()
+
+    # Same sizes reuse the communication
+    assert manager.get_communication(**sizes) is communication
 
     # Cleanup
     manager.cleanup()
-    assert not manager.initialized
-    assert manager.workspace_tensor is None
-    assert manager.prepare_workspace_tensor is None
+    assert not manager.communications
 
     torch.distributed.barrier()
 
-    # Reinitialize
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=num_gpus)
-    assert manager.initialized
-
-    torch.distributed.barrier()
-
-    # ensure_alltoall_workspace_initialized is idempotent when already init'd
-    assert manager.ensure_alltoall_workspace_initialized()
-    assert manager.initialized
+    # Recreate
+    assert manager.get_communication(**sizes) is not communication
 
     manager.cleanup()
-    assert not manager.initialized
+    assert not manager.communications
 
 
 @requires_multi_gpu
@@ -312,7 +465,7 @@ def _two_sided_lifecycle_worker(rank, world_size):
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
 def test_two_sided_manager_lifecycle(world_size):
-    """Test init, cleanup, reinit, and ensure_initialized idempotency."""
+    """Test create, reuse, cleanup, and recreate."""
     _spawn_workers(_two_sided_lifecycle_worker, world_size)
 
 
@@ -482,7 +635,9 @@ def _one_sided_workspace_grow_worker(rank, world_size):
         top_k = base_kwargs["top_k"]
         ids = torch.arange(top_k, dtype=torch.int32, device=device).repeat(tokens, 1)
         weights = torch.ones(tokens, top_k, device=device)
-        received = shared.dispatch(x, ids, weights, max_tokens_per_rank=world_size + 2)
+        received = shared.dispatch(
+            x, ids, weights, runtime_max_tokens_per_rank=world_size + 2
+        )
         local = (received.topk_ids >= rank * 8) & (received.topk_ids < (rank + 1) * 8)
         values = received.hidden_states.to(torch.bfloat16)
         expected = x.to(torch.bfloat16)
@@ -551,7 +706,9 @@ def _one_sided_expert_output_in_workspace_worker(rank, world_size):
         device=device,
     )
     weights = torch.ones(tokens, top_k, device=device)
-    received = comm.dispatch(x, ids, weights, max_tokens_per_rank=tokens_per_rank)
+    received = comm.dispatch(
+        x, ids, weights, runtime_max_tokens_per_rank=tokens_per_rank
+    )
 
     fused_out = prepare_finalize.allocate_fused_expert_output(
         (world_size * tokens_per_rank, hidden),
@@ -571,13 +728,14 @@ def _one_sided_expert_output_in_workspace_worker(rank, world_size):
     )
 
     payload_in_workspace = []
-    combine = comm.alltoall.combine
+    combine = comm.combine
 
-    def spy_combine(*args, **kwargs):
-        payload_in_workspace.append(kwargs["payload_in_workspace"])
-        return combine(*args, **kwargs)
+    def spy_combine(expert_output, **kwargs):
+        buffer = comm.get_combine_input_buffer(expert_output.dtype)
+        payload_in_workspace.append(expert_output.data_ptr() == buffer.data_ptr())
+        return combine(expert_output, **kwargs)
 
-    comm.alltoall.combine = spy_combine
+    comm.combine = spy_combine
     output = torch.empty_like(x)
     prepare_finalize.finalize(
         output, fused_out, weights, ids, False, TopKWeightAndReduceNoOP()
@@ -934,7 +1092,7 @@ def test_args_dispatch_combine(world_size):
 # ---------------------------------------------------------------------------
 
 
-def _two_sided_data_worker(rank, world_size):
+def _two_sided_data_worker(rank, world_size, *, empty_rank):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkTwoSidedManager,
     )
@@ -949,28 +1107,34 @@ def _two_sided_data_worker(rank, world_size):
         flashinfer_alltoall_dispatch,
     )
 
-    # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
-    # internally and requires dp_size == ep_size.
+    # Use the DP group, which spans all ranks here (dp_size == ep_size).
     cpu_group = get_dp_group().cpu_group
     device = torch.device(f"{DEVICE}:{rank}")
-    num_gpus = torch.accelerator.device_count()
 
     hidden_size = 128
     tokens_per_rank = 32
+    token_counts = [tokens_per_rank] * world_size
+    if empty_rank:
+        token_counts[0] = 0
+    num_tokens = token_counts[rank]
     experts_per_token = 2
     num_experts = world_size * 4
 
     # Initialize the FlashInfer two-sided manager
     manager = FlashInferNVLinkTwoSidedManager(cpu_group)
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=num_gpus)
-    assert manager.initialized
+    communication = manager.get_communication(
+        max_num_tokens=tokens_per_rank,
+        top_k=experts_per_token,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+    )
 
     torch.distributed.barrier()
 
     # Create deterministic per-rank test data
     torch.manual_seed(rank + 42)
     hidden = torch.randn(
-        tokens_per_rank,
+        num_tokens,
         hidden_size,
         device=device,
         dtype=torch.bfloat16,
@@ -979,12 +1143,12 @@ def _two_sided_data_worker(rank, world_size):
     topk_ids = torch.randint(
         0,
         num_experts,
-        (tokens_per_rank, experts_per_token),
+        (num_tokens, experts_per_token),
         device=device,
         dtype=torch.int32,
     )
     topk_weights = torch.rand(
-        tokens_per_rank,
+        num_tokens,
         experts_per_token,
         device=device,
         dtype=torch.float32,
@@ -1000,27 +1164,28 @@ def _two_sided_data_worker(rank, world_size):
     )
     assert quant_config.quant_dtype is None  # sanity: no quantization
 
-    with _make_forward_context(rank, world_size, tokens_per_rank):
+    with _make_forward_context(
+        rank, world_size, num_tokens, num_tokens_across_dp=token_counts
+    ):
         dp_metadata = get_forward_context().dp_metadata
 
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             local_sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
 
-            # --- FlashInfer two-sided dispatch ---
-            alltoall_info, fi_topk_ids, fi_topk_weights, fi_hidden, fi_scale = (
-                flashinfer_alltoall_dispatch(
-                    manager,
+            def dispatch():
+                return flashinfer_alltoall_dispatch(
+                    communication,
                     local_sizes,
                     hidden.clone(),
                     None,  # no global scale
                     topk_ids.clone(),
                     topk_weights.clone(),
-                    experts_per_token,
-                    num_experts,
                     quant_config,
                     defer_input_quant=True,
                 )
-            )
+
+            # --- FlashInfer two-sided dispatch ---
+            fi_topk_ids, fi_topk_weights, fi_hidden, fi_scale = dispatch()
             assert fi_scale is None  # deferred quant: no scale produced
             assert fi_hidden is not None
             assert fi_hidden.shape[1] == hidden_size
@@ -1033,13 +1198,9 @@ def _two_sided_data_worker(rank, world_size):
             # hidden straight back):
             #   result[i] = hidden[i] * num_distinct_expert_ranks(i)
             combined = flashinfer_alltoall_combine(
-                manager,
-                fi_hidden,
-                top_k=experts_per_token,
-                token_count=tokens_per_rank,
-                alltoall_info=alltoall_info,
+                communication, fi_hidden, torch.empty_like(hidden)
             )
-            assert combined.shape == (tokens_per_rank, hidden_size)
+            assert combined.shape == (num_tokens, hidden_size)
 
             experts_per_rank = num_experts // world_size
             expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
@@ -1053,14 +1214,12 @@ def _two_sided_data_worker(rank, world_size):
 
             # --- Linearity check with scaled expert output ---
             # Scaling the expert output by a constant should scale the
-            # combined result by the same constant.
+            # combined result by the same constant. Combine consumes its
+            # dispatch, so dispatch the same data again first.
             scale = 3.0
+            _, _, fi_hidden, _ = dispatch()
             combined_scaled = flashinfer_alltoall_combine(
-                manager,
-                fi_hidden * scale,
-                top_k=experts_per_token,
-                token_count=tokens_per_rank,
-                alltoall_info=alltoall_info,
+                communication, fi_hidden * scale, torch.empty_like(hidden)
             )
             expected_scaled = (hidden.float() * num_distinct * scale).to(hidden.dtype)
             torch.testing.assert_close(combined_scaled, expected_scaled)
@@ -1074,9 +1233,14 @@ def _two_sided_data_worker(rank, world_size):
 @requires_two_sided
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
-def test_two_sided_dispatch_combine(world_size):
+@pytest.mark.parametrize("empty_rank", [False, True])
+def test_two_sided_dispatch_combine(world_size, empty_rank):
     """Test FlashInfer two-sided dispatch/combine with exact value verification."""
-    _spawn_workers(_two_sided_data_worker, world_size, dp_size=world_size)
+    _spawn_workers(
+        partial(_two_sided_data_worker, empty_rank=empty_rank),
+        world_size,
+        dp_size=world_size,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1181,7 +1345,7 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
                     topk_ids,
                     topk_weights,
                     hidden_states_scale=x_sf,
-                    max_tokens_per_rank=runtime_max_tokens,
+                    runtime_max_tokens_per_rank=runtime_max_tokens,
                 )
                 recv_ids = received.topk_ids
                 local = (recv_ids >= rank * experts_per_rank) & (
@@ -1394,7 +1558,7 @@ def _one_sided_low_precision_worker(rank, world_size):
         topk_ids,
         topk_weights,
         hidden_states_scale=x_sf,
-        max_tokens_per_rank=tokens_per_rank,
+        runtime_max_tokens_per_rank=tokens_per_rank,
     )
 
     expert_output = torch.ones(

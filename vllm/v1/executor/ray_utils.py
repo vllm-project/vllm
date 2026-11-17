@@ -103,9 +103,9 @@ def build_actor_name(
     if tp_size > 1:
         name += f"_TP{rank % tp_size}"
     if pp_size > 1:
-        name += f"_PP{(rank // tp_size) % pp_size}"
+        name += f"_PP{(rank // (tp_size * pcp_size)) % pp_size}"
     if pcp_size > 1:
-        name += f"_PCP{rank // (tp_size * pp_size)}"
+        name += f"_PCP{(rank // tp_size) % pcp_size}"
     return name
 
 
