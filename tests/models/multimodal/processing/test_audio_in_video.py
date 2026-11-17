@@ -151,6 +151,48 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
 
 
 @pytest.mark.parametrize("model_id", MODELS)
+def test_audio_in_video_partial_cache_hit(model_id: str) -> None:
+    """A cached audio track must not be mistaken for a missing one.
+
+    The second request has different video content (video cache miss) but the
+    same audio content (audio cache hit). The HF processor then only sees the
+    missing video, so the "video has no audio track" check must use the
+    pre-cache request counts, not the post-cache item counts.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = LruKeyReplicatedSenderCache(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+
+    first = create_mm_data(1)
+    second = create_mm_data(1)
+    # Different video content, identical audio content: only audio is cached.
+    second["video"] = [
+        random_video(
+            np.random.RandomState(123), min_frames=8, max_frames=9, min_wh=64, max_wh=65
+        )
+    ]
+    second["audio"] = first["audio"]
+
+    def run(mm_data: dict[str, list]):
+        return processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+            cache=cache,
+        )
+
+    first_out = run(first)
+    second_out = run(second)
+
+    assert len(second_out["prompt_token_ids"]) == len(first_out["prompt_token_ids"])
+
+
+@pytest.mark.parametrize("model_id", MODELS)
 def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     """A video with no audio track, combined with `use_audio_in_video=True`,
     must raise a clear `ValueError` naming the mismatch, rather than an
