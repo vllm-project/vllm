@@ -23,6 +23,7 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -702,12 +703,21 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         (`assert audio is not None`) can consume that item, so report the
         cause while it is still known.
         """
+        use_audio_in_video = get_use_audio_in_video(
+            self.info.ctx.get_merged_mm_kwargs(inputs.hf_processor_mm_kwargs)
+        )
+        if use_audio_in_video:
+            # Count before the cache drops hits: a cached audio is not missing.
+            mm_counts = inputs.mm_data_items.get_all_counts()
+            if mm_counts.get("audio", 0) < mm_counts.get("video", 0):
+                raise ValueError(
+                    "Video doesn't have audio track with `audio_in_video=True`"
+                )
+
         if (
-            "audio" in inputs.mm_data_items
+            use_audio_in_video
+            and "audio" in inputs.mm_data_items
             and "video" in inputs.mm_data_items
-            and get_use_audio_in_video(
-                self.info.ctx.get_merged_mm_kwargs(inputs.hf_processor_mm_kwargs)
-            )
         ):
             audio_items = inputs.mm_data_items["audio"]
             audio_uuids = (inputs.mm_uuid_items or {}).get("audio") or ()
@@ -727,6 +737,33 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 )
         return super().apply(inputs, timing_ctx)
 
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult:
+        cache = inputs.cache
+        if cache is None:
+            return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
+            inputs.hf_processor_mm_kwargs
+        )
+        if not get_use_audio_in_video(merged_kwargs):
+            return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+        mm_hashes = self._get_mm_hashes(inputs)
+        video_is_cached = cache.is_cached(mm_hashes.get("video", []))
+        audio_is_cached = cache.is_cached(mm_hashes.get("audio", []))
+
+        # The HF processor needs each video and its paired audio in the same
+        # call, but per-item caching can leave a video miss with an audio hit.
+        # Such a request bypasses the cache.
+        if not all(video_is_cached) and any(audio_is_cached):
+            inputs = replace(inputs, cache=None)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -742,14 +779,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         use_audio_in_video = get_use_audio_in_video(merged_kwargs)
         if use_audio_in_video:
             num_videos = mm_counts.get("video", 0)
-            if mm_counts.get("audio", 0) < num_videos:
-                raise ValueError(
-                    "Video doesn't have audio track with `audio_in_video=True`"
-                )
-
             if num_videos and "text" in hf_inputs.hf_data:
                 standalone_mm_counts = dict(mm_counts)
-                standalone_mm_counts["audio"] -= num_videos
+                # The paired audio may be a cache hit and absent from `mm_items`.
+                standalone_mm_counts["audio"] = max(
+                    0, standalone_mm_counts.get("audio", 0) - num_videos
+                )
                 hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
                 if _PASS_AUDIO_FROM_VIDEO_INDICES:
                     num_standalone = standalone_mm_counts["audio"]
@@ -765,10 +800,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
             hf_data["audio"] = audios
-        elif use_audio_in_video and "audio" not in hf_data and hf_data.get("videos"):
-            raise ValueError(
-                "Video doesn't have audio track with `audio_in_video=True`"
-            )
 
         if hf_data.get("videos") and (
             merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}
