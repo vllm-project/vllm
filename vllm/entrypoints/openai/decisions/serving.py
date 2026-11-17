@@ -9,7 +9,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
-from .adapters import input_text, make_answer, make_read_question
+from .adapters import input_state, input_text, make_answer, make_read_question
 from .protocol import (
     DecisionRequest,
     DecisionResponse,
@@ -78,10 +78,9 @@ class OpenAIServingDecisions(BaseServingDecisions):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
-            text = input_text(request.input)
-            self._log_inputs(request_id, text, None, lora_request)
-            read_fn = self.strategy.read_joint if joint else self.strategy.read
-            reads = await read_fn(
+            text = input_state(request.input)
+            self._log_inputs(request_id, input_text(request.input), None, lora_request)
+            reads = await self.strategy.read_input(
                 questions,
                 None,
                 text,
@@ -91,6 +90,7 @@ class OpenAIServingDecisions(BaseServingDecisions):
                 priority=0,
                 cache_salt=request.cache_salt,
                 trace_headers=trace_headers,
+                joint=joint,
             )
         except StructuredDecisionError as exc:
             return self.create_error_response(exc)
