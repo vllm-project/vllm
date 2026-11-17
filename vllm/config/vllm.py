@@ -1297,15 +1297,6 @@ class VllmConfig:
                 "AuxOutput Connector is incompatible with "
                 "context parallelism (DCP/PCP > 1)."
             )
-        if self.cache_config.kv_sharing_fast_prefill and (
-            self.aux_output_config.enable_return_hidden_states
-            or self.aux_output_config.return_topk_logprobs
-        ):
-            raise ValueError(
-                "enable_return_hidden_states and return_topk_logprobs are not "
-                "compatible with --kv-sharing-fast-prefill, which gives incorrect "
-                "hidden states for prompt tokens."
-            )
         k = self.aux_output_config.return_topk_logprobs
         if k:
             if self.lora_config is not None:

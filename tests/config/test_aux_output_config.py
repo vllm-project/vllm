@@ -24,7 +24,6 @@ def _config(
     attention_chunk_size: int | None = None,
     enable_prefix_caching: bool = True,
     adaptive_verification: bool = False,
-    kv_sharing_fast_prefill: bool = False,
 ):
     return SimpleNamespace(
         model_config=SimpleNamespace(
@@ -41,7 +40,6 @@ def _config(
         aux_output_config=AuxOutputConfig(enable_return_routed_experts=True),
         cache_config=SimpleNamespace(
             enable_prefix_caching=enable_prefix_caching,
-            kv_sharing_fast_prefill=kv_sharing_fast_prefill,
         ),
         speculative_config=(
             SimpleNamespace(enable_adaptive_verification=True)
@@ -240,24 +238,6 @@ def test_dense_model_without_routed_experts_is_accepted():
     )
     assert config.aux_output_config.enabled
     VllmConfig._verify_aux_output_compatibility(config)
-
-
-@pytest.mark.parametrize("fast_prefill", [False, True], ids=["default", "fast-prefill"])
-@pytest.mark.parametrize(
-    "output",
-    [{"enable_return_hidden_states": True}, {"return_topk_logprobs": 2}],
-    ids=["hidden-states", "topk-logprobs"],
-)
-def test_prompt_row_outputs_reject_kv_sharing_fast_prefill(output, fast_prefill):
-    config = _config(kv_sharing_fast_prefill=fast_prefill)
-    config.model_config.get_vocab_size = lambda: 8
-    config.lora_config = None
-    config.aux_output_config = AuxOutputConfig(object_key_prefix="run-1", **output)
-    if not fast_prefill:
-        VllmConfig._verify_aux_output_compatibility(config)
-        return
-    with pytest.raises(ValueError, match="kv-sharing-fast-prefill"):
-        VllmConfig._verify_aux_output_compatibility(config)
 
 
 @pytest.mark.parametrize(
