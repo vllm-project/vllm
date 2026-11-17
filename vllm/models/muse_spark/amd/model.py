@@ -94,9 +94,10 @@ def _supports_router_bf16x3_device() -> bool:
         return False
 
     # Importing a foreign platform can reload torch extension libraries.
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    return on_gfx950()
+    # Tile tables exist for CDNA3 (gfx942) and CDNA4 (gfx950).
+    return get_cdna_version() in (3, 4)
 
 
 def norm_residual_then_norm(
@@ -294,7 +295,6 @@ class MuseSparkMoE(nn.Module):
             self._router_multiplier_folded = True
             self.moe_router.router_output_multiplier = None
         weight = self.router.weight.data
-        # Configs are tuned and validated on gfx950 only.
         if (
             _supports_router_bf16x3_device()
             and weight.dtype == torch.float32
@@ -963,7 +963,6 @@ class MuseSparkModel(LlamaModel):
         x: MuseSparkResidualStream | torch.Tensor = hidden_states.to(
             self.residual_dtype
         )
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(aux_hidden_states, self.start_layer, x, None)
@@ -1002,7 +1001,6 @@ class MuseSparkModel(LlamaModel):
             output, _ = norm_residual_then_norm(
                 x, self.norm, out_dtype=self.default_dtype
             )
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return output, aux_hidden_states
         return output
