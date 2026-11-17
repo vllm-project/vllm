@@ -1313,6 +1313,94 @@ def _two_logits(hidden_states):
     return torch.cat([hidden_states, -hidden_states], dim=1)
 
 
+def test_session_fields_without_routed_experts_through_the_scheduler():
+    """Session and plain requests share chunked-prefill and decode steps."""
+    scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=48)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, 0, enable_routed_experts=False, key_prefix="job"
+    )
+    _, store = fake_store()
+    worker = _make_worker(16, 256, enable_r3=False, shape_per_token=(1,), block_size=16)
+    worker._return_hidden_states = True
+    worker._topk_logprobs = 2
+    worker._object_writer = SessionObjectWriter(
+        store, key_prefix="job", max_pending_batches=4, fields=worker._object_fields
+    )
+    (first,) = _session_requests(["first"], 40, 3, token=1)
+    (plain,) = create_requests(num_requests=1, num_tokens=30, max_tokens=3)
+    plain.sampling_params.ignore_eos = True
+    (second,) = _session_requests(["second"], 24, 3, token=3, session="t")
+    offsets = {"first": 1, plain.request_id: 1000, "second": 2000}
+    for request in (first, plain, second):
+        scheduler.add_request(request)
+    keys = {}
+    while scheduler.has_unfinished_requests():
+        scheduler_output = scheduler.schedule()
+        worker.begin_step(scheduler_output.aux_output_connector_metadata)
+        request_ids = list(scheduler_output.num_scheduled_tokens)
+        counts = [scheduler_output.num_scheduled_tokens[r] for r in request_ids]
+        ends = [scheduler.requests[r].num_computed_tokens for r in request_ids]
+        starts = [end - count for end, count in zip(ends, counts)]
+        hidden_states = torch.cat(
+            [
+                offsets[r] + torch.arange(start, end, dtype=torch.float32)
+                for r, start, end in zip(request_ids, starts, ends)
+            ]
+        )[:, None]
+        sampled = [
+            [0] if end == scheduler.requests[r].num_tokens else []
+            for r, end in zip(request_ids, ends)
+        ]
+        pending = worker.prepare_output(
+            _input_batch(request_ids, np.array(starts), np.cumsum([0, *counts])),
+            hidden_states,
+            _two_logits,
+        )
+        aux_outputs = None
+        if pending is not None:
+            pending.enqueue_cpu_copy(
+                np.array([len(tokens) for tokens in sampled]),
+                np.zeros(len(request_ids), dtype=np.int64),
+            )
+            aux_outputs = pending.process_output()
+        outputs = scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=request_ids,
+                sampled_token_ids=sampled,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=aux_outputs,
+            ),
+        )
+        for client_outputs in outputs.values():
+            for output in client_outputs.outputs:
+                if output.finish_reason is not None:
+                    keys[output.request_id] = output.aux_output_keys
+    worker.begin_step(scheduler.schedule().aux_output_connector_metadata)
+    worker.close()
+
+    assert keys[plain.request_id] is None
+    for request in (first, second):
+        rows = offsets[request.request_id] + torch.arange(
+            request.num_tokens - 1, dtype=torch.float32
+        )
+        expected = torch.log_softmax(_two_logits(rows[:, None]), dim=-1).topk(2)
+        request_keys = keys[request.request_id]
+        np.testing.assert_array_equal(
+            read_aux_rows(store, request_keys, "hidden_states")[:, 0], rows.numpy()
+        )
+        np.testing.assert_array_equal(
+            read_aux_rows(store, request_keys, "topk_token_ids"),
+            expected.indices.numpy(),
+        )
+        np.testing.assert_allclose(
+            read_aux_rows(store, request_keys, "topk_logprobs"),
+            expected.values.numpy(),
+        )
+
+
 class HostTierSpec(OffloadingSpec):
     manager_cls = CPUOffloadingManager
 

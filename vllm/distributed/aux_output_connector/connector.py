@@ -188,6 +188,10 @@ class AuxOutputSchedulerConnector:
             return None
         return params.aux_session
 
+    def _untracked(self, request: Request) -> bool:
+        """Whether a request has no rows: no inline output and no session."""
+        return not self._output_fields and self._session(request) is None
+
     def add_request(self, request: Request) -> None:
         """Salt a session request's positions before any KV connector sees its
         block hashes: with the versions of its `aux_version_segments` up to the
@@ -240,6 +244,8 @@ class AuxOutputSchedulerConnector:
         hash_starts: dict[str, int] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             request = requests[request_id]
+            if self._untracked(request):
+                continue
             state = self._session_requests.get(request_id)
             if request_id not in self._sent_hash_counts:
                 self._sent_hash_counts[request_id] = 0
@@ -328,6 +334,8 @@ class AuxOutputSchedulerConnector:
     def max_cache_hit(self, request: Request) -> int:
         if self._session(request) is not None:
             return (request.num_tokens - 1) // self._block_size * self._block_size
+        if self._untracked(request):
+            return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -342,6 +350,8 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if self._untracked(request):
+            return num_external
         num_hit = num_local + num_external
         if self._session(request) is None and num_hit <= self._emit_start(request):
             for block, keys in islice(
@@ -356,6 +366,8 @@ class AuxOutputSchedulerConnector:
         return num_external
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
+        if self._untracked(request):
+            return
         blocks = islice(
             self._kv_blocks(request.block_hashes), cdiv(num_tokens, self._block_size)
         )
@@ -462,6 +474,8 @@ class AuxOutputSchedulerConnector:
         """Rows of one output, or for a stopped session request the keys of
         the objects that hold its rows and the version segments of their
         names."""
+        if self._untracked(request):
+            return None, None, None, None
         state = self._session_requests.get(request.request_id)
         if state is None:
             return *self.take_output(request, output), None, None
@@ -502,6 +516,8 @@ class AuxOutputSchedulerConnector:
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
+        if self._untracked(request):
+            return
         request_id = request.request_id
         self._loading.pop(request_id, None)
         session = request_id in self._session_requests

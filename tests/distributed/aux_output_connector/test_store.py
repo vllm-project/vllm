@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import torch
+from safetensors.numpy import load
 
 from tests.distributed.aux_output_connector.utils import fake_store
 from tests.v1.core.test_prefix_caching import _make_hybrid_kv_cache_config
@@ -3459,6 +3460,52 @@ def test_topk_logprobs_cover_only_session_rows(sessions, expected_rows):
     )
     selected = torch.cat(computed) if computed else hidden_states[:0]
     assert torch.equal(selected, hidden_states[expected_rows])
+
+
+def test_session_objects_without_capture_hold_only_the_other_fields():
+    client, store = fake_store()
+    worker = _make_worker(2, enable_r3=False, shape_per_token=(1,))
+    worker._return_hidden_states = True
+    worker._object_writer = SessionObjectWriter(
+        store, key_prefix="job", max_pending_batches=4, fields=worker._object_fields
+    )
+    end = _BLOCK_SIZE + 2
+    hidden = torch.arange(end, dtype=torch.float32)[:, None]
+    for token_start, num_tokens, hashes in [
+        (0, _BLOCK_SIZE, _HASHES[:1]),
+        (_BLOCK_SIZE, 1, []),
+        (_BLOCK_SIZE + 1, 1, []),
+    ]:
+        step = _metadata(
+            0, [_request_metadata("session", token_start, num_tokens, 0, hashes)], {}
+        )
+        step.metadata.session_object_size = _BLOCK_SIZE
+        if token_start == 0:
+            step.metadata.sessions = {"session": "s"}
+        _begin_step(worker, step)
+        rows = hidden[token_start : token_start + num_tokens]
+        pending = worker.prepare_output(
+            _input_batch(
+                ["plain", "session"],
+                np.array([token_start, token_start]),
+                np.array([0, num_tokens, 2 * num_tokens]),
+            ),
+            torch.cat([rows + 100, rows]),
+        )
+        pending.enqueue_cpu_copy(np.array([1, 1]), np.array([0, 0]))
+        assert worker.process_output(pending) == {}
+    assert "plain" not in worker._requests
+    terminal = _metadata(0, [], {"session": []})
+    terminal.metadata.session_object_size = _BLOCK_SIZE
+    terminal.metadata.session_tails = {"session": ("job/s/tail/t", _BLOCK_SIZE, end)}
+    _begin_step(worker, terminal)
+    worker.close()
+
+    keys = [f"job/s/{_HASHES[0].hex()}", "job/s/tail/t"]
+    assert [list(load(client.objects[key])) for key in keys] == [["hidden_states"]] * 2
+    np.testing.assert_array_equal(
+        read_aux_rows(store, keys, "hidden_states"), hidden.numpy()
+    )
 
 
 class _RequestsTornDownWhileIterated(dict):

@@ -474,6 +474,40 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     assert output.routed_experts.shape == (0, 1, 1)
 
 
+def test_plain_requests_bypass_aux_outputs_without_inline_fields():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, 0, enable_routed_experts=False, key_prefix="job"
+    )
+    first, second = create_requests(
+        num_requests=2, num_tokens=80, max_tokens=3, ignore_eos=True, same_prompt=True
+    )
+    scheduled = []
+    for request in (first, second):
+        scheduler.add_request(request)
+        while not request.is_finished():
+            scheduler_output = scheduler.schedule()
+            scheduled.append(scheduler_output.num_scheduled_tokens[request.request_id])
+            metadata = scheduler_output.aux_output_connector_metadata
+            assert metadata.requests == {} and metadata.block_hashes == {}
+            outputs = scheduler.update_from_output(
+                scheduler_output,
+                ModelRunnerOutput(
+                    req_ids=[request.request_id],
+                    sampled_token_ids=[[0]],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[],
+                    aux_output_connector_output={},
+                ),
+            )
+            assert outputs[request.client_index].outputs[0].routed_experts is None
+    assert scheduled == [80, 1, 1, 16, 1, 1]
+    metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata.finished_requests == ()
+    assert metadata.retained_block_hashes is None
+
+
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)

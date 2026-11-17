@@ -273,7 +273,8 @@ class AuxOutputWorkerConnector:
             self._r3_dtype = np.dtype(self._routed_experts_capturer.output_dtype_name)
             self._r3_nbytes = int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
         if self._indexer is None:
-            assert self._routed_experts_capturer is not None
+            if self._routed_experts_capturer is None:
+                return (1,), np.dtype("uint8")
             return self._r3_shape, self._r3_dtype
         assert len(self._indexer.device_buffer) >= max_num_batched_tokens, (
             "auxiliary-output capture capacity is smaller than the token budget"
@@ -392,7 +393,8 @@ class AuxOutputWorkerConnector:
             )
             self._pending_outputs.append(pending_output)
             for request_id in pending_output.request_ids:
-                self._requests[request_id].pending_outputs += 1
+                if request_id in self._requests:
+                    self._requests[request_id].pending_outputs += 1
         return pending_output
 
     def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
@@ -409,7 +411,9 @@ class AuxOutputWorkerConnector:
             finally:
                 self._pending_outputs.remove(pending)
                 for request_id in pending.request_ids:
-                    state = self._requests[request_id]
+                    state = self._requests.get(request_id)
+                    if state is None:
+                        continue
                     state.pending_outputs -= 1
                     if state.pending_outputs == 0 and state.finished:
                         teardown.append(request_id)
@@ -445,6 +449,9 @@ class AuxOutputWorkerConnector:
                     ),
                     axis=1,
                 )
+        captured = packed_rows is not None
+        if not captured:
+            packed_rows = np.zeros((pending.query_start_loc[-1], 1), dtype=np.uint8)
         num_sampled = pending.num_sampled
         num_rejected = pending.num_rejected
         assert (
@@ -473,7 +480,10 @@ class AuxOutputWorkerConnector:
             assert request_num_tokens > 0, (
                 "auxiliary output request token count must be positive"
             )
-            state = self._requests[request_id]
+            state = self._requests.get(request_id)
+            if state is None:
+                assert not captured, f"auxiliary output request {request_id} is unknown"
+                continue
 
             # Capture precedes speculative acceptance, so discard the rejected
             # suffix. Batch boundaries still span the full executed range.
@@ -572,7 +582,12 @@ class AuxOutputWorkerConnector:
 
     def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
         if self._indexer is None:
-            return AuxRequestOutput(token_start=token_start, routed_rows=rows)
+            return AuxRequestOutput(
+                token_start=token_start,
+                routed_rows=(
+                    rows if self._routed_experts_capturer is not None else None
+                ),
+            )
         routed_rows = None
         combined = self._routed_experts_capturer is not None
         if combined:

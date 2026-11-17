@@ -32,12 +32,14 @@ class AuxOutputConfig:
 
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or `None` to derive it from the KV cache capacity.
-    Grows when every object is referenced."""
+    Grows when every object is referenced. Requires
+    `enable_return_routed_experts`."""
 
     object_key_prefix: str | None = None
     """First segment of the keys of the shared objects that deliver the
     auxiliary outputs of requests with `SamplingParams.aux_session`. Must not
-    be reused: choose a new one for every engine start."""
+    be reused: choose a new one for every engine start. Any one enabled output
+    suffices, so dense models can deliver hidden states and top-k logprobs."""
 
     mooncake_config_path: str | None = None
     """Mooncake configuration file of the store that holds the objects of
@@ -77,7 +79,11 @@ class AuxOutputConfig:
     @property
     def enabled(self) -> bool:
         """Whether any execution auxiliary output is enabled."""
-        return self.enable_return_routed_experts or self.enable_return_indexer_topk
+        return (
+            self.enable_return_routed_experts
+            or self.enable_return_indexer_topk
+            or self.object_key_prefix is not None
+        )
 
     def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config, add it to

@@ -166,12 +166,35 @@ def test_indexer_only_does_not_require_moe_routing():
             {
                 "object_key_prefix": "run-1",
                 "enable_return_routed_experts": False,
+                "enable_return_hidden_states": True,
+            },
+            None,
+        ),
+        (
+            {
+                "object_key_prefix": "run-1",
+                "enable_return_routed_experts": False,
+                "return_topk_logprobs": 2,
+            },
+            None,
+        ),
+        (
+            {
+                "object_key_prefix": "run-1",
+                "enable_return_routed_experts": False,
                 "enable_return_indexer_topk": True,
             },
             None,
         ),
     ],
-    ids=["valid", "empty-prefix", "slash", "indexer-only"],
+    ids=[
+        "valid",
+        "empty-prefix",
+        "slash",
+        "hidden-states-only",
+        "topk-logprobs-only",
+        "indexer-only",
+    ],
 )
 def test_object_key_prefix_is_validated(kwargs, error):
     kwargs = {"enable_return_routed_experts": True, **kwargs}
@@ -199,9 +222,18 @@ def test_session_fields_require_object_key_prefix(name, value):
     )
 
 
+def test_dense_model_without_routed_experts_is_accepted():
+    config = _config(is_moe=False)
+    config.aux_output_config = AuxOutputConfig(
+        object_key_prefix="run-1", enable_return_hidden_states=True
+    )
+    assert config.aux_output_config.enabled
+    VllmConfig._verify_aux_output_compatibility(config)
+
+
 @pytest.mark.parametrize(
     "legacy_flag,error",
-    [(True, None), (False, "object_key_prefix requires")],
+    [(True, None), (False, "requires at least one output")],
     ids=["legacy-flag", "no-output"],
 )
 def test_object_key_prefix_takes_its_output_from_the_legacy_flag(legacy_flag, error):
@@ -221,3 +253,26 @@ def test_object_key_prefix_takes_its_output_from_the_legacy_flag(legacy_flag, er
 def test_object_put_stall_timeout_must_be_positive(timeout_s):
     with pytest.raises(ValueError):
         AuxOutputConfig(object_put_stall_timeout_s=timeout_s)
+
+
+@pytest.mark.parametrize(
+    "routed_experts,legacy_flag,error",
+    [(False, False, "max_bytes requires"), (True, False, None), (False, True, None)],
+    ids=["without-routed-experts", "with-routed-experts", "legacy-flag"],
+)
+def test_max_bytes_requires_routed_experts(routed_experts, legacy_flag, error):
+    config = _config()
+    config.aux_output_config = EngineArgs(
+        aux_output_config={
+            "enable_return_routed_experts": routed_experts,
+            "max_bytes": 1 << 20,
+            "object_key_prefix": "run-1",
+            "enable_return_hidden_states": True,
+        },
+        enable_return_routed_experts=legacy_flag,
+    ).aux_output_config
+    if error is None:
+        VllmConfig._verify_aux_output_compatibility(config)
+        return
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._verify_aux_output_compatibility(config)
