@@ -135,7 +135,7 @@ def _module_refusals(model: torch.nn.Module) -> list[str]:
         OnlineMoEMethodBase,
     )
 
-    reasons = []
+    modules: dict[str, list[str]] = {}  # reason -> the modules it applies to
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
         # online quantization without a checkpoint counterpart, a
@@ -147,12 +147,17 @@ def _module_refusals(model: torch.nn.Module) -> list[str]:
             or getattr(method, "uses_meta_device", False)
             or getattr(module, "shared_expert_online_loader", None) is not None
         ):
-            reasons.append(f"online quantization ({name}: {type(method).__name__})")
+            reason = f"online quantization ({type(method).__name__})"
+            modules.setdefault(reason, []).append(name)
         elif isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
             # the method, not the module): a reload would keep checkpoint bytes
-            reasons.append(f"humming ({name})")
-    return reasons
+            modules.setdefault("humming", []).append(name)
+    return [
+        f"{reason} in {names[0]}"
+        + (f" and {len(names) - 1} more modules" if len(names) > 1 else "")
+        for reason, names in modules.items()
+    ]
 
 
 def log_direct_reload_support(model: torch.nn.Module, vllm_config: VllmConfig) -> None:
