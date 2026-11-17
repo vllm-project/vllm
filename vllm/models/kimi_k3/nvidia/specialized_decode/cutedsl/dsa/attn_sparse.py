@@ -111,6 +111,13 @@ SPARSE_DCP = "1-8:sparse"
 # rows (one wave already) one tile stays ahead.
 SPARSE_TILES = {16: "7-8:2"}
 SPARSE_BULK = {16: "7-8:1"}
+# P-exchange form of the pushing decode, batch tables per DCP size (1: on): the
+# cluster CTAs of a row exchange their split's E4M3 P and row statistics instead of
+# the FP32 partials, and each CTA runs the PV of every split over its own merged
+# columns. Same results bit for bit. DCP16 at 7-8 rows: set by a one-GPU A/B of the
+# decode and a 16-rank decode-step A/B.
+SPARSE_PX = {16: "7-8:1"}
+PX_VPITCH = COLS + 16  # another split's V columns of this CTA, per key
 LOG2_P_SCALE = math.log2(448.0)  # E4M3 P at 448 of the row max (FlashInfer's)
 LN2 = math.log(2.0)
 
@@ -524,11 +531,351 @@ class SparseDcpDecode:
                 store_relaxed(lpeers[owner] + Int64(slot) * 4, (float_bits(value),))
 
 
+def _split_chunk(n, per, s, c):
+    """(first key of chunk `c` of split `s`, its key count >= 0) over `n` keys
+    split `per` per split (SparseDcpDecode's partition)."""
+    first = cutlass.min(n, Int32(s * per))
+    mine = cutlass.min(n - first, per)
+    base = first + c * CHUNK
+    count = cutlass.min(first + mine - base, Int32(CHUNK))
+    return base, cutlass.max(count, Int32(0))
+
+
+class SparseDcpDecodePx(SparseDcpDecode):
+    """The pushing two-tile SparseDcpDecode (SPARSE_PX) with the cluster exchange
+    moved before PV: CTA `split` of a row's cluster runs QK and the softmax of its
+    split as SparseDcpDecode, then sends its split's E4M3 P and (max, sum, rescale)
+    rows to the other CTAs (one bulk copy each per peer), and every CTA runs the PV
+    of all SPLIT splits over its own COLS merged columns (the other splits' keys
+    gathered as just those columns). Each split's accumulators of these columns
+    then sit in the local inbox, and the merge is SparseDcpDecode's. Per head and
+    column the operations and their order are SparseDcpDecode's (the same P bytes,
+    V bytes, PV k-steps, rescales and merge), so it matches bit for bit. Rows of
+    more than one chunk per split exchange per chunk (double-buffered)."""
+
+    def __init__(self, batch, heads, padded, width, push):
+        assert push is not None and heads % (2 * HEADS) == 0 and heads <= padded
+        assert QK_WARPS * 2 == WARPS and COLS == 128
+        self.batch, self.heads, self.padded, self.width = batch, heads, padded, width
+        self.push, self.tiles, self.cta_heads = push, 2, 2 * HEADS
+        self.grid = (heads // self.cta_heads * SPLIT, batch, 1)
+
+    @cute.jit
+    def __call__(self, *args):
+        launch(
+            self.kernel,
+            args,
+            self.grid,
+            THREADS,
+            cluster=(SPLIT, 1, 1),
+            min_blocks_per_mp=1,
+        )
+
+    @cute.kernel
+    def kernel(self, args):
+        query, kv, rows_in, valid_in = args[:4]
+        scale_log2 = args[6]
+        T: cutlass.Constexpr = self.tiles
+        CH: cutlass.Constexpr = self.cta_heads
+        smem = cutlass.utils.SmemAllocator()
+        kvs = alloc(smem, Uint8, (CHUNK, PITCH), 128)  # this split's rows
+        vcols = alloc(smem, Uint8, (SPLIT - 1, CHUNK, PX_VPITCH), 128)
+        qs = alloc(smem, Uint8, (CH, PITCH), 128)
+        # Per chunk parity: every split's P and (max, sum, rescale) rows; this
+        # CTA's split written here, the others by their CTAs' bulk copies.
+        ps = alloc(smem, Uint8, (2, SPLIT, CH, P_PITCH), 128)
+        xst = alloc(smem, Float32, (2, SPLIT, 3, CH), 128)
+        red = alloc(smem, Float32, (2, QK_WARPS, CH))
+        stats = alloc(smem, Float32, (SPLIT, 2, CH))
+        # The splits' partials of this CTA's columns (rows padded: the PV warps'
+        # row-strided stores spread over the banks).
+        inbox = alloc(smem, Float32, (SPLIT, CH, COLS + 4), 16)
+        bar = smem.allocate(cutlass.Uint64, 8)
+        inbound = smem.allocate(cutlass.Uint64, 8)
+        tid, _, _ = cute.arch.thread_idx()
+        x, b, _ = cute.arch.block_idx()
+        tile, split = x // SPLIT, x % SPLIT
+        lane, warp = tid % 32, tid // 32
+        group, quarter = lane // 4, lane % 4
+        qt, kw = warp // QK_WARPS, warp % QK_WARPS
+        psplit = warp // (WARPS // SPLIT)  # PV: split, 32-column block
+        pblock = warp % (WARPS // SPLIT)
+        x_bytes: cutlass.Constexpr = (SPLIT - 1) * (CH * P_PITCH + 3 * CH * 4)
+        if tid == 0:
+            cute.arch.mbarrier_init(bar, 1)
+            cute.arch.mbarrier_init(inbound, 1)
+            cute.arch.mbarrier_init_fence()
+            cute.arch.mbarrier_arrive_and_expect_tx(inbound, x_bytes)
+        cute.arch.sync_threads()
+        # Every CTA's barriers are armed before any peer copies (waited below).
+        cute.arch.cluster_arrive_relaxed()
+        # Nothing above reads the inputs: the kernel before may launch this early.
+        cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_launch_dependents()
+        chunks16 = ROW // 16
+        q_loads: cutlass.Constexpr = -(-CH * chunks16 // THREADS)
+        q_words = []
+        for i in cutlass.range_constexpr(q_loads):
+            h_flat = min(tid + THREADS * i, Int32(CH * chunks16 - 1))
+            h_row, h_chunk = h_flat // chunks16, h_flat % chunks16
+            h_src = at(query, b, tile * CH + h_row, 16 * h_chunk)
+            q_words.append(load_words(h_src, count=4, mutable=True))
+        n = valid_in[b]
+        n = max(min(n, Int32(self.width)), Int32(0))
+        per = (n + SPLIT - 1) // SPLIT
+        kv_base = kv.iterator.toint()
+        neg_inf = Float32(-math.inf)
+        m_run = zeros(2 * T, Float32)
+        m_run.fill(neg_inf)
+        l_run = zeros(2 * T, Float32)
+        acc = zeros((T, 4, 4), Float32)  # split psplit, this CTA's columns
+        a_row = lane % 8 + 8 * ((lane // 8) % 2)
+        a_col = 16 * (lane // 16)
+        b_row = 8 * kw + lane % 8
+        b_col = 16 * (lane // 8)
+        phase = Int32(0)
+        # Every CTA of the cluster runs split 0's chunk count (the most).
+        chunks = (per + CHUNK - 1) // CHUNK
+        for c in cutlass.range(0, chunks, unroll=1):
+            par = c % 2
+            if c > 0:
+                cute.arch.sync_threads()  # the previous chunk's readers are done
+            obase, count = _split_chunk(n, per, split, c)
+            span = (count + 31) // 32 * 32
+            if tid == 0:
+                total = count * ROW
+                for j in cutlass.range_constexpr(1, SPLIT):
+                    total += _split_chunk(n, per, (split + j) % SPLIT, c)[1] * COLS
+                cute.arch.mbarrier_arrive_and_expect_tx(bar, total)
+            if tid < CHUNK:
+                if tid < count:
+                    src = kv_base + Int64(rows_in[b, obase + tid]) * ROW
+                    copy_g2s(kvs.iterator + tid * PITCH, src, ROW, bar)
+                elif tid < span:  # V past the count: zero (P is zero there)
+                    for k in cutlass.range_constexpr(LATENT // 16):
+                        dst = kvs.iterator + tid * PITCH + 16 * k
+                        store_words(dst, (Uint32(0),) * 4, shared=True)
+            elif tid < SPLIT * CHUNK:
+                # This CTA's columns of the other splits' keys (slot j - 1).
+                j = tid // CHUNK
+                vk = tid % CHUNK
+                vbase, vcount = _split_chunk(n, per, (split + j) % SPLIT, c)
+                vspan = (vcount + 31) // 32 * 32
+                vdst = at(vcols, j - 1, vk, 0)
+                if vk < vcount:
+                    src = kv_base + Int64(rows_in[b, vbase + vk]) * ROW + COLS * split
+                    copy_g2s(vdst, src, COLS, bar)
+                elif vk < vspan:
+                    for k in cutlass.range_constexpr(COLS // 16):
+                        store_words(vdst + 16 * k, (Uint32(0),) * 4, shared=True)
+            if c == 0:
+                for i in cutlass.range_constexpr(q_loads):
+                    flat = tid + THREADS * i
+                    if flat < CH * chunks16:
+                        q_row, q_chunk = flat // chunks16, flat % chunks16
+                        dst = qs.iterator + q_row * PITCH + 16 * q_chunk
+                        store_words(dst, q_words[i], shared=True)
+            wait(bar, phase, scope="cta")
+            phase = phase ^ 1
+            cute.arch.sync_threads()  # the zeroed V rows
+            # ---- QK (this split): warp w, tile qt, keys 8 kw .. 8 kw + 7 ----------
+            # (n-tiles past the count only hold masked keys: their scores stay 0
+            # and are masked below, as SparseDcpDecode masks the ones it computes)
+            s = zeros(4, Float32)
+            if 8 * kw < count:
+                parts = zeros((QK_CHAINS, 4), Float32)
+                for kp in cutlass.range_constexpr(ROW // 64):
+                    k = ldmatrix(kvs.iterator + b_row * PITCH + 64 * kp + b_col)
+                    for h in cutlass.range_constexpr(2):
+                        ks = 2 * kp + h
+                        qk_row = 16 * qt + a_row
+                        a = ldmatrix(qs.iterator + qk_row * PITCH + 32 * ks + a_col)
+                        b_frag = (k[2 * h], k[2 * h + 1])
+                        mma_into(parts[ks % QK_CHAINS, None], a, b_frag, fp8=True)
+                for e in cutlass.range_constexpr(4):
+                    total = parts[0, e]
+                    for chain in cutlass.range_constexpr(1, QK_CHAINS):
+                        total += parts[chain, e]
+                    s[e] = total
+            top = zeros(2, Float32)
+            top.fill(neg_inf)
+            for e in cutlass.range_constexpr(4):
+                key = 8 * kw + 2 * quarter + e % 2
+                value = neg_inf
+                if key < count:
+                    value = s[e] * scale_log2
+                s[e] = value
+                top[e // 2] = max(top[e // 2], value)
+            for r in cutlass.range_constexpr(2):
+                for shift in cutlass.range_constexpr(2):
+                    other = cute.arch.shuffle_sync_bfly(top[r], 1 << shift)
+                    top[r] = max(top[r], other)
+            if quarter == 0:
+                red[0, kw, 16 * qt + group] = top[0]
+                red[0, kw, 16 * qt + group + 8] = top[1]
+            cute.arch.sync_threads()
+            alpha = zeros(2 * T, Float32)
+            alpha.fill(1.0)
+            m_new = zeros(2 * T, Float32)
+            for t in cutlass.range_constexpr(T):
+                for r in cutlass.range_constexpr(2):
+                    i = 2 * t + r
+                    chunk_max = red[0, 0, 16 * t + group + 8 * r]
+                    for w in cutlass.range_constexpr(1, QK_WARPS):
+                        chunk_max = max(chunk_max, red[0, w, 16 * t + group + 8 * r])
+                    m_new[i] = max(m_run[i], chunk_max)
+                    if m_run[i] != neg_inf:
+                        alpha[i] = cute.math.exp2(m_run[i] - m_new[i], fastmath=True)
+            own = zeros(2, Float32)  # the running maxima of this warp's QK tile
+            for t in cutlass.range_constexpr(T):
+                if qt == t:  # warp-uniform
+                    for r in cutlass.range_constexpr(2):
+                        own[r] = m_new[2 * t + r]
+            # ---- P (E4M3 at 448 of the running max) and its FP32 sums -------------
+            sums = zeros(2, Float32)
+            if 8 * kw < span:
+                for r in cutlass.range_constexpr(2):
+                    bias = own[r] - Float32(LOG2_P_SCALE)
+                    p = []
+                    for e in cutlass.range_constexpr(2):
+                        value = s[2 * r + e]
+                        prob = Float32(0)
+                        if value != neg_inf:
+                            prob = cute.math.exp2(value - bias, fastmath=True)
+                        sums[r] += prob
+                        p.append(prob)
+                    key = 8 * kw + 2 * quarter
+                    p_at = at(ps, par, split, 16 * qt + group + 8 * r, key)
+                    store_fp8_pair_shared(p_at, p[0], p[1])
+            for r in cutlass.range_constexpr(2):
+                for shift in cutlass.range_constexpr(2):
+                    sums[r] += cute.arch.shuffle_sync_bfly(sums[r], 1 << shift)
+            if quarter == 0:
+                red[1, kw, 16 * qt + group] = sums[0]
+                red[1, kw, 16 * qt + group + 8] = sums[1]
+            cute.arch.sync_threads()
+            for t in cutlass.range_constexpr(T):
+                for r in cutlass.range_constexpr(2):
+                    i = 2 * t + r
+                    total = red[1, 0, 16 * t + group + 8 * r]
+                    for w in cutlass.range_constexpr(1, QK_WARPS):
+                        total += red[1, w, 16 * t + group + 8 * r]
+                    l_run[i] = l_run[i] * alpha[i] + total
+                    m_run[i] = m_new[i]
+            if (warp == 0) & (quarter == 0):
+                for t in cutlass.range_constexpr(T):
+                    for r in cutlass.range_constexpr(2):
+                        row = 16 * t + group + 8 * r
+                        xst[par, split, 0, row] = m_run[2 * t + r]
+                        xst[par, split, 1, row] = l_run[2 * t + r]
+                        xst[par, split, 2, row] = alpha[2 * t + r]
+            # ---- exchange this split's P and rows with the other CTAs --------------
+            cute.arch.fence_proxy("async.shared", space="cta")
+            cute.arch.sync_threads()
+            # Peers' barriers armed (c = 0) / done reading this parity (c > 1).
+            cute.arch.cluster_wait()
+            if tid < SPLIT - 1:
+                peer = tid
+                if tid >= split:
+                    peer = tid + 1
+                p_blk = at(ps, par, split, 0, 0)
+                copy_s2cluster(p_blk, p_blk, inbound, peer, size=CH * P_PITCH)
+                x_blk = at(xst, par, split, 0, 0)
+                copy_s2cluster(x_blk, x_blk, inbound, peer, size=3 * CH * 4)
+            wait(inbound, c % 2)  # the other splits' P and rows of this chunk
+            if (tid == 0) & (c + 1 < chunks):
+                cute.arch.mbarrier_arrive_and_expect_tx(inbound, x_bytes)
+            if c == 0:
+                # Every CTA of the cluster read the q rows (their P landed here):
+                # re-arm this CTA's quarter of them.
+                self.rearm(query, tile, split, b, tid)
+            # ---- PV: split psplit, this CTA's columns 32 pblock .. + 31 -------------
+            for t in cutlass.range_constexpr(T):
+                for r in cutlass.range_constexpr(2):
+                    factor = xst[par, psplit, 2, 16 * t + group + 8 * r]
+                    for j in cutlass.range_constexpr(4):
+                        for e in cutlass.range_constexpr(2):
+                            acc[t, j, 2 * r + e] *= factor
+            pspan = (_split_chunk(n, per, psplit, c)[1] + 31) // 32 * 32
+            slot = (psplit - split + SPLIT) % SPLIT  # 0: this CTA's split
+            vcol = 32 * pblock + 4 * group
+            for ks in cutlass.range_constexpr(CHUNK // 32):
+                if 32 * ks < pspan:
+                    halves = []
+                    for hf in cutlass.range_constexpr(2):
+                        words = []
+                        for i in cutlass.range_constexpr(4):
+                            key = 32 * ks + 16 * hf + 4 * quarter + i
+                            word = Uint32(0)
+                            if slot == 0:  # warp-uniform: this split's full rows
+                                mine_v = (
+                                    kvs.iterator + key * PITCH + COLS * split + vcol
+                                )
+                                word = load_words(mine_v, count=1, shared=True)[0]
+                            else:
+                                theirs = at(vcols, slot - 1, key, vcol)
+                                word = load_words(theirs, count=1, shared=True)[0]
+                            words.append(word)
+                        halves.append(transpose4(words))
+                    for t in cutlass.range_constexpr(T):
+                        pv_at = at(ps, par, psplit, 16 * t + a_row, 32 * ks + a_col)
+                        a = ldmatrix(pv_at)
+                        for j in cutlass.range_constexpr(4):
+                            b_frag = (halves[0][j], halves[1][j])
+                            mma_into(acc[t, j, None], a, b_frag, fp8=True)
+            # Done reading the peers' P and rows of this chunk.
+            cute.arch.cluster_arrive_relaxed()
+        # ---- the splits' statistics (last chunk's) and partials, then the merge -----
+        last = (chunks + 1) % 2  # (chunks - 1) mod 2
+        if tid < SPLIT * 2 * CH:
+            sc, sk, sh = tid // (2 * CH), (tid // CH) % 2, tid % CH
+            value = neg_inf
+            if sk == 1:
+                value = Float32(0)
+            if chunks > 0:
+                value = xst[last, sc, sk, sh]
+            stats[sc, sk, sh] = value
+        for t in cutlass.range_constexpr(T):
+            for r in cutlass.range_constexpr(2):
+                row = 16 * t + group + 8 * r
+                for e in cutlass.range_constexpr(2):
+                    words = tuple(float_bits(acc[t, j, 2 * r + e]) for j in range(4))
+                    column = 32 * pblock + 8 * quarter + 4 * e
+                    store_words(at(inbox, psplit, row, column), words, shared=True)
+        cute.arch.sync_threads()
+        for t in cutlass.range_constexpr(T):
+            self.merge(args, inbox, stats, tile, split, b, tid, t)
+        if chunks == 0:  # no q row read is used
+            self.rearm(query, tile, split, b, tid)
+        # No peer copies into this CTA or reads its blocks any more.
+        cute.arch.cluster_wait()
+
+    @cute.jit
+    def rearm(self, query, tile, split, b, tid):
+        """Q_SENT into this CTA's quarter of its tile's q mailbox rows."""
+        chunks16 = ROW // 16
+        part: cutlass.Constexpr = self.cta_heads * chunks16 // SPLIT
+        for i in range(tid, part, THREADS):
+            flat = split * part + i
+            q_row, q_chunk = flat // chunks16, flat % chunks16
+            sentinel = (Uint32(Q_SENT),) * 4
+            q_dst = at(query, b, tile * self.cta_heads + q_row, 16 * q_chunk)
+            store_words(q_dst, sentinel)
+
+
 def sparse_for(rows, gathered, padded):
     """Whether a DCP batch of `rows` runs SparseDcpDecode (`gathered` query
     heads of a `padded`-row q mailbox)."""
     fits = gathered % HEADS == 0 and gathered <= padded
     return fits and batch_table(SPARSE_DCP).get(rows) == "sparse"
+
+
+def sparse_px(batch, heads, push=None):
+    """Whether the pushing decode of `batch` rows runs SparseDcpDecodePx (SPARSE_PX
+    of its DCP size, two-tile CTAs)."""
+    if push is None or heads % (2 * HEADS):
+        return False
+    return batch_table(SPARSE_PX.get(push[1], "")).get(batch, 0) == 1
 
 
 def sparse_layout(batch, heads, push=None):
@@ -547,11 +894,13 @@ def sparse_layout(batch, heads, push=None):
 
 @cache
 def compile_sparse(
-    batch, heads, padded, width, cap, device, push=None, tiles=None, bulk=None
+    batch, heads, padded, width, cap, device, push=None, tiles=None, bulk=None, px=None
 ):
     """SparseDcpDecode of `batch` rows (the q mailbox of `cap` rows; `push`:
     (owner heads, DCP) to push into the DcpValue mailbox; `tiles` / `bulk`:
-    sparse_layout's unless given)."""
+    sparse_layout's unless given; `px`: SparseDcpDecodePx, sparse_px's unless
+    given)."""
+    px = sparse_px(batch, heads, push) if px is None else px
     layout = sparse_layout(batch, heads, push)
     tiles = layout[0] if tiles is None else tiles
     bulk = layout[1] if bulk is None else bulk
@@ -563,6 +912,8 @@ def compile_sparse(
     lse = fake((batch, padded), None, torch.float32, 4)
     owners = None if push is None else (*push, cap)
     kernel = SparseDcpDecode(batch, heads, padded, width, owners, tiles, bulk)
+    if px:
+        kernel = SparseDcpDecodePx(batch, heads, padded, width, owners)
     args: tuple = (query, kv, rows, valid, latent, lse, Float32(1.0), Float32(1.0))
     if push is not None:
         peers = fake((push[1],), None, torch.int64, 8)
