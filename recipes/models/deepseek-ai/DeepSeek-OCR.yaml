@@ -1,0 +1,226 @@
+meta:
+  title: "DeepSeek-OCR"
+  slug: "deepseek-ocr"
+  provider: "DeepSeek"
+  description: "Frontier OCR model exploring optical context compression for LLMs, optimized for document parsing and markdown generation."
+  date_added: 2025-10-22
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Optical context compression for efficient OCR and document understanding"
+  related_recipes:
+    - "deepseek-ai/DeepSeek-OCR-2"
+  hardware:
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-OCR"
+  min_vllm_version: "0.12.0"
+  architecture: dense
+  parameter_count: "3B"
+  active_parameters: "3B"
+  context_length: 8192
+  base_args:
+    - "--trust-remote-code"
+    - "--logits-processors"
+    - "vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor"
+    - "--mm-processor-cache-gb"
+    - "0"
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 7
+    description: "Full precision BF16 (~3.3B params)"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  DeepSeek-OCR is a frontier OCR model exploring optical context compression for LLMs.
+  It is optimized for document parsing, free-form OCR, and markdown generation from images,
+  and ships with a custom n-gram logits processor for optimal quality.
+
+  ## Prerequisites
+
+  - **Hardware**: Single GPU with >=8 GB VRAM (CUDA, MI300X / MI325X / MI355X, or Intel XPU B60 / B70)
+  - **vLLM**: Current stable release
+  - **Python**: 3.10+ (CUDA) or 3.12 (ROCm)
+
+  ### CUDA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### ROCm (MI300X, MI325X, MI355X)
+  Requires Python 3.12, ROCm 7.2.1, and glibc >= 2.35. Use the Docker flow from the
+  [vLLM installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/#pre-built-images)
+  if your host environment does not meet those requirements.
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ### Intel XPU (B60 / B70)
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest
+  ```
+
+  ## Client Usage
+
+  ### Offline OCR (Python)
+
+  ```python
+  from vllm import LLM, SamplingParams
+  from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+  from PIL import Image
+
+  llm = LLM(
+      model="deepseek-ai/DeepSeek-OCR",
+      enable_prefix_caching=False,
+      mm_processor_cache_gb=0,
+      logits_processors=[NGramPerReqLogitsProcessor],
+  )
+
+  image_1 = Image.open("path/to/your/image_1.png").convert("RGB")
+  image_2 = Image.open("path/to/your/image_2.png").convert("RGB")
+  prompt = "<image>\nFree OCR."
+
+  model_input = [
+      {"prompt": prompt, "multi_modal_data": {"image": image_1}},
+      {"prompt": prompt, "multi_modal_data": {"image": image_2}},
+  ]
+
+  sampling_param = SamplingParams(
+      temperature=0.0,
+      max_tokens=8192,
+      extra_args=dict(
+          ngram_size=30,
+          window_size=90,
+          whitelist_token_ids={128821, 128822},  # <td>, </td>
+      ),
+      skip_special_tokens=False,
+  )
+
+  for output in llm.generate(model_input, sampling_param):
+      print(output.outputs[0].text)
+  ```
+
+  ### Online OCR serving
+
+  **CUDA**
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-OCR \
+    --logits-processors vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor \
+    --mm-processor-cache-gb 0
+  ```
+
+  **ROCm (MI300X / MI325X / MI355X)**
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve deepseek-ai/DeepSeek-OCR \
+    --logits-processors vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor \
+    --mm-processor-cache-gb 0
+  ```
+
+  **Intel XPU (B60, B70)**
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    deepseek-ai/DeepSeek-OCR \
+    --logits-processors vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor \
+    --mm-processor-cache-gb 0
+  ```
+
+  Query the running server with the OpenAI client (same for CUDA / ROCm / XPU):
+
+  ```python
+  import time
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  messages = [
+      {
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"}},
+              {"type": "text", "text": "Free OCR."},
+          ],
+      }
+  ]
+
+  start = time.time()
+  response = client.chat.completions.create(
+      model="deepseek-ai/DeepSeek-OCR",
+      messages=messages,
+      max_tokens=2048,
+      temperature=0.0,
+      extra_body={
+          "skip_special_tokens": False,
+          "vllm_xargs": {
+              "ngram_size": 30,
+              "window_size": 90,
+              "whitelist_token_ids": [128821, 128822],
+          },
+      },
+  )
+  print(f"Response costs: {time.time() - start:.2f}s")
+  print(f"Generated text: {response.choices[0].message.content}")
+  ```
+
+  ## Troubleshooting / Configuration Tips
+
+  - **Use the custom logits processor** along with the model for optimal OCR and markdown
+    generation performance.
+  - Unlike multi-turn chat, OCR tasks do not typically benefit from prefix caching or image
+    reuse, so disable these features to avoid unnecessary hashing and caching overhead.
+  - DeepSeek-OCR works better with plain prompts than instruction formats. See the
+    [official example prompts](https://github.com/deepseek-ai/DeepSeek-OCR/blob/2ac6d64a00656693b79c4f759a5e62c1b78bbeb1/DeepSeek-OCR-master/DeepSeek-OCR-vllm/config.py#L27-L37).
+  - Depending on your hardware, adjust `max_num_batched_tokens` for better throughput.
+
+  ## References
+
+  - [DeepSeek-OCR on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-OCR)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html#offline-inference)

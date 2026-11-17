@@ -212,3 +212,34 @@ def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
     )
     assert torch.equal(scales[-1:], expected_scales)
     assert torch.equal(out[-1:], expected_out)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_vec_matches_scalar(
+    default_vllm_config,
+    dtype: torch.dtype,
+    quant_dtype: torch.dtype,
+    group_size: int,
+    is_scale_transposed: bool,
+) -> None:
+    """The vectorized kernel (large, 16B-aligned inputs) must match the
+    one-block-per-group kernel bitwise; a 2-byte-misaligned view of the same
+    values forces the latter."""
+    num_tokens, hidden_size = 1024, 1536
+    x = torch.randn(num_tokens, 2 * hidden_size, dtype=dtype, device="cuda") * 4
+    buf = torch.empty(x.numel() + 1, dtype=dtype, device="cuda")
+    x_misaligned = buf[1:].view_as(x)
+    x_misaligned.copy_(x)
+    kwargs = dict(
+        group_size=group_size,
+        quant_dtype=quant_dtype,
+        is_scale_transposed=is_scale_transposed,
+    )
+    out, scales = ops.silu_and_mul_per_block_quant(x, **kwargs)
+    ref_out, ref_scales = ops.silu_and_mul_per_block_quant(x_misaligned, **kwargs)
+    assert torch.equal(out.view(torch.uint8), ref_out.view(torch.uint8))
+    assert torch.equal(scales, ref_scales)

@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm custom op schema tests for AITER MLA decode.
 
-``opcheck`` verifies that the decode ops are registered and that their schemas
+`opcheck` verifies that the decode ops are registered and that their schemas
 and fake implementations are consistent with the real kernels: fake-tensor
-support for torch.compile tracing and ``mutates_args=["o"]`` in-place output
+support for torch.compile tracing and `mutates_args=["o"]` in-place output
 aliasing.
 """
 
@@ -34,12 +34,32 @@ def _require_aiter():
 
 
 @torch.inference_mode()
+def test_gather_kv_b_proj_op_schema() -> None:
+    """Validate fake tensors and mutation of both expanded K/V outputs."""
+    _require_aiter()
+    from vllm._aiter_ops import rocm_aiter_ops  # noqa: F401
+
+    rows, num_heads = 32, 12
+    cache = torch.randn(rows, 1, 576, device="cuda").to(current_platform.fp8_dtype())
+    scale = torch.tensor([0.07], device="cuda")
+    cu_seq_lens = torch.tensor([0, 13, rows], dtype=torch.int32, device="cuda")
+    indices = torch.arange(rows, dtype=torch.int32, device="cuda").flip(0)
+    weight = torch.randn(num_heads * 256, 512, dtype=torch.bfloat16, device="cuda")
+    k = torch.empty(rows, num_heads, 192, dtype=torch.bfloat16, device="cuda")
+    v = torch.empty(rows, num_heads, 128, dtype=torch.bfloat16, device="cuda")
+    opcheck(
+        torch.ops.vllm.rocm_aiter_gather_kv_b_proj,
+        (cache, scale, cu_seq_lens, indices, cu_seq_lens, weight, k, v),
+    )
+
+
+@torch.inference_mode()
 def test_mla_decode_fwd_op_schema() -> None:
-    """Opcheck validates registration, schema, fake-tensor, and ``o`` aliasing.
+    """Opcheck validates registration, schema, fake-tensor, and `o` aliasing.
 
     A single opcheck call covers that the op is registered/callable, that its
     fake implementation matches the real op (torch.compile tracing), and that
-    the ``mutates_args=["o"]`` in-place output aliasing is declared correctly.
+    the `mutates_args=["o"]` in-place output aliasing is declared correctly.
     """
     _require_aiter()
     # Import ensures the custom op is registered.

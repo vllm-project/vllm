@@ -3,11 +3,11 @@
 """Platform-agnostic eligibility tests for GateLinear's ROCm router GEMMs.
 
 These assert the dispatch flags directly, so they run device-free by mocking
-the platform predicates. ``allow_cublas_router_gemm`` selects the
-bf16xbf16->fp32 ``torch.mm`` epilogue, while ``allow_fp32_router_gemm`` selects
+the platform predicates. `allow_cublas_router_gemm` selects the
+bf16xbf16->fp32 `torch.mm` epilogue, while `allow_fp32_router_gemm` selects
 the gfx950 low-M kernel with fp32 weights and output.
 
-The ROCm branch is guarded on ``not bias`` because ``torch.mm`` has no bias
+The ROCm branch is guarded on `not bias` because `torch.mm` has no bias
 term; a biased gate must fall back so the bias is not silently dropped.
 """
 
@@ -109,7 +109,17 @@ def test_rocm_set_out_dtype_respects_bias_guard(monkeypatch):
 
 @pytest.mark.parametrize(
     ("input_size", "output_size"),
-    [(3072, 256), (4096, 8), (4096, 192), (6144, 128), (6144, 256)],
+    [
+        (3072, 256),
+        (4096, 8),
+        (4096, 192),
+        (6144, 128),
+        (6144, 256),
+        (8192, 256),
+        (2048, 64),
+        (2560, 512),
+        (7168, 384),
+    ],
 )
 def test_rocm_gfx950_enables_fp32_router_gemm(
     monkeypatch, input_size: int, output_size: int
@@ -147,7 +157,6 @@ def test_rocm_fp32_router_gemm_is_replicated_across_ep_sizes(
     ("input_size", "output_size", "params_dtype", "bias", "on_gfx950"),
     [
         pytest.param(6144, 128, torch.float32, False, False, id="gfx942"),
-        pytest.param(2048, 64, torch.float32, False, True, id="shape"),
         pytest.param(6144, 128, torch.bfloat16, False, True, id="bf16-weight"),
         pytest.param(6144, 128, torch.float32, True, True, id="bias"),
     ],
@@ -258,3 +267,51 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
     assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
         "allow_fp32_router_gemm"
     )
+
+
+@pytest.mark.parametrize(
+    ("m", "has_aiter", "aiter_enabled", "path"),
+    [
+        (1, True, True, "aiter"),
+        (32, True, True, "aiter"),
+        (2047, True, True, "aiter"),
+        (2048, True, True, "bf16x3"),
+        (0, True, True, "linear"),
+        (64, False, True, "linear"),
+        (2048, False, True, "bf16x3"),
+        (64, True, False, "linear"),
+        (2047, True, False, "linear"),
+        (2048, True, False, "bf16x3"),
+    ],
+)
+def test_rocm_bf16x3_dispatch_uses_aiter_below_min_tokens(
+    monkeypatch, m: int, has_aiter: bool, aiter_enabled: bool, path: str
+) -> None:
+    """Below MIN_TOKENS the dispatch runs AITER's gemm_a16w32 when AITER is
+    enabled and the installed AITER has it; with no rows, without it, or with
+    AITER disabled, the previous path."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.router import (
+        bf16x3_router_gemm_rocm as rocm_bf16x3,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: aiter_enabled)
+
+    calls: list[str] = []
+
+    def fake(name):
+        def run(x, *args):
+            calls.append(name)
+            return torch.zeros(x.shape[0], 128, dtype=torch.float32)
+
+        return run
+
+    aiter = fake("aiter") if has_aiter else None
+    monkeypatch.setattr(gate_linear_mod, "_aiter_gemm_a16w32", lambda: aiter)
+    monkeypatch.setattr(rocm_bf16x3, "bf16x3_router_gemm", fake("bf16x3"))
+    x = torch.randn(m, 256, dtype=torch.bfloat16)
+    w = torch.randn(128, 256, dtype=torch.float32)
+    split = torch.zeros(3, 128, 256, dtype=torch.bfloat16)
+    out = gate_linear_mod.rocm_bf16x3_router_gemm_dispatch_impl(x, w, split)
+    assert out.shape == (m, 128) and out.dtype == torch.float32
+    assert calls == ([] if path == "linear" else [path])

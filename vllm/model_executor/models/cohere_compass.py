@@ -233,7 +233,7 @@ if HAS_TRITON:
     ) -> torch.Tensor:
         """Launch the fused Triton kernel for one (t,h,w) grid.
 
-        Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+        Returns a tensor of shape `(t * h * w, hidden_dim)` with the
         bilinearly-interpolated position embeddings in spatial-merge order.
         """
         assert h % m_size == 0 and w % m_size == 0, (
@@ -279,7 +279,7 @@ def pos_embed_interpolate_native(
 ) -> torch.Tensor:
     """Eager PyTorch bilinear position-embedding interpolation.
 
-    Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+    Returns a tensor of shape `(t * h * w, hidden_dim)` with the
     bilinearly-interpolated position embeddings in spatial-merge order.
     """
     assert h % m_size == 0 and w % m_size == 0, (
@@ -1493,6 +1493,9 @@ class CohereCompassForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                self.visual.attn_backend, "cu_seqlens"
+            ),
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -2033,7 +2036,7 @@ class CohereCompassForConditionalGeneration(
                 batch.
                 **NOTE**: If mrope is enabled (default setting for Cohere Compass
                 opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
+                otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from previous pipeline
                 stages.
             inputs_embeds: Pre-computed input embeddings.
@@ -2096,11 +2099,6 @@ class CohereCompassForConditionalGeneration(
         del modality, mm_kwargs
         merge_size = self.config.vision_config.spatial_merge_size
         return num_mm_embeds * merge_size**2, num_mm_embeds
-
-
-@lru_cache
-def _cached_tensor(x, device) -> torch.Tensor:
-    return torch.tensor(x, device=device)
 
 
 class CohereCompassAttention(nn.Module):

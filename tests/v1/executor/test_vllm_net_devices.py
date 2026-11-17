@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 
+from vllm.config import ParallelConfig
+from vllm.v1.executor import vllm_net_devices
 from vllm.v1.executor.vllm_net_devices import normalize_pci
 
 
@@ -74,3 +78,24 @@ def test_normalize_pci_device_out_of_range_raises():
 def test_normalize_pci_empty_string_raises():
     with pytest.raises(ValueError):
         normalize_pci("")
+
+
+@pytest.mark.parametrize("pcp,pp", [(1, 1), (2, 1), (2, 2)])
+def test_set_worker_net_device_uses_pcp_aware_gpu_index(monkeypatch, pcp, pp):
+    """NIC lookup uses the same DP-offset GPU index as device selection."""
+    monkeypatch.setenv("VLLM_GPU_NIC_PCIE_MAPPING", "unused")
+    monkeypatch.setenv("VLLM_NIC_SELECTION_VARS", "unused")
+    seen: list[int] = []
+    monkeypatch.setattr(vllm_net_devices, "set_worker_gpu_nic_mapping", seen.append)
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=pcp,
+        pipeline_parallel_size=pp,
+        data_parallel_size=2,
+        data_parallel_rank_local=1,
+        distributed_executor_backend="mp",
+    )
+    vllm_net_devices.set_worker_net_device(
+        1, SimpleNamespace(parallel_config=parallel_config)
+    )
+    assert seen == [1 + 2 * pcp * pp]
