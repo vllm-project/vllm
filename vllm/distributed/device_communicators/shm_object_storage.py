@@ -152,7 +152,7 @@ class SingleWriterShmRingBuffer:
                 lambda *args, **kwargs: None,
             ):
                 self.shared_memory = shared_memory.SharedMemory(name=name)
-                # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                # See https://docs.python.org/3/library/multiprocessing.shared_memory.html
                 # Some platforms allocate memory based on page size,
                 # so the shared memory block size may be larger or equal
                 # to the requested size. The size parameter is ignored
@@ -435,7 +435,7 @@ class MsgpackSerde(ObjectSerde):
         return obj
 
 
-@dataclass
+@dataclass(slots=True)
 class ShmObjectStorageHandle:
     max_object_size: int
     n_readers: int

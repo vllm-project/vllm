@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{DecodedText, IncrementalDecoder, Result, Tokenizer, TokenizerError};
+use crate::{DecodedText, IncrementalDecoder, Result, Tokenizer};
 
 const FIRST_CONFIGURED_TOKEN_ID: u32 = 256;
 
@@ -241,9 +241,9 @@ impl Tokenizer for TestTokenizer {
                 Self::flush_bytes(&mut pending_bytes, &mut output);
                 match self.unknown_decode {
                     UnknownDecode::Error => {
-                        return Err(TokenizerError(format!(
+                        return Err(backend!(
                             "test tokenizer cannot decode unknown token id {id}"
-                        )));
+                        ));
                     }
                     UnknownDecode::Empty => {}
                     UnknownDecode::Replacement => output.push('\u{FFFD}'),
