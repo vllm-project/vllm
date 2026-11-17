@@ -22,6 +22,27 @@ It'd be better to store the model in a local disk. Additionally, have a look at 
 
 If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options](../configuration/conserving_memory.md) to reduce the memory consumption.
 
+### Batch-sharded sampling memory overhead
+
+With `--enable-batch-sharded-sampling`, the all-to-all exchange of vocabulary logits uses NCCL point-to-point buffers on CUDA. These buffers consume GPU memory that would otherwise be available for the KV cache, potentially reducing KV cache capacity or causing an OOM error. The overhead depends on the tensor parallel size, hardware, NCCL version, and workload, and can grow as more communication paths are exercised.
+
+For example, [issue #68067](https://github.com/vllm-project/vllm/issues/68067) reports about 2.7 GiB per GPU with NCCL's default settings on eight A100-SXM4-40GB GPUs at TP=8 using NCCL 2.30.7. Setting `NCCL_MAX_P2P_NCHANNELS=4` reduced the measured overhead to 380 MiB per GPU in that setup. These measurements are specific to the reported workload and hardware.
+
+To evaluate a lower-memory configuration, set the channel limit in each worker's environment before starting vLLM:
+
+```bash
+export NCCL_MAX_P2P_NCHANNELS=4
+# Launch your existing vLLM command with --enable-batch-sharded-sampling.
+```
+
+This NCCL setting caps the number of point-to-point channels; it does not set a GPU memory budget and is not specific to sampling. Lower limits can increase communication latency, so benchmark KV cache capacity, throughput, and latency with your representative workload before keeping the setting. Measure memory after exercising the workload, since startup memory alone may miss later buffer allocations. The value `4` is an example to evaluate, not a recommended default for every deployment.
+
+To restore NCCL's default channel selection, unset the variable and restart vLLM:
+
+```bash
+unset NCCL_MAX_P2P_NCHANNELS
+```
+
 ## Generation quality changed
 
 In v0.8.0, the source of default sampling parameters was changed in <https://github.com/vllm-project/vllm/pull/12622>. Prior to v0.8.0, the default sampling parameters came from vLLM's set of neutral defaults. From v0.8.0 onwards, the default sampling parameters come from the `generation_config.json` provided by the model creator.
