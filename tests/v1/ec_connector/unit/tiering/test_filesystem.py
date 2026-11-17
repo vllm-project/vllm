@@ -907,7 +907,7 @@ def test_recovery_many_dead_owners_uses_bounded_file_descriptors(tmp_path):
 import resource
 import sys
 from pathlib import Path
-from vllm.distributed.ec_transfer.ec_connector.tiering.temporary import (
+from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
     ECTemporaryFileOwner,
 )
 namespace = Path(sys.argv[1])
@@ -922,7 +922,7 @@ assert not list((namespace / '.owners').iterdir())
 
 
 def test_recovery_metadata_error_preserves_owner_for_next_start(tmp_path, monkeypatch):
-    from vllm.distributed.ec_transfer.ec_connector.tiering.temporary import (
+    from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
         ECTemporaryFileOwner,
     )
 
