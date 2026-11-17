@@ -19,6 +19,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
+from vllm.utils.math_utils import round_up
 
 LAYER_0 = "visual.blocks.0.attn.attn"
 LAYER_1 = "visual.blocks.1.attn.attn"
@@ -36,7 +37,7 @@ def _is_mi3xx() -> bool:
 
 
 @contextlib.contextmanager
-def _build_attention(mm_config, attn_backend=None):
+def _build_attention(mm_config, attn_backend=None, head_size=HEAD_DIM):
     """Yield an MMEncoderAttention with the given multimodal config.
 
     The VllmConfig context stays active while the test runs so that
@@ -73,7 +74,7 @@ def _build_attention(mm_config, attn_backend=None):
     ):
         attn = MMEncoderAttention(
             num_heads=NUM_HEADS,
-            head_size=HEAD_DIM,
+            head_size=head_size,
             prefix=LAYER_0,
         )
         attn.process_weights_after_loading()
@@ -444,3 +445,79 @@ def test_scale_save_armed_on_first_rank_only(tmp_path, monkeypatch, first_rank):
         assert mod._fp8_scale_save_every_wrap
     else:
         assert mod._fp8_scale_save_path is None
+
+
+@pytest.mark.parametrize("head_dim", [72, 80])
+@pytest.mark.parametrize("num_tokens", [1444, 4144])
+def test_fused_dynamic_quant_matches_unfused(monkeypatch, head_dim, num_tokens):
+    """With dynamic scales and head_dim padding, Q, K and V are quantized by
+    the fused kernels, bit-identical to the code they replace (amax record and
+    scale update, then one quantize per tensor): FP8 bytes, scales and amax
+    history over two history wraps, on strided views of a packed QKV buffer."""
+    import vllm.model_executor.layers.attention.mm_encoder_attention as mod
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+        quantize_fp8_maybe_pad_head_dim,
+    )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attn_backend = None
+    if _is_mi3xx():
+        aiter = pytest.importorskip("aiter")
+        if not hasattr(aiter, "flash_attn_varlen_fp8_pertensor_func"):
+            pytest.skip("Installed AITER does not provide varlen FP8 attention")
+        # The AITER asm FP8 kernel path pads head_dim to 128.
+        monkeypatch.setenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "128")
+        attn_backend = AttentionBackendEnum.ROCM_AITER_FA
+    monkeypatch.setattr(mod, "_fp8_scale_save_path", None)
+    fused_calls = []
+    fused_quant = mod.dynamic_quantize_pad_qkv_fp8_triton
+
+    def counted_fused_quant(*args, **kwargs):
+        fused_calls.append(args[5])
+        return fused_quant(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "dynamic_quantize_pad_qkv_fp8_triton", counted_fused_quant)
+    mm_config = MultiModalConfig(mm_encoder_attn_dtype="fp8")
+    with (
+        _build_attention(mm_config, attn_backend, head_dim) as ref,
+        _build_attention(mm_config, attn_backend, head_dim) as fused,
+    ):
+        if ref is None or not ref.fp8_enabled:
+            pytest.skip("FP8 attention not available (AITER or FlashInfer cuDNN)")
+        pad_to = ref._fp8_pad_to
+        if head_dim % pad_to == 0:
+            pytest.skip(f"head_dim {head_dim} needs no padding to {pad_to}")
+        ref, fused = ref.to("cuda"), fused.to("cuda")
+        state = ("q_scale", "k_scale", "v_scale", "q_amax", "k_amax", "v_amax")
+
+        gen = torch.Generator(device="cuda").manual_seed(num_tokens)
+        num_calls = 2 * _FP8_AMAX_HISTORY_LEN + 3
+        for call in range(num_calls):
+            mult = (1.0, 4.0, 0.25, 2.0, 0.5, 8.0, 1.5)[call % 7]
+            qkv = mult * torch.randn(
+                num_tokens, 3, NUM_HEADS, head_dim, device="cuda", generator=gen
+            )
+            if call % 5 == 3:
+                # Mostly negative K: its signed max is not its absolute max.
+                qkv[:, 1] -= 3.0 * mult
+            qkv = qkv.to(torch.bfloat16)
+            q, k, v = (qkv[:, i].unsqueeze(0) for i in range(3))
+
+            ref._record_amax_and_update_scales(q, k, v)
+            ref_scales = (ref._fp8_q_scale, ref._fp8_k_scale, ref._fp8_v_scale)
+            expected = [
+                quantize_fp8_maybe_pad_head_dim(x, sc, ref.fp8_quant, pad_to=pad_to)
+                for x, sc in zip((q, k, v), ref_scales)
+            ]
+            actual = fused._quantize_qkv_fp8(q, k, v)
+
+            padded_shape = (1, num_tokens, NUM_HEADS, round_up(head_dim, pad_to))
+            for e, a in zip(expected, actual):
+                assert a.shape == e.shape == padded_shape
+                assert torch.equal(a.view(torch.uint8), e.view(torch.uint8)), call
+            for name in state:
+                e, a = getattr(ref, f"_fp8_{name}"), getattr(fused, f"_fp8_{name}")
+                assert torch.equal(a.view(torch.int32), e.view(torch.int32)), name
+            assert fused._fp8_amax_pos == ref._fp8_amax_pos
+    assert fused_calls == [c % _FP8_AMAX_HISTORY_LEN for c in range(num_calls)]

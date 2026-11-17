@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.config import MultiModalConfig
 from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
+    dynamic_quantize_pad_qkv_fp8_triton,
     quantize_fp8_maybe_pad_head_dim,
 )
 from vllm.logger import init_logger
@@ -712,6 +713,31 @@ class MMEncoderAttention(CustomOp):
             buffer_wrapped,
         )
 
+    def _fused_dynamic_quantize_qkv_fp8(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """`_record_amax_and_update_scales` plus the padded quantization of
+        Q, K and V in two kernel launches, with bit-identical outputs, scales
+        and amax history. Same CUDA graph caveat."""
+        pos = self._fp8_amax_pos
+        self._fp8_amax_pos = (pos + 1) % _FP8_AMAX_HISTORY_LEN
+        scales = (self._fp8_q_scale, self._fp8_k_scale, self._fp8_v_scale)
+        qkv = dynamic_quantize_pad_qkv_fp8_triton(
+            query,
+            key,
+            value,
+            (self._fp8_q_amax, self._fp8_k_amax, self._fp8_v_amax),
+            scales,
+            pos,
+            pad_to=self._fp8_pad_to,
+        )
+        buffer_wrapped = self._fp8_amax_pos == 0 and pos == _FP8_AMAX_HISTORY_LEN - 1
+        _maybe_save_fp8_scales(self.layer_name, *scales, buffer_wrapped)
+        return qkv
+
     def _quantize_qkv_fp8(
         self,
         query: torch.Tensor,
@@ -721,6 +747,11 @@ class MMEncoderAttention(CustomOp):
         assert self.fp8_quant is not None
 
         if self._fp8_dynamic_scale:
+            if (
+                query.shape[-1] % self._fp8_pad_to != 0
+                and query.shape == key.shape == value.shape
+            ):
+                return self._fused_dynamic_quantize_qkv_fp8(query, key, value)
             self._record_amax_and_update_scales(query, key, value)
 
         query = quantize_fp8_maybe_pad_head_dim(
