@@ -571,7 +571,7 @@ _PP_NUM_LAYERS = 4
 _INDEXER = AttentionSpec(
     block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
 )
-_PP_MODELS = ["dense", "two_specs", "attn_mamba"]
+_PP_MODELS = ["dense", "two_specs", "attn_mamba", "longcat"]
 
 
 def _pp_groups(model: str, layers: range) -> list:
@@ -579,6 +579,15 @@ def _pp_groups(model: str, layers: range) -> list:
     formed over the whole model, so every stage has each of them."""
     if model == "dense":
         return [make_kv_cache_group([f"layers.{i}.attn" for i in layers], _ATTN)]
+    if model == "longcat":
+        # Like LongCat-Flash: two MLA attention modules per decoder layer.
+        mla = MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=40, dtype=torch.float16
+        )
+        names = [
+            f"model.layers.{i}.self_attn.{j}.attn" for i in layers for j in range(2)
+        ]
+        return [make_kv_cache_group(names, mla)]
     if model == "two_specs":
         # Like MLA with an indexer cache: two KV cache specs per layer.
         return [

@@ -160,6 +160,16 @@ def _draft_layer_names(vllm_config: VllmConfig) -> frozenset[str]:
     return frozenset(name for name, layer in layers.items() if layer.is_draft_layer)
 
 
+def _decoder_layer_index(layer_name: str) -> int:
+    """Decoder layer index of `layer_name`, e.g. 7 for LongCat-Flash's
+    `model.layers.7.self_attn.1.attn`."""
+    parts = layer_name.split(".")
+    for part, index in zip(parts, parts[1:]):
+        if part == "layers" and index.isdigit():
+            return int(index)
+    return extract_layer_index(layer_name)
+
+
 def _group_range_objects(
     metadata: KeyMetadata,
     group: KVCacheGroup,
@@ -188,7 +198,7 @@ def _group_range_objects(
             return 0
         if name in draft_layers:
             return len(layer_ranges) - 1
-        return layer_range_index(layer_ranges, extract_layer_index(name))
+        return layer_range_index(layer_ranges, _decoder_layer_index(name))
 
     ranges = [range_of(name) for name in names]
     first_seen: dict[tuple[int, KVCacheSpec], int] = {}
