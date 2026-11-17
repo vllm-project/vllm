@@ -264,6 +264,8 @@ class AuxOutputSchedulerConnector:
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
+        *,
+        should_emit_output: bool,
     ) -> tuple[np.ndarray | None, torch.Tensor | None, tuple[int, torch.Tensor] | None]:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id
@@ -274,9 +276,7 @@ class AuxOutputSchedulerConnector:
             if request_output.hidden_states is not None:
                 end = max(0, request.num_tokens - 1 - request_output.hidden_start)
                 hidden = request_output.hidden_states[:end]
-        if not self._routing or (
-            request.num_output_tokens == 0 and not request.is_finished()
-        ):
+        if not self._routing or not should_emit_output:
             return None, hidden, prompt
         # The block this request started mid-block has no rows here. Its hash
         # exists only once its last token is known; record the block before
@@ -316,9 +316,9 @@ class AuxOutputSchedulerConnector:
         return request_output.rows[:local_end], hidden, prompt
 
     def request_finished(self, request: Request) -> None:
+        """Queue a request's terminal event and final block hashes."""
         if not self._routing:
             return
-        """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
         self._loading.pop(request_id, None)
         if request_id in self._sent_hash_counts:

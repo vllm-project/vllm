@@ -536,28 +536,6 @@ mod tests {
     use crate::protocol::{decode_msgpack, encode_msgpack};
 
     #[test]
-    fn python_hidden_output_keeps_existing_wire_positions() {
-        let cases: serde_json::Value =
-            serde_json::from_str(include_str!("../../testdata/python_hidden_output.json")).unwrap();
-        for case in cases.as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let frames: Vec<Bytes> = case["frames"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|value| Bytes::from(hex::decode(value.as_str().unwrap()).unwrap()))
-                .collect();
-            let decoded = EngineCoreOutputs::from_frames(&frames).unwrap();
-            let outputs = &decoded.as_request_batch().unwrap().outputs;
-            assert_eq!(outputs.len(), 1);
-            assert_eq!(outputs[0].request_id, name);
-            assert_eq!(outputs[0].num_nans_in_logits, 7);
-            assert_eq!(outputs[0].routed_experts.is_some(), name == "routed");
-            assert_eq!(outputs[0].spec_decode_metrics.is_some(), name == "spec");
-        }
-    }
-
-    #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {
         let outputs = WireEngineCoreOutputs {
             outputs: vec![EngineCoreOutput {

@@ -4,7 +4,7 @@
 from copy import copy
 from typing import cast
 
-from vllm.outputs import CompletionOutput
+from vllm.outputs import CompletionOutput, RequestError
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import IterationStats
@@ -48,6 +48,7 @@ class ParentRequest:
         )
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
+        self.error: RequestError | None = None
 
     def _get_child_sampling_params(
         self,

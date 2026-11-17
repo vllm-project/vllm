@@ -446,6 +446,9 @@ class RequestState:
         if self.parent_req is None:
             outputs = [output]
         else:
+            if final_only:
+                self.parent_req.error = self.parent_req.error or error
+                error = self.parent_req.error
             outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             if not outputs:
                 return None
@@ -557,7 +560,11 @@ class RequestState:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
         hidden_states = None
-        if finished and self.hidden_states_chunks is not None:
+        if (
+            finished
+            and finish_reason != FinishReason.ERROR
+            and self.hidden_states_chunks is not None
+        ):
             assert self.hidden_states_start is not None
             end = self.prompt_len - 1 + self.detokenizer.num_output_tokens()
             if self.hidden_states_end is not None:
@@ -577,7 +584,11 @@ class RequestState:
                 raise GenerationError("Requested hidden-state rows were not delivered")
 
         prompt_hidden_states = None
-        if finished and self.prompt_hidden_chunks is not None:
+        if (
+            finished
+            and finish_reason != FinishReason.ERROR
+            and self.prompt_hidden_chunks is not None
+        ):
             chunks = self.prompt_hidden_chunks
             prompt_hidden_states = (
                 torch.cat(chunks)
@@ -600,7 +611,9 @@ class RequestState:
             token_ids=token_ids,
             routed_experts=routed_experts,
             hidden_states=hidden_states,
-            hidden_states_start=self.hidden_states_start if finished else None,
+            hidden_states_start=(
+                self.hidden_states_start if hidden_states is not None else None
+            ),
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -610,13 +623,11 @@ class RequestState:
             weight_versions=self._weight_version_spans() if finished else None,
             prompt_hidden_states=prompt_hidden_states,
             prompt_hidden_states_start=(
-                self.prompt_hidden_start
-                if finished and self.prompt_hidden_chunks is not None
-                else None
+                self.prompt_hidden_start if prompt_hidden_states is not None else None
             ),
             prompt_hidden_states_weight_versions=(
                 self.prompt_hidden_versions
-                if finished and self.prompt_hidden_chunks is not None
+                if prompt_hidden_states is not None
                 else None
             ),
         )
@@ -999,9 +1010,9 @@ class OutputProcessor:
                     error=request_error,
                 )
             except GenerationError as exc:
-                self._finish_request(req_state)
                 reqs_to_abort.append(req_id)
                 if req_state.queue is not None:
+                    self._finish_request(req_state)
                     req_state.queue.put(exc)
                     continue
                 request_output = req_state.make_request_output(
@@ -1015,6 +1026,7 @@ class OutputProcessor:
                         code="hidden_states_unavailable", message=str(exc)
                     ),
                 )
+                self._finish_request(req_state)
                 if request_output is not None:
                     request_outputs.append(request_output)
                 continue

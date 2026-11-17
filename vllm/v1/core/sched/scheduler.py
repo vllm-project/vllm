@@ -2459,7 +2459,9 @@ class Scheduler(SchedulerInterface):
             if self.aux_output_connector is not None:
                 routed_experts, hidden_states, prompt_hidden_states = (
                     self.aux_output_connector.take_output(
-                        request, model_runner_output.aux_output_connector_output
+                        request,
+                        model_runner_output.aux_output_connector_output,
+                        should_emit_output=should_emit_output,
                     )
                 )
             if should_emit_output:

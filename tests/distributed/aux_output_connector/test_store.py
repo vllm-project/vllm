@@ -1530,7 +1530,9 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
-    np.testing.assert_array_equal(connector.take_output(request, output)[0], routing)
+    np.testing.assert_array_equal(
+        connector.take_output(request, output, should_emit_output=True)[0], routing
+    )
 
 
 @pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
@@ -1812,10 +1814,13 @@ def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector.request_finished(request)
 
     request.num_tokens = 5
-    np.testing.assert_array_equal(connector.take_output(request, first)[0], first_rows)
+    np.testing.assert_array_equal(
+        connector.take_output(request, first, should_emit_output=True)[0], first_rows
+    )
     request.num_tokens = 6
     np.testing.assert_array_equal(
-        connector.take_output(request, second)[0], second_rows[:1]
+        connector.take_output(request, second, should_emit_output=True)[0],
+        second_rows[:1],
     )
 
 
@@ -1830,10 +1835,7 @@ def test_scheduler_rejects_stale_output_without_aux_outputs():
     with pytest.raises(
         AssertionError, match="auxiliary output worker output is missing"
     ):
-        connector.take_output(
-            request,
-            {},
-        )[0]
+        connector.take_output(request, {}, should_emit_output=True)[0]
 
 
 def test_scheduler_rejects_missing_accepted_aux_output_rows():
@@ -1851,7 +1853,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
     }
 
     with pytest.raises(AssertionError, match="invalid token range"):
-        connector.take_output(request, output)[0]
+        connector.take_output(request, output, should_emit_output=True)[0]
 
 
 def test_scheduler_rejects_aux_output_past_finished_request():
@@ -1872,7 +1874,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
     with pytest.raises(
         AssertionError, match="finished auxiliary output output has no accepted"
     ):
-        connector.take_output(request, output)[0]
+        connector.take_output(request, output, should_emit_output=True)[0]
 
 
 @pytest.mark.parametrize("chunk_size", [2, 4])
@@ -1906,7 +1908,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         request.num_tokens = 5
         request.num_output_tokens = 1
         request.finished = max_tokens == 1
-        result = connector.take_output(request, output)[0]
+        result = connector.take_output(request, output, should_emit_output=True)[0]
         np.testing.assert_array_equal(result, rows[:0])
 
         if max_tokens == 2:
@@ -1926,7 +1928,8 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
             request.num_tokens = 6
             request.finished = True
             np.testing.assert_array_equal(
-                connector.take_output(request, output)[0], rows[4:]
+                connector.take_output(request, output, should_emit_output=True)[0],
+                rows[4:],
             )
     finally:
         worker.close()
@@ -2125,7 +2128,9 @@ def test_connector_marks_partly_computed_block_once_its_hash_exists():
     decode.block_hashes.append(_HASHES[1])
     decode.num_tokens = 8
     rows = np.zeros((2, *_SHAPE), dtype=_DTYPE)
-    connector.take_output(decode, {"decode": AuxRequestOutput(5, rows)})
+    connector.take_output(
+        decode, {"decode": AuxRequestOutput(5, rows)}, should_emit_output=True
+    )
 
     assert connector.max_cache_hit(request) == 4
 

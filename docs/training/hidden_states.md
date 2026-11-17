@@ -164,3 +164,6 @@ apply when `aux_outputs` includes `hidden_states`, including requests for both
 outputs. A missing required row fails its request; synchronous Python consumers
 receive `finish_reason="error"` and a structured `RequestOutput.error`. Other
 requests in the batch continue.
+The failed completion returns neither hidden tensor nor hidden-position metadata.
+For `n > 1`, other completions continue; `FINAL_ONLY` retains the first structured
+error until the parent result is delivered.

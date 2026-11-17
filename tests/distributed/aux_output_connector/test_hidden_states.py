@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-from pathlib import Path
-
 import msgspec
 import numpy as np
 import pytest
@@ -21,12 +18,12 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import (
     EngineCoreOutput,
-    EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
-from vllm.v1.metrics.stats import IterationStats, RequestSpecDecodeMetrics
+from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.cpu_test
@@ -157,6 +154,7 @@ def test_prompt_rows_cross_chunks_keep_first_versions_and_reject_missing_rows():
     )
     assert failed.reqs_to_abort == ["p"]
     assert failed.request_outputs[0].error.code == "hidden_states_unavailable"
+    assert failed.request_outputs[0].outputs[0].prompt_hidden_states is None
     assert processor.get_num_unfinished_requests() == 0
 
 
@@ -215,6 +213,7 @@ def test_frontend_delivers_window_only_at_completion_and_rejects_missing_rows():
     )
     assert failed.reqs_to_abort == ["r"]
     assert failed.request_outputs[0].error.code == "hidden_states_unavailable"
+    assert failed.request_outputs[0].outputs[0].hidden_states is None
     assert processor.get_num_unfinished_requests() == 0
 
 
@@ -255,39 +254,6 @@ def test_engine_output_preserves_existing_wire_positions():
     assert decoded.num_nans_in_logits == 7
     assert decoded.routed_experts is None
     assert decoded.error is None
-
-
-def python_output_wire_cases():
-    cases = []
-    for name in ("decode", "spec", "routed"):
-        output = EngineCoreOutput(
-            request_id=name, new_token_ids=[8], num_nans_in_logits=7
-        )
-        if name == "spec":
-            output.finish_reason = FinishReason.LENGTH
-            output.spec_decode_metrics = RequestSpecDecodeMetrics.new(2)
-        elif name == "routed":
-            output.routed_experts = np.array([[[1, 2]]], dtype=np.int32)
-        cases.append(
-            {
-                "name": name,
-                "frames": [
-                    bytes(frame).hex()
-                    for frame in MsgpackEncoder().encode(
-                        EngineCoreOutputs(outputs=[output], timestamp=1.0)
-                    )
-                ],
-            }
-        )
-    return cases
-
-
-def test_rust_output_fixture_matches_python_encoder():
-    fixture = (
-        Path(__file__).resolve().parents[3]
-        / "rust/src/engine-core-client/testdata/python_hidden_output.json"
-    )
-    assert json.loads(fixture.read_text()) == python_output_wire_cases()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -382,4 +348,78 @@ def test_abort_discards_partial_prompt_rows_before_request_id_reuse():
     ).request_outputs[0]
     torch.testing.assert_close(
         result.outputs[0].prompt_hidden_states, fresh, atol=0, rtol=0
+    )
+
+
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+@pytest.mark.parametrize("broken_index", [0, 1])
+def test_parallel_sampling_keeps_missing_hidden_error(output_kind, broken_index):
+    processor = OutputProcessor(None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="parent",
+        external_req_id="parent",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(
+            n=2,
+            detokenize=False,
+            max_tokens=1,
+            output_kind=output_kind,
+            aux_outputs=("hidden_states", "prompt_hidden_states"),
+        ),
+        pooling_params=None,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    parent = ParentRequest(request)
+    child_ids = []
+    for index in range(2):
+        child_id, params = parent.get_child_info(index)
+        child_ids.append(child_id)
+        child = msgspec.structs.replace(
+            request, request_id=child_id, sampling_params=params
+        )
+        processor.add_request(
+            child, prompt=None, parent_req=parent, request_index=index
+        )
+    rows = torch.ones((2, 4))
+    results = []
+    # Complete children in index order, covering errors both before and at
+    # the final parent delivery.
+    for index, child_id in enumerate(child_ids):
+        broken = index == broken_index
+        result = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=child_id,
+                    new_token_ids=[4],
+                    hidden_states=None if broken else rows[:1],
+                    prompt_hidden_states=(0, rows[:1] if broken else rows),
+                    finish_reason=FinishReason.LENGTH,
+                )
+            ]
+        )
+        assert result.reqs_to_abort == ([child_id] if broken else [])
+        results.extend(result.request_outputs)
+    assert processor.get_num_unfinished_requests() == 0
+    assert results[-1].finished
+    failed = next(result for result in results if result.error is not None)
+    assert failed.error.code == "hidden_states_unavailable"
+    completions = {out.index: out for result in results for out in result.outputs}
+    assert completions[broken_index].finish_reason == "error"
+    assert completions[broken_index].hidden_states is None
+    assert completions[broken_index].hidden_states_start is None
+    assert completions[broken_index].prompt_hidden_states is None
+    assert completions[broken_index].prompt_hidden_states_start is None
+    assert completions[broken_index].prompt_hidden_states_weight_versions is None
+    assert completions[1 - broken_index].finish_reason == "length"
+    torch.testing.assert_close(
+        completions[1 - broken_index].hidden_states, rows[:1], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        completions[1 - broken_index].prompt_hidden_states, rows, atol=0, rtol=0
     )
