@@ -1368,15 +1368,19 @@ class Glm5NextForConditionalGeneration(
     is_hybrid: ClassVar[Literal[True]] = True
     supports_mm_device_do_normalize = False
 
-    # GLM-5.3-Flash stores the dense-MLP gate/up as separate tensors (like
+    # GLM-5.3-Flash stores the dense-MLP gate/up and the MLA
+    # ``q_a_proj``/``kv_a_proj_with_mqa`` as separate tensors (like
     # ``Glm4vMoeForConditionalGeneration``, ``glm4_moe`` and ``deepseek_v2``),
-    # so the fused ``gate_up_proj`` must expand to its real shard names for
-    # per-layer quant-scheme resolution. The identity ``gate_up_proj`` entry
-    # inherited from ``Glm4vForConditionalGeneration`` (pre-fused gate_up_proj)
-    # would otherwise route the module to ``global_quant_config`` and mismatch
-    # at load for mixed-precision Quark checkpoints.
+    # so the fused ``gate_up_proj`` and ``fused_qkv_a_proj`` must expand to
+    # their real shard names for per-layer quant-scheme resolution. Unmapped
+    # (or with the identity ``gate_up_proj`` entry inherited from
+    # ``Glm4vForConditionalGeneration``, for a pre-fused gate_up_proj), a fused
+    # module resolves to ``global_quant_config`` and mismatches at load for
+    # mixed-precision Quark checkpoints. The text model and the MTP draft share
+    # this quant config and define no mapping, so they resolve with this one.
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     }
 
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
