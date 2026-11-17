@@ -128,9 +128,11 @@ async def test_hash_endpoint_matches_rendered_tokens_and_engine_kv_events(
     async with httpx.AsyncClient(
         base_url=hash_server.url_for(""), timeout=60
     ) as client:
-        assert (await client.post("/hash", json=payload)).status_code == 401
+        assert (
+            await client.post("/v1/completions/hash", json=payload)
+        ).status_code == 401
         client.headers["Authorization"] = "Bearer test-key"
-        response = await client.post("/hash", json=payload)
+        response = await client.post("/v1/completions/hash", json=payload)
         assert response.status_code == 200, response.text
         hashes = response.json()
         assert len(hashes["prompts"][0]["block_hashes"]) >= 2
@@ -143,7 +145,7 @@ async def test_hash_endpoint_matches_rendered_tokens_and_engine_kv_events(
             "token_ids": prompt["token_ids"],
             "cache_salt": cache_salt,
         }
-        token_hashes = await client.post("/hash", json=tokens)
+        token_hashes = await client.post("/v1/completions/hash", json=tokens)
         assert token_hashes.status_code == 200, token_hashes.text
         assert token_hashes.json() == hashes
         generation = await client.post(f"/v1/{kind}", json=payload)
@@ -152,11 +154,13 @@ async def test_hash_endpoint_matches_rendered_tokens_and_engine_kv_events(
             generation.json()["usage"]["prompt_tokens"]
             == hashes["prompts"][0]["num_tokens"]
         )
-        assert (await client.post("/hash", json=payload)).json() == hashes
+        assert (
+            await client.post("/v1/completions/hash", json=payload)
+        ).json() == hashes
         tokens["cache_salt"] = "tenant-b"
-        assert (await client.post("/hash", json=tokens)).json()["prompts"] != hashes[
+        assert (await client.post("/v1/completions/hash", json=tokens)).json()[
             "prompts"
-        ]
+        ] != hashes["prompts"]
 
     stored: dict[int | None, BlockStored] = {}
     next_seq = 0
@@ -196,14 +200,14 @@ async def test_hash_endpoint_completion_batch_preserves_prompt_order(hash_server
         headers={"Authorization": "Bearer test-key"},
     ) as client:
         response = await client.post(
-            "/hash", json={"model": MODEL_NAME, "prompt": prompts}
+            "/v1/completions/hash", json={"model": MODEL_NAME, "prompt": prompts}
         )
         assert response.status_code == 200, response.text
         batch = response.json()["prompts"]
         assert len(batch) == len(prompts)
         for prompt, expected in zip(prompts, batch):
             single = await client.post(
-                "/hash", json={"model": MODEL_NAME, "prompt": prompt}
+                "/v1/completions/hash", json={"model": MODEL_NAME, "prompt": prompt}
             )
             assert single.status_code == 200, single.text
             assert single.json()["prompts"] == [expected]

@@ -29,7 +29,7 @@ def render(request: Request) -> ServingRender | None:
 
 
 @router.post(
-    "/hash",
+    "/v1/completions/hash",
     dependencies=[Depends(validate_json_request)],
     response_model=HashResponse,
     responses={

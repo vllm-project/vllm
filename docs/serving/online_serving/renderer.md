@@ -19,7 +19,7 @@ vllm serve <model> --enable-scale-out
 
 ## API Reference
 
-- [Prefix Hash API](#prefix-hashes) (`/hash`, requires a running engine)
+- [Prefix Hash API](#prefix-hashes) (`/v1/completions/hash`, requires a running engine)
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
@@ -29,7 +29,7 @@ vllm serve <model> --enable-scale-out
 
 ## Prefix hashes
 
-`POST /hash` returns the engine's prefix-cache hashes without generating tokens.
+`POST /v1/completions/hash` returns the engine's prefix-cache hashes without generating tokens.
 It is disabled by default: use `vllm serve <model> --enable-scale-out` with prefix
 caching enabled. It requires a running engine serving a decoder-only model.
 
@@ -37,7 +37,7 @@ Send an OpenAI chat/completion request, or `model` and `token_ids` for
 pretokenized input:
 
 ```bash
-curl http://localhost:8000/hash \
+curl http://localhost:8000/v1/completions/hash \
   -H 'Content-Type: application/json' \
   -d '{"model":"my-model","prompt":"Hello"}'
 ```

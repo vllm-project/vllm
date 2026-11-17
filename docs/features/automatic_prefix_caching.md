@@ -8,7 +8,7 @@ Automatic Prefix Caching (APC in short) caches the KV cache of existing queries,
     Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
 
 External routers can obtain the engine's prefix-cache hashes through the
-[`/hash` endpoint](../serving/online_serving/renderer.md#prefix-hashes).
+[`/v1/completions/hash` endpoint](../serving/online_serving/renderer.md#prefix-hashes).
 
 ## Enabling APC in vLLM
 
