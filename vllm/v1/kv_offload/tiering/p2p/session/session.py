@@ -4,8 +4,8 @@
 
 A single P2PSession per remote peer handles BOTH directions of the P2P
 protocol on one ControlConnection: it can request blocks from the peer
-("client" role, in :mod:`.client`) AND serve blocks to the peer
-("server" role, in :mod:`.server`). This module is the thin coordinator
+("client" role, in `.client`) AND serve blocks to the peer
+("server" role, in `.server`). This module is the thin coordinator
 that owns the connection, the handshake, send-gating, and the message
 dispatch — each parsed message is forwarded to the corresponding role.
 
@@ -298,15 +298,15 @@ class P2PSession:
         self._server.finish(kv_request_id)
 
     def abort_loads(self) -> None:
-        """Abort every inbound load, failing each now; see ``ClientRole``."""
+        """Abort every inbound load, failing each now; see `ClientRole`."""
         self._client.abort_loads()
 
     def register_lookup(self, kv_request_id: str, key: bytes) -> bool | None:
         """Register or resolve one (kv_request_id, key) probe.
 
         Called from the manager's lookup() for symmetric-P2P consumers
-        (``remote_kv_source`` sub-dict in kv_transfer_params). See
-        ``ClientRole.register_lookup`` for the state-machine contract.
+        (`remote_kv_source` sub-dict in kv_transfer_params). See
+        `ClientRole.register_lookup` for the state-machine contract.
         """
         return self._client.register_lookup(kv_request_id, key)
 
@@ -314,14 +314,14 @@ class P2PSession:
         """Flush any aggregated symmetric-P2P lookups for this peer.
 
         Called once per scheduler step from the manager's
-        ``on_schedule_end()``. Probes wait for ConnectAckMsg before sending.
+        `on_schedule_end()`. Probes wait for ConnectAckMsg before sending.
         """
         self._client.flush_pending_lookups(send_ready=self._send_ready)
 
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
 
-        Delegates to the server role; the ``parent`` handle is valid
+        Delegates to the server role; the `parent` handle is valid
         only for the duration of this call.
         """
         self._server.serve_external_requests(parent)
@@ -415,8 +415,8 @@ class P2PSession:
             answer that can never arrive.
         failed_stores: server store job_ids to fail.
         failed_serves: synthetic lookup ctxs still owing
-            ``parent.on_request_finished`` (the manager flushes these on
-            its next ``serve_external_requests``).
+            `parent.on_request_finished` (the manager flushes these on
+            its next `serve_external_requests`).
         retained: server transfers that may still be writing, with the
             store jobs they read (held until they stop).
         """
@@ -484,9 +484,9 @@ class P2PSession:
     def _protocol_error(self, reason: str) -> None:
         """Log a protocol violation and disconnect.
 
-        Best-effort sends ``DisconnectMsg`` so the peer learns why we're
+        Best-effort sends `DisconnectMsg` so the peer learns why we're
         going away, then marks the connection dead. The manager reaps
-        the session on the next poll via ``alive``.
+        the session on the next poll via `alive`.
         """
         logger.error(
             "P2PSession %s: protocol error: %s — disconnecting",

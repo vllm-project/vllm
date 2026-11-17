@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The FlashInfer sparse-MLA decode of a specialized decode step.
 
-It is the decode branch of ``DeepseekV4FlashInferMLAAttention.forward_mqa``
+It is the decode branch of `DeepseekV4FlashInferMLAAttention.forward_mqa`
 with two changes, neither of which issues a collective:
 
-- Shared sparse-index tables (``SparseIndexTables``). Compressed layers that
+- Shared sparse-index tables (`SparseIndexTables`). Compressed layers that
   share an index source build equal tables in a step, so the first of them
   builds the table and the others reuse it; the first layer of such a run also
   builds, on a side stream, the tables its later layers look up in other SWA
   KV-cache groups.
 - Persistent multi-CTA KV counters. Without a caller-owned counter buffer,
-  ``trtllm_batch_decode_sparse_mla_dsv4`` allocates and zeroes a fresh one
+  `trtllm_batch_decode_sparse_mla_dsv4` allocates and zeroes a fresh one
   before every call, a small fill kernel ahead of each decode launch. The
   kernel returns every counter to zero when it finishes, so a buffer zeroed
   once stays valid for launches that do not overlap, as in the FlashInfer MLA
   backend.
 
 Batches whose clusters fit the GPU at once (at width 640, up to 8 requests with
-DSpark on a GB300) run the CuTe DSL kernel of ``sparse_mla_cute`` instead of
+DSpark on a GB300) run the CuTe DSL kernel of `sparse_mla_cute` instead of
 TRTLLM-gen: it spreads a token's columns over one CTA per 128 instead of at most
 3.
 """
@@ -58,7 +58,7 @@ _kv_counters_by_device: dict[torch.device, torch.Tensor] = {}
 @cache
 def _takes_kv_counters() -> bool:
     """Whether the installed FlashInfer's sparse-MLA decode takes caller-owned
-    KV counters (``multi_ctas_kv_counter_buffer``, since 0.7.1); logs once when
+    KV counters (`multi_ctas_kv_counter_buffer`, since 0.7.1); logs once when
     it does not."""
     try:
         import flashinfer.utils
@@ -80,7 +80,7 @@ def _takes_kv_counters() -> bool:
 
 def kv_counter_buffer(max_rows: int) -> torch.Tensor | None:
     """Zeroed multi-CTA KV counters on the current device for decode launches
-    of up to ``max_rows`` rows (requests x heads), or None when FlashInfer's
+    of up to `max_rows` rows (requests x heads), or None when FlashInfer's
     decode takes no counter buffer.
 
     Allocated when the executor is built, outside any CUDA graph capture. Every
@@ -123,8 +123,8 @@ def trtllm_decode_sparse_mla_dsv4(
     max_q_len: int,
     kv_counters: torch.Tensor | None,
 ) -> None:
-    """``trtllm_batch_decode_sparse_mla_dsv4`` for ``sparse_indices`` that are
-    KV storage offsets, on ``kv_counters`` (from ``kv_counter_buffer``) when
+    """`trtllm_batch_decode_sparse_mla_dsv4` for `sparse_indices` that are
+    KV storage offsets, on `kv_counters` (from `kv_counter_buffer`) when
     they are large enough for the launch."""
     counter_kwargs: dict[str, torch.Tensor] = {}
     if kv_counters is not None:
@@ -177,12 +177,12 @@ class SparseIndexTables:
     group's SWA indices and block table and, for compressed layers, the index
     source's top-k indices; not on any layer's KV write. So the first layer of
     a run builds its own group's table through the stock
-    ``_build_sparse_index_metadata`` and then forks, onto ``stream``, the
+    `_build_sparse_index_metadata` and then forks, onto `stream`, the
     builds that later layers of the run look up in other groups:
 
-    * ``lookup`` returns a layer's table, building and forking on a miss and
-      making the current stream wait for a table built on ``stream``.
-    * ``join`` makes the current stream wait for everything ``stream`` ran.
+    * `lookup` returns a layer's table, building and forking on a miss and
+      making the current stream wait for a table built on `stream`.
+    * `join` makes the current stream wait for everything `stream` ran.
       Index sources call it before their indexer overwrites the top-k indices,
       and the executor at the end of its step, so a CUDA graph capture ends
       joined.
@@ -228,7 +228,7 @@ class SparseIndexTables:
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``attn._build_sparse_index_metadata``, on the step's shared tables."""
+        """`attn._build_sparse_index_metadata`, on the step's shared tables."""
         key = self.keys[attn]
         table = self._tables.get((id(swa_metadata), key))
         if table is None:
@@ -280,10 +280,10 @@ class SparseIndexTables:
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
     ) -> None:
-        """Build, on ``stream``, the tables of the other KV-cache groups whose
-        later layers of the run look ``key`` up: for each group, the build its
+        """Build, on `stream`, the tables of the other KV-cache groups whose
+        later layers of the run look `key` up: for each group, the build its
         first such layer would run on a miss. The key fixes the compressed
-        cache and its metadata, so these are ``attn``'s."""
+        cache and its metadata, so these are `attn`'s."""
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)
         builds: list[
@@ -327,7 +327,7 @@ class SparseIndexTables:
 
 
 class SparseMlaDecode:
-    """``forward_mqa`` of a pure-decode step on the shared tables and the
+    """`forward_mqa` of a pure-decode step on the shared tables and the
     persistent KV counters."""
 
     def __init__(self, tables: SparseIndexTables, max_rows: int) -> None:
@@ -337,7 +337,7 @@ class SparseMlaDecode:
     def run(
         self, attn: DeepseekV4FlashInferMLAAttention, q: torch.Tensor, out: torch.Tensor
     ) -> None:
-        """Write ``attn``'s sparse MLA of ``q`` into ``out``."""
+        """Write `attn`'s sparse MLA of `q` into `out`."""
         assert attn.kv_cache_torch_dtype in (torch.bfloat16, torch.float8_e4m3fn)
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)

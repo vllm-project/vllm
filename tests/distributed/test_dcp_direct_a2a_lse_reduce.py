@@ -159,6 +159,14 @@ class _FakeProcessGroup:
 
 
 class TestDirectDCPGating:
+    @pytest.fixture(autouse=True)
+    def supported_topology(self, monkeypatch):
+        monkeypatch.setattr(
+            cp_common,
+            "get_symmetric_memory_topology",
+            lambda _group: cp_common.SymmetricMemoryTopology.INTRA_NODE,
+        )
+
     def test_env_disabled_returns_none(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
         dcp.get_direct_dcp_a2a_workspace.cache_clear()
@@ -1116,10 +1124,13 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                     partial_output,
                     partial_lse,
                     packed_send,
-                    world_size,
-                    heads_per_rank,
-                    head_dim,
-                    2,
+                    None,
+                    None,
+                    has_mask=False,
+                    world_size=world_size,
+                    h_per_rank=heads_per_rank,
+                    head_dim=head_dim,
+                    lse_pack_dim=2,
                 )
                 expected_recv = torch.empty_like(packed_send)
                 dist.all_to_all_single(expected_recv, packed_send)
@@ -1162,12 +1173,16 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                             rtol=0,
                             atol=0,
                         )
-                nccl_output, nccl_lse = dcp._dcp_a2a_unpack_combine(
+                nccl_output = torch.empty_like(actual)
+                nccl_lse = torch.empty_like(actual_lse)
+                dcp._dcp_a2a_unpack_combine(
                     expected_recv,
-                    head_dim,
-                    2,
-                    True,
-                    is_lse_base_on_e,
+                    nccl_output,
+                    nccl_lse,
+                    head_dim=head_dim,
+                    lse_pack_dim=2,
+                    return_lse=True,
+                    is_lse_base_on_e=is_lse_base_on_e,
                 )
                 torch.testing.assert_close(actual, nccl_output, rtol=0, atol=0)
                 torch.testing.assert_close(actual_lse, nccl_lse, rtol=0, atol=0)
@@ -1380,12 +1395,29 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                 (world_size, replays, 1, 10), device=device, dtype=dtype
             )
             dcp._dcp_a2a_pack_send(
-                output_history, lse_history, reference_send, world_size, 1, 8, 2
+                output_history,
+                lse_history,
+                reference_send,
+                None,
+                None,
+                has_mask=False,
+                world_size=world_size,
+                h_per_rank=1,
+                head_dim=8,
+                lse_pack_dim=2,
             )
             reference_recv = torch.empty_like(reference_send)
             dist.all_to_all_single(reference_recv, reference_send)
-            reference_history = dcp._dcp_a2a_unpack_combine(
-                reference_recv, 8, 2, False, is_lse_base_on_e
+            reference_history = torch.empty((replays, 1, 8), device=device, dtype=dtype)
+            unused_lse = torch.empty((1, 1), device=device, dtype=dtype)
+            dcp._dcp_a2a_unpack_combine(
+                reference_recv,
+                reference_history,
+                unused_lse,
+                head_dim=8,
+                lse_pack_dim=2,
+                return_lse=False,
+                is_lse_base_on_e=is_lse_base_on_e,
             )
             torch.testing.assert_close(history, reference_history[:, 0], rtol=0, atol=0)
 
@@ -1488,6 +1520,94 @@ def test_distributed_nixl_a2a_matches_reference(
             "TEST_REQUIRE_MAPPED_P2P": "1",
         },
     )
+
+
+def _distributed_direct_dcp_topk_worker(env: dict[str, str]) -> None:
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        DirectDCPTopKWorkspace,
+    )
+
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        topk, max_rows, local_len = 2048, 64, 3000
+        workspace = DirectDCPTopKWorkspace(dist.group.WORLD, device, max_rows, topk)
+
+        def make_inputs(rows: int, seed: int, valid: int):
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed * 101 + rank)
+            logits = torch.randn(
+                rows, local_len, device=device, generator=generator
+            ).round_(decimals=1)
+            local = logits.topk(topk, dim=1).indices.to(torch.int32)
+            local[:, valid:] = -1
+            return logits, local
+
+        def reference(logits: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+            rows = local.shape[0]
+            packed = torch.empty((rows, topk, 2), device=device)
+            pack_dcp_topk_candidates_cutedsl(
+                logits, local, packed, rank, world_size, 1, None
+            )
+            gathered = torch.empty((world_size, rows, topk, 2), device=device)
+            dist.all_gather_into_tensor(gathered, packed)
+            out = torch.empty((rows, topk), device=device, dtype=torch.int32)
+            # The selector reads the rank-major all-gather layout as is.
+            stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=out)
+            return out
+
+        def check(actual: torch.Tensor, expected: torch.Tensor) -> None:
+            for row in range(actual.shape[0]):
+                assert sorted(actual[row].tolist()) == sorted(expected[row].tolist())
+            peers = [torch.empty_like(actual) for _ in range(world_size)]
+            dist.all_gather(peers, actual)
+            for peer in peers:
+                assert torch.equal(peer.sort(dim=1).values, actual.sort(dim=1).values)
+
+        # An odd number of exchanges covers both ping-pong inboxes; the
+        # rounded scores create top-k boundary ties; valid=200 fits in topk.
+        for it, (rows, valid) in enumerate(
+            ((1, topk), (64, topk), (17, topk), (3, 200), (64, 1000))
+        ):
+            logits, local = make_inputs(rows, it, valid)
+            expected = reference(logits, local)
+            actual = local.clone()
+            workspace.merge(logits, actual, 1, None)
+            check(actual, expected)
+
+        rows = 17
+        static_logits, static_local = make_inputs(rows, 100, topk)
+        static_topk = static_local.clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            workspace.merge(static_logits, static_topk, 1, None)
+        for it in range(3):
+            logits, local = make_inputs(rows, 200 + it, topk)
+            expected = reference(logits, local)
+            static_logits.copy_(logits)
+            static_topk.copy_(local)
+            graph.replay()
+            check(static_topk, expected)
+        torch.accelerator.synchronize()
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4 or not torch.cuda.is_available(),
+    reason="Need 4 GPUs.",
+)
+def test_distributed_direct_dcp_topk_matches_all_gather():
+    _distributed_run(_distributed_direct_dcp_topk_worker, world_size=4, extra_env={})
 
 
 if __name__ == "__main__":

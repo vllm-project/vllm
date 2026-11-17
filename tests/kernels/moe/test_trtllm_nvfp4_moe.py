@@ -393,11 +393,11 @@ def _run_fp4_padded(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
 ) -> torch.Tensor:
-    """Drive ``TrtLlmNvFp4ExpertsModular.apply`` on a padded layout.
+    """Drive `TrtLlmNvFp4ExpertsModular.apply` on a padded layout.
 
-    ``topk_ids`` already carries the padding tail (rows whose ids are -1).
+    `topk_ids` already carries the padding tail (rows whose ids are -1).
     FlashInfer manages the workspaces, so pass the (0,)-shaped stand-ins that
-    ``workspace_shapes`` advertises.
+    `workspace_shapes` advertises.
     """
     experts = kernel.fused_experts
     assert isinstance(experts, TrtLlmNvFp4ExpertsModular)

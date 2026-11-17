@@ -118,7 +118,7 @@ def _shard_all_ranks(
 ):
     """Simulate every TP rank by faking get_tp_group() per BatchSharder.
 
-    ``owners_np`` is a sharded DraftLogitsCache owner table indexed by request
+    `owners_np` is a sharded DraftLogitsCache owner table indexed by request
     slot. Without it, requests are owned by batch position.
     """
     draft_logits = None

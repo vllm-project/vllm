@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused decode qkv for Flint at M <= 8 tokens (CuTe DSL), two kernels:
 
-1. ``fused_add_rms_norm`` (or ``rms_norm`` for the first layer) writing the
-   normalized activations ``xn`` and the new residual; it releases its PDL
+1. `fused_add_rms_norm` (or `rms_norm` for the first layer) writing the
+   normalized activations `xn` and the new residual; it releases its PDL
    dependents immediately so the second kernel's weights stream in meanwhile.
 2. the qkv GEMV (same fragment math, K split and summation order as
-   ``nvfp4_gemv`` at M <= 8) whose 16-row CTAs form one cluster per head and
+   `nvfp4_gemv` at M <= 8) whose 16-row CTAs form one cluster per head and
    send their BF16 rows to rank 0 through DSMEM, which applies per-head q/k
    RMSNorm, NeoX RoPE (FP32 cos/sin table, FP32 math) and the paged KV-cache
-   write like ``qk_norm_rope_cache``.
+   write like `qk_norm_rope_cache`.
 
-Numerics are those of ``norm.fused_add_rms_norm`` / ``norm.rms_norm`` ->
-GEMV -> ``qk_norm_rope_cache``; the per-head q/k norm sums its squares in a
+Numerics are those of `norm.fused_add_rms_norm` / `norm.rms_norm` ->
+GEMV -> `qk_norm_rope_cache`; the per-head q/k norm sums its squares in a
 different order, so q/k can differ from that path by one BF16 ulp.
 """
 
@@ -510,7 +510,7 @@ def flint_qkv_fused(
     num_kv_heads: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Residual-add RMSNorm + qkv GEMV + q/k norm, RoPE, cache write for
-    ``M <= 8`` tokens.
+    `M <= 8` tokens.
 
     Args:
         x: [M, 2048] bf16 attention input (contiguous).
@@ -526,7 +526,7 @@ def flint_qkv_fused(
         cos_sin_cache: [max_pos, 128] fp32 (cos | sin), or None (no RoPE).
         positions: [M] int64.
         k_cache: [blocks, block_size, kv_heads, 128] view.
-        v_cache: Same shape and strides as ``k_cache``.
+        v_cache: Same shape and strides as `k_cache`.
         slot_mapping: [<= M] int64; negative slots and tokens beyond it are
             not written.
         num_q_heads: Number of q heads.

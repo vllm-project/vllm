@@ -274,7 +274,7 @@ def is_supported_lora_module(
 
     Args:
         module_name: Full dot-separated module name.
-        module: Runtime module associated with ``module_name``.
+        module: Runtime module associated with `module_name`.
         supported_lora_modules: List of module suffixes supported by the
             model.
 
@@ -314,7 +314,7 @@ def is_in_target_modules(
             LoRAConfig.target_modules.
         packed_modules_mapping: Optional model-defined mapping from packed
             runtime module names to their adapter-visible submodule names
-            (e.g. ``{"gate_up_proj": ["gate_proj", "up_proj"]}``).
+            (e.g. `{"gate_up_proj": ["gate_proj", "up_proj"]}`).
 
     Returns:
         True if the module passes the filter, False otherwise.
