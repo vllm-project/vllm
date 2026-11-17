@@ -2127,7 +2127,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_TP_FP16_PARTIAL_SUMS", "0"))
     ),
     # k in [0, 14]: FP16 partial sums are prescaled by 2^-k (exact), so they
-    # overflow at 65504 * 2^k instead of 65504.
+    # overflow at 65504 * 2^k instead of 65504. The bound applies to their sum
+    # as well: models with massive activations in o_proj/down_proj outputs
+    # need a larger k. Overflow gives inf; nothing clamps it.
     "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": lambda: int(
         env_with_choices(
             "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2", [str(k) for k in range(15)]

@@ -32,7 +32,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     cuda_unquantized_gemm,
-    default_unquantized_gemm,
     dispatch_unquantized_gemm,
     maybe_pad_weight_avoid_cache_aliasing,
     maybe_use_skinny_gemm,
@@ -1946,11 +1945,11 @@ class RowParallelLinear(LinearBase):
             output = tensor_model_parallel_all_reduce(output_parallel)
             if self._fp16_partials is not None:
                 # Round to BF16 once, after the sum.
-                output = torch.mul(
-                    output,
-                    self._partial_sum_unscale_fp32,
-                    out=torch.empty_like(output, dtype=self.params_dtype),
-                )
+                output = self._unscale_fp16_partials(output)
+        elif self._fp16_partials is not None:
+            # reduce_results was turned off after __init__, for good or for
+            # one call: the caller reduces, so it gets BF16 partial sums.
+            output = self._unscale_fp16_partials(output_parallel)
         else:
             output = output_parallel
 
@@ -1958,6 +1957,13 @@ class RowParallelLinear(LinearBase):
             return output
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def _unscale_fp16_partials(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mul(
+            x,
+            self._partial_sum_unscale_fp32,
+            out=torch.empty_like(x, dtype=self.params_dtype),
+        )
 
     def _fp16_partials_mode(self) -> Literal["gemm", "kernel"] | None:
         if not (
@@ -1985,7 +1991,7 @@ class RowParallelLinear(LinearBase):
         mode: Literal["gemm", "kernel"] | None = None
         if type(self.quant_method) is UnquantizedLinearMethod:
             gemm = self.quant_method._gemm_impl
-            if gemm in (default_unquantized_gemm, cuda_unquantized_gemm):
+            if gemm is cuda_unquantized_gemm:
                 mode = "gemm"
             impl = getattr(gemm, "__name__", type(gemm).__name__)
         else:
