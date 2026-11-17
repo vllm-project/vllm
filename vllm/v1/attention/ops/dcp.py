@@ -1704,6 +1704,9 @@ class MLADCPManager:
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.num_heads = num_heads
         self.query_head_dim = query_head_dim
         self.output_head_dim = output_head_dim

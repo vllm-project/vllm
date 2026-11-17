@@ -299,9 +299,14 @@ def warm_up_dcp_fallback(dcp_manager: "MLADCPManager", num_tokens: int) -> None:
         return dict(seq_lens=seq_lens, query_start_loc=query_start_loc)
 
     dcp_manager.combine(partial_output, partial_lse, **batch(num_tokens, 1))
+    # Steps beyond the direct workspace combine with the NCCL A2A, whose first
+    # use connects its peers and allocates their buffers. A step without a
+    # token split keeps the DCP path at any size up to max_num_batched_tokens,
+    # so the A2A is reachable whenever that exceeds the workspace, even when
+    # `num_tokens` (the profile's DCP-path step) fits it.
     if dcp_manager.use_a2a and (
         dcp_manager.direct_a2a is None
-        or num_tokens > dcp_manager.direct_a2a.max_num_tokens
+        or dcp_manager.max_num_batched_tokens > dcp_manager.direct_a2a.max_num_tokens
     ):
         # The NCCL A2A's pack kernel compiles once per power-of-two
         # bucket of the batch's requests, and both its kernels once per

@@ -426,6 +426,56 @@ def test_stats_report_paths_since_last_report():
     )
 
 
+@pytest.mark.parametrize(
+    "num_tokens,direct_tokens,max_num_batched_tokens,warms",
+    [
+        # The profile's DCP-path step outgrows the direct workspace.
+        pytest.param(1663, 1024, 16384, True, id="step_beyond_workspace"),
+        # It fits the workspace, but a step without a token split can
+        # still outgrow it (a 2048-token CUDA graph capture size).
+        pytest.param(2048, 2048, 16384, True, id="no_split_beyond_workspace"),
+        # Every step fits the workspace: the NCCL A2A is unreachable.
+        pytest.param(2048, 2048, 2048, False, id="unreachable"),
+        # Without a direct workspace the NCCL A2A is the combine.
+        pytest.param(2048, None, 2048, True, id="no_direct_workspace"),
+    ],
+)
+def test_warm_up_dcp_fallback_runs_the_nccl_a2a_when_reachable(
+    monkeypatch, num_tokens, direct_tokens, max_num_batched_tokens, warms
+):
+    from vllm.v1.attention.ops.dcp_shardq import context as dcp
+
+    a2a_rows: list[int] = []
+    monkeypatch.setattr(
+        dcp,
+        "dcp_a2a_lse_reduce",
+        lambda output, lse, **kwargs: a2a_rows.append(output.shape[0]),
+    )
+    monkeypatch.setattr(dcp, "_WARMED_UP_DCP_FALLBACK", set())
+    direct_a2a = (
+        None if direct_tokens is None else SimpleNamespace(max_num_tokens=direct_tokens)
+    )
+    manager = SimpleNamespace(
+        group=SimpleNamespace(world_size=2, unique_name="dcp"),
+        device=torch.device("cpu"),
+        num_heads=1,
+        query_head_dim=8,
+        output_head_dim=8,
+        query_dtype=torch.bfloat16,
+        output_dtype=torch.bfloat16,
+        is_lse_base_on_e=True,
+        query_gather=None,
+        combine=lambda *args, **kwargs: None,
+        use_a2a=True,
+        direct_a2a=direct_a2a,
+        max_num_seqs=4,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+    dcp.warm_up_dcp_fallback(manager, num_tokens)
+    assert bool(a2a_rows) == warms
+    assert max(a2a_rows, default=0) <= num_tokens
+
+
 @pytest.mark.parametrize("num_spec", [0, 3])
 def test_planner_follows_the_split_decode_rows(num_spec):
     """The split's decode rows (at most 1 + num_speculative_tokens tokens,
