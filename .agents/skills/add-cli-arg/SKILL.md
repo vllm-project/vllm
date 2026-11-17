@@ -48,7 +48,7 @@ This docstring is the `--help` text and the rendered CLI reference."""
 
 Fields of a config exposed through a JSON arg (search `add_cli_args` for
 `--compilation-config`, `--attention-config`, `--kernel-config` and the other
-`--*-config` args) are already settable as `--x-config.field=value`. Adding
+`--*-config` args) are already settable as `--x-config.field value`. Adding
 the field to that config class is the whole change. Give such a field its own
 flag only when most users will set it, as `--attention-backend` does for
 `AttentionConfig.backend`; the steps below then apply as for any other field.
