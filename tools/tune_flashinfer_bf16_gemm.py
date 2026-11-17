@@ -270,10 +270,30 @@ def parse_buckets(values: list[str]) -> tuple[int, ...]:
     return tuple(sorted({int(x) for v in values for x in v.replace(",", " ").split()}))
 
 
+def pause_before_profiling(seconds: float) -> None:
+    """Idle the GPU before every profiled tactic, so that each one starts at the
+    boost clock. Under sustained load the GPU drops to its power-capped clock within
+    about half a second, which would favour the tactics profiled first; one pause of
+    0.1 s is enough for the clock to recover."""
+    if seconds <= 0:
+        return
+    from flashinfer.autotuner import AutoTuner
+
+    profile = AutoTuner._profile_single_kernel
+
+    def profile_after_pause(self, *args, **kwargs):
+        torch.accelerator.synchronize()
+        time.sleep(seconds)
+        return profile(self, *args, **kwargs)
+
+    AutoTuner._profile_single_kernel = profile_after_pause
+
+
 def tune(args: argparse.Namespace, shapes: list[tuple[int, int]]) -> None:
     from flashinfer import autotune, mm_bf16
 
     buckets = parse_buckets(args.bs)
+    pause_before_profiling(args.pause)
     torch.accelerator.set_device_index(0)
     start = time.perf_counter()
     with (
@@ -353,6 +373,8 @@ def tune_on_gpus(args: argparse.Namespace, shapes: list[tuple[int, int]]) -> Non
                 shapes_file,
                 "--bs",
                 *args.bs,
+                "--pause",
+                str(args.pause),
                 "--out",
                 out_file,
             ]
@@ -388,6 +410,12 @@ def main() -> None:
     parser.add_argument("--tp", type=int, nargs="+", default=[1])
     parser.add_argument(
         "--gpus", type=int, default=1, help="tune on this many GPUs in parallel"
+    )
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=0.1,
+        help="seconds of GPU idle before profiling each tactic (0 disables)",
     )
     parser.add_argument("--out", required=True, help="output FlashInfer tuning JSON")
     parser.add_argument(
