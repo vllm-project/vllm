@@ -311,5 +311,19 @@ class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
                         is_tma_aligned=is_tma_aligned,
                     )
                 )
+        elif current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            # Validated on gfx1201 only: same error vs fp32 as the unfused
+            # SiLU-and-mul + per_token_group_fp8_quant, one kernel instead of two.
+            if on_rdna4():
+                for quant_key, is_scale_transposed in itertools.product(
+                    [kFp8Dynamic128Sym, kFp8Dynamic64Sym], [False, True]
+                ):
+                    self.register(
+                        SiluMulBlockQuantPattern(
+                            quant_key, is_scale_transposed=is_scale_transposed
+                        )
+                    )
 
         self.dump_patterns(config, self.pm_pass)

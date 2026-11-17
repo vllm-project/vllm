@@ -54,6 +54,16 @@ def is_nvfp4_supported():
     return current_platform.has_device_capability(100)
 
 
+def is_block_quant_fusion_supported():
+    if current_platform.is_cuda():
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4()
+    return False
+
+
 class TestSiluMulFp8QuantModel(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
@@ -252,14 +262,14 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
                 not current_platform.is_rocm(), reason="ROCm only"
             ),
         ),
-        # Block quant fusion for per-group FP8 (CUDA only).
+        # Block quant fusion for per-group FP8 (CUDA and RDNA4).
         *[
             pytest.param(
                 partial(TestSiluMulBlockQuantModel, is_scale_transposed=transposed),
                 True,
                 None,
                 marks=pytest.mark.skipif(
-                    not current_platform.is_cuda(), reason="CUDA only"
+                    not is_block_quant_fusion_supported(), reason="CUDA/RDNA4 only"
                 ),
                 id=f"TestSiluMulBlockQuant-transposed={transposed}",
             )
@@ -352,13 +362,10 @@ def test_fusion_silu_and_mul_quant(
         elif isinstance(model, TestSiluMulGroupFp8QuantModel):
             atol, rtol = 5e-2, 5e-2
         elif isinstance(model, TestSiluMulBlockQuantModel):
-            if current_platform.is_rocm():
-                atol, rtol = 1e-3, 1e-3
-            else:
-                # CUDA fused kernel computes silu*mul in fp32 while the reference
-                # goes through bf16/fp16 storage, so group maxima (and thus scales)
-                # can shift by one FP8-e4m3 code (~1/8 relative step).
-                atol, rtol = 5e-2, 5e-2
+            # The fused kernel computes silu*mul in fp32 while the reference
+            # goes through bf16/fp16 storage, so group maxima (and thus scales)
+            # can shift by one FP8-e4m3 code (~1/8 relative step).
+            atol, rtol = 5e-2, 5e-2
 
         torch.testing.assert_close(
             result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol
