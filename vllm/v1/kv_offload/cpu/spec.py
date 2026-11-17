@@ -28,6 +28,25 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 
 logger = init_logger(__name__)
 
+# Seconds, from one second to one day.
+_CHUNK_AGE_BUCKETS = (
+    1,
+    5,
+    15,
+    30,
+    60,
+    120,
+    300,
+    600,
+    1200,
+    1800,
+    3600,
+    7200,
+    14400,
+    28800,
+    86400,
+)
+
 
 def _all_workers_barrier() -> None:
     """Block until every worker rank has reached this point (gloo cpu group).
@@ -82,6 +101,32 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "KV offload prepare_store call."
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT: (
+                OffloadingHistogramMetadata(
+                    documentation=(
+                        "Histogram of the time from the last demand access of "
+                        "a CPU chunk to its capacity eviction, measured from "
+                        "the time the chunk became readable if it was never "
+                        "accessed."
+                    ),
+                    buckets=_CHUNK_AGE_BUCKETS,
+                )
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_LIFETIME: OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of the time from a CPU chunk becoming readable "
+                    "to its capacity eviction."
+                ),
+                buckets=_CHUNK_AGE_BUCKETS,
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS: OffloadingCounterMetadata(
+                documentation=(
+                    "Number of CPU chunks evicted to reclaim capacity. reused "
+                    "tells whether the chunk was read by a load or a peer "
+                    "while it was cached."
+                ),
+                labelnames=("reused",),
             ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
