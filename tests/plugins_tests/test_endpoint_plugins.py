@@ -12,6 +12,7 @@ request through the plugin's route, and lifecycle tests that run the optional
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import subprocess
@@ -738,9 +739,17 @@ async def test_lifespan_cancellation_during_stop_is_bounded_and_reraised(
     ]
 
 
+@pytest.fixture
+def plugin_logs(caplog_vllm: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
+    # Building the app can import a dependency that raises the root logger's
+    # level, which would hide these warnings from the first test that runs.
+    caplog_vllm.set_level(logging.INFO, logger="vllm.plugins")
+    return caplog_vllm
+
+
 @pytest.mark.asyncio
 async def test_stop_hooks_share_one_time_limit(
-    monkeypatch: pytest.MonkeyPatch, caplog_vllm: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, plugin_logs: pytest.LogCaptureFixture
 ):
     """The stop time limit is total, not per hook: once one hung `stop` uses
     it up, core abandons that hook, does not call the remaining `stop` hooks
@@ -764,7 +773,7 @@ async def test_stop_hooks_share_one_time_limit(
         "stop:second",
         "native_shutdown",
     ]
-    warnings = [r.getMessage() for r in caplog_vllm.records]
+    warnings = [r.getMessage() for r in plugin_logs.records]
     assert [w for w in warnings if "stop hooks" in w] == [
         (
             "Endpoint plugin stop hooks exceeded the 1 second limit "
