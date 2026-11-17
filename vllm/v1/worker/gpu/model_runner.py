@@ -1110,7 +1110,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Hold the prompt_embeds rows the scheduler may admit, so that the peak
         # counts them (see PromptEmbedsState).
         prompt_embeds_rows = None
-        max_prompt_embeds_rows = self.scheduler_config.max_num_prompt_embeds_tokens
+        scheduler_config = self.vllm_config.scheduler_config
+        max_prompt_embeds_rows = scheduler_config.max_num_prompt_embeds_tokens
         if max_prompt_embeds_rows and self.is_first_pp_rank:
             prompt_embeds_rows = torch.empty(
                 max_prompt_embeds_rows,
