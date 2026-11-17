@@ -21,14 +21,16 @@ Usage:
     nsys stats --report cuda_gpu_kern_sum bench_copy_mamba.nsys-rep \
       | grep -i bench_copy_mamba_state_block
 
-    # ncu (kernel metrics; use --nvtx-include to slice per-config).
+    # ncu (kernel metrics; use --nvtx-include to slice per-config, and -k to
+    # skip the L2-flush kernels that also run inside each range).
     # The trailing "/" is Nsight's push/pop match marker, not part of the name;
     # the range names below intentionally contain no "/" so they parse.
     ncu --set full --nvtx --nvtx-include "reqs=64_conv=SD_tiles=16/" \
-      -o bench_copy_mamba \
+      -k regex:bench_copy_mamba_state_block -o bench_copy_mamba \
       python benchmarks/kernels/benchmark_copy_mamba_state_block.py
 
-    # Wall-clock only:
+    # CUPTI kernel timing only (cold L2, median per config; needs
+    # cupti-python >= 13, otherwise FlashInfer falls back to CUDA events):
     python benchmarks/kernels/benchmark_copy_mamba_state_block.py
 
     # Any HF hybrid model (fetches its config):
@@ -39,12 +41,14 @@ Usage:
 import argparse
 import math
 import os
+import statistics
 import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import torch
 import torch.cuda.nvtx as nvtx
+from flashinfer.testing import bench_gpu_time_with_cupti
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -234,8 +238,8 @@ def model_state_config_from_hf(
 
 
 # Each request gets its own src/dst block ids inside every state tensor so
-# concurrent copies don't collide and L2 doesn't mask DRAM bandwidth; the
-# state tensors are sized to 2*num_reqs blocks in bench_one.
+# concurrent copies never alias; the state tensors are sized to 2*num_reqs
+# blocks in bench_one. Cold L2 comes from the flush before each timed launch.
 SRC_COL = 0
 DST_COL = 1
 TOKEN_BIAS = 0
@@ -453,33 +457,31 @@ def bench_one(
     torch.accelerator.synchronize()
     check_copy(layer_states, block_table)
 
-    for _ in range(iters_warmup):
-        launch()
-    torch.accelerator.synchronize()
-
     layout = "DS" if conv_state_dim_first else "SD"
     # Underscore separator: '/' is Nsight's NVTX level marker and breaks
     # --nvtx-include filters when it appears inside a range name.
     label = f"reqs={num_reqs}_conv={layout}_tiles={temporal_tiles}"
     nvtx.range_push(label)
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters_timed):
-        launch()
-    end.record()
-    torch.accelerator.synchronize()
+    # Not use_cuda_graph: its no-CUPTI fallback keeps L2 cold by cloning tensor
+    # args, which can't relocate states reached through raw metadata pointers.
+    times_ms = bench_gpu_time_with_cupti(
+        launch,
+        dry_run_iters=iters_warmup,
+        repeat_iters=iters_timed,
+        cold_l2_cache=True,
+        use_cuda_graph=False,
+    )
     nvtx.range_pop()
 
-    avg_us = start.elapsed_time(end) * 1000.0 / iters_timed
+    median_us = statistics.median(times_ms) * 1000.0
     bytes_per_req = bytes_moved_per_launch(layer_states, conv_state_dim_first)
     total_bytes = bytes_per_req * num_reqs
     # Read + write: memory traffic is 2x copy size.
-    gbps = (2 * total_bytes) / (avg_us * 1e-6) / 1e9
+    gbps = (2 * total_bytes) / (median_us * 1e-6) / 1e9
     print(
         f"{label:30s} grid={grid!s:16s} "
         f"copy/req={bytes_per_req / 1024 / 1024:6.2f} MiB  "
-        f"avg={avg_us:8.2f} us  BW~{gbps:6.1f} GB/s"
+        f"median={median_us:8.2f} us  BW~{gbps:6.1f} GB/s"
     )
 
 
@@ -536,15 +538,15 @@ def main():
         "--iters-warmup",
         type=int,
         default=DEFAULT_ITERS_WARMUP,
-        help="Warmup launches before the timed loop.",
+        help="Untimed launches before CUPTI timing.",
     )
     parser.add_argument(
         "--iters-timed",
         type=int,
         default=DEFAULT_ITERS_TIMED,
         help=(
-            "Timed launches inside the NVTX range. Drop to 1 when profiling "
-            "with `ncu --launch-count N` so each NVTX range yields one launch."
+            "CUPTI-timed launches per config, each after an L2 flush; the "
+            "median is reported."
         ),
     )
     args = parser.parse_args()
