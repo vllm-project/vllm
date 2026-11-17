@@ -139,8 +139,6 @@ class OutputHead:
     """Stands in for the output embeddings in `module`."""
     in_features: int
     """The input size of the output embeddings."""
-    bias: bool
-    """Whether the output embeddings have a bias."""
     renames: dict[str, str]
     """Checkpoint name -> vLLM name of the head's weights and their modules."""
     forward_kwargs: dict[str, bool]
@@ -212,7 +210,6 @@ def to_output_head(
         module=model,
         output_embeddings=output_embeddings,
         in_features=embeddings.in_features,
-        bias=embeddings.bias is not None,
         renames=renames,
         forward_kwargs={k: v for k, v in _FORWARD_KWARGS.items() if k in parameters},
     )
@@ -256,11 +253,11 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         output_head = self._output_head
         vocab_size = self.text_config.vocab_size
         if output_head is None:
-            in_features, bias = self.text_config.hidden_size, False
+            in_features = self.text_config.hidden_size
             scale = getattr(self.text_config, "logit_scale", 1.0)
             soft_cap = getattr(self.text_config, "final_logit_softcapping", None)
         else:
-            in_features, bias = output_head.in_features, output_head.bias
+            in_features = output_head.in_features
             scale, soft_cap = output_head.scale, output_head.soft_cap
         self.logits_processor = LogitsProcessor(
             vocab_size, scale=scale, soft_cap=soft_cap
@@ -268,7 +265,6 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         self.lm_head = ParallelLMHead(
             vocab_size,
             in_features,
-            bias=bias,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -358,7 +354,8 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
         def auto_load_lm_head_bias(weights):
             for name, weight in weights:
-                if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
+                is_bias = name.endswith("bias") and self.pp_group.is_last_rank
+                if is_bias and self.hf_to_vllm_mapper.map_name(name) == "lm_head.bias":
                     # load_weights is called outside vLLM's device context,
                     # so we must enter it again when registering the bias.
                     with torch.device(load_device):
