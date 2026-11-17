@@ -160,8 +160,9 @@ def dequant_routed_mxfp4(
 ) -> torch.Tensor:
     """Dequantize the MXFP4 experts `used` selects into a slot-indexed buffer.
 
-    Matches quark's default (HIP) `dq_mxfp4` bit for bit. Unused (-1) slots
-    are left uninitialized; the caller routes no tokens to them.
+    Matches quark's default (HIP) `dq_mxfp4` bit for bit apart from NaN
+    payloads. Unused (-1) slots are left uninitialized; the caller routes no
+    tokens to them.
 
     Args:
         w: Packed weights [E, rows, cols // 2], uint8.

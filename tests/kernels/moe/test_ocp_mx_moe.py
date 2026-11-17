@@ -2969,8 +2969,11 @@ def test_dequant_routed_mxfp4_matches_quark_on_every_code_and_scale():
     used = torch.tensor([1, -1, 0], dtype=torch.int32, device="cuda")
     out = dequant_routed_mxfp4(w, scale, used)
     ref = mx.dq_mxfp4(w, scale, torch.bfloat16)
-    assert torch.equal(out[0].view(torch.int16), ref[1].view(torch.int16))
-    assert torch.equal(out[2].view(torch.int16), ref[0].view(torch.int16))
+    for got, want in ((out[0], ref[1]), (out[2], ref[0])):
+        # NaN payloads (0 * inf under scale 255) differ by GPU; bits elsewhere.
+        nan = want.isnan()
+        assert torch.equal(got.isnan(), nan)
+        assert torch.equal(got.view(torch.int16)[~nan], want.view(torch.int16)[~nan])
 
 
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
