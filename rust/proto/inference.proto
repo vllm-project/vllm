@@ -327,8 +327,11 @@ message MediaItem {
   // Per-item preprocessing options, the same knobs the OpenAI content parts
   // carry. Ignored for preprocessed features.
   optional string detail = 8;  // image: "auto", "low" or "high"
-  optional double fps = 9;  // video
-  optional uint32 max_long_side_pixel = 10;  // image, video
+  // Video sampling rate. Honored on `url` and `data_uri`. Rejected on
+  // `raw_bytes`; send `data:<mime>;base64,<base64>` instead.
+  optional double fps = 9;
+  // Long-side cap. Honored on `url` and `data_uri`. Rejected on `raw_bytes`.
+  optional uint32 max_long_side_pixel = 10;
   // Raw item only: prompt position of its single placeholder marker.
   // Required on every raw item when raw media and features are mixed; the
   // raw item expands there and later feature offsets shift by its growth.

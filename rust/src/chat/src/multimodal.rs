@@ -701,21 +701,33 @@ impl MultimodalModelInfo {
 
 /// Content hashes describe the bytes; preprocessing options change the
 /// tensors, so they change the cache identity too. Caller uuids stay as given.
+fn media_cache_key(uuid: Option<&str>, hash: &str) -> String {
+    match uuid {
+        Some(uuid) => format!("uuid:{uuid}"),
+        None => format!("content:{hash}"),
+    }
+}
+
+/// Salt both cache ids with the request's preprocessing options.
+///
+/// The encoder cache keys on `identifier`. A caller UUID is a cache id, so it
+/// is salted too: the same UUID with different `mm_processor_kwargs` or
+/// `video.num_frames` must not reuse another request's embeddings. The salt is
+/// the options JSON, not a fixed list of field names. When `identifier` and
+/// `mm_hash` started equal, they stay equal.
 fn salt_identity(features: &mut MmFeatures, options: &MediaOptions) {
     if options.is_empty() {
         return;
     }
     let salt = serde_json::to_string(&(&options.processor_kwargs, options.video_num_frames))
         .unwrap_or_default();
+    let salted = |value: &str| hex::encode(Sha256::digest(format!("{value}\n{salt}")));
     for feature in features {
-        let Some(hash) = feature.mm_hash.as_mut() else {
+        let Some(hash) = feature.mm_hash.clone() else {
             continue;
         };
-        let salted = hex::encode(Sha256::digest(format!("{hash}\n{salt}")));
-        if feature.identifier == *hash {
-            feature.identifier = salted.clone();
-        }
-        *hash = salted;
+        feature.identifier = salted(&feature.identifier);
+        feature.mm_hash = Some(salted(&hash));
     }
 }
 
@@ -1160,12 +1172,13 @@ impl MultimodalModelInfo {
                 &placeholder.token,
             )?;
             growth.push((placed.marker_offset, replacement.tokens.len() as isize - 1));
+            let cache_key = media_cache_key(item.uuid.as_deref(), &item.hash);
             placed_features.push(MmFeatureSpec {
                 data: Some(item.data),
                 modality: mm_modality(*modality),
-                identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
+                identifier: cache_key.clone(),
                 mm_position: range,
-                mm_hash: Some(item.hash),
+                mm_hash: Some(cache_key),
             });
             cursor = placed.marker_offset + 1;
         }
@@ -1283,10 +1296,7 @@ impl MultimodalModelInfo {
                 // Like Python, tag the cache key with its source, so a client
                 // `uuid` spelled like another item's content hash cannot hit
                 // that item's entries in the engine's caches.
-                let cache_key = match item.uuid {
-                    Some(uuid) => format!("uuid:{uuid}"),
-                    None => format!("content:{}", item.hash),
-                };
+                let cache_key = media_cache_key(item.uuid.as_deref(), &item.hash);
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -3084,7 +3094,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn options_salt_content_hashes_but_not_caller_uuids() {
+    async fn options_salt_content_hashes_and_caller_uuids() {
         let info = qwen3_vl_info();
         let options = MediaOptions {
             video_num_frames: Some(4),
@@ -3107,11 +3117,22 @@ mod tests {
             }
         };
         let plain = prepare(red_image(None), MediaOptions::default()).await;
+        assert!(plain.identifier.starts_with("content:"));
         let salted = prepare(red_image(None), options.clone()).await;
         assert_ne!(plain.mm_hash, salted.mm_hash);
         assert_eq!(salted.identifier, *salted.mm_hash.as_ref().unwrap());
         let pinned = prepare(red_image(Some("caller")), options).await;
-        assert_eq!(pinned.identifier, "caller");
+        assert_eq!(pinned.identifier, *pinned.mm_hash.as_ref().unwrap());
+        assert_ne!(pinned.identifier, "uuid:caller");
+        let other = prepare(
+            red_image(Some("caller")),
+            MediaOptions {
+                video_num_frames: Some(8),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_ne!(pinned.identifier, other.identifier);
     }
 
     #[tokio::test]

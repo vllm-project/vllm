@@ -533,6 +533,7 @@ mod tests {
             ResponseOpts::default(),
             Span::none(),
             Instant::now(),
+            Vec::new(),
         )
         .map_ok(|response| response.outputs.expect("outputs").sampling_mask)
         .try_collect()
