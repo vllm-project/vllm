@@ -1781,13 +1781,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
             ba:   packed [b, a] gating vectors    (num_tokens, 2*num_heads)
             z_out: **output** buffer for z        (num_tokens, num_heads,
-                   head_dim); mutated in-place. `None` when the layer uses the
-                   fused AITER kernel (`use_aiter_fused_gdn_decode`): the gated
+                   head_dim); mutated in-place. `None` if and only if the layer
+                   uses the fused AITER kernel (`use_aiter_fused_gdn_decode`): the gated
                    RMSNorm is then applied too and `core_attn_out` receives the
                    normed output.
             core_attn_out: Pre-allocated output buffer for attention results.
 
         """
+        assert (z_out is None) == self.use_aiter_fused_gdn_decode
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
@@ -1827,8 +1828,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
         )
-        if not self.use_aiter_fused_gdn_decode:
-            assert z_out is not None
+        if z_out is not None:
             z_out[:] = z
         self._forward_core(
             mixed_qkv=mixed_qkv,
@@ -1836,7 +1836,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             a=a,
             core_attn_out=core_attn_out,
         )
-        if self.use_aiter_fused_gdn_decode:
+        if z_out is None:
             num_actual_tokens = attn_metadata.num_actual_tokens
             self._rms_norm_gated_cuda(
                 core_attn_out[:num_actual_tokens],
