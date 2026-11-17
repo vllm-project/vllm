@@ -844,7 +844,7 @@ def _layout_bytes(layout: pt.ChunkLayout, tensors: list[torch.Tensor]) -> list[b
     for k, pieces in enumerate(layout.chunks):
         buf = torch.zeros(layout.sizes[k], dtype=torch.uint8)
         for piece, view in zip(pieces, layout.views(k, buf)):
-            view.copy_(pt._source(piece, tensors[piece[0]], view))
+            view.copy_(pt._source(piece, tensors[piece.index], view))
         out.append(buf.numpy().tobytes())
     return out
 
@@ -873,7 +873,7 @@ class TestChunkLayout:
         while (chunk := pt.pack_tensors(it, lambda x: x[1], limit)) is not None:
             expected.append(chunk.packed_tensor.numpy().tobytes())
         assert _layout_bytes(layout, tensors) == expected
-        assert all(p[1] is None for chunk in layout.chunks for p in chunk)
+        assert all(p.rows is None for chunk in layout.chunks for p in chunk)
 
     def test_segments_split_only_over_twice_the_buffer(self):
         limit = 1000
@@ -882,13 +882,17 @@ class TestChunkLayout:
         layout = pt.chunk_layout(
             [(big.shape, big.dtype), (mid.shape, mid.dtype)], limit, segments=True
         )
-        rows = [p[1] for chunk in layout.chunks for p in chunk if p[0] == 0]
+        rows = [p.rows for chunk in layout.chunks for p in chunk if p.index == 0]
         assert rows == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
-        assert [p[1] for chunk in layout.chunks for p in chunk if p[0] == 1] == [None]
+        assert [p.rows for chunk in layout.chunks for p in chunk if p.index == 1] == [
+            None
+        ]
         # no segment is larger than the buffer
-        assert all(p[5] <= limit for chunk in layout.chunks for p in chunk if p[1])
+        assert all(
+            p.nbytes <= limit for chunk in layout.chunks for p in chunk if p.rows
+        )
         off = pt.chunk_layout([(big.shape, big.dtype)], limit)
-        assert [p[1] for chunk in off.chunks for p in chunk] == [None]
+        assert [p.rows for chunk in off.chunks for p in chunk] == [None]
 
     def test_row_over_the_buffer_travels_whole_and_warns(self):
         with patch.object(pt.logger, "warning_once") as warn:

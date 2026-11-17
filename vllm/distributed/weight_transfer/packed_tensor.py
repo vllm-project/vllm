@@ -6,7 +6,7 @@ import math
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cache
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
@@ -176,8 +176,15 @@ def wire_segments(
     return [(r, min(r + rows, shape[0])) for r in range(0, shape[0], rows)]
 
 
-# (index, rows, shape, dtype, offset, nbytes) of one tensor or segment in a chunk
-Piece = tuple[int, tuple[int, int] | None, list[int], torch.dtype, int, int]
+class Piece(NamedTuple):
+    """One tensor, or one dim-0 segment of it, in a packed chunk."""
+
+    index: int  # the tensor's position in the sent sequence
+    rows: tuple[int, int] | None  # dim-0 range of a segment; None: the whole tensor
+    shape: list[int]  # shape of this piece
+    dtype: torch.dtype
+    offset: int  # byte offset in the chunk
+    nbytes: int
 
 
 def _pieces(
@@ -195,11 +202,11 @@ def _pieces(
         split: list[tuple[int, int] | None] = list(segs) if segs else [None]
         for rows in split:
             if rows is None:
-                piece: Piece = (index, None, list(shape), dtype, size, nbytes)
+                piece = Piece(index, None, list(shape), dtype, size, nbytes)
             else:
                 n = rows[1] - rows[0]
-                piece = (index, rows, [n, *shape[1:]], dtype, size, n * row)
-            size += piece[5]
+                piece = Piece(index, rows, [n, *shape[1:]], dtype, size, n * row)
+            size += piece.nbytes
             closes = size > limit
             if closes:
                 size = 0
@@ -219,10 +226,10 @@ class ChunkLayout:
         """Chunk k's pieces in `buf`: typed, or raw bytes for a piece at an
         offset its dtype cannot view (pieces are packed back to back)."""
         out = []
-        for _, _, shape, dtype, off, n in self.chunks[k]:
-            raw = buf[off : off + n]
+        for p in self.chunks[k]:
+            raw = buf[p.offset : p.offset + p.nbytes]
             try:
-                out.append(raw.view(dtype).view(shape))
+                out.append(raw.view(p.dtype).view(p.shape))
             except RuntimeError:
                 out.append(raw)
         return out
@@ -242,10 +249,11 @@ def chunk_layout(
     for closes, piece in _pieces(full, limit, segments):
         chunks[-1].append(piece)
         if closes:
-            sizes.append(piece[4] + piece[5])
+            sizes.append(piece.offset + piece.nbytes)
             chunks.append([])
     if chunks[-1]:
-        sizes.append(chunks[-1][-1][4] + chunks[-1][-1][5])
+        last = chunks[-1][-1]
+        sizes.append(last.offset + last.nbytes)
     else:
         chunks.pop()
     return ChunkLayout(chunks, sizes)
@@ -253,7 +261,7 @@ def chunk_layout(
 
 def _source(piece: Piece, tensor: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
     """What a piece copies from `tensor` into its `view`."""
-    rows = piece[1]
+    rows = piece.rows
     part = tensor if rows is None else tensor[rows[0] : rows[1]]
     return (
         part
@@ -336,12 +344,12 @@ def _chunks(
 
 
 def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
-    one = ChunkLayout([pieces], [pieces[-1][4] + pieces[-1][5]])
-    device = stash[pieces[0][0]].device
+    one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes])
+    device = stash[pieces[0].index].device
     buf = torch.empty(one.sizes[0], dtype=torch.uint8, device=device)
     views = one.views(0, buf)
-    srcs = [_source(p, stash[p[0]], v) for p, v in zip(pieces, views)]
-    for i in {p[0] for p in pieces} - {pieces[-1][0]}:
+    srcs = [_source(p, stash[p.index], v) for p, v in zip(pieces, views)]
+    for i in {p.index for p in pieces} - {pieces[-1].index}:
         stash.pop(i, None)  # the last tensor may continue in the next chunk
     return buf, views, srcs
 
@@ -412,7 +420,12 @@ def packed_nccl_broadcast_consumer(
                 packed.record_stream(stream)
             out = []
             for piece, view in zip(pieces, layout.views(k, packed)):
-                index, rows, shape, dtype = piece[:4]
+                index, rows, shape, dtype = (
+                    piece.index,
+                    piece.rows,
+                    piece.shape,
+                    piece.dtype,
+                )
                 if rows is not None:
                     # one tensor of the full size, written segment by segment
                     whole = joined.get(index)
