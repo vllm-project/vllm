@@ -3358,40 +3358,36 @@ def test_finalize_rejects_partially_loaded_requantization_source(
         assert processed == [layer]
 
 
-@pytest.mark.parametrize("before", [None, [1, 32]])
 @pytest.mark.skip_global_cleanup
-def test_requantization_source_does_not_leak_layer_attributes(before) -> None:
-    """The serialized weights' block size, set on the layer by the source's
-    `create_weights`, must not reach a non-block target's kernel selection."""
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        OnlineRequantizationMixin,
+def test_block_fp8_source_does_not_leak_block_size_to_non_block_target(
+    default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """The block size the FP8 source sets on the layer describes the serialized
+    weights: a non-block target must not inherit it in its kernel selection."""
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
+        lambda **kwargs: (None, None),
     )
-
-    class Source:
-        def create_weights(self, layer, *args, **kwargs):
-            layer.weight_block_size = [128, 128]
-            layer.register_parameter(
-                "weight",
-                torch.nn.Parameter(
-                    torch.empty(8, 8, device="meta", dtype=torch.float8_e4m3fn),
-                    requires_grad=False,
-                ),
-            )
-
-    mixin = OnlineRequantizationMixin()
-    mixin.set_requantization_source(Source())
-    layer = torch.nn.Module()
-    layer.weight_block_size = before
-    assert mixin.create_requantization_source_weights(layer)
-    assert layer.weight_block_size == before
-    assert layer.weight.is_meta
-
-    # Without a previous value, the attribute is not left behind either.
-    layer = torch.nn.Module()
-    mixin = OnlineRequantizationMixin()
-    mixin.set_requantization_source(Source())
-    mixin.create_requantization_source_weights(layer)
-    assert not hasattr(layer, "weight_block_size")
+    default_vllm_config.model_config = ModelConfig()
+    layer = FusedMoEFactory(
+        num_experts=2,
+        top_k=1,
+        hidden_size=256,
+        intermediate_size=256,
+        prefix="fp8_source_layer",
+    ).routed_experts
+    source = Fp8MoEMethod(Fp8Config(weight_block_size=[128, 128]), layer)
+    target = Fp8PerTensorOnlineMoEMethod(moe=layer.moe_config)
+    target.set_requantization_source(source)
+    target.create_weights(
+        layer=layer,
+        num_experts=2,
+        hidden_size=256,
+        intermediate_size_per_partition=256,
+        params_dtype=torch.bfloat16,
+    )
+    assert layer.w13_weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_block_size is None
 
 
 def _naive_block_fp8_dequant(
