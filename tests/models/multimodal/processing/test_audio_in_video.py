@@ -33,6 +33,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import LruKeyReplicatedSenderCache
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -542,3 +543,89 @@ def test_nemotron_silent_video_degrades_per_video():
     # The audible video's audio keeps its own UUID. Hashing it under the
     # silent video's UUID could hit another request's cache entry.
     assert mixed_hashes["audio"] == audible_hashes["audio"]
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_silent_video_reports_clear_error(model_id: str) -> None:
+    """A video without an audio track must fail with an actionable message.
+
+    The renderer keeps `mm_data`/`mm_uuids` aligned by inserting a
+    `(None, uuid)` audio item. Neither the processor cache (which reports a
+    misleading "Cache miss") nor the prompt updates (`assert audio is not
+    None`) can consume that item, so the processor rejects the request before
+    either path runs.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+
+    rng = np.random.RandomState(0)
+    video = random_video(rng, min_frames=8, max_frames=9, min_wh=64, max_wh=65)
+
+    with pytest.raises(VLLMValidationError, match="has no audio track"):
+        processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data({"video": [video], "audio": [None]}),
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+        )
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_audio_only_none_audio_is_not_a_silent_video(model_id: str) -> None:
+    """Audio-only uuid reuse also carries `None` items and must not be rejected.
+
+    `use_audio_in_video` can be set engine-wide, so an audio-only request with
+    an empty `input_audio.data` + uuid inherits it. Only a video-derived `None`
+    audio item is a silent video; the guard must not fire without a video.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    prompt = [getattr(processor.info.get_hf_config(), "audio_token_id", 1)]
+
+    try:
+        processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data({"audio": [None]}),
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+        )
+    except VLLMValidationError as exc:
+        assert "has no audio track" not in str(exc)
+    except Exception:  # noqa: BLE001 - downstream may reject the bare `None`
+        pass
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_video_with_extra_audio_is_not_a_silent_video(model_id: str) -> None:
+    """A video plus a separate audio part must not hit the silent-video guard.
+
+    The extra audio part can itself be a uuid reuse (`None`), so the guard's
+    1:1 audio/video pairing check must not fire when the counts differ.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 2, "image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+
+    rng = np.random.RandomState(0)
+    video = random_video(rng, min_frames=8, max_frames=9, min_wh=64, max_wh=65)
+
+    try:
+        processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(
+                {"video": [video], "audio": [None, None]}
+            ),
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+        )
+    except VLLMValidationError as exc:
+        assert "has no audio track" not in str(exc)
+    except Exception:  # noqa: BLE001 - downstream may reject the bare `None`
+        pass
