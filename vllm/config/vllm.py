@@ -1450,7 +1450,8 @@ class VllmConfig:
             ):
                 raise ValueError(
                     f"The '{watermark_config.algorithm}' watermarking algorithm "
-                    "does not support speculative decoding. Set "
+                    "does not support speculative decoding with probabilistic "
+                    "drafts. Use draft_sample_method='greedy', or set "
                     "allow_target_only_watermarking=true to leave draft tokens "
                     "unwatermarked."
                 )

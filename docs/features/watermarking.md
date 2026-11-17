@@ -65,11 +65,11 @@ Watermark contexts use generated tokens only. The first `context_width` tokens
 use ordinary sampling, independently of context deduplication. Prompt tokens
 are not needed for detection.
 
-`allow_target_only_watermarking` defaults to false and only has an effect when
-speculative decoding is enabled. It permits speculative decoding with a
+`allow_target_only_watermarking` defaults to false and only has an effect with
+probabilistic speculative drafts. It permits probabilistic drafting with a
 watermarking algorithm that does not support it natively, at the cost of
-weaker detectability. See
-[Speculative decoding](#speculative-decoding).
+weaker detectability. Greedy drafts, the default, work with every algorithm and
+do not need it. See [Speculative decoding](#speculative-decoding).
 
 ## Monitoring
 
@@ -329,7 +329,8 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 ## Limitations
 
-- Not all watermarking algorithms have native speculative-decoding support.
+- With probabilistic drafts, not all watermarking algorithms have native
+  speculative-decoding support. Greedy drafts work with every algorithm.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
 - Global custom logits processors are not supported.

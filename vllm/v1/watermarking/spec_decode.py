@@ -267,8 +267,9 @@ def create_speculative_draft_watermarker(
         return None
     raise ValueError(
         f"The {type(watermarker).__name__} watermarking algorithm does not support "
-        "speculative decoding. Set allow_target_only_watermarking=true to "
-        "leave draft tokens unwatermarked."
+        "speculative decoding with probabilistic drafts. Use "
+        "draft_sample_method='greedy', or set allow_target_only_watermarking=true "
+        "to leave draft tokens unwatermarked."
     )
 
 
