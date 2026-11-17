@@ -421,7 +421,9 @@ class TestPackedIpcProducer:
         what earlier versions sent."""
         tensors = [t.cuda() for t in _mixed_tensors()]
         tensors = [t for t in tensors if t.nbytes <= limit]
-        expected, cur, size = [], [], 0
+        expected: list = []
+        cur: list = []
+        size = 0
         for i, t in enumerate(tensors):  # the IPC rule, spelled out
             if size and size + t.nbytes > limit:
                 expected.append(cur)
@@ -742,7 +744,7 @@ def _layout_bytes(layout: pt.ChunkLayout, tensors: list[torch.Tensor]) -> list[b
     for k, pieces in enumerate(layout.chunks):
         buf = torch.zeros(layout.sizes[k], dtype=torch.uint8)
         for piece, view in zip(pieces, layout.views(k, buf)):
-            view.copy_(pt._source(piece, tensors[piece.index], view))
+            view.copy_(pt._source(piece, tensors[piece.position], view))
         out.append(buf.numpy().tobytes())
     return out
 
@@ -788,7 +790,7 @@ class TestChunkLayout:
         )
 
         def rows(i):
-            return [p.rows for chunk in layout.chunks for p in chunk if p.index == i]
+            return [p.rows for chunk in layout.chunks for p in chunk if p.position == i]
 
         assert rows(0) == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
         assert rows(1) == [(0, 10), (10, 15)]
@@ -823,14 +825,14 @@ class TestChunkLayout:
         buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
         for piece, view in zip(layout.chunks[0], layout.views(0, buf)):
             got = pt._unpacked(view, piece)
-            assert got.shape == tensors[piece.index].shape
-            torch.testing.assert_close(got, tensors[piece.index], rtol=0, atol=0)
+            assert got.shape == tensors[piece.position].shape
+            torch.testing.assert_close(got, tensors[piece.position], rtol=0, atol=0)
 
     def test_chunks_keep_order_across_several(self):
         tensors = [torch.randn(50, 50) for _ in range(6)]  # 10 kB each
         layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), 12_000)
         assert len(layout.chunks) > 1
-        assert [p.index for chunk in layout.chunks for p in chunk] == list(range(6))
+        assert [p.position for chunk in layout.chunks for p in chunk] == list(range(6))
         assert all(size > 12_000 for size in layout.sizes[:-1])
 
     def test_row_over_the_buffer_travels_whole_and_warns(self):
@@ -906,7 +908,7 @@ class TestSegmentedRoundtrip:
         torch.accelerator.synchronize()
         torch.cuda.reset_peak_memory_stats()
         base = torch.cuda.memory_allocated()
-        seen = []
+        seen: list = []
         packed_nccl_broadcast_consumer(
             iterator=iter([("big", ([64, 256 * 1024], torch.float32))]),
             group=group,

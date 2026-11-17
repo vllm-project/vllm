@@ -63,7 +63,7 @@ def wire_segments(
 class Piece(NamedTuple):
     """One tensor, or one dim-0 segment of it, in a packed chunk."""
 
-    index: int  # the tensor's position in the sent sequence
+    position: int  # the tensor's position in the sent sequence
     rows: tuple[int, int] | None  # dim-0 range of a segment; None: the whole tensor
     shape: list[int]  # shape of this piece
     dtype: torch.dtype
@@ -240,11 +240,11 @@ def _chunks(
 
 def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
     one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes])
-    device = stash[pieces[0].index].device
+    device = stash[pieces[0].position].device
     buf = torch.empty(one.sizes[0], dtype=torch.uint8, device=device)
     views = one.views(0, buf)
-    srcs = [_source(p, stash[p.index], v) for p, v in zip(pieces, views)]
-    for i in {p.index for p in pieces} - {pieces[-1].index}:
+    srcs = [_source(p, stash[p.position], v) for p, v in zip(pieces, views)]
+    for i in {p.position for p in pieces} - {pieces[-1].position}:
         stash.pop(i, None)  # the last tensor may continue in the next chunk
     return buf, views, srcs
 
@@ -315,7 +315,7 @@ def packed_nccl_broadcast_consumer(
                 packed.record_stream(stream)
             out = []
             for piece, view in zip(pieces, layout.views(k, packed)):
-                index, rows, dtype = piece.index, piece.rows, piece.dtype
+                index, rows, dtype = piece.position, piece.rows, piece.dtype
                 if rows is not None:
                     # one tensor of the full size, written segment by segment
                     whole = joined.get(index)
