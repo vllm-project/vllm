@@ -343,9 +343,10 @@ Rather than embedding `host`/`port` in each `secondary_tiers` entry, set them on
 - `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): base port for the P2P control socket. The port actually bound is `VLLM_P2P_SIDE_CHANNEL_PORT + data_parallel_index` — one socket per DP replica, matching NIXL (for DP=1 the offset is 0). The peer's port is passed as `remote_port` in `kv_transfer_params`; the router/EPP that selects the DP rank (e.g. via the `X-data-parallel-rank` header) computes `remote_port = base + rank`. The DP-index offset separates replicas *within* one deployment; two co-located *deployments* (a prefiller and a decoder on the same host) still need distinct base ports (e.g. decoder base `5711`) to avoid a bind collision.
 
 IPv6 literals are also supported for the control channel, in `host`,
-`VLLM_P2P_SIDE_CHANNEL_HOST`, and the peer's `remote_host`. Write them without
-brackets (for example, `::1` for local testing); a bracketed literal such as
-`[::1]` is accepted too and normalized. Supply the port separately.
+`VLLM_P2P_SIDE_CHANNEL_HOST`, and the peer's `remote_host` (for example, `::1`
+for local testing). Supply the port separately. IP literals are canonicalized
+before they form the `host:port` identity, so `[::1]`, `0:0::1` and `::1` all
+name the same peer.
 
 #### Orchestration-Layer Protocol
 

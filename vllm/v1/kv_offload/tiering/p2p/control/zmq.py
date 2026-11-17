@@ -16,7 +16,11 @@ import zmq
 import zmq.utils.monitor
 
 from vllm.logger import init_logger
-from vllm.utils.network_utils import is_valid_ipv6_address, make_zmq_path
+from vllm.utils.network_utils import (
+    is_valid_ipv6_address,
+    make_zmq_path,
+    split_zmq_path,
+)
 from vllm.v1.kv_offload.tiering.p2p.control.base import (
     ControlConnection,
     ControlTransport,
@@ -67,15 +71,19 @@ for _ev in _FATAL_MONITOR_EVENTS:
     _MONITOR_EVENT_MASK |= _ev
 
 
-def _normalize_host(host: str) -> str:
-    """Strip the brackets from a bracketed IPv6 literal, if present."""
-    if host.startswith("[") and host.endswith("]"):
-        return host[1:-1]
-    return host
-
-
 def _tcp_addr(host: str, port: int | str) -> str:
     return make_zmq_path("tcp", host, int(port))
+
+
+def _enable_ipv6_if_needed(sock: zmq.Socket, addr: str) -> None:
+    """Set ZMQ_IPV6 when ``addr`` targets an IPv6 literal.
+
+    Mirrors ``make_zmq_socket``. Kept conditional: enabling it always could
+    make a ``localhost`` bind resolve to ``::1`` only.
+    """
+    _, host, _ = split_zmq_path(addr)
+    if is_valid_ipv6_address(host):
+        sock.setsockopt(zmq.IPV6, 1)
 
 
 def _apply_heartbeat(sock: zmq.Socket) -> None:
@@ -175,7 +183,6 @@ class ZmqTransport(ControlTransport):
     def __init__(self, local_id: str, host: str, port: int) -> None:
         self._local_id = local_id
         self._closed = False
-        host = _normalize_host(host)
 
         self._connections: dict[str, ZmqConnection] = {}
         self._pending_inbound: list[tuple[str, dict]] = []
@@ -186,9 +193,8 @@ class ZmqTransport(ControlTransport):
         self._zmq_ctx = zmq.Context()
         self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
         _apply_heartbeat(self._router)
-        if is_valid_ipv6_address(host):
-            self._router.setsockopt(zmq.IPV6, 1)
         bind_addr = _tcp_addr(host, port)
+        _enable_ipv6_if_needed(self._router, bind_addr)
         self._router.bind(bind_addr)
         logger.info("ZmqTransport %s: ROUTER bound on %s", self._local_id, bind_addr)
 
@@ -285,7 +291,6 @@ class ZmqTransport(ControlTransport):
     ) -> ZmqConnection:
         """Create a DEALER socket + monitor and register the connection."""
         host, port_str = peer_id.rsplit(":", 1)
-        host = _normalize_host(host)
         dealer_addr = _tcp_addr(host, port_str)
 
         logger.debug(
@@ -298,8 +303,7 @@ class ZmqTransport(ControlTransport):
 
         dealer = self._zmq_ctx.socket(zmq.DEALER)
         _apply_heartbeat(dealer)
-        if is_valid_ipv6_address(host):
-            dealer.setsockopt(zmq.IPV6, 1)
+        _enable_ipv6_if_needed(dealer, dealer_addr)
         dealer.identity = self._local_id.encode()
         # ZMQ_IMMEDIATE stays 0: messages queue before the TCP connect
         # completes, so the ConnectMsg sent right after connect() fits.
