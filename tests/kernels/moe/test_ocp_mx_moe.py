@@ -77,7 +77,7 @@ if TRTLLM_GEN_MXFP8_AVAILABLE:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model_id: str
     tp: int
@@ -2755,6 +2755,171 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
     )
+
+
+# With at most a quarter as many top-k slots as local experts, the emulation
+# dequantizes one expert per slot instead of every expert. It must give the
+# same output as the full dequantization, sync with the host on neither path,
+# and stay correct when a CUDA graph captured on one routing replays another.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize(
+    "topk_ids, num_routed",
+    [
+        # 8 slots of 32 experts, with repeated experts: one per slot.
+        ([[30, 2], [2, 17], [9, 30], [17, 4]], 8),
+        # 10 slots, past a quarter: every expert is dequantized.
+        ([[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]], 32),
+        # One token.
+        ([[30, 2]], 2),
+    ],
+)
+@torch.inference_mode()
+def test_emulation_routed_dequant_moe_forward_is_bit_identical(
+    monkeypatch: pytest.MonkeyPatch, topk_ids: list[list[int]], num_routed: int
+):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        make_mxfp4_moe_kernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        mxfp4_quantize,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+
+    num_experts, topk = 32, 2
+    hidden_size, intermediate_size = 256, 256
+    dtype, device = torch.bfloat16, "cuda:0"
+
+    torch.manual_seed(0)
+    w13, w13_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w2, w2_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w13, w2 = w13.contiguous(), w2.contiguous()
+    w13_scale, w2_scale = w13_scale.contiguous(), w2_scale.contiguous()
+
+    topk_ids_t = torch.tensor(topk_ids, dtype=torch.int32, device=device)
+    num_tokens = topk_ids_t.size(0)
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    topk_weights = torch.softmax(
+        torch.randn(num_tokens, topk, device=device), dim=-1
+    ).to(dtype)
+
+    dequantized: list[int] = []
+    dequantize = OCP_MXQuantizationEmulationTritonExperts._dequantize_weights
+
+    def recording_dequantize(self, w, w_scale, dtype):
+        dequantized.append(w.size(0))
+        return dequantize(self, w, w_scale, dtype)
+
+    monkeypatch.setattr(
+        OCP_MXQuantizationEmulationTritonExperts,
+        "_dequantize_weights",
+        recording_dequantize,
+    )
+
+    def make_kernel():
+        moe_config = FusedMoEConfig(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_size,
+            intermediate_size=intermediate_size,
+            num_local_experts=num_experts,
+            num_logical_experts=num_experts,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=dtype,
+            device=device,
+            routing_method=RoutingMethodType.Renormalize,
+        )
+        # A fresh quant config per run: the experts null the weight scales on it.
+        quant_config = mxfp4_w4a16_moe_quant_config(
+            w1_scale=w13_scale, w2_scale=w2_scale
+        )
+        with set_current_vllm_config(VllmConfig()):
+            return make_mxfp4_moe_kernel(
+                moe_quant_config=quant_config,
+                moe_config=moe_config,
+                mxfp4_backend=Mxfp4MoeBackend.EMULATION,
+                experts_cls=OCP_MXQuantizationEmulationTritonExperts,
+                routing_tables=None,
+            )
+
+    def apply(kernel, ids):
+        return kernel.apply(
+            hidden_states=hidden_states,
+            w1=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    def run(ids=topk_ids_t):
+        kernel = make_kernel()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            return apply(kernel, ids)
+        finally:
+            torch.cuda.set_sync_debug_mode(0)
+
+    # The first dequantization imports quark, which copies lookup tables once.
+    apply(make_kernel(), topk_ids_t)
+    dequantized.clear()
+    routed = run()
+    assert dequantized == [num_routed, num_routed]
+
+    # Capture on the parametrized routing and replay another one: a bijection
+    # moves every slot, and the last token repeats the first token's experts.
+    replay_ids = (topk_ids_t * 7 + 3) % num_experts
+    replay_ids[-1] = replay_ids[0]
+    kernel = make_kernel()
+    static_ids = topk_ids_t.clone()
+    apply(kernel, static_ids)
+    dequantized.clear()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_out = apply(kernel, static_ids)
+    assert dequantized == [num_routed, num_routed]
+    static_ids.copy_(replay_ids)
+    graph.replay()
+    replayed = graph_out.clone()
+
+    # Full-dequant references.
+    monkeypatch.setattr(
+        OCP_MXQuantizationEmulationTritonExperts,
+        "_routed_experts",
+        staticmethod(lambda topk_ids, num_experts: None),
+    )
+    dequantized.clear()
+    full = run()
+    assert dequantized == [num_experts, num_experts]
+    assert torch.equal(routed, full)
+    assert torch.equal(replayed, run(replay_ids))
 
 
 # (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
