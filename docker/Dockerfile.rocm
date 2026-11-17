@@ -621,6 +621,21 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     fi; \
     if [ -n "$spec" ]; then \
         pip install --no-cache-dir --pre --no-deps --force-reinstall "$spec" || exit 1; \
+        # --no-deps keeps the stack's torch and triton, but also any requirement the wheel moved past
+        # the stack's AITER release (flydsl): AITER refuses to import with an older one. Install what
+        # the wheel requires, within the stack's constraints, and fail if any is still unmet. vLLM's
+        # own FlyDSL kernels run on what this moves, so list it in the log.
+        python3 -c 'import importlib.metadata as m; print("\n".join(m.requires("amd-aiter") or []))' \
+            > /tmp/aiter-requires.txt; \
+        pip list --format=freeze > /tmp/stack-packages.txt; \
+        pip install --no-cache-dir -c /etc/rocm-constraints.txt -r /tmp/aiter-requires.txt || exit 1; \
+        changed="$(pip list --format=freeze | diff /tmp/stack-packages.txt - | grep '^[<>]' || true)"; \
+        if [ -n "$changed" ]; then \
+            echo "AITER nightly requirements changed these stack packages (< stack, > now):"; echo "$changed"; \
+        fi; \
+        if pip check | grep -iE '^amd[-_]aiter '; then \
+            echo "AITER nightly has requirements the stack's constraints do not allow" >&2; exit 1; \
+        fi; \
         # Locate aiter without importing it: import needs a GPU, which a build has not. A wheel built
         # against a newer glibc or libstdc++ than this image installs fine but fails every test that
         # loads its modules; fail here instead.

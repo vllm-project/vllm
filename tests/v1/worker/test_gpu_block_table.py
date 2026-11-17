@@ -296,6 +296,42 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
 
 
+def test_clear_input_block_tables_drops_stale_entries():
+    """gather_block_tables writes only a request's own blocks, so a row keeps
+    a longer earlier request's ids past them. Kernels that load whole KV tiles
+    read those ids, so after the KV cache releases blocks they must be nulled
+    while the persistent storage address stays the same for CUDA graphs."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=4,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[8],
+        device=device,
+    )
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    block_tables.append_block_ids(
+        req_index=0, new_block_ids=([1, 2, 3],), overwrite=True
+    )
+    block_tables.apply_staged_writes()
+    block_tables.gather_block_tables(idx_mapping, num_reqs_padded=1)
+    block_tables.append_block_ids(req_index=0, new_block_ids=([4],), overwrite=True)
+    block_tables.apply_staged_writes()
+    table = block_tables.gather_block_tables(idx_mapping, num_reqs_padded=1)[0]
+    torch.accelerator.synchronize()
+    assert table[0, :3].tolist() == [4, 2, 3]
+
+    data_ptr = block_tables.input_block_tables[0].data_ptr()
+    block_tables.clear_input_block_tables()
+    torch.accelerator.synchronize()
+    assert (block_tables.input_block_tables[0] == 0).all()
+    assert block_tables.input_block_tables[0].data_ptr() == data_ptr
+
+    table = block_tables.gather_block_tables(idx_mapping, num_reqs_padded=1)[0]
+    torch.accelerator.synchronize()
+    assert table[0, :3].tolist() == [4, 0, 0]
+
+
 def test_dummy_request_slot_mapping_is_pad():
     """idx_mapping == -1 marks a dummy (or CUDA-graph padding) request.
 
