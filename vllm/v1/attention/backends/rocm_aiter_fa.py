@@ -3,7 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass, field, replace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
@@ -1170,13 +1170,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
         fp8_context = (
             self.fp8_prefill and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
-        context_descales = {}
+        context_descales: dict[str, Any] = {}
         if fp8_context:
             fp8_workspace = workspace.view(-1).view(current_platform.fp8_dtype())
             key_fetched, value_fetched = (
                 fp8_workspace[: workspace.numel()].view(workspace.shape).unbind(0)
             )
             context_descales = dict(descale_k=k_scale, descale_v=v_scale)
+        elif self.fp8_prefill:
+            context_descales = dict(kv_quant_scales=(k_scale, v_scale))
         chunked_output = None
         chunked_lse = None
         for chunk_idx in range(num_chunks):
@@ -1329,7 +1331,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
-        kv_descales: dict[str, torch.Tensor] = {}
+        kv_descales: dict[str, Any] = {}
         if (self.kv_sharing_target_layer_name is not None or key is None) and (
             num_prefills > 0 or num_extends > 0
         ):
@@ -1368,6 +1370,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 else "NHD",
                 total_tokens=num_actual_tokens - num_decode_tokens,
             )
+        if self.fp8_prefill and not kv_descales:
+            kv_descales = dict(kv_quant_scales=(layer._k_scale, layer._v_scale))
         # calculate for pure prefills
         if num_prefills > 0:
             assert attn_metadata.prefill_metadata is not None

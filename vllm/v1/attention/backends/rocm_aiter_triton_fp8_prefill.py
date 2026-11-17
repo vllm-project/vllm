@@ -193,9 +193,15 @@ def _descale(scale: torch.Tensor, n_heads: int, batch: int) -> torch.Tensor:
     return scale.expand(batch, n_heads).contiguous()
 
 
-def _quant(t: torch.Tensor, buf: torch.Tensor, n_heads: int, batch: int):
+def _quant(
+    t: torch.Tensor,
+    buf: torch.Tensor,
+    n_heads: int,
+    batch: int,
+    scale: torch.Tensor | None = None,
+):
     _, scale = ops.scaled_fp8_quant(
-        t.reshape(t.shape[0], -1), output=buf.view(t.shape[0], -1)
+        t.reshape(t.shape[0], -1), scale=scale, output=buf.view(t.shape[0], -1)
     )
     return buf, _descale(scale, n_heads, batch)
 
@@ -206,7 +212,9 @@ def triton_fp8_prefill_attn(*, orig: Callable[..., Any], **kwargs: Any) -> Any:
     ``k``/``v`` are either in ``q``'s dtype, or FP8 with one ``descale_k`` and
     ``descale_v`` scale each, which ``orig`` cannot take.
     """
-    return _triton_or_orig(orig, kwargs, **kwargs)
+    # Not a CK argument, so it cannot stay in the fallback kwargs.
+    kv_quant_scales = kwargs.pop("kv_quant_scales", None)
+    return _triton_or_orig(orig, kwargs, kv_quant_scales=kv_quant_scales, **kwargs)
 
 
 def _triton_or_orig(
@@ -231,6 +239,7 @@ def _triton_or_orig(
     sink_ptr=None,
     descale_k=None,
     descale_v=None,
+    kv_quant_scales=None,
     **extra,
 ):
     kv_is_fp8 = descale_k is not None
@@ -274,8 +283,11 @@ def _triton_or_orig(
         dk = _descale(descale_k, n_kv_heads, batch)
         dv = _descale(descale_v, n_kv_heads, batch)
     else:
-        k8, dk = _quant(k, bufs[1], n_kv_heads, batch)
-        v8, dv = _quant(v, bufs[2], n_kv_heads, batch)
+        # The cache stores these same tokens with these scales, so reuse them
+        # instead of paying for an amax pass over k and v.
+        k_scale, v_scale = kv_quant_scales or (None, None)
+        k8, dk = _quant(k, bufs[1], n_kv_heads, batch, k_scale)
+        v8, dv = _quant(v, bufs[2], n_kv_heads, batch, v_scale)
     mha = _load_kernel()
     assert mha is not None
     o, lse = mha._flash_attn_forward(
