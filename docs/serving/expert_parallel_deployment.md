@@ -280,6 +280,8 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
 
+Phase filtering is supported by the built-in Model Runner V2. Out-of-tree and custom runners must pass their target batch's prefill flag to `EPLBController.set_batch_phase()` before the target forward; setting the configuration field alone does not enable filtering in those runners.
+
 To balance experts using decode load, add `"load_collection_phase":"decode"` to `--eplb-config`. A batch containing any prefill request, including a mixed prefill/decode batch, belongs to the prefill phase. Decode collection includes only batches without prefill requests. Draft-model forwards inherit the target batch's phase, and DBO microbatches share that phase. Filtering affects load collection only: every rank continues stepping EPLB and participating in rearrangement collectives, including ranks whose local batch is excluded. Excluded batches contribute zero load to slots where the existing sampling schedule would record a batch. Filtering does not pause the rearrangement interval.
 
 ??? tip "Prefer individual arguments instead of JSON?"

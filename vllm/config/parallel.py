@@ -210,8 +210,9 @@ class EPLBConfig:
     """
     load_collection_phase: Literal["all", "prefill", "decode"] = "all"
     """Collect expert load from all batches, batches containing prefill, or
-    decode-only batches. Mixed batches count as prefill. Target and draft models
-    use the target batch's phase.
+    decode-only batches in the built-in Model Runner V2. Mixed batches count as
+    prefill. Target and draft models use the target batch's phase. Out-of-tree
+    runners must integrate phase updates before each target forward.
     """
     use_async: bool = True
     """
