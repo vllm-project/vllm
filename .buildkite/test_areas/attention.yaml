@@ -37,6 +37,8 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
+      - vllm/models/deepseek_v4/amd/rocm.py
+      - vllm/models/deepseek_v41/amd/rocm.py
       commands:
       - >-
         pytest -v -s
@@ -85,6 +87,8 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
+      - vllm/models/deepseek_v4/amd/rocm.py
+      - vllm/models/deepseek_v41/amd/rocm.py
       commands:
       - >-
         pytest -v -s

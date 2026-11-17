@@ -428,7 +428,7 @@ th {
 | `GraniteSWAForCausalLM` | Granite SWA | `ibm-granite/granite-swash-2b` | ✅︎ | ✅︎ |
 | `HrmTextForCausalLM` | HRM-Text | `sapientinc/HRM-Text-1B`, etc. | | |
 | `HYV3ForCausalLM` | HY3 | `tencent/Hy3-preview-Base`, `tencent/Hy3-preview`, `tencent/Hy3`, `tencent/Hy3-FP8` | ✅︎ | ✅︎ |
-| `HYV4ForCausalLM` | [HY4](hy4.md) | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
+| `HYV4ForCausalLM` | HY4 | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
 | `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
@@ -572,6 +572,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `GLM4VForCausalLM`<sup>^</sup> | GLM-4V | T + I | `zai-org/glm-4v-9b`, `zai-org/cogagent-9b-20241220`, etc. | ✅︎ | ✅︎ |
 | `Glm4vForConditionalGeneration` | GLM-4.1V-Thinking | T + I<sup>E+</sup> + V<sup>E+</sup> | `zai-org/GLM-4.1V-9B-Thinking`, etc. | ✅︎ | ✅︎ |
 | `Glm4vMoeForConditionalGeneration` | GLM-4.5V | T + I<sup>E+</sup> + V<sup>E+</sup> | `zai-org/GLM-4.5V`, etc. | ✅︎ | ✅︎ |
+| `Glm5NextForConditionalGeneration` | [GLM-5.3-Flash](../features/multimodal_inputs.md#glm-53-flash) (Rust frontend) | T + I + V | `zai-org/GLM-5.3-Flash` | ✅︎ | ✅︎ |
 | `GlmOcrForConditionalGeneration` | GLM-OCR | T + I<sup>E+</sup> | `zai-org/GLM-OCR`, etc. | ✅︎ | ✅︎ |
 | `Granite4VisionForConditionalGeneration` | Granite 4 Vision | T + I<sup>E+</sup> | `ibm-granite/granite-4.1-3b-vision`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | T + A | `ibm-granite/granite-speech-3.3-8b` | ✅︎ | ✅︎ |
@@ -595,6 +596,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `LightOnOCRForConditionalGeneration` | LightOnOCR-1B | T + I<sup>E+</sup> | `lightonai/LightOnOCR-1B`, etc | ✅︎ | ✅︎ |
 | `Lfm2VlForConditionalGeneration` | LFM2-VL | T + I<sup>+</sup> | `LiquidAI/LFM2-VL-450M`, `LiquidAI/LFM2-VL-3B`, `LiquidAI/LFM2-VL-8B-A1B`, etc. | ✅︎ | ✅︎ |
 | `Lfm3AudioForConditionalGeneration` | LFM3-Audio | T + A<sup>E+</sup> | `LiquidAI/LFM3-Audio-2B`, etc. | | ✅︎ |
+| `Lfm3OmniForConditionalGeneration` | LFM3-Omni | T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>E+</sup> | `LiquidAI/LFM3-Omni-2B` | | ✅︎ |
 | `Lfm3VlForConditionalGeneration` | LFM3-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `LiquidAI/LFM3-VL-2B` | | ✅︎ |
 | `Llama4ForConditionalGeneration` | Llama 4 | T + I<sup>+</sup> | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. | ✅︎ | ✅︎ |
 | `Llama_Nemotron_Nano_VL` | Llama Nemotron Nano VL | T + I<sup>E+</sup> | `nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1` | ✅︎ | ✅︎ |
