@@ -250,9 +250,7 @@ class Worker(WorkerBase):
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
 
-        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
-
-        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
+        self.elastic_ep_executor = self._make_elastic_ep_executor()
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
@@ -274,7 +272,7 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-        validate_worker_profiler_config(self.profiler_config)
+        self._validate_profiler_config()
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -285,6 +283,15 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+
+    def _validate_profiler_config(self) -> None:
+        validate_worker_profiler_config(self.profiler_config)
+
+    def _make_elastic_ep_executor(self):
+        """Construct elastic EP lazily so platform workers can opt out."""
+        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+
+        return ElasticEPScalingExecutor(self)
 
     @property
     def sleep_mode_backend(self) -> "SleepModeBackend":
@@ -551,8 +558,13 @@ class Worker(WorkerBase):
             torch.nn.functional.linear(x, x, x[0])
             del x
 
+            # Collect garbage, then freeze the startup heap so that later gc.collect()
+            # calls (weight loading, memory profiling, KV cache sizing) skip it. It is
+            # unfrozen by the first CUDA graph capture, or at the latest by
+            # compile_or_warm_up_model, which then refreezes the final heap.
+            freeze_gc_heap()
+
             # Now take memory snapshot after NCCL is initialized
-            gc.collect()
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
@@ -581,7 +593,10 @@ class Worker(WorkerBase):
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        pc = self.vllm_config.parallel_config
+        # all-reduce-overlap runs both microbatches on one stream: one workspace set.
+        per_ubatch = pc.enable_dbo and pc.dbo_schedule != "all-reduce-overlap"
+        num_ubatches = 2 if per_ubatch else 1
         init_workspace_manager(
             self.device,
             num_ubatches,
@@ -1112,6 +1127,9 @@ class Worker(WorkerBase):
             # nearly all the memory warmup may commit: release them, so the
             # sizing steps run beside only the blocks they address.
             kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
+            # Null stale ids past each row's last block, which the shrink unmapped:
+            # some kernels load whole KV tiles (e.g. AITER on gfx950, ROCm/aiter#8033).
+            self.model_runner.block_tables.clear_input_block_tables()
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )
@@ -1245,8 +1263,10 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
-        # Freeze the worker heap so the GC won't scan static objects
-        # (model weights, KV caches, CUDA graphs) during inference.
+        # Unfreeze and run GC (also frees cyclic garbage objects since init_device),
+        # then refreeze so that GC won't scan static objects (model weights, KV caches,
+        # CUDA graphs) during inference.
+        gc.unfreeze()
         freeze_gc_heap()
         maybe_attach_gc_debug_callback()
 
