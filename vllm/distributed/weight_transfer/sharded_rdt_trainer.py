@@ -50,7 +50,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     check_ray_rdt_version,
     deregister_nixl_memory,
     flat_layout,
-    flat_view,
     from_wire_box,
     gather_units,
     piece_nbytes,
@@ -115,6 +114,9 @@ class _ServedBucket:
     pieces: tuple[tuple[str, tuple[slice, ...]], ...]
     nbytes: int
     layout: tuple[FlatPiece, ...]
+    # each piece's bytes, then the padding up to the next piece: one `split`
+    # of the bucket's block cuts out every piece
+    splits: tuple[int, ...]
 
 
 def _ray_stored(tensor: torch.Tensor) -> bool:
@@ -357,12 +359,14 @@ class _RDTProducerServer:
                     f"than the {self._arena_bytes} B arena: the consumer cut "
                     "its buckets with a larger buffer_bytes"
                 )
+            layout = flat_layout(boxes, dtypes)
+            ends = [start for start, *_ in layout[1:]] + [nbytes]
+            splits = []
+            for (start, size, *_), end in zip(layout, ends):
+                splits += [size, end - start - size]
             served.append(
                 _ServedBucket(
-                    units.pop(),
-                    tuple(pieces),
-                    nbytes,
-                    tuple(flat_layout(boxes, dtypes)),
+                    units.pop(), tuple(pieces), nbytes, tuple(layout), tuple(splits)
                 )
             )
         with self._cond:
@@ -404,8 +408,11 @@ class _RDTProducerServer:
             offset = self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            views = [self._cache[name][slices] for name, slices in spec.pieces]
+            # the unit stays cached until this bucket is freed
+            tensors = [self._cache[name] for name, _ in spec.pieces]
             self._progress()
+        views = [t[slices] for t, (_, slices) in zip(tensors, spec.pieces)]
+        del tensors
         flat = self._pack(views, spec, offset)
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
@@ -427,13 +434,32 @@ class _RDTProducerServer:
     def _pack(
         self, views: list[torch.Tensor], spec: _ServedBucket, offset: int
     ) -> torch.Tensor:
-        """Pack a bucket with one fused copy into its arena block."""
+        """Pack a bucket into its arena block: the contiguous boxes as bytes,
+        with one fused copy, and the strided ones (e.g. TP column slices)
+        typed. One strided box or a second dtype would otherwise put every
+        box on the per-tensor path, a kernel each."""
         if self._arena is None:  # warmup_nixl never ran (tests)
             self._arena = torch.empty(
                 self._arena_bytes, dtype=torch.uint8, device=views[0].device
             )
         flat = self._arena[offset : offset + spec.nbytes]
-        torch._foreach_copy_([flat_view(flat, p) for p in spec.layout], views)
+        # every piece's bytes, from one split; per piece op count matters,
+        # since a MoE bucket has hundreds
+        chunks = flat.split(spec.splits)[::2]
+        byte_dsts, byte_srcs, dsts, srcs = [], [], [], []
+        for chunk, (_, _, dtype, shape), view in zip(
+            chunks, spec.layout, views, strict=True
+        ):
+            if view.is_contiguous():
+                byte_dsts.append(chunk)
+                byte_srcs.append(view.view(-1).view(torch.uint8))
+            else:
+                dsts.append(chunk.view(dtype).view(shape))
+                srcs.append(view)
+        if byte_dsts:
+            torch._foreach_copy_(byte_dsts, byte_srcs)
+        if dsts:
+            torch._foreach_copy_(dsts, srcs)
         if flat.is_cuda:
             # Ray synchronizes the device under its cache lock; do it here so
             # its wait is empty.
