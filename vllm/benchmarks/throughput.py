@@ -306,7 +306,7 @@ async def run_vllm_async(
     do_profile: bool,
     disable_detokenize: bool = False,
     warmup_requests: list[SampleRequest] | None = None,
-) -> float:
+) -> tuple[float, list[RequestOutput]]:
     from vllm.entrypoints.launchers.api_server.entry import (
         build_async_engine_client_from_engine_args,
     )
@@ -336,7 +336,7 @@ async def run_vllm_async(
                 request_id_prefix="warmup",
             )
 
-        elapsed_time, _ = await _run_vllm_async_requests(
+        return await _run_vllm_async_requests(
             llm,
             requests,
             n,
@@ -344,7 +344,6 @@ async def run_vllm_async(
             do_profile=do_profile,
             request_id_prefix="test",
         )
-        return elapsed_time
 
 
 async def _run_vllm_async_requests(
@@ -354,7 +353,7 @@ async def _run_vllm_async_requests(
     disable_detokenize: bool,
     do_profile: bool,
     request_id_prefix: str,
-) -> tuple[float, None]:
+) -> tuple[float, list[RequestOutput]]:
     from vllm import SamplingParams
 
     prompts: list[TextPrompt | TokensPrompt] = []
@@ -398,12 +397,14 @@ async def _run_vllm_async_requests(
         )
         generators.append(generator)
     all_gens = merge_async_iterators(*generators)
-    async for _i, _res in all_gens:
-        pass
+    outputs = []
+    async for _i, res in all_gens:
+        if res.finished:
+            outputs.append(res)
     if do_profile:
         await llm.stop_profile()
     end = time.perf_counter()
-    return end - start, None
+    return end - start, outputs
 
 
 def run_hf(
@@ -1052,7 +1053,7 @@ def main(args: argparse.Namespace):
     request_outputs: list[RequestOutput] | None = None
     if args.backend == "vllm":
         if args.async_engine:
-            elapsed_time = uvloop.run(
+            elapsed_time, request_outputs = uvloop.run(
                 run_vllm_async(
                     requests,
                     args.n,
