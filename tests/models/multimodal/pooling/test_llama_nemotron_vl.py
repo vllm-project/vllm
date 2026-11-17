@@ -31,7 +31,7 @@ from vllm.transformers_utils.processors.nemotron_vl import (
 )
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
-from ....utils import ROCM_ENGINE_KWARGS
+from ....utils import ROCM_ENGINE_KWARGS, create_new_process_for_each_test
 from ...utils import check_embeddings_close
 
 # Prefixes used by the model API
@@ -63,6 +63,9 @@ MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
     [(True, 0), (False, 128)],
     ids=["async-encoder-cache-pressure", "sync-prefill-threshold"],
 )
+# The in-process engine compiles the Transformers model's classes, which later HF
+# runs in this process would pick up
+@create_new_process_for_each_test()
 def test_image_embeddings_without_chunked_prefill(
     vllm_runner, model, monkeypatch, async_scheduling, long_prefill_token_threshold
 ):

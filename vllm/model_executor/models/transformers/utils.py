@@ -50,6 +50,9 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
+    from transformers import PreTrainedConfig
+    from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
     from vllm.compilation.decorators import DynamicArgDims
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.pooler import SequencePoolingType
@@ -57,6 +60,19 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+def map_extended_config(
+    auto_cls: type["_BaseAutoModelClass"], config: "PreTrainedConfig"
+) -> None:
+    """Map a remote config that only extends a Transformers config, and has no model
+    for `auto_cls` of its own, to that config's model."""
+    mapping = auto_cls._model_mapping
+    config_cls = type(config)
+    if auto_cls.__name__ in getattr(config, "auto_map", {}) or config_cls in mapping:
+        return
+    if parent := next((cls for cls in config_cls.__mro__ if cls in mapping), None):
+        mapping.register(config_cls, mapping[parent], exist_ok=True)
 
 
 # Copied from `accelerate`

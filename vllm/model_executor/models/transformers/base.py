@@ -72,6 +72,7 @@ from vllm.model_executor.models.transformers.utils import (
     has_bidirectional_attention,
     init_on_device_without_buffers,
     log_replacement,
+    map_extended_config,
     maybe_disable_dynamic_rope_update,
     named_state,
     replace_conv_class,
@@ -229,9 +230,16 @@ class Base(
         `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
+        - Points a sub-config of a remote model (e.g. a VLM's text config) at the
+        model's repo, where its remote code lives
+        - Maps a remote config that only extends a Transformers config, and has no
+        `AutoModel` of its own, to that config's model
         """
         self.text_config._attn_implementation = VLLM_ATTN_IMPL
         self.config.dtype = torch.get_default_dtype()
+        if not self.config._name_or_path:
+            self.config._name_or_path = self.model_config.model
+        map_extended_config(AutoModel, self.config)
 
     @contextmanager
     def _mark_model_components(self, vllm_config: "VllmConfig"):
