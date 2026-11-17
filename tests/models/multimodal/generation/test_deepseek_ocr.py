@@ -56,3 +56,40 @@ class TestDeepseekOCREncodeLocalFeaturesGuard:
         crop_shape = torch.tensor([1, 2])
         with pytest.raises(AttributeError):
             DeepseekOCRForCausalLM._encode_local_features(None, wb, crop_shape)
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    "model_id, expected_tokens",
+    [("deepseek-ai/DeepSeek-OCR", 273), ("deepseek-ai/DeepSeek-OCR-2", 257)],
+)
+def test_deepseek_ocr_request_processor_kwargs(vllm_runner, model_id, expected_tokens):
+    """Generate with a request override and verify the processed image span."""
+    from PIL import Image
+
+    from vllm import SamplingParams
+
+    with vllm_runner(
+        model_id,
+        enforce_eager=True,
+        max_model_len=4096,
+        max_num_batched_tokens=4096,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=1 << 29,
+        attention_config={"backend": "TRITON_ATTN"},
+        mm_encoder_attn_backend="TORCH_SDPA",
+        limit_mm_per_prompt={"image": 1},
+    ) as runner:
+        result = runner.llm.generate(
+            {
+                "prompt": "<image>\nFree OCR.",
+                "multi_modal_data": {"image": Image.new("RGB", (1600, 1200))},
+                "mm_processor_kwargs": {"crop_mode": False},
+            },
+            SamplingParams(temperature=0, max_tokens=1, ignore_eos=True),
+        )[0]
+        assert result.outputs[0].finish_reason == "length"
+        assert len(result.outputs[0].token_ids) == 1
+        image_token_id = runner.llm.get_tokenizer().convert_tokens_to_ids("<image>")
+        assert result.prompt_token_ids.count(image_token_id) == expected_tokens
