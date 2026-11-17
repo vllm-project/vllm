@@ -714,7 +714,13 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     )
     llm = LLM(
         model=model,
+        # The checkpoint also ships Mistral-format weights; load the HF ones.
+        config_format="hf",
+        load_format="safetensors",
+        tokenizer_mode="hf",
         max_model_len=block_size * 10,
+        # fp32 Mamba states take ~260 MiB per sequence on this model.
+        max_num_seqs=16,
         gpu_memory_utilization=0.85,
         tensor_parallel_size=tp_size,
         kv_transfer_config=kv_transfer_config,

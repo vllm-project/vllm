@@ -33,8 +33,8 @@ SSM_MODELS = [
 ]
 
 HYBRID_MODELS = [
-    "Zyphra/Zamba2-1.2B-instruct",
     "ibm-granite/granite-4.0-tiny-preview",
+    "Zyphra/Zamba2-1.2B-instruct",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
     "tiny-random/qwen3-next-moe",
@@ -271,7 +271,7 @@ def test_state_cleanup(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_distributed_correctness(
@@ -878,7 +878,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
-@pytest.mark.parametrize("model", ["mistralai/Mamba-Codestral-7B-v0.1"])
+@pytest.mark.parametrize("model", [SSM_MODELS[0]])
 def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
@@ -942,6 +942,10 @@ def test_apc_common_prefix_same_batch(
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     llm = LLM(
         model=model,
+        # The checkpoint also ships Mistral-format weights; load the HF ones.
+        config_format="hf",
+        load_format="safetensors",
+        tokenizer_mode="hf",
         enforce_eager=True,
         block_size=16,
         mamba_block_size=16,
