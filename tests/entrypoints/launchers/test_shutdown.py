@@ -333,9 +333,37 @@ async def test_wait_timeout_completes_requests():
         await _assert_children_cleaned_up(child_pids)
 
 
+async def _pooling_request_rejected_with_503(
+    client: openai.AsyncOpenAI,
+    deadline_s: float,
+) -> str | None:
+    """Poll embeddings until shutdown rejects one.
+
+    SIGTERM and EngineCore entering shutdown are not the same instant, so the
+    first call after the signal can still be admitted. Returns None on 503,
+    or the unexpected failure that ended the poll.
+    """
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        try:
+            await client.embeddings.create(model=MODEL_NAME, input="ping")
+        except openai.APIStatusError as e:
+            if e.status_code == 503:
+                return None
+            return f"HTTP {e.status_code}: {e}"
+        except (openai.APIConnectionError, httpx.RemoteProtocolError) as e:
+            return f"connection closed before 503: {e}"
+        await asyncio.sleep(0.05)
+    return "timed out before a new embeddings call returned 503"
+
+
 @pytest.mark.asyncio
 async def test_wait_timeout_completes_pooling_requests():
-    """Verify in-flight /v1/embeddings requests finish with 200 during drain."""
+    """In-flight /v1/embeddings finish during drain; a later one gets 503.
+
+    One request is admitted before SIGTERM and must return 200. Another is
+    issued after the signal and must be rejected with 503, not 500.
+    """
     shutdown_timeout = 30
     server_args = [
         "--runner",
@@ -364,48 +392,33 @@ async def test_wait_timeout_completes_pooling_requests():
         proc = remote_server.proc
         child_pids = _get_child_pids(proc.pid)
 
-        state = ShutdownState()
-        sigterm_sent = asyncio.Event()
-
-        request_task = asyncio.create_task(
-            _concurrent_request_loop(
-                client,
-                state,
-                sigterm_sent,
-                concurrency=4,
-                pooling=True,
-                stop_on_sigterm=True,
+        inflight = asyncio.create_task(
+            client.embeddings.create(
+                model=MODEL_NAME,
+                input="hello " * 1500,
             )
         )
-
         try:
             admission_delay = await _wait_for_running_request(
                 remote_server.url_for("metrics"),
                 timeout=60,
             )
             proc.send_signal(signal.SIGTERM)
-            sigterm_sent.set()
-
-            await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
+            rejection = await _pooling_request_rejected_with_503(
+                client, _SHUTDOWN_DETECTION_TIMEOUT
+            )
+            result = await asyncio.wait_for(inflight, timeout=shutdown_timeout)
+            assert result.data, "In-flight pooling request returned an empty embedding"
+            assert rejection is None, (
+                "A new embeddings call after SIGTERM should return 503. "
+                f"admission_delay: {admission_delay:.3f}s, failure: {rejection}"
+            )
+            _wait_for_server_exit(proc, shutdown_timeout)
+            await _assert_children_cleaned_up(child_pids)
         finally:
-            state.stop_requesting = True
-            if not request_task.done():
-                request_task.cancel()
-            await asyncio.gather(request_task, return_exceptions=True)
-
-        assert not state.got_500, (
-            f"In-flight pooling requests returned 500 during drain: {state.errors}"
-        )
-        assert not state.errors, f"Unexpected errors during drain: {state.errors}"
-        assert state.requests_after_sigterm > 0, (
-            f"Wait timeout should complete in-flight pooling requests. "
-            f"admission_delay: {admission_delay:.3f}s, "
-            f"503: {state.got_503}, 500: {state.got_500}, "
-            f"conn_errors: {state.connection_errors}, errors: {state.errors}"
-        )
-
-        _wait_for_server_exit(proc, shutdown_timeout)
-        await _assert_children_cleaned_up(child_pids)
+            if not inflight.done():
+                inflight.cancel()
+                await asyncio.gather(inflight, return_exceptions=True)
 
 
 @pytest.mark.asyncio

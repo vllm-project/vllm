@@ -778,6 +778,7 @@ def test_idle_dp_rank_announces_wave_for_new_work(
     core.has_coordinator = True
     core.current_wave = 3
     core.engines_running = engines_running
+    core.shutdown_state = EngineShutdownState.RUNNING
     core.scheduler = MagicMock(pause_state=pause_state)
     core.output_queue = MagicMock()
 
@@ -833,6 +834,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
         pytest.param("abort", False, "new", False, id="sleep-or-elastic-ep"),
         pytest.param("abort", True, "cleanup", False, id="kv-cleanup-marker"),
         pytest.param("abort", True, "session", False, id="open-session-input"),
+        pytest.param("abort", True, "duplicate", True, id="duplicate-live-id"),
     ],
 )
 def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected):
@@ -844,7 +846,16 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     core = _pausable_engine_core_proc()
     core.shutdown_state = EngineShutdownState.RUNNING
     core.reject_new_requests = False
-    core.scheduler.has_request.return_value = kind == "session"
+    # Only an open resumable session may reuse an id. A normal in-flight
+    # request is also in `requests`, and adding it again asserts.
+    core.scheduler.requests = {}
+    if kind == "session":
+        core.scheduler.requests["r"] = MagicMock(resumable=True)
+    elif kind == "duplicate":
+        core.scheduler.requests["r"] = MagicMock(resumable=False)
+    core.scheduler.has_request.side_effect = lambda request_id: (
+        request_id in core.scheduler.requests
+    )
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
     request = MagicMock(

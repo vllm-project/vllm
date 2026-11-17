@@ -7,7 +7,7 @@ import json
 import queue
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -24,6 +24,7 @@ from vllm.exceptions import RetryableRequestError
 from vllm.outputs import RequestError
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import (
     EngineCoreOutput,
     EngineCoreOutputs,
@@ -33,7 +34,12 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine import async_llm as async_llm_module
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.core import (
+    DPEngineCoreProc,
+    EngineCore,
+    EngineCoreProc,
+    EngineShutdownState,
+)
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor import Executor
 
@@ -267,7 +273,9 @@ async def test_shutdown_cleans_up_resources_when_engine_core_raises(
         EngineShutdownState.SHUTTING_DOWN,
     ],
 )
-@pytest.mark.parametrize("kind", ["new", "pd", "cleanup", "session"])
+@pytest.mark.parametrize(
+    "kind", ["new", "pd", "cleanup", "session", "session_finish", "duplicate"]
+)
 def test_engine_core_rejects_new_requests_during_shutdown(
     shutdown_state: EngineShutdownState,
     kind: str,
@@ -276,25 +284,45 @@ def test_engine_core_rejects_new_requests_during_shutdown(
     error (mapped to HTTP 503), rather than FinishReason.ABORT (HTTP 200).
     Cleanup markers and open streaming-session inputs still pass through, and
     rejected P/D requests still trigger KV cleanup.
+
+    A duplicate of a normal in-flight id is not an open session.
+    `Scheduler.add_request` asserts "duplicate request id" for that reuse, which
+    kills the busy loop, so it must get the same 503 and must not be added.
+    The finish sentinel of a resumable session is not resumable itself, and
+    still must be forwarded or the live session cannot end.
     """
     core = object.__new__(EngineCoreProc)
     core.shutdown_state = shutdown_state
     core.reject_new_requests = False
     core.output_queue = queue.Queue()
     core.scheduler = MagicMock()
-    core.scheduler.has_request.return_value = kind == "session"
+    core.scheduler.requests = {}
+    if kind in ("session", "session_finish"):
+        core.scheduler.requests["r"] = SimpleNamespace(resumable=True)
+    elif kind == "duplicate":
+        # Live, but not a resumable session: `has_request` is true and
+        # `streaming_queue` is unset, so `add_request` would assert.
+        core.scheduler.requests["r"] = SimpleNamespace(resumable=False)
+    core.scheduler.has_request.side_effect = lambda request_id: (
+        request_id in core.scheduler.requests
+    )
     core.add_request = MagicMock()
 
     request = MagicMock(
         request_id="r",
         client_index=1,
         abort_immediately=kind == "cleanup",
+        resumable=kind == "session",
         kv_transfer_params={"do_remote_prefill": True} if kind == "pd" else None,
     )
 
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
 
-    rejected = shutdown_state != EngineShutdownState.RUNNING and kind in ("new", "pd")
+    rejected = shutdown_state != EngineShutdownState.RUNNING and kind in (
+        "new",
+        "pd",
+        "duplicate",
+    )
     if rejected:
         client_index, eco = core.output_queue.get_nowait()
         assert client_index == 1
@@ -424,3 +452,33 @@ async def test_new_request_during_drain_surfaces_503_while_inflight_completes(
         if shutdown_future is not None:
             await asyncio.gather(shutdown_future, return_exceptions=True)
         engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    "shutdown_state",
+    [EngineShutdownState.REQUESTED, EngineShutdownState.SHUTTING_DOWN],
+)
+def test_dp_rank_does_not_start_wave_for_adds_during_shutdown(
+    shutdown_state: EngineShutdownState,
+):
+    """An add during shutdown must not publish `start_wave`.
+
+    `DPEngineCoreProc.add_request` wakes idle peers when the scheduler is
+    unpaused. A rejected prefill/decode request is added only to free remote
+    KV, with `abort_immediately` set. During shutdown an idle peer may already
+    have destroyed `dp_group`, so the wave's all-reduce hangs until SIGKILL.
+    """
+    core = object.__new__(DPEngineCoreProc)
+    core.has_coordinator = True
+    core.current_wave = 0
+    core.engines_running = False
+    core.shutdown_state = shutdown_state
+    core.scheduler = MagicMock(pause_state=PauseState.UNPAUSED)
+    core.output_queue = MagicMock()
+    request = SimpleNamespace(request_id="r", abort_immediately=True)
+
+    with patch.object(EngineCore, "add_request"):
+        core.add_request(request, 0)
+
+    assert core.engines_running is False
+    core.output_queue.put_nowait.assert_not_called()
