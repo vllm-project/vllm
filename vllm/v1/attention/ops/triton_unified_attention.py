@@ -79,8 +79,9 @@ _GFX1100_2D_DECODE_CONFIGS = {
 }
 # Split-KV (3D) decode: the segment count per request follows requests x KV heads
 # instead of vLLM's fixed 16.
-# gfx1201: padded head sizes whose segment count follows the batch.
-_GFX1201_3D_HEADS = (64, 128, 256)
+# gfx1201: padded head sizes with a tuned split-KV launch; the segment count follows
+# the batch for all but 512.
+_GFX1201_3D_HEADS = (64, 128, 256, 512)
 # gfx1100: padded head size -> (T, (TILE_SIZE, num_warps, num_stages)), with
 # next_pow2(T / (requests x KV heads)) segments.
 _GFX1100_3D_CONFIGS = {
@@ -118,8 +119,8 @@ def _gfx1201_split_kv_segments(
 ):
     """gfx1201: segments so that requests x KV heads x segments is about 128 (more
     for small batches; fewer, down to 4, for larger ones with a 16-bit query).
-    Sliding windows < 2048 keep `segments`."""
-    if 0 < sliding_window < 2048:
+    Head size 512 and sliding windows < 2048 keep `segments`."""
+    if head_size_padded == 512 or 0 < sliding_window < 2048:
         return segments
     programs = 64 if fp8_query and head_size_padded == 256 else 128
     while segments < 128 and segments * 2 * grid_fill <= programs:
@@ -137,7 +138,7 @@ def _gfx1201_split_kv_launch(head_size_padded, sliding_window, fp8_query, segmen
             return 32, 1, 1
         return (32, 4, 2) if segments > 16 else None
     if sliding_window == 0 or sliding_window >= 2048:
-        return 16, 2, 1
+        return (16, 4, 1) if head_size_padded == 512 else (16, 2, 1)
     return {64: (32, 1, 1), 128: (16, 1, 1)}.get(head_size_padded)
 
 
