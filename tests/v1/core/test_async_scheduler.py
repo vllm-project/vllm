@@ -911,6 +911,31 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
     assert scheduler._pp_microbatch_cap(512) == 212
     assert looked_up == ids[:4]
 
+    # Hits are remembered while requests wait, until num_tokens changes.
+    assert scheduler._pp_microbatch_cap(512) == 212
+    assert looked_up == ids[:4]
+    scheduler.requests["r2"].append_output_token_ids(0)
+    scheduler._pp_microbatch_cap(512)
+    assert looked_up == ids[:4] + ["r2"]
+
+
+def test_pp_microbatch_cap_skips_decode_only_steps():
+    """Without a prefill to split the cap is the full budget, so steps with only
+    decodes don't scan the running requests."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    scheduler.pp_microbatch_min_tokens = 128
+    for request in create_requests(3, 40, max_tokens=8):
+        scheduler.add_request(request)
+    assert scheduler.schedule().total_num_scheduled_tokens == 120
+    assert not scheduler._inflight_prefills
+    scheduler.running = _NoIter(scheduler.running)
+    assert scheduler._pp_microbatch_cap(512) == 512
+
+
+class _NoIter(list):
+    def __iter__(self):
+        raise AssertionError("running requests scanned")
+
 
 def test_pp_microbatch_cap_default_on(monkeypatch: pytest.MonkeyPatch):
     """On by default (4096 floor): a lone 18k prefill at budget 16k. The cap is

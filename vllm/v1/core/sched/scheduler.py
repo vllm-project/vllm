@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
+import weakref
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
@@ -440,6 +441,8 @@ class Scheduler(SchedulerInterface):
             and not self.need_mamba_block_aligned_split
             else 0
         )
+        # Waiting requests' prefix-cache hits for the cap, by num_tokens.
+        self._pp_cached_tokens = weakref.WeakKeyDictionary[Request, tuple[int, int]]()
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -725,28 +728,29 @@ class Scheduler(SchedulerInterface):
         least `pp_microbatch_min_tokens`, plus the running decodes' tokens,
         clamped to `budget`. A small backlog runs as small chunks that fill every
         stage; a backlog of pp_size x budget or more gets the full budget."""
-        prefill = decode = 0
-        for request in self.running:
-            remaining = request.num_prompt_tokens - request.num_computed_tokens
-            if remaining > 0:
-                prefill += remaining
-            elif not self._needs_no_more_steps(request):
-                decode += 1 + len(request.spec_token_ids)
-        waiting = itertools.chain(
-            self.kv_holding_waiting, self.waiting, self.async_kv_waiting
+        waiting_queues = (self.kv_holding_waiting, self.waiting, self.async_kv_waiting)
+        # Running prefills not yet fully scheduled (a last chunk in flight adds
+        # nothing). Parked async KV loads are counted with the waiting requests.
+        prefill = sum(
+            max(0, request.num_tokens - request.num_computed_tokens)
+            for request in self._inflight_prefills
+            if request.status == RequestStatus.RUNNING
         )
-        for i, request in enumerate(waiting):
+        if not prefill and not any(waiting_queues):
+            return budget  # No prefill to split.
+        decode = sum(
+            1 + len(request.spec_token_ids)
+            for request in self.running
+            if request.num_computed_tokens >= request.num_prompt_tokens
+            and not self._needs_no_more_steps(request)
+        )
+        for i, request in enumerate(itertools.chain(*waiting_queues)):
             if prefill >= budget * self.pp_size:
                 break  # cap already at the full budget
-            # Prefix-cache lookup (walks the block hashes) only for the first
-            # pp_size requests; later ones count in full, which errs toward the
-            # full budget. num_tokens: a preempted request's hit can cover its
-            # generated tokens too.
-            hit = (
-                self.kv_cache_manager.get_num_cached_tokens(request)
-                if i < self.pp_size
-                else 0
-            )
+            # Prefix-cache lookup only for the first pp_size requests; later ones
+            # count in full, which errs toward the full budget. num_tokens: a
+            # preempted request's hit can cover its generated tokens too.
+            hit = self._pp_num_cached_tokens(request) if i < self.pp_size else 0
             prefill += max(0, request.num_tokens - hit)
         # At least num_prefill_lookahead, so the MTP lookahead reservation still
         # leaves a token to schedule.
@@ -756,6 +760,16 @@ class Scheduler(SchedulerInterface):
             cdiv(prefill, self.pp_size),
         )
         return min(budget, cap + decode)
+
+    def _pp_num_cached_tokens(self, request: Request) -> int:
+        """`get_num_cached_tokens`, remembered while a request waits, since the
+        lookup walks all its block hashes. It is redone if num_tokens changes
+        (preemption); a stale hit only skews the cap's chunk sizes."""
+        cached = self._pp_cached_tokens.get(request)
+        if cached is None or cached[0] != request.num_tokens:
+            num_cached = self.kv_cache_manager.get_num_cached_tokens(request)
+            cached = self._pp_cached_tokens[request] = (request.num_tokens, num_cached)
+        return cached[1]
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
