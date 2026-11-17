@@ -564,6 +564,14 @@ end at an attention-chunk boundary for every chunked-local cache group. Otherwis
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
 
+## Core dumps
+
+On Linux, `SimpleCPUOffloadConnector` and `OffloadingConnector` leave their CPU
+KV caches out of core dumps (`MADV_DONTDUMP`). A crashing worker still writes a
+core file, but it no longer grows with `cpu_bytes_to_use`. The exception is the
+single-tier `OffloadingConnector` on platforms other than CUDA and XPU, where
+the CPU tier is a plain pinned tensor.
+
 ## Further Reading
 
 - [vLLM blog: KV Offloading Connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) — motivation, architecture (DMA-based async transfer), and benchmarks (TTFT and throughput).
