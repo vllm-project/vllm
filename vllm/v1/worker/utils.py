@@ -144,10 +144,9 @@ class KVBlockZeroer:
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
-        # Overlaid layers (packed layouts) share a base address but may have
-        # different page sizes; keep the widest span per address so newly
-        # allocated blocks are fully zeroed for every overlaying group.
-        seen_ptrs: dict[int, int] = {}
+        # Merge overlaid pages only when their base address and logical block
+        # stride match, keeping the widest page span for each segment.
+        seen_ptrs: dict[tuple[int, int], int] = {}
         seg_addrs: list[int] = []
         seg_block_strides: list[int] = []
         seg_page_sizes: list[int] = []
@@ -200,16 +199,13 @@ class KVBlockZeroer:
                     assert (dp + off_bytes) % 4 == 0
                     for virtual_index in range(ratio):
                         addr = dp + off_bytes + virtual_index * block_stride_bytes
-                        if (idx := seen_ptrs.get(addr)) is not None:
-                            assert (
-                                seg_block_strides[idx]
-                                == logical_block_stride_bytes // 4
-                            )
+                        segment_key = (addr, logical_block_stride_bytes)
+                        if (idx := seen_ptrs.get(segment_key)) is not None:
                             seg_page_sizes[idx] = max(
                                 seg_page_sizes[idx], kernel_page_bytes // 4
                             )
                             continue
-                        seen_ptrs[addr] = len(seg_addrs)
+                        seen_ptrs[segment_key] = len(seg_addrs)
                         seg_addrs.append(addr)
                         seg_block_strides.append(logical_block_stride_bytes // 4)
                         seg_page_sizes.append(kernel_page_bytes // 4)
