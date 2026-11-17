@@ -33,12 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
-from vllm.v1.request import (
-    KEEP_LAST_OUTPUT_TOKEN,
-    Request,
-    RequestStatus,
-    StreamingUpdate,
-)
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
@@ -61,7 +56,6 @@ class DummyRequest(Request):
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         max_tokens: int | None = 16,
-        keep_last_output_token: bool = False,
     ):
         super().__init__(
             request_id=request_id,
@@ -69,9 +63,6 @@ class DummyRequest(Request):
             sampling_params=SamplingParams(
                 stop_token_ids=[STOP_TOKEN],
                 max_tokens=max_tokens,
-                extra_args={KEEP_LAST_OUTPUT_TOKEN: True}
-                if keep_last_output_token
-                else None,
             ),
             pooling_params=None,
             mm_features=mm_features,
@@ -801,29 +792,22 @@ def _audio_feature(offset: int, identifier: str = "") -> MultiModalFeatureSpec:
     )
 
 
-@pytest.mark.parametrize("new_tokens", [[], [4, 5]])
-def test_update_request_as_session_keeps_last_output_token(new_tokens):
-    """An opted-in update keeps the last sampled token. A chunk without
-    tokens places its features at that token."""
+def test_update_request_as_session_without_tokens_keeps_last_output_token():
+    """An update without tokens keeps the last sampled token and places its
+    features at that token."""
     scheduler = create_scheduler()
     session = DummyRequest("session", prompt_token_ids=[1, 2, 3])
     session.append_output_token_ids(10)
     session.num_computed_tokens = 3
 
     update = StreamingUpdate.from_request(
-        DummyRequest(
-            "session",
-            prompt_token_ids=new_tokens,
-            mm_features=[_audio_feature(offset=0)],
-            keep_last_output_token=True,
-        )
+        DummyRequest("session", mm_features=[_audio_feature(offset=0)])
     )
     scheduler._update_request_as_session(session, update)
 
-    assert session.prompt_token_ids == [1, 2, 3, 10, *new_tokens]
-    first_input = 3 if not new_tokens else 4
-    assert session.mm_features[0].mm_position.offset == first_input
-    assert session.num_tokens - session.num_computed_tokens == 1 + len(new_tokens)
+    assert session.prompt_token_ids == [1, 2, 3, 10]
+    assert session.mm_features[0].mm_position.offset == 3
+    assert session.num_tokens - session.num_computed_tokens == 1
 
 
 def test_keep_last_output_token_rehashes_block_of_kept_token():
@@ -850,9 +834,7 @@ def test_keep_last_output_token_rehashes_block_of_kept_token():
 
     update = StreamingUpdate.from_request(
         DummyRequest(
-            "session",
-            mm_features=[_audio_feature(offset=0, identifier="audio")],
-            keep_last_output_token=True,
+            "session", mm_features=[_audio_feature(offset=0, identifier="audio")]
         )
     )
     scheduler._update_request_as_session(session, update)
@@ -871,17 +853,13 @@ def test_keep_last_output_token_rehashes_block_of_kept_token():
 def test_keep_last_output_token_lifecycle():
     """Each one-token chunk decodes from the previous chunk's sample."""
     scheduler = create_scheduler()
-    session = DummyRequest(
-        "session", prompt_token_ids=[1, 2, 3], max_tokens=1, keep_last_output_token=True
-    )
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=1)
     scheduler.add_request(session)
     scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
     assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
 
     for sampled in (11, 12):
-        scheduler.add_request(
-            DummyRequest("session", max_tokens=1, keep_last_output_token=True)
-        )
+        scheduler.add_request(DummyRequest("session", max_tokens=1))
         output = scheduler.schedule()
         assert output.num_scheduled_tokens["session"] == 1
         scheduler.update_from_output(output, _model_output("session", [sampled]))
@@ -890,9 +868,8 @@ def test_keep_last_output_token_lifecycle():
     assert list(session.all_token_ids) == [1, 2, 3, 10, 11, 12]
 
 
-def _keep_last_chunk(**kwargs) -> DummyRequest:
-    kwargs = {"max_tokens": 1, "keep_last_output_token": True} | kwargs
-    return DummyRequest("session", **kwargs)
+def _chunk(**kwargs) -> DummyRequest:
+    return DummyRequest("session", **({"max_tokens": 1} | kwargs))
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
@@ -904,7 +881,7 @@ def test_session_resumes_in_place(async_scheduling, chunk_queued_before_stop):
     scheduler = create_async_scheduler(
         model="llava-hf/llava-1.5-7b-hf", async_scheduling=async_scheduling
     )
-    session = _keep_last_chunk(prompt_token_ids=[1, 2, 3])
+    session = _chunk(prompt_token_ids=[1, 2, 3])
     scheduler.add_request(session)
     output = scheduler.schedule()
     # No step is in flight past max_tokens.
@@ -912,7 +889,7 @@ def test_session_resumes_in_place(async_scheduling, chunk_queued_before_stop):
 
     for i, sampled in enumerate([10, 11]):
         feature = _audio_feature(offset=0, identifier=f"audio-{i}")
-        chunk = _keep_last_chunk(mm_features=[feature])
+        chunk = _chunk(mm_features=[feature])
         if chunk_queued_before_stop:
             scheduler.add_request(chunk)
         scheduler.update_from_output(output, _model_output("session", [sampled]))
@@ -944,13 +921,13 @@ def test_session_rebuilt_after_stop_with_step_in_flight(chunk_queued_before_stop
     workers would take as the next input. The session is rebuilt instead of
     resumed in place."""
     scheduler = create_async_scheduler(async_scheduling=True)
-    session = _keep_last_chunk(prompt_token_ids=[1, 2, 3], max_tokens=4)
+    session = _chunk(prompt_token_ids=[1, 2, 3], max_tokens=4)
     scheduler.add_request(session)
     output = scheduler.schedule()
     in_flight = scheduler.schedule()
     assert in_flight.num_scheduled_tokens == {"session": 1}
 
-    chunk = _keep_last_chunk(max_tokens=4)
+    chunk = _chunk(max_tokens=4)
     if chunk_queued_before_stop:
         scheduler.add_request(chunk)
     scheduler.update_from_output(output, _model_output("session", [STOP_TOKEN]))
@@ -968,13 +945,13 @@ def test_session_rebuilt_after_stop_with_step_in_flight(chunk_queued_before_stop
 def test_session_rebuilt_after_stop_while_preempted():
     """Preemption releases the KV cache and the worker state."""
     scheduler = create_async_scheduler(async_scheduling=True)
-    session = _keep_last_chunk(prompt_token_ids=list(range(10)))
+    session = _chunk(prompt_token_ids=list(range(10)))
     scheduler.add_request(session)
     output = scheduler.schedule()
     scheduler.running.remove(session)
     scheduler._preempt_request(session, timestamp=0.0)
     scheduler.update_from_output(output, _model_output("session", [10]))
-    scheduler.add_request(_keep_last_chunk())
+    scheduler.add_request(_chunk())
 
     assert session.status == RequestStatus.WAITING
     assert scheduler.schedule().num_scheduled_tokens == {"session": 11}
@@ -985,9 +962,6 @@ def test_session_rebuilt_after_stop_while_preempted():
     [
         pytest.param({}, {}, {}, True, id="in_place"),
         pytest.param({}, {}, {"prompt_token_ids": [4]}, False, id="new_tokens"),
-        pytest.param(
-            {}, {}, {"keep_last_output_token": False}, False, id="drops_last_token"
-        ),
         pytest.param({}, {}, {"max_tokens": 2}, False, id="new_sampling_params"),
         pytest.param({"max_model_len": 4}, {}, {}, False, id="max_model_len"),
         pytest.param({"num_speculative_tokens": 1}, {}, {}, False, id="spec_decode"),
@@ -999,12 +973,12 @@ def test_session_resume_in_place_conditions(
     scheduler_kwargs, scheduler_attrs, chunk_kwargs, in_place
 ):
     scheduler = create_async_scheduler(**scheduler_kwargs)
-    session = _keep_last_chunk(prompt_token_ids=[1, 2, 3])
+    session = _chunk(prompt_token_ids=[1, 2, 3])
     scheduler.add_request(session)
     scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
     for name, value in scheduler_attrs.items():
         setattr(scheduler, name, value)
-    scheduler.add_request(_keep_last_chunk(**chunk_kwargs))
+    scheduler.add_request(_chunk(**chunk_kwargs))
 
     assert session.status == (
         RequestStatus.RUNNING if in_place else RequestStatus.WAITING

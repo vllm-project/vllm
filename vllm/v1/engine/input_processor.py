@@ -33,7 +33,6 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
-from vllm.v1.request import keeps_last_output_token
 
 logger = init_logger(__name__)
 
@@ -422,9 +421,9 @@ class InputProcessor:
         self._validate_model_inputs(
             encoder_input,
             decoder_input,
-            # A streaming input chunk continuing from the last sampled token
-            # may add only multimodal data at that token's position.
-            allow_empty_decoder_prompt=resumable and keeps_last_output_token(params),
+            # A streaming input chunk without tokens continues from the last
+            # sampled token, and may add multimodal data at its position.
+            allow_empty_decoder_prompt=resumable,
         )
 
         # Mypy can be conservative for TypedDict unions; normalize access.

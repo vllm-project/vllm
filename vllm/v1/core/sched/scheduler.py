@@ -76,12 +76,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import (
-    Request,
-    RequestStatus,
-    StreamingUpdate,
-    keeps_last_output_token,
-)
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1907,18 +1902,13 @@ class Scheduler(SchedulerInterface):
         """Updates the stopped session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk,
-        unless the update keeps it (see `KEEP_LAST_OUTPUT_TOKEN`). A session
-        that continues from that token without new prompt tokens may resume in
-        place: it stays scheduled with its worker state instead of being
-        re-sent to the workers in full.
+        unless the update has no prompt tokens. The session then continues from
+        that token and may resume in place: it stays scheduled with its worker
+        state instead of being re-sent to the workers in full.
         """
-        # Keep all output tokens, but the final sampled one only if the update
-        # opts in.
-        keep_last = keeps_last_output_token(update.sampling_params)
-        keep_end = session.num_tokens if keep_last else session.num_tokens - 1
-        # Position of the update's first input. Without new tokens, a kept
-        # sample is the input its multimodal features are added to.
-        start = keep_end - 1 if keep_last and not update.prompt_token_ids else keep_end
+        # Position of the update's first input. Without new tokens, the last
+        # sample is kept as the input its multimodal features are added to.
+        start = session.num_tokens - 1
         assert start >= session.num_computed_tokens
         if update.mm_features:
             for mm_feature in update.mm_features:
@@ -1941,6 +1931,9 @@ class Scheduler(SchedulerInterface):
             session.status = RequestStatus.RUNNING
             return
 
+        # Keep all output tokens, but the final sampled one only if the update
+        # has no tokens.
+        keep_end = start if update.prompt_token_ids else session.num_tokens
         del session._all_token_ids[keep_end:]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
@@ -1970,8 +1963,7 @@ class Scheduler(SchedulerInterface):
 
     def _can_resume_in_place(self, session: Request, update: StreamingUpdate) -> bool:
         return (
-            keeps_last_output_token(update.sampling_params)
-            and not update.prompt_token_ids
+            not update.prompt_token_ids
             and session.sampling_params == update.sampling_params
             # Preemption releases the KV cache and the worker state.
             and session.num_computed_tokens > 0

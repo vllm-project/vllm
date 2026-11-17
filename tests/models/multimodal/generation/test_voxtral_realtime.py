@@ -23,7 +23,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.request import KEEP_LAST_OUTPUT_TOKEN
 
 from ....utils import ROCM_ENGINE_KWARGS, create_new_process_for_each_test
 
@@ -231,11 +230,7 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
     # Lazy import to avoid CUDA-reinitialization error
     from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=1,
-        extra_args={KEEP_LAST_OUTPUT_TOKEN: True},
-    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
     async def input_stream(audio_buffer):
@@ -326,11 +321,7 @@ async def test_voxtral_realtime_generator_max_model_len(
     from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 
     max_model_len = async_engine.model_config.max_model_len
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=1,
-        extra_args={KEEP_LAST_OUTPUT_TOKEN: True},
-    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
     async def input_stream(audio_buffer):

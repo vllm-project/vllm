@@ -32,19 +32,6 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
 
-# `SamplingParams.extra_args` key for streaming-input requests: each input chunk
-# continues from the last token sampled for the previous chunk, instead of
-# discarding it.
-KEEP_LAST_OUTPUT_TOKEN = "keep_last_output_token"
-
-
-def keeps_last_output_token(params: SamplingParams | PoolingParams | None) -> bool:
-    return bool(
-        isinstance(params, SamplingParams)
-        and params.extra_args
-        and params.extra_args.get(KEEP_LAST_OUTPUT_TOKEN, False)
-    )
-
 
 @dataclass(slots=True)
 class StreamingUpdate:

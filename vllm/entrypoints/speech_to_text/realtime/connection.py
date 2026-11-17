@@ -18,7 +18,6 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.v1.request import KEEP_LAST_OUTPUT_TOKEN
 
 from .protocol import (
     ErrorEvent,
@@ -218,17 +217,11 @@ class RealtimeConnection:
             # Create sampling params
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-            keep_last_output_token = (
-                self.serving.model_cls.realtime_keep_last_output_token
-            )
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
-                extra_args={KEEP_LAST_OUTPUT_TOKEN: True}
-                if keep_last_output_token
-                else None,
             )
 
             # Pass the streaming input generator to the engine
@@ -249,7 +242,7 @@ class RealtimeConnection:
                     delta = output.outputs[0].text
                     full_text += delta
 
-                    if not keep_last_output_token:
+                    if not self.serving.model_cls.realtime_keep_last_output_token:
                         # append output to input
                         input_stream.put_nowait(list(output.outputs[0].token_ids))
                     await self.send(TranscriptionDelta(delta=delta))

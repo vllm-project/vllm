@@ -35,10 +35,9 @@ class StreamingInput:
     This is used with generate() to support multi-turn streaming sessions
     where inputs are provided via an async generator.
 
-    By default, each input discards the token sampled for the previous one.
-    With `SamplingParams(extra_args={"keep_last_output_token": True})`, it
-    continues from that token instead, and may then contain only multimodal
-    data, which is placed at that token.
+    Each input discards the token sampled for the previous one, unless it has
+    no prompt tokens: it then continues from that token, and its multimodal
+    data is placed at that token. The first input must have prompt tokens.
     """
 
     prompt: PromptType | EngineInput
