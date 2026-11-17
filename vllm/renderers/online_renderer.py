@@ -110,6 +110,24 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
+_OFFLOAD_ONLY_CONNECTORS = frozenset(
+    {"OffloadingConnector", "LMCacheMPConnector", "SimpleCPUOffloadConnector"}
+)
+
+
+def _has_prompt_token_id_reuse_connector(renderer: BaseRenderer) -> bool:
+    config = renderer.config.kv_transfer_config
+    if config is None or config.kv_connector is None:
+        return False
+    if config.kv_connector == "MultiConnector":
+        return any(
+            (name := child.get("kv_connector")) is not None
+            and name not in _OFFLOAD_ONLY_CONNECTORS
+            for child in config.kv_connector_extra_config.get("connectors", [])
+        )
+    return config.kv_connector not in _OFFLOAD_ONLY_CONNECTORS
+
+
 def _reused_prompt_token_ids(
     request: Any,
     renderer: BaseRenderer,
@@ -161,13 +179,14 @@ def _reused_prompt_token_ids(
     # truncate_prompt_tokens, and tokenization on any client-supplied text.
     # Render messages by default so aggregated routers keep working; an explicit
     # server opt-in preserves direct reuse for trusted pre-rendered requests.
-    if getattr(renderer.config, "kv_transfer_config", None) is None and not (
-        enable_prompt_token_ids
+    if (
+        not _has_prompt_token_id_reuse_connector(renderer)
+        and not enable_prompt_token_ids
     ):
         logger.warning_once(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
-            "the server has no KV transfer connector and "
-            "--enable-prompt-token-ids is not set, so messages are rendered "
+            "the server has no KV transfer connector configured for prompt id "
+            "reuse and --enable-prompt-token-ids is not set, so messages are rendered "
             "instead. Set --enable-prompt-token-ids to keep reusing ids "
             "forwarded by a trusted caller."
         )
