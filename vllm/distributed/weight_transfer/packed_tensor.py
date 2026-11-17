@@ -71,54 +71,45 @@ class Piece(NamedTuple):
     nbytes: int
 
 
-def _pieces(
+def _chunks(
     specs: Iterable[tuple[Sequence[int], torch.dtype]], limit: int, segments: bool
-) -> Iterator[tuple[bool, Piece]]:
-    """Each piece in order, and whether it closes its chunk: a chunk takes
-    pieces until it holds more than `limit` bytes. Without `segments` every
-    tensor travels whole, back to back."""
+) -> Iterator[list[Piece]]:
+    """Each chunk's pieces, lazily: a chunk takes pieces until it holds more
+    than `limit` bytes. Without `segments` every tensor travels whole, back to
+    back."""
+    chunk: list[Piece] = []
     size = 0
     for index, (shape, dtype) in enumerate(specs):
         nbytes = math.prod(shape) * dtype.itemsize
         segs = wire_segments(shape, dtype, limit) if segments else None
-        row = nbytes // shape[0] if segs else 0
         split: list[tuple[int, int] | None] = list(segs) if segs else [None]
         for rows in split:
             if rows is None:
                 piece = Piece(index, None, list(shape), dtype, size, nbytes)
             else:
                 n = rows[1] - rows[0]
+                row = nbytes // shape[0]
                 piece = Piece(index, rows, [n, *shape[1:]], dtype, size, n * row)
+            chunk.append(piece)
             size += piece.nbytes
-            closes = size > limit
-            if closes:
-                size = 0
-            yield closes, piece
+            if size > limit:
+                yield chunk
+                chunk, size = [], 0
+    if chunk:
+        yield chunk
 
 
-@dataclass
-class ChunkLayout:
-    """How a sequence of tensors travels as packed chunks: `chunks[k]` holds
-    the pieces of chunk k, which is `sizes[k]` bytes. The producer and every
-    consumer derive it from the metadata alone, so they always agree."""
-
-    chunks: list[list[Piece]]
-    sizes: list[int]
-
-    def views(self, k: int, buf: torch.Tensor) -> list[torch.Tensor]:
-        """Chunk k's pieces in `buf`: typed, or raw bytes for a piece at an
-        offset its dtype cannot view (pieces are packed back to back)."""
-        return [_view(buf, p) for p in self.chunks[k]]
+def chunk_bytes(chunk: list[Piece]) -> int:
+    return chunk[-1].offset + chunk[-1].nbytes
 
 
 def _view(buf: torch.Tensor, piece: Piece) -> torch.Tensor:
     """`piece` in `buf`: typed, or raw bytes at an offset its dtype cannot
-    view."""
+    view (pieces are packed back to back)."""
     raw = buf[piece.offset : piece.offset + piece.nbytes]
-    try:
-        return raw.view(piece.dtype).view(piece.shape)
-    except RuntimeError:
+    if raw.storage_offset() % piece.dtype.itemsize:
         return raw
+    return raw.view(piece.dtype).view(piece.shape)
 
 
 def _unpacked(view: torch.Tensor, piece: Piece) -> torch.Tensor:
@@ -133,25 +124,13 @@ def chunk_layout(
     specs: Iterable[tuple[Sequence[int], torch.dtype]],
     limit: int,
     segments: bool = False,
-) -> ChunkLayout:
-    """The chunks `specs` travel as. `segments` (both sides must agree; see
+) -> list[list[Piece]]:
+    """The chunks `specs` travel as, each chunk's pieces. The producer and
+    every consumer derive it from the metadata alone, so they always agree.
+    `segments` (both sides must agree; see
     `NCCLWeightTransferInitInfo.packed_wire_segments`) splits tensors over
-    the buffer along dim 0; without it every tensor travels whole, back to
-    back, and a chunk takes tensors until it holds more than `limit` bytes."""
-    full = [(tuple(shape), dtype) for shape, dtype in specs]
-    chunks: list[list[Piece]] = [[]]
-    sizes: list[int] = []
-    for closes, piece in _pieces(full, limit, segments):
-        chunks[-1].append(piece)
-        if closes:
-            sizes.append(piece.offset + piece.nbytes)
-            chunks.append([])
-    if chunks[-1]:
-        last = chunks[-1][-1]
-        sizes.append(last.offset + last.nbytes)
-    else:
-        chunks.pop()
-    return ChunkLayout(chunks, sizes)
+    the buffer along dim 0."""
+    return list(_chunks(specs, limit, segments))
 
 
 def _source(piece: Piece, tensor: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
@@ -193,14 +172,26 @@ def packed_nccl_broadcast_producer(
             must agree (`chunk_layout`).
 
     """
-    tensors = (post_iter_func(item) for item in iterator)
+    tensors: dict[int, torch.Tensor] = {}  # the ones the next chunk may read
+
+    def specs() -> Iterator[tuple[Sequence[int], torch.dtype]]:
+        for i, item in enumerate(iterator):
+            t = tensors[i] = post_iter_func(item)
+            yield t.shape, t.dtype
+
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
     held: list[Any] = [None] * num_buffers  # alive until their broadcast ends
-    for k, (buf, views, srcs) in enumerate(
-        _chunks(tensors, buffer_size_bytes, segments)
-    ):
+    for k, pieces in enumerate(_chunks(specs(), buffer_size_bytes, segments)):
+        device = tensors[pieces[0].position].device
+        buf = torch.empty(chunk_bytes(pieces), dtype=torch.uint8, device=device)
+        views = [_view(buf, p) for p in pieces]
+        srcs = [_source(p, tensors[p.position], v) for p, v in zip(pieces, views)]
+        last = pieces[-1]
+        continues = last.rows is not None and last.rows[1] < len(tensors[last.position])
+        for i in range(pieces[0].position, last.position + (not continues)):
+            del tensors[i]
         slot = k % num_buffers
         prev = done[slot]
         if prev is not None:
@@ -215,38 +206,6 @@ def packed_nccl_broadcast_producer(
         done[slot], held[slot] = event, (buf, srcs)
     for stream in streams:
         stream.synchronize()
-
-
-def _chunks(
-    tensors: Iterator[torch.Tensor], limit: int, segments: bool
-) -> Iterator[tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]]:
-    """(buffer, piece views, piece sources) per chunk."""
-    stash: dict[int, torch.Tensor] = {}
-
-    def specs() -> Iterator[tuple[Sequence[int], torch.dtype]]:
-        for i, t in enumerate(tensors):
-            stash[i] = t
-            yield t.shape, t.dtype
-
-    cur: list[Piece] = []
-    for closes, piece in _pieces(specs(), limit, segments):
-        cur.append(piece)
-        if closes:
-            yield _fresh_chunk(cur, stash)
-            cur = []
-    if cur:
-        yield _fresh_chunk(cur, stash)
-
-
-def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
-    one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes])
-    device = stash[pieces[0].position].device
-    buf = torch.empty(one.sizes[0], dtype=torch.uint8, device=device)
-    views = one.views(0, buf)
-    srcs = [_source(p, stash[p.position], v) for p, v in zip(pieces, views)]
-    for i in {p.position for p in pieces} - {pieces[-1].position}:
-        stash.pop(i, None)  # the last tensor may continue in the next chunk
-    return buf, views, srcs
 
 
 def packed_nccl_broadcast_consumer(
@@ -282,7 +241,6 @@ def packed_nccl_broadcast_consumer(
     for name, spec in iterator:
         names.append(name)
         specs.append(spec)
-    layout = chunk_layout(specs, buffer_size_bytes, segments)
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     caller_stream = torch.accelerator.current_stream()
     for stream in streams:
@@ -291,7 +249,7 @@ def packed_nccl_broadcast_consumer(
     slot_done: list[torch.Event | None] = [None] * num_buffers
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
-    for k, pieces in enumerate(layout.chunks):
+    for k, pieces in enumerate(_chunks(specs, buffer_size_bytes, segments)):
         slot = k % num_buffers
         # Wait for this slot's previous pack. Not streams[slot].synchronize():
         # on ROCm, streams can share a hardware queue, and synchronizing one
@@ -300,7 +258,7 @@ def packed_nccl_broadcast_consumer(
         if done is not None:
             done.synchronize()
         with torch.cuda.stream(streams[slot]):
-            packed = torch.empty(layout.sizes[k], dtype=torch.uint8, device=device)
+            packed = torch.empty(chunk_bytes(pieces), dtype=torch.uint8, device=device)
             group.broadcast(packed, src=src)
             # post_unpack_func may keep the unpacked views and read them from a
             # later pack's callback, on another slot stream. Chaining the ready
@@ -314,7 +272,8 @@ def packed_nccl_broadcast_consumer(
             for stream in (*streams, caller_stream):
                 packed.record_stream(stream)
             out = []
-            for piece, view in zip(pieces, layout.views(k, packed)):
+            for piece in pieces:
+                view = _view(packed, piece)
                 index, rows, dtype = piece.position, piece.rows, piece.dtype
                 if rows is not None:
                     # one tensor of the full size, written segment by segment
@@ -396,8 +355,10 @@ def packed_ipc_producer(
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device=device)
     _, ipc_args = reduce_tensor(ipc_buffer)
 
-    pieces: list[Piece] = []
     names: list[str] = []
+    shapes: list[list[int]] = []
+    dtypes: list[torch.dtype] = []
+    tensor_sizes: list[int] = []
     total_bytes = 0
 
     def chunk() -> PackedIpcChunk:
@@ -405,9 +366,9 @@ def packed_ipc_producer(
         torch.accelerator.current_stream().synchronize()
         return PackedIpcChunk(
             names=names,
-            shapes=[p.shape for p in pieces],
-            dtype_names=[str(p.dtype).split(".")[-1] for p in pieces],
-            tensor_sizes=[p.nbytes for p in pieces],
+            shapes=shapes,
+            dtype_names=[str(d).split(".")[-1] for d in dtypes],
+            tensor_sizes=tensor_sizes,
             ipc_handle={gpu_uuid: ipc_args},
         )
 
@@ -427,19 +388,13 @@ def packed_ipc_producer(
             yield chunk()
             # Fresh lists, so the yielded chunk's metadata is not mutated
             # while the consumer is still reading it.
-            pieces, names, total_bytes = [], [], 0
-        # Shape and dtype as sent (the original tensor's), bytes back to back.
-        piece = Piece(
-            len(pieces),
-            None,
-            list(orig_tensor.shape),
-            orig_tensor.dtype,
-            total_bytes,
-            nbytes,
-        )
+            names, shapes, dtypes, tensor_sizes = [], [], [], []
+            total_bytes = 0
         ipc_buffer[total_bytes : total_bytes + nbytes].copy_(flat)
-        pieces.append(piece)
         names.append(name)
+        shapes.append(list(orig_tensor.shape))
+        dtypes.append(orig_tensor.dtype)
+        tensor_sizes.append(nbytes)
         total_bytes += nbytes
 
     if total_bytes:
@@ -537,22 +492,14 @@ def packed_ipc_consumer(
         importer = PackedBufferImporter()
     packed = importer.rebuild(list_args)
 
-    # The chunk's tensors, back to back as the producer packed them.
-    pieces, offset = [], 0
-    for i, (shape, dtype_name, nbytes) in enumerate(
-        zip(shapes, dtype_names, tensor_sizes, strict=True)
+    # The chunk's tensors, back to back as the producer packed them. Each
+    # tensor's bytes are cloned into its own storage (see above), which is
+    # also aligned for its dtype wherever it sat in the buffer.
+    out, offset = [], 0
+    for name, shape, dtype_name, nbytes in zip(
+        names, shapes, dtype_names, tensor_sizes, strict=True
     ):
-        dtype = getattr(torch, dtype_name)
-        pieces.append(Piece(i, None, list(shape), dtype, offset, nbytes))
+        raw = packed[offset : offset + nbytes].clone()
+        out.append((name, raw.view(getattr(torch, dtype_name)).view(shape)))
         offset += nbytes
-    layout = ChunkLayout([pieces], [offset])
-    # Every tensor gets its own storage (see above). One at an offset its
-    # dtype cannot view (#64936) is copied into aligned storage, its own.
-    out = []
-    buffer_ptr = packed.untyped_storage().data_ptr()
-    for name, piece, view in zip(names, pieces, layout.views(0, packed)):
-        t = _unpacked(view, piece)
-        if t.untyped_storage().data_ptr() == buffer_ptr:
-            t = t.clone()
-        out.append((name, t))
     return out

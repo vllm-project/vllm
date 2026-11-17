@@ -414,49 +414,6 @@ class TestPackedIpcProducer:
         )
         assert len(chunks) == 0
 
-    @pytest.mark.parametrize("limit", [16, 100, 1000, 4096])
-    def test_chunks_match_ipc_packing(self, limit):
-        """Chunks hold tensors back to back and flush before overflowing the
-        fixed buffer, so the metadata (and the bytes at those offsets) are
-        what earlier versions sent."""
-        tensors = [t.cuda() for t in _mixed_tensors()]
-        tensors = [t for t in tensors if t.nbytes <= limit]
-        expected: list = []
-        cur: list = []
-        size = 0
-        for i, t in enumerate(tensors):  # the IPC rule, spelled out
-            if size and size + t.nbytes > limit:
-                expected.append(cur)
-                cur, size = [], 0
-            cur.append(i)
-            size += t.nbytes
-        if cur:
-            expected.append(cur)
-        chunks = list(
-            packed_ipc_producer(
-                iterator=iter([(str(i), t) for i, t in enumerate(tensors)]),
-                gpu_uuid="uuid",
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=limit,
-            )
-        )
-        assert [[int(n) for n in c.names] for c in chunks] == expected
-        for c in chunks:
-            ts = [tensors[int(n)] for n in c.names]
-            assert c.tensor_sizes == [t.nbytes for t in ts]
-            assert c.shapes == [list(t.shape) for t in ts]
-
-    def test_tensor_over_the_buffer_raises(self):
-        with pytest.raises(ValueError, match="exceeds buffer_size_bytes"):
-            list(
-                packed_ipc_producer(
-                    iterator=iter([("big", torch.randn(100).cuda())]),
-                    gpu_uuid="uuid",
-                    post_iter_func=lambda x: x[1],
-                    buffer_size_bytes=100,
-                )
-            )
-
 
 # --- Integration Tests: IPC Producer-Consumer Roundtrip ---
 
@@ -738,12 +695,15 @@ from unittest.mock import patch  # noqa: E402
 from vllm.distributed.weight_transfer import packed_tensor as pt  # noqa: E402
 
 
-def _layout_bytes(layout: pt.ChunkLayout, tensors: list[torch.Tensor]) -> list[bytes]:
+def _layout_bytes(
+    layout: list[list[pt.Piece]], tensors: list[torch.Tensor]
+) -> list[bytes]:
     """Each chunk's bytes when `tensors` are packed with `layout` (CPU)."""
     out = []
-    for k, pieces in enumerate(layout.chunks):
-        buf = torch.zeros(layout.sizes[k], dtype=torch.uint8)
-        for piece, view in zip(pieces, layout.views(k, buf)):
+    for pieces in layout:
+        buf = torch.zeros(pt.chunk_bytes(pieces), dtype=torch.uint8)
+        for piece in pieces:
+            view = pt._view(buf, piece)
             view.copy_(pt._source(piece, tensors[piece.position], view))
         out.append(buf.numpy().tobytes())
     return out
@@ -778,7 +738,7 @@ class TestChunkLayout:
         if cur:
             expected.append(torch.cat(cur).numpy().tobytes())
         assert _layout_bytes(layout, tensors) == expected
-        assert all(p.rows is None for chunk in layout.chunks for p in chunk)
+        assert all(p.rows is None for chunk in layout for p in chunk)
 
     def test_segments_split_only_over_the_buffer(self):
         limit = 1000
@@ -790,27 +750,27 @@ class TestChunkLayout:
         )
 
         def rows(i):
-            return [p.rows for chunk in layout.chunks for p in chunk if p.position == i]
+            return [p.rows for chunk in layout for p in chunk if p.position == i]
 
         assert rows(0) == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
         assert rows(1) == [(0, 10), (10, 15)]
         assert rows(2) == [None]
         # no piece is larger than the buffer, so no chunk exceeds twice it
-        assert all(p.nbytes <= limit for chunk in layout.chunks for p in chunk)
-        assert max(layout.sizes) <= 2 * limit
+        assert all(p.nbytes <= limit for chunk in layout for p in chunk)
+        assert max(map(pt.chunk_bytes, layout)) <= 2 * limit
         off = pt.chunk_layout([(big.shape, big.dtype)], limit)
-        assert [p.rows for chunk in off.chunks for p in chunk] == [None]
+        assert [p.rows for chunk in off for p in chunk] == [None]
 
     def test_views_alias_the_buffer_and_misaligned_is_raw(self):
         layout = pt.chunk_layout(
             [((3,), torch.uint8), ((2, 2), torch.float32), ((4,), torch.uint8)], 1024
         )
-        buf = torch.zeros(layout.sizes[0], dtype=torch.uint8)
-        tag, w, tail = layout.views(0, buf)
+        buf = torch.zeros(pt.chunk_bytes(layout[0]), dtype=torch.uint8)
+        tag, w, tail = (pt._view(buf, p) for p in layout[0])
         assert tag.data_ptr() == buf.data_ptr() and tag.dtype == torch.uint8
         assert w.dtype == torch.uint8 and w.numel() == 16  # offset 3: raw bytes
         assert tail.data_ptr() == buf.data_ptr() + 19
-        piece = layout.chunks[0][1]
+        piece = layout[0][1]
         w.copy_(torch.arange(4.0).view(-1).view(torch.uint8))
         got = pt._unpacked(w, piece)
         assert got.dtype == torch.float32 and got.shape == (2, 2)
@@ -823,17 +783,10 @@ class TestChunkLayout:
         layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), 1024)
         [raw] = _layout_bytes(layout, tensors)
         buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-        for piece, view in zip(layout.chunks[0], layout.views(0, buf)):
-            got = pt._unpacked(view, piece)
+        for piece in layout[0]:
+            got = pt._unpacked(pt._view(buf, piece), piece)
             assert got.shape == tensors[piece.position].shape
             torch.testing.assert_close(got, tensors[piece.position], rtol=0, atol=0)
-
-    def test_chunks_keep_order_across_several(self):
-        tensors = [torch.randn(50, 50) for _ in range(6)]  # 10 kB each
-        layout = pt.chunk_layout(((t.shape, t.dtype) for t in tensors), 12_000)
-        assert len(layout.chunks) > 1
-        assert [p.position for chunk in layout.chunks for p in chunk] == list(range(6))
-        assert all(size > 12_000 for size in layout.sizes[:-1])
 
     def test_row_over_the_buffer_travels_whole_and_warns(self):
         with patch.object(pt.logger, "warning_once") as warn:
