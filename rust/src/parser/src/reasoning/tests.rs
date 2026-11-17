@@ -8,9 +8,9 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, T
 
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DelimitedReasoningParser, DelimitedReasoningParserBuilder, Glm45ReasoningParser,
-    KimiReasoningParser, MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
-    ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV41ReasoningParser, DelimitedReasoningParser, DelimitedReasoningParserBuilder,
+    Glm45ReasoningParser, KimiReasoningParser, MiniMaxM3ReasoningParser, Qwen3ReasoningParser,
+    ReasoningDelta, ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -24,6 +24,7 @@ pub(crate) const MM_THINK_START_ID: u32 = 263;
 pub(crate) const MM_THINK_END_ID: u32 = 264;
 pub(crate) const SEED_THINK_START_ID: u32 = 265;
 pub(crate) const SEED_THINK_END_ID: u32 = 266;
+pub(crate) const DSML_ID: u32 = 267;
 
 pub(crate) fn fake_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
@@ -38,6 +39,7 @@ pub(crate) fn fake_tokenizer() -> TestTokenizer {
         .with_regular_token("</mm:think>", MM_THINK_END_ID)
         .with_regular_token("<seed:think>", SEED_THINK_START_ID)
         .with_regular_token("</seed:think>", SEED_THINK_END_ID)
+        .with_regular_token("｜DSML｜", DSML_ID)
 }
 
 /// Decode `chunks` with [`fake_tokenizer`] as the frontend streams them:
@@ -209,6 +211,12 @@ fn delimited_families() -> Vec<FamilyCase> {
             "</think>",
         ),
         (
+            "deepseek_v41",
+            DeepSeekV41ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
             "glm45",
             Glm45ReasoningParser::create,
             THINK_START_ID,
@@ -296,6 +304,46 @@ fn delimited_families_end_reasoning_only_at_the_dedicated_end_token() {
         );
         assert_eq!(collected.content_text, "answer", "{name}");
     }
+}
+
+#[test]
+fn deepseek_v41_tool_call_opener_ends_reasoning_at_every_split() {
+    let opener = "<｜DSML｜ calls>";
+    let wire = format!("reason{opener}call");
+    for split in 0..=wire.len() {
+        let Some((head, tail)) = wire.split_at_checked(split) else {
+            continue;
+        };
+        let mut parser = DeepSeekV41ReasoningParser::create(Arc::new(fake_tokenizer())).unwrap();
+        parser.initialize(&[THINK_START_ID]).unwrap();
+
+        let collected = collect_attributed(parser.as_mut(), decode([head, tail]).to_vec());
+
+        assert_eq!(collected.reasoning_text, "reason", "split at {split}");
+        assert_eq!(
+            collected.content_text,
+            format!("{opener}call"),
+            "split at {split}"
+        );
+    }
+}
+
+#[test]
+fn deepseek_v41_ordinary_tool_call_opener_stays_reasoning() {
+    let tokenizer = fake_tokenizer();
+    let opener = "<｜DSML｜ calls>";
+    let mut parser = DeepSeekV41ReasoningParser::create(Arc::new(fake_tokenizer())).unwrap();
+    parser.initialize(&[THINK_START_ID]).unwrap();
+
+    let ids = [
+        tokenizer.encode("quote ", false).unwrap(),
+        tokenizer.encode_ordinary(opener).unwrap(),
+    ]
+    .concat();
+    let collected = collect_attributed(parser.as_mut(), vec![decode_ids(&tokenizer, &ids)]);
+
+    assert_eq!(collected.reasoning_text, format!("quote {opener}"));
+    assert_eq!(collected.content_text, "");
 }
 
 #[test]
