@@ -1,16 +1,163 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
+from typing import TYPE_CHECKING
 
+import pytest
+import torch
+
+from vllm import ModelRegistry, SamplingParams
 from vllm.config.cache import CacheConfig
+from vllm.distributed import get_pp_group, get_tp_group
+from vllm.distributed.pp_transport.schema import (
+    PPTransportSchema,
+    PPTransportTensorSpec,
+)
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from ..models.utils import check_logprobs_close
 from ..utils import (
     compare_two_settings,
     create_new_process_for_each_test,
+    multi_gpu_test,
     wait_for_memory_to_settle,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+class Qwen3PPTransportForCausalLM(Qwen3ForCausalLM):
+    """Exercise a mixed full/SP boundary without changing Qwen3's layers."""
+
+    def __init__(self, *, vllm_config, prefix=""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.pp_transport_schema = PPTransportSchema(
+            {
+                "hidden_states": PPTransportTensorSpec(
+                    (self.config.hidden_size,), sequence_parallel=True
+                ),
+                "residual": PPTransportTensorSpec((self.config.hidden_size,)),
+            },
+            tp_size=get_tp_group().world_size,
+        )
+        self.make_empty_intermediate_tensors = (
+            self.pp_transport_schema.make_empty_intermediate_tensors
+        )
+
+    def forward(
+        self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None
+    ):
+        tp_group = get_tp_group()
+        num_tokens = positions.shape[0]
+        if intermediate_tensors is not None:
+            intermediate_tensors = IntermediateTensors(
+                {
+                    **intermediate_tensors.tensors,
+                    "hidden_states": tp_group.all_gather(
+                        intermediate_tensors["hidden_states"], dim=0
+                    )[:num_tokens],
+                }
+            )
+        output = super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        if isinstance(output, IntermediateTensors):
+            rows = (num_tokens + tp_group.world_size - 1) // tp_group.world_size
+            hidden = torch.nn.functional.pad(
+                output["hidden_states"],
+                (0, 0, 0, rows * tp_group.world_size - num_tokens),
+            )
+            output["hidden_states"] = hidden.narrow(
+                0, tp_group.rank_in_group * rows, rows
+            ).contiguous()
+        return output
+
+
+ModelRegistry.register_model(
+    "Qwen3PPTransportForCausalLM", f"{__name__}:Qwen3PPTransportForCausalLM"
+)
+
+
+class PPTransportWorkerExtension:
+    """Register the test model in workers and inspect actual capture layouts."""
+
+    model_runner: "GPUModelRunner"
+
+    def pp_transport_capture_shapes(self):
+        if get_pp_group().is_last_rank:
+            return None
+        manager = self.model_runner.cudagraph_manager
+        return {
+            desc.num_tokens: {key: tuple(value.shape) for key, value in output.items()}
+            for desc, output in manager.captured_intermediate_tensors.items()
+        }
+
+
+@multi_gpu_test(num_gpus=4)
+def test_pp_transport_preserves_sp_padding(vllm_runner, monkeypatch):
+    """Keep all SP rows when one real token runs an eight-token CUDA graph."""
+    monkeypatch.setenv("VLLM_PP_TRANSPORT", "nccl")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # Keep the engine in this process so it shares the test model registry.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=4,
+        ignore_eos=True,
+        logprobs=0,
+        prompt_logprobs=0,
+        detokenize=False,
+    )
+    results = {}
+    for sharded, eager in ((False, False), (True, False), (True, True)):
+        overrides = (
+            {"architectures": ["Qwen3PPTransportForCausalLM"]} if sharded else {}
+        )
+        with vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            enforce_eager=eager,
+            max_model_len=32,
+            max_num_seqs=4,
+            max_num_batched_tokens=32,
+            kv_cache_memory_bytes=64 << 20,
+            enable_prefix_caching=False,
+            hf_overrides=overrides,
+            attention_config={"backend": "TRITON_ATTN"},
+            compilation_config={
+                "mode": 0,
+                "cudagraph_mode": "FULL",
+                "prefill_cudagraph_capture_token_sizes": [8, 32],
+            },
+            worker_extension_cls=f"{__name__}.PPTransportWorkerExtension",
+        ) as model:
+            outputs = []
+            for lengths in ((1,), (1, 5, 9), (1,)):
+                prompts = [{"prompt_token_ids": [42] * n} for n in lengths]
+                outputs.extend(model.llm.generate(prompts, params, use_tqdm=False))
+            results[sharded, eager] = [
+                (
+                    output.outputs[0].token_ids,
+                    output.outputs[0].logprobs,
+                    output.prompt_logprobs,
+                )
+                for output in outputs
+            ]
+            assert all(len(output.outputs[0].token_ids) == 4 for output in outputs)
+            if sharded and not eager:
+                shapes = model.llm.collective_rpc("pp_transport_capture_shapes")
+                senders = [shape for shape in shapes if shape is not None]
+                assert len(senders) == 2
+                for shape in senders:
+                    assert shape[8]["hidden_states"][0] == 4
+                    assert shape[8]["residual"][0] == 8
+    assert results[True, False] == results[False, False]
+    assert results[True, True] == results[False, False]
 
 
 @pytest.mark.parametrize(
