@@ -5,6 +5,7 @@
 import importlib
 import inspect
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -57,8 +58,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    _ALWAYS_BF16_BOUND,
     Mxfp4MoeBackend,
     _backend_activation_key,
+    _serves_requested_activation,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -206,6 +209,14 @@ else:
 
 DEVICE = current_platform.device_type
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
+    """Restore AITER's process-wide activation bound after each test."""
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+
+
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
 )
@@ -305,6 +316,7 @@ def test_online_activation_override(
     ("layer_kind", "method_cls"),
     [("linear", Mxfp4OnlineLinearMethod), ("moe", Mxfp4OnlineMoEMethod)],
 )
+@pytest.mark.skip_global_cleanup
 def test_online_mxfp4_activation_key_is_honoured_or_rejected(
     default_vllm_config,
     layer_kind: str,
@@ -314,9 +326,9 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
     """Each activation key either dispatches to a kernel that computes it, or is
     rejected; it is never silently replaced by another format. Which keys are
     supported depends on the platform and the installed kernels."""
-    default_vllm_config.model_config = SimpleNamespace(
-        quantization_config=None,
-        dtype=torch.bfloat16,
+    default_vllm_config.model_config = ModelConfig(dtype=torch.bfloat16)
+    default_vllm_config.model_config.quantization_config = QuantizationConfigArgs(
+        **{layer_kind: QuantSpec(weight=kMxfp4Static, activation=activation_quant_key)}
     )
     kwargs = {"moe": _TestRoutedExperts().moe_config} if layer_kind == "moe" else {}
 
@@ -341,7 +353,55 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
             if method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(method.mxfp4_backend)
         )
-        assert computed_key == activation_quant_key
+        assert computed_key == activation_quant_key or _serves_requested_activation(
+            method.mxfp4_backend, activation_quant_key
+        )
+        if method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+            assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
+                "0" if activation_quant_key == kMxfp8Dynamic else _ALWAYS_BF16_BOUND
+            )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not on_gfx950(), reason="Requires ROCm gfx950"
+)
+@pytest.mark.parametrize("source", ["moe", "targets"])
+@pytest.mark.parametrize("strict", ["0", "1"])
+@pytest.mark.parametrize("activation", ["mxfp8", None], ids=["mxfp8", "bf16"])
+def test_online_mxfp4_aiter_layer_honours_activation(
+    source, strict, activation, default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """Online MoE construction selects AITER and configures the resolved activation
+    even when only the online config (not ModelConfig) carries the request."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
+    rocm_aiter_ops.refresh_env_variables()
+    default_vllm_config.model_config = ModelConfig(dtype=torch.bfloat16)
+    default_vllm_config.kernel_config = KernelConfig(moe_backend="aiter")
+    prefix = "model.layers.0.mlp.experts"
+    spec = {"weight": "mxfp4", "activation": activation}
+    args = quant_config_args(
+        **({"moe": spec} if source == "moe" else {"targets": {prefix: spec}})
+    )
+    layer = FusedMoEFactory(
+        num_experts=4,
+        top_k=2,
+        hidden_size=256,
+        intermediate_size=256,
+        params_dtype=torch.bfloat16,
+        quant_config=OnlineQuantizationConfig(args),
+        prefix=prefix,
+    ).routed_experts
+
+    assert isinstance(layer.quant_method, Mxfp4OnlineMoEMethod)
+    assert layer.quant_method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+    assert layer.quant_method.activation_quant_key == (
+        kMxfp8Dynamic if activation == "mxfp8" else None
+    )
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
+        "0" if activation == "mxfp8" else _ALWAYS_BF16_BOUND
+    )
 
 
 def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
