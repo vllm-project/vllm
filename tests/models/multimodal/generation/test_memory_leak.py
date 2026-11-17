@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import os
 import random
 import string
 import sys
@@ -84,10 +85,59 @@ def _ru_maxrss_bytes() -> int | None:
     return rss if sys.platform == "darwin" else rss * KiB_bytes
 
 
-def _gpu_used_bytes() -> int:
+_FDINFO_UNITS = {"": 1, "KiB": KiB_bytes, "MiB": MiB_bytes, "GiB": 1 << 30}
+
+
+def _rocm_process_vram_bytes() -> int | None:
+    # VRAM of this process's amdgpu DRM clients, by preferred placement.
+    # Device-wide used memory also moves in 2 MiB steps when other processes,
+    # including those on a sibling partition of the same physical GPU, start,
+    # exit or create queues.
+    clients: dict[tuple[str, str], int] = {}
+    for fd in os.listdir("/proc/self/fdinfo"):
+        try:
+            with open(f"/proc/self/fdinfo/{fd}") as f:
+                info = {
+                    key: value.strip()
+                    for key, value in (line.split(":", 1) for line in f if ":" in line)
+                }
+        except OSError:
+            continue
+        if info.get("drm-driver") != "amdgpu":
+            continue
+        # drm-memory-vram counts only resident memory, so eviction would move it.
+        size = info.get("drm-total-vram")
+        if size is None:
+            return None
+        value, *unit = size.split()
+        # Duplicated fds share one DRM client.
+        client = (info.get("drm-pdev", ""), info.get("drm-client-id", fd))
+        clients[client] = int(value) * _FDINFO_UNITS[unit[0] if unit else ""]
+    return sum(clients.values()) if clients else None
+
+
+def _gpu_used_bytes() -> tuple[int, int | None]:
+    """Device-wide used memory, and this process's VRAM where available."""
     torch.accelerator.synchronize()
     free_bytes, total_bytes = torch.accelerator.get_memory_info()
-    return int(total_bytes - free_bytes)
+    process_bytes = None
+    if current_platform.is_rocm():
+        process_bytes = _rocm_process_vram_bytes()
+        assert process_bytes is not None, (
+            "drm-total-vram for the amdgpu DRM clients of this process is missing "
+            "from /proc/self/fdinfo"
+        )
+    return int(total_bytes - free_bytes), process_bytes
+
+
+def _gpu_growth(
+    baseline: tuple[int, int | None], sample: tuple[int, int | None]
+) -> int:
+    # Prefer this process's own VRAM, which other processes on the device
+    # cannot move, and use device-wide used memory where it is not measured.
+    if baseline[1] is not None and sample[1] is not None:
+        return sample[1] - baseline[1]
+    return sample[0] - baseline[0]
 
 
 def _format_mib(num_bytes: int | None) -> str:
@@ -146,7 +196,7 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
     warmup_gpu = _gpu_used_bytes()
     warmup_cpu_peak = _ru_maxrss_bytes()
 
-    post_warmup_gpu_samples: list[int] = []
+    post_warmup_gpu_samples: list[tuple[int, int | None]] = []
     post_warmup_cpu_peak_samples: list[int] = []
 
     for _ in range(MEASURED_ROUNDS):
@@ -161,13 +211,15 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
         if cpu_peak is not None:
             post_warmup_cpu_peak_samples.append(cpu_peak)
 
-    gpu_growth = max(post_warmup_gpu_samples) - warmup_gpu
+    gpu_growth = max(_gpu_growth(warmup_gpu, x) for x in post_warmup_gpu_samples)
     gpu_threshold = GPU_GROWTH_THRESHOLD_MIB * MiB_bytes
 
     assert gpu_growth <= gpu_threshold, (
         "Qwen3-VL GPU memory kept growing after warmup. "
-        f"warmup_baseline={_format_mib(warmup_gpu)}, "
-        f"post_warmup_samples={[_format_mib(x) for x in post_warmup_gpu_samples]}, "
+        f"warmup_baseline={_format_mib(warmup_gpu[0])}, "
+        f"post_warmup_samples={[_format_mib(x[0]) for x in post_warmup_gpu_samples]}, "
+        f"warmup_process_vram={_format_mib(warmup_gpu[1])}, "
+        f"post_warmup_process_vram={[_format_mib(x[1]) for x in post_warmup_gpu_samples]}, "  # noqa: E501
         f"gpu_growth={_format_mib(gpu_growth)}, "
         f"gpu_threshold={GPU_GROWTH_THRESHOLD_MIB} MiB"
     )
