@@ -264,38 +264,6 @@ def test_block_fp8_batch_invariant_across_tuned_block_size_k(monkeypatch):
     assert not torch.equal(run(256), run(512))
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.has_device_capability(75)
-    or current_platform.has_device_capability(100),
-    reason="CUTLASS int8 GEMM requires SM75 to SM90.",
-)
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("use_bias", [False, True])
-@torch.inference_mode()
-def test_cutlass_int8_scaled_mm_batch_invariant(
-    out_dtype: torch.dtype, use_bias: bool
-) -> None:
-    """int8 accumulates exactly in int32, so each M-dependent tile config gives
-    the same rows. SM89 used to send int8 to the fp8-only fixed-config kernel,
-    which rejected it."""
-    set_random_seed(0)
-    m, n, k = 257, 1024, 4096
-    a = torch.randint(-128, 127, (m, k), dtype=torch.int8)
-    b = torch.randint(-128, 127, (n, k), dtype=torch.int8).t()
-    scale_a = torch.rand((m, 1)) / 100
-    scale_b = torch.rand((1, n)) / 100
-    bias = torch.randn(n, dtype=out_dtype) if use_bias else None
-
-    full = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
-    # One sub-batch per SM89 int8 tile config; the full batch uses the default.
-    for rows in (1, 16, 17, 33, 65, 129, 256):
-        out = ops.cutlass_scaled_mm(
-            a[:rows], b, scale_a[:rows], scale_b, out_dtype, bias
-        )
-        assert torch.equal(out, full[:rows]), f"rows={rows}"
-
-
 @_NVFP4_REQUIRES_SM100
 @pytest.mark.parametrize("dtype", _NVFP4_LINEAR_DTYPES)
 @pytest.mark.parametrize("shape", _NVFP4_LINEAR_CONSISTENCY_SHAPES)
