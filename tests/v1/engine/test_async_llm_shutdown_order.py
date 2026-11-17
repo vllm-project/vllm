@@ -70,6 +70,10 @@ class _BlockingDrainEngineCoreClient:
         self.allow_exit = threading.Event()
         self.shutdown_timeouts: list[float | None] = []
         self._shutdown_called = False
+        # Production MPClient does not push EngineDeadError into the output
+        # handler on the graceful path; it cancels that task. Tests that need
+        # the handler to observe the death set this True.
+        self.signal_engine_dead = True
         self._output_queue: asyncio.Queue[EngineCoreOutputs | BaseException] = (
             asyncio.Queue()
         )
@@ -107,8 +111,11 @@ class _BlockingDrainEngineCoreClient:
                 )
             raise self._shutdown_error
         assert self.allow_exit.wait(timeout=TIMEOUT_SEC)
+        # BackgroundResources.__call__ sets engine_dead before MPClient.shutdown
+        # returns, which is before AsyncLLM tears down the renderer.
         self.resources.stop_requested = True
-        if not self._loop.is_closed():
+        self.resources.engine_dead = True
+        if self.signal_engine_dead and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(
                 self._output_queue.put_nowait, EngineDeadError()
             )
@@ -446,6 +453,151 @@ async def test_new_request_during_drain_surfaces_503_while_inflight_completes(
     finally:
         core_client.allow_exit.set()
         for task in (inflight_task, rejected_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if shutdown_future is not None:
+            await asyncio.gather(shutdown_future, return_exceptions=True)
+        engine.shutdown()
+
+
+def _generate_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[AsyncLLM, _BlockingDrainEngineCoreClient]:
+    vllm_config = AsyncEngineArgs(
+        model=MODEL_NAME,
+        shutdown_timeout=5,
+    ).create_engine_config()
+    core_client = _BlockingDrainEngineCoreClient(loop, supported_tasks=("generate",))
+    monkeypatch.setattr(
+        async_llm_module.EngineCoreClient,
+        "make_async_mp_client",
+        lambda *args, **kwargs: core_client,
+    )
+    engine = AsyncLLM(vllm_config, executor_class=Executor, log_stats=False)
+    return engine, core_client
+
+
+async def _collect_generate(engine: AsyncLLM, request_id: str):
+    outputs = []
+    async for out in engine.generate(
+        {"prompt_token_ids": [1, 2]},
+        SamplingParams(max_tokens=4),
+        request_id,
+    ):
+        outputs.append(out)
+    return outputs[-1]
+
+
+@pytest.mark.asyncio
+async def test_new_request_after_engine_core_shutdown_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A request that arrives after engine_core.shutdown() returns, while the
+    renderer is still up, raises EngineDeadError instead of hanging.
+
+    On main the renderer executor was already closed here, so the same request
+    failed immediately with HTTP 500. Shutdown now keeps the renderer until
+    the engine process is gone; add_request() must still fail before it waits
+    on that process.
+    """
+    loop = asyncio.get_running_loop()
+    engine, core_client = _generate_engine(monkeypatch, loop)
+    renderer_shutdown_entered = threading.Event()
+    release_renderer_shutdown = threading.Event()
+    real_renderer_shutdown = engine.renderer.shutdown
+
+    def blocking_renderer_shutdown() -> None:
+        renderer_shutdown_entered.set()
+        assert release_renderer_shutdown.wait(timeout=TIMEOUT_SEC)
+        real_renderer_shutdown()
+
+    engine.renderer.shutdown = blocking_renderer_shutdown  # type: ignore[method-assign]
+    core_client.allow_exit.set()
+    shutdown_future = loop.run_in_executor(None, engine.shutdown, 5.0)
+    late_task: asyncio.Task | None = None
+    try:
+        entered = await loop.run_in_executor(
+            None, renderer_shutdown_entered.wait, TIMEOUT_SEC
+        )
+        assert entered
+        assert engine._shut_down
+        # The pool is still the one serving requests. submit() raises only
+        # after renderer.shutdown() closes it.
+        assert (
+            engine.renderer._executor.submit(lambda: None).result(timeout=TIMEOUT_SEC)
+            is None
+        )
+
+        late_task = asyncio.create_task(_collect_generate(engine, "after-shutdown"))
+        with pytest.raises(EngineDeadError):
+            await asyncio.wait_for(late_task, timeout=TIMEOUT_SEC)
+    finally:
+        release_renderer_shutdown.set()
+        if late_task is not None and not late_task.done():
+            late_task.cancel()
+            await asyncio.gather(late_task, return_exceptions=True)
+        await asyncio.gather(shutdown_future, return_exceptions=True)
+        engine.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_request_waiting_when_engine_core_exits_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A request already waiting on the output handler when EngineCore exits
+    must not block until the HTTP server closes.
+
+    Graceful MPClient shutdown cancels the output handler instead of
+    delivering EngineDeadError through the socket task. CancelledError is not
+    an Exception, so the handler used to skip propagate_error.
+    """
+    loop = asyncio.get_running_loop()
+    engine, core_client = _generate_engine(monkeypatch, loop)
+    # Match production: the socket task is cancelled along with the handler,
+    # so the handler never observes a queued EngineDeadError.
+    core_client.signal_engine_dead = False
+
+    inflight_task = asyncio.create_task(_collect_generate(engine, "inflight-req"))
+    late_task: asyncio.Task | None = None
+    shutdown_future: asyncio.Future[None] | None = None
+    try:
+        await asyncio.wait_for(core_client.request_added.wait(), timeout=TIMEOUT_SEC)
+        shutdown_future = loop.run_in_executor(None, engine.shutdown, 5.0)
+        entered = await loop.run_in_executor(
+            None, core_client.shutdown_entered.wait, TIMEOUT_SEC
+        )
+        assert entered
+
+        inflight_req = core_client.requests[0]
+        core_client.push_output(
+            EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id=inflight_req.request_id,
+                        new_token_ids=[5],
+                        finish_reason=FinishReason.STOP,
+                    )
+                ]
+            )
+        )
+        inflight_out = await asyncio.wait_for(inflight_task, timeout=TIMEOUT_SEC)
+        assert inflight_out.finished
+
+        core_client.request_added.clear()
+        late_task = asyncio.create_task(_collect_generate(engine, "after-exit"))
+        await asyncio.wait_for(core_client.request_added.wait(), timeout=TIMEOUT_SEC)
+        # The late request is registered and blocked on its collector.
+        # Release engine_core.shutdown(); the handler is cancelled with no
+        # output ever pushed for this request.
+        core_client.allow_exit.set()
+        with pytest.raises(EngineDeadError):
+            await asyncio.wait_for(late_task, timeout=TIMEOUT_SEC)
+        await asyncio.wait_for(shutdown_future, timeout=TIMEOUT_SEC)
+    finally:
+        core_client.allow_exit.set()
+        for task in (inflight_task, late_task):
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)

@@ -150,15 +150,46 @@ async def _concurrent_request_loop(
                 t.cancel()
 
 
-def _num_running_requests(metrics_text: str) -> float:
-    """Sum `vllm:num_requests_running` across the server's label sets."""
+def _metric_total(metrics_text: str, name: str) -> float:
+    """Sum one Prometheus gauge across the server's label sets."""
     total = 0.0
     for family in text_string_to_metric_families(metrics_text):
-        if family.name == "vllm:num_requests_running":
+        if family.name == name:
             for sample in family.samples:
-                if sample.name == "vllm:num_requests_running":
+                if sample.name == name:
                     total += sample.value
     return total
+
+
+def _num_running_requests(metrics_text: str) -> float:
+    """Sum `vllm:num_requests_running` across the server's label sets."""
+    return _metric_total(metrics_text, "vllm:num_requests_running")
+
+
+def _num_admitted_requests(metrics_text: str) -> float:
+    """Requests the scheduler already has: running plus waiting."""
+    return _num_running_requests(metrics_text) + _metric_total(
+        metrics_text, "vllm:num_requests_waiting"
+    )
+
+
+async def _wait_for_metric(
+    metrics_url: str,
+    predicate,
+    timeout: float,
+    failure: str,
+) -> float:
+    """Poll server metrics until `predicate` accepts the text."""
+    start = time.monotonic()
+    deadline = start + timeout
+    async with httpx.AsyncClient() as metrics_client:
+        while time.monotonic() < deadline:
+            response = await metrics_client.get(metrics_url)
+            response.raise_for_status()
+            if predicate(response.text):
+                return time.monotonic() - start
+            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
+    raise AssertionError(failure)
 
 
 async def _wait_for_running_request(
@@ -172,16 +203,12 @@ async def _wait_for_running_request(
     only complete work the engine has already admitted, so synchronize on the
     server's own scheduler gauge instead.
     """
-    start = time.monotonic()
-    deadline = start + timeout
-    async with httpx.AsyncClient() as metrics_client:
-        while time.monotonic() < deadline:
-            response = await metrics_client.get(metrics_url)
-            response.raise_for_status()
-            if _num_running_requests(response.text) > 0:
-                return time.monotonic() - start
-            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
-    raise AssertionError(f"No request reached the running state within {timeout}s")
+    return await _wait_for_metric(
+        metrics_url,
+        lambda text: _num_running_requests(text) > 0,
+        timeout,
+        f"No request reached the running state within {timeout}s",
+    )
 
 
 @pytest.mark.asyncio
@@ -357,14 +384,30 @@ async def _pooling_request_rejected_with_503(
     return "timed out before a new embeddings call returned 503"
 
 
+# One embeddings call of this length finishes in well under a second on a
+# fast GPU once the scheduler has it (see the 5090 log: SIGTERM, HTTP 200,
+# and "request processing complete" in the same second). A single in-flight
+# request is therefore gone before the post-SIGTERM probe is tokenized.
+# Ten serial chunked prefills, each ~1400 tokens at 16 tokens per step,
+# keep EngineCore inside the drain loop for that probe. Prefix caching is
+# disabled and each prompt differs: identical text would hit the cache after
+# the first request, and the drain would end before the probe.
+_POOLING_DRAIN_REQUESTS = 10
+
+
+def _pooling_prompt(i: int) -> str:
+    return f"{i} " + ("hello " * 1400)
+
+
 @pytest.mark.asyncio
 async def test_wait_timeout_completes_pooling_requests():
     """In-flight /v1/embeddings finish during drain; a later one gets 503.
 
-    One request is admitted before SIGTERM and must return 200. Another is
-    issued after the signal and must be rejected with 503, not 500.
+    Several long embeddings are admitted before SIGTERM, behind a one-sequence
+    budget and a small token chunk, so the engine is still draining when the
+    probe runs. Those calls return 200. The probe returns 503, not 500.
     """
-    shutdown_timeout = 30
+    shutdown_timeout = 60
     server_args = [
         "--runner",
         "pooling",
@@ -373,12 +416,13 @@ async def test_wait_timeout_completes_pooling_requests():
         "--max-model-len",
         "2048",
         "--max-num-batched-tokens",
-        "64",
+        "16",
         "--enforce-eager",
         "--gpu-memory-utilization",
         "0.05",
         "--max-num-seqs",
-        "4",
+        "1",
+        "--no-enable-prefix-caching",
         "--shutdown-timeout",
         str(shutdown_timeout),
     ]
@@ -388,27 +432,47 @@ async def test_wait_timeout_completes_pooling_requests():
         server_args,
         env_dict={"VLLM_USE_RUST_FRONTEND": "0"},
     ) as remote_server:
-        client = remote_server.get_async_client()
+        # In-flight calls must be allowed to outlive the drain. The probe
+        # client fails in 10s so a missed drain window cannot sit until the
+        # default 600s client timeout.
+        client = remote_server.get_async_client(timeout=shutdown_timeout + 30)
+        probe = remote_server.get_async_client(timeout=10)
         proc = remote_server.proc
         child_pids = _get_child_pids(proc.pid)
+        metrics_url = remote_server.url_for("metrics")
 
-        inflight = asyncio.create_task(
-            client.embeddings.create(
-                model=MODEL_NAME,
-                input="hello " * 1500,
+        inflight = [
+            asyncio.create_task(
+                client.embeddings.create(model=MODEL_NAME, input=_pooling_prompt(i))
             )
-        )
+            for i in range(_POOLING_DRAIN_REQUESTS)
+        ]
         try:
-            admission_delay = await _wait_for_running_request(
-                remote_server.url_for("metrics"),
+            # Drain only finishes work the scheduler already holds. Wait until
+            # every call is running or waiting, not merely until the first
+            # one has started (that one may already be on its last chunk).
+            admission_delay = await _wait_for_metric(
+                metrics_url,
+                lambda text: _num_admitted_requests(text) >= _POOLING_DRAIN_REQUESTS,
                 timeout=60,
+                failure=(
+                    "Pooling requests were not all admitted before SIGTERM "
+                    f"(wanted {_POOLING_DRAIN_REQUESTS})"
+                ),
             )
             proc.send_signal(signal.SIGTERM)
             rejection = await _pooling_request_rejected_with_503(
-                client, _SHUTDOWN_DETECTION_TIMEOUT
+                probe, _SHUTDOWN_DETECTION_TIMEOUT
             )
-            result = await asyncio.wait_for(inflight, timeout=shutdown_timeout)
-            assert result.data, "In-flight pooling request returned an empty embedding"
+            done, pending = await asyncio.wait(inflight, timeout=shutdown_timeout)
+            assert not pending, (
+                f"{len(pending)} in-flight embeddings did not finish during drain"
+            )
+            for task in done:
+                result = task.result()
+                assert result.data, (
+                    "In-flight pooling request returned an empty embedding"
+                )
             assert rejection is None, (
                 "A new embeddings call after SIGTERM should return 503. "
                 f"admission_delay: {admission_delay:.3f}s, failure: {rejection}"
@@ -416,9 +480,10 @@ async def test_wait_timeout_completes_pooling_requests():
             _wait_for_server_exit(proc, shutdown_timeout)
             await _assert_children_cleaned_up(child_pids)
         finally:
-            if not inflight.done():
-                inflight.cancel()
-                await asyncio.gather(inflight, return_exceptions=True)
+            for task in inflight:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*inflight, return_exceptions=True)
 
 
 @pytest.mark.asyncio

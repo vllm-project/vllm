@@ -217,6 +217,11 @@ class AsyncLLM(EngineClient):
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
+        # Set once engine_core.shutdown() has returned. The HTTP server is
+        # still accepting connections until the caller finishes this shutdown,
+        # and the renderer is torn down only after that. add_request() checks
+        # `errored` before it waits on an engine that is already gone.
+        self._shut_down = False
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -311,6 +316,12 @@ class AsyncLLM(EngineClient):
             if engine_core := getattr(self, "engine_core", None):
                 engine_core.shutdown(timeout=timeout)
         finally:
+            # engine_core.shutdown() returns only after the engine process has
+            # exited (or the call raised). Mark the engine dead before
+            # cancelling the output handler and before renderer.shutdown(),
+            # while this method is still running on the executor thread and
+            # the HTTP server has not stopped.
+            self._shut_down = True
             if handler := getattr(self, "output_handler", None):
                 cancel_task_threadsafe(handler)
 
@@ -536,6 +547,12 @@ class AsyncLLM(EngineClient):
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
         self.input_processor.assign_request_id(request)
+
+        # process_inputs_async awaits. Shutdown can finish in that gap, after
+        # the errored check at entry, and cancel the output handler. Do not
+        # register a collector that handler will never wake.
+        if self.errored:
+            raise EngineDeadError()
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
@@ -964,6 +981,20 @@ class AsyncLLM(EngineClient):
                 else:
                     logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
+            except asyncio.CancelledError:
+                # Shutdown cancels this task after EngineCore is gone.
+                # CancelledError is not an Exception, so the handler above
+                # does not run. A generate() task blocked on its collector
+                # would then wait until the HTTP server drops the connection.
+                # Leave an output that already arrived: drain finished it.
+                for state in output_processor.request_states.values():
+                    queue = state.queue
+                    if queue is None or queue.output is not None:
+                        continue
+                    if getattr(queue, "_backlog", None):
+                        continue
+                    queue.put(EngineDeadError())
+                raise
 
         self.output_handler = asyncio.create_task(output_handler())
 
@@ -1415,7 +1446,13 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.resources.engine_dead or not self.is_running
+        # getattr: unit tests build a bare AsyncLLM with __new__ and never
+        # run __init__. A real instance sets this in __init__ and shutdown().
+        return (
+            getattr(self, "_shut_down", False)
+            or self.engine_core.resources.engine_dead
+            or not self.is_running
+        )
 
     @property
     def should_keep_api_server_alive(self) -> bool:
