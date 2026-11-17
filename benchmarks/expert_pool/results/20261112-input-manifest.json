@@ -1,0 +1,2351 @@
+{
+  "tokenizer": "/private/tmp/pr56177-tokenizer",
+  "cases": [
+    {
+      "length": 12500,
+      "repeat": 0,
+      "seed": 68677,
+      "needle_token_positions": [
+        28,
+        3119,
+        6224,
+        9329,
+        12313
+      ],
+      "prompt_sha256": "0486ac6573531834141906ca71e10b3e4020104c3288dc5fef08ca78d1b92cb8",
+      "file": "retrieval-12500-0.json",
+      "expected_sha256": "a55aec8964005b6cf98ba618f04283fb22d57471341cf345eed0a5f06c64e853"
+    },
+    {
+      "length": 12500,
+      "repeat": 1,
+      "seed": 68678,
+      "needle_token_positions": [
+        28,
+        3122,
+        6228,
+        9329,
+        12310
+      ],
+      "prompt_sha256": "5dd4aaf353a06037d5c5abbd8eedec8999737291bf5257d0c5283ccf9fd5db1c",
+      "file": "retrieval-12500-1.json",
+      "expected_sha256": "304edac3eb23e00874d64051bd52e4b8ca009431e6e627599c62bdcd6870b894"
+    },
+    {
+      "length": 12500,
+      "repeat": 2,
+      "seed": 68679,
+      "needle_token_positions": [
+        28,
+        3121,
+        6225,
+        9329,
+        12312
+      ],
+      "prompt_sha256": "82d73114780667087f45121d489cb4eea8702ea3a07d4219af71a04786c00fa7",
+      "file": "retrieval-12500-2.json",
+      "expected_sha256": "42db92faea7dda83b6c3520ff6f29420940a3baad4f8a86c06e7ea4c9ec923a6"
+    },
+    {
+      "length": 81600,
+      "repeat": 0,
+      "seed": 137777,
+      "needle_token_positions": [
+        97,
+        20397,
+        40777,
+        61155,
+        80720
+      ],
+      "prompt_sha256": "7984a76877ccd64160424ef761c154bbf9d0e4247f223c7dae5ff14ddc72c5be",
+      "file": "retrieval-81600-0.json",
+      "expected_sha256": "e4810f4fe5ce755649fbcc11757d6b688cf4d568d47cbefcca6c8764f5c023ef"
+    },
+    {
+      "length": 81600,
+      "repeat": 1,
+      "seed": 137778,
+      "needle_token_positions": [
+        97,
+        20393,
+        40776,
+        61153,
+        80719
+      ],
+      "prompt_sha256": "c0493484b7b23e5a41738fb4e83c2a0447fd4982d9baf2713ce034f1f77cab6b",
+      "file": "retrieval-81600-1.json",
+      "expected_sha256": "a2d7b93716b963845f3a2c7c6cfc4803f715d451f7c010fa5812ea6b0ebb931f"
+    },
+    {
+      "length": 81600,
+      "repeat": 2,
+      "seed": 137779,
+      "needle_token_positions": [
+        97,
+        20393,
+        40773,
+        61154,
+        80721
+      ],
+      "prompt_sha256": "4adebdfab87df5c12cae6455343b4fda45e1cd59e1e6b8194693b6e0d5aeb138",
+      "file": "retrieval-81600-2.json",
+      "expected_sha256": "5480c63a4652ba263b719e19d885c28d1b51c27b307155d7e945486f8d4f4345"
+    },
+    {
+      "length": 128000,
+      "repeat": 0,
+      "seed": 184177,
+      "needle_token_positions": [
+        143,
+        31996,
+        63976,
+        95955,
+        126656
+      ],
+      "prompt_sha256": "20874d34dc7d8044ed2dc2409dfff59f5d651ff6343ff634f6186dd3f34a3010",
+      "file": "retrieval-128000-0.json",
+      "expected_sha256": "f31bff0df38dede26b9d0cdfd42bfabfc00250a0e7d250382d1b39f9e179038e"
+    },
+    {
+      "length": 128000,
+      "repeat": 1,
+      "seed": 184178,
+      "needle_token_positions": [
+        143,
+        31996,
+        63976,
+        95955,
+        126656
+      ],
+      "prompt_sha256": "669b4c00165972c8afab96b26a6a1f7a1310f050a133fb22de76544b3693b60f",
+      "file": "retrieval-128000-1.json",
+      "expected_sha256": "ed516e7bb67352fc05b1d7d1ee934c4144cf707d702b3cc91a930a03479a6011"
+    },
+    {
+      "length": 128000,
+      "repeat": 2,
+      "seed": 184179,
+      "needle_token_positions": [
+        143,
+        31994,
+        63975,
+        95955,
+        126656
+      ],
+      "prompt_sha256": "3ac91e057374acb50595a6f8ea9fcfa96d50dfb5a94bc267eff7655e6b9b8618",
+      "file": "retrieval-128000-2.json",
+      "expected_sha256": "50343f02507fafe09127e88cecd873efa124583c659143c8356d90400421aecc"
+    },
+    {
+      "length": 262000,
+      "repeat": 0,
+      "seed": 318177,
+      "needle_token_positions": [
+        277,
+        65493,
+        130974,
+        196453,
+        259317
+      ],
+      "prompt_sha256": "b5aee5df1efc055e688245b7f07e01ab7da31146f75a277664298b7b72f63ccd",
+      "file": "retrieval-262000-0.json",
+      "expected_sha256": "0eb5ff23bec29f351db55eac0084861d992476d44033296116134c348aca53f5"
+    },
+    {
+      "length": 262000,
+      "repeat": 1,
+      "seed": 318178,
+      "needle_token_positions": [
+        277,
+        65497,
+        130978,
+        196457,
+        259321
+      ],
+      "prompt_sha256": "1e9bb13a6ff4e120bf8b874a0d2cb527be0110bae0ac646ec9a3329952755c04",
+      "file": "retrieval-262000-1.json",
+      "expected_sha256": "d7b6be9a31ab5e8ec199d2c956335a4d28d3fe9842f1e070dc080a696cb36943"
+    },
+    {
+      "length": 262000,
+      "repeat": 2,
+      "seed": 318179,
+      "needle_token_positions": [
+        277,
+        65493,
+        130975,
+        196454,
+        259316
+      ],
+      "prompt_sha256": "504f3dab31cc431a3ea374fb22e2cb86527811b7200fd15067b41f087b7afeaf",
+      "file": "retrieval-262000-2.json",
+      "expected_sha256": "5ffd12a63093644c35ae72f90b3f5e24569acadb09b16ba261f2368068e6f716"
+    },
+    {
+      "length": 524000,
+      "repeat": 0,
+      "seed": 580177,
+      "needle_token_positions": [
+        539,
+        130995,
+        261976,
+        392956,
+        518698
+      ],
+      "prompt_sha256": "2cc1d6c4ec04576368a8aece67df7d70d9006529ac2529053613283ee51e60a7",
+      "file": "retrieval-524000-0.json",
+      "expected_sha256": "4cac72e43ed7ee4caa621467e6710ef404e9f9510168fc6450c7821d305c557e"
+    },
+    {
+      "length": 524000,
+      "repeat": 1,
+      "seed": 580178,
+      "needle_token_positions": [
+        539,
+        130995,
+        261976,
+        392955,
+        518696
+      ],
+      "prompt_sha256": "0d510dd454cdb174ad471d4213e5bb6f2c5b66385b72468230badfc9d1bfcb8a",
+      "file": "retrieval-524000-1.json",
+      "expected_sha256": "ef76acb62332efb9ccfb12329fb69f42c739fe434dcc7a34a98fafc65ce8b756"
+    },
+    {
+      "length": 524000,
+      "repeat": 2,
+      "seed": 580179,
+      "needle_token_positions": [
+        539,
+        130996,
+        261976,
+        392955,
+        518696
+      ],
+      "prompt_sha256": "084489e0c6c15102d2a25e7455d4c6ef1b94a7a05fb38de2c9c4201ec10e1536",
+      "file": "retrieval-524000-2.json",
+      "expected_sha256": "4685d711d2b26182f803fdd0b2be58215be25c09333c75ed5fc2a116865980ec"
+    },
+    {
+      "length": 1000000,
+      "repeat": 0,
+      "seed": 1056177,
+      "needle_token_positions": [
+        1015,
+        249995,
+        499975,
+        749955,
+        989937
+      ],
+      "prompt_sha256": "4392632f81f411782a438cf464483b5e312b8080acb07aa544f7a7b5faf7f4bc",
+      "file": "retrieval-1000000-0.json",
+      "expected_sha256": "d3b84527f93db789f7c8203780f07e41fe71aeef3e3621abf7703261c69dfd43"
+    },
+    {
+      "length": 1000000,
+      "repeat": 1,
+      "seed": 1056178,
+      "needle_token_positions": [
+        1015,
+        249994,
+        499976,
+        749956,
+        989938
+      ],
+      "prompt_sha256": "a5df3c11e087cf3553e5934e2216c0eb0599888ef1870551162a0284b18d663d",
+      "file": "retrieval-1000000-1.json",
+      "expected_sha256": "ba7fa42a97e55a2fadf43e5bfb306673c988792bbd41a6654d12868e71742d2a"
+    },
+    {
+      "length": 1000000,
+      "repeat": 2,
+      "seed": 1056179,
+      "needle_token_positions": [
+        1015,
+        249995,
+        499976,
+        749955,
+        989936
+      ],
+      "prompt_sha256": "3ab5c749f820411d6a0665cea30d6746e30780af08f5e1dbd4a25328e5b8eba5",
+      "file": "retrieval-1000000-2.json",
+      "expected_sha256": "7b9fa35eba54f147a7e5ccb1040dfac59149b457e93316fdfc420688ce5216b2"
+    }
+  ],
+  "corpus": [
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/oproj/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/runtime/expert_tp.py",
+      "sha256": "d7d05f154e008df2bedc57ad6562230224e5594cde3dda7c6373f3e4eb9764b9"
+    },
+    {
+      "path": "v1/worker/gpu/sample/sampler.py",
+      "sha256": "984b334c4d996550481d9bae4d9ccd57b3c208ad3fe1579d9c9f794e0be58b40"
+    },
+    {
+      "path": "tool_parsers/phi4mini_tool_parser.py",
+      "sha256": "3d638912d7216d95415d8e065b82c8b33dd10ca32e4d40a01901f4584ae84f37"
+    },
+    {
+      "path": "models/minimax_m3/nvidia/ops/__init__.py",
+      "sha256": "288f4f1d0a7e1f3f0958cb03deb530f610d52ec54a9349d5407b16f37b98b4d4"
+    },
+    {
+      "path": "model_executor/models/glm4_moe_lite.py",
+      "sha256": "ffe4ba39b77d27d86f4f5e2fa763bc758c8307169f2ce2f8eaf87ebf7e17b5ad"
+    },
+    {
+      "path": "parser/chat_parsing/__init__.py",
+      "sha256": "9a37f5ea7f9b63e853af1cc6229e532bd856e365e7fba9f951380064aad4c9c9"
+    },
+    {
+      "path": "model_executor/models/transformers/causal.py",
+      "sha256": "0e9fab14b4dfc95b61399015e2d027a48dc8c65f21687af6735974dadf442798"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/expert_pool/copy.py",
+      "sha256": "e51bd01dc975750942c65fc09bc0cb867660826eccb8f71d915a034558f14c05"
+    },
+    {
+      "path": "models/muse_spark/common/ops/fused_rmsnorm.py",
+      "sha256": "2de38445f8223e7a68542e6d56fc50852a32d479d0e47b63d6aef73ac273788f"
+    },
+    {
+      "path": "v1/attention/ops/rocm_paged_mxfp4_indexer.py",
+      "sha256": "34c0f42a726721f8cac16ede4f6c6d05b8ae97813cb358b4443e0fc75cfd75b0"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/eagle/eagle3_utils.py",
+      "sha256": "5a4e56df6bf9cfd9b5706f6bef5016076fb2817d622a304f1350debb9e8338b1"
+    },
+    {
+      "path": "model_executor/kernels/attention/dsa/dcp_indexer_cutedsl.py",
+      "sha256": "54b6cd4fe06353280b85ab9b242bd399c6fbb8f5f91dc2c5ce81ec5e943b82c5"
+    },
+    {
+      "path": "compilation/passes/ir/utils.py",
+      "sha256": "f59d33a6c7d0616cbeec1e9fb1d6c948881bf81fe124caeb906eac2e2197ea21"
+    },
+    {
+      "path": "compilation/passes/fusion/allreduce_rms_fusion.py",
+      "sha256": "ac386b336d178c2ccf2303e1eec640ef8bce9f365ef0680b3b006600ea2aca52"
+    },
+    {
+      "path": "model_executor/models/qwen2_5_vl.py",
+      "sha256": "fac36696c2a0e85e5da12f70f86c8fc9d7bf28970205d0ebebb15d21e44d8a58"
+    },
+    {
+      "path": "models/kimi_k3/amd/specialized_decode/model_state.py",
+      "sha256": "dc9ff793d51005aa84966ebf18dec517a4e6557127d3b0366ce459ef6b58f9f0"
+    },
+    {
+      "path": "model_executor/models/llama4.py",
+      "sha256": "08dbec592bab8393e58d563f821a9aed6201e51030b5c69d038d6d9690e8159b"
+    },
+    {
+      "path": "v1/attention/backends/mla/flashattn_mla.py",
+      "sha256": "6a1194da0997c70d685b9800b4e38454f1a835251321e2ec22556948b96cd4c1"
+    },
+    {
+      "path": "compilation/passes/fusion/matcher_utils.py",
+      "sha256": "d6f1c7a67f942c00c810f03de0a54964384b29e4e590b61c66c93ac2112ba0da"
+    },
+    {
+      "path": "model_executor/models/falcon_h1.py",
+      "sha256": "aa153570bd2395c94d53f68ca36f26c687fd64b63aa26c050b46f7411461719c"
+    },
+    {
+      "path": "reasoning/gptoss_reasoning_parser.py",
+      "sha256": "63c76793605c1af008941d3eadd017f9a56cf07d1253246403704236fa827ec4"
+    },
+    {
+      "path": "models/deepseek_v4/nvidia/flashinfer_sparse.py",
+      "sha256": "6db441e2e26f5ee03d07c596c2770df5106bd48de12b691a98bde5be9081c8a3"
+    },
+    {
+      "path": "transformers_utils/__init__.py",
+      "sha256": "053753ff29b57ed455860c4152474942a98ed8b88a0d7d8c6591041bc53fd391"
+    },
+    {
+      "path": "model_executor/hw_agnostic/layers/activation.py",
+      "sha256": "214ba7669f8956aca9ee470ad206e16933520eef2011db5b1504cedbee16cdfc"
+    },
+    {
+      "path": "entrypoints/serve/dev/cache/api_router.py",
+      "sha256": "8f773fff7402bfbf5a8d9290bed47a7f44cde7d248592d41264625a3f7a7e51a"
+    },
+    {
+      "path": "model_executor/models/phi4mm_utils.py",
+      "sha256": "f0dbcfb760285c23e7b7a915d5822664657d9a8ef77ebf813706ad6933ca9876"
+    },
+    {
+      "path": "models/inkling/amd/ops/rel_attention_decode.py",
+      "sha256": "1033c26b5d67b17dc3f4d7b174c6312365f8eee886c59240abb4bb84206a0207"
+    },
+    {
+      "path": "model_executor/kernels/linear/scaled_mm/aiter.py",
+      "sha256": "65b3c92545a22942cf59ee431a9e3e7d5231594f3f5e7d02124ffd1792918d48"
+    },
+    {
+      "path": "v1/worker/gpu/model_states/encoder_only.py",
+      "sha256": "f3b10fdc479b4fdaea0c5e79ab7af9fb97ba07e4832876f72f820e3afc0ea1cd"
+    },
+    {
+      "path": "models/deepseek_v41/common/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/moe/experts_runtime.py",
+      "sha256": "d5e284c481e1676ded0e0f36582165d88a3c1b46c2040342c87fe4afce8a0d1c"
+    },
+    {
+      "path": "model_executor/models/nemotron_h_mtp.py",
+      "sha256": "cb8df35c6e4009cbce9ec17da0c0b8ff57e1e58bf1ec52f554970058ac09eaae"
+    },
+    {
+      "path": "models/minimax_m3/amd/model_state.py",
+      "sha256": "3e1309dae82f12ec0f84be68262c0bc343fb5c76ff65afbbff35eff8f7d48e93"
+    },
+    {
+      "path": "model_executor/models/glm4.py",
+      "sha256": "436547559400141ccda24c99bd918768a3007330e06572b65cf50aeafc4f92d2"
+    },
+    {
+      "path": "models/step5/nvidia/ops/sparse_prefill_pages.py",
+      "sha256": "84e68ca8347375de75c4463c47a57ad47afb4f87cdedfcf119560301d0980ccd"
+    },
+    {
+      "path": "entrypoints/rl/online/metrics.py",
+      "sha256": "f0117f4750942dcd742004e6d1c12996429f2bb4c139017e9633bca55ef26e99"
+    },
+    {
+      "path": "reasoning/gemma4_utils.py",
+      "sha256": "ccebe482201d5388fe9719c6035421b3fd84ce74cc2213770773c717c20bb32e"
+    },
+    {
+      "path": "models/flint/ops/cute_primitives.py",
+      "sha256": "b77616a97d1b26754e381dc9100e30f25ac5f5b743b45f0bcdbc9f2b49936d61"
+    },
+    {
+      "path": "entrypoints/launchers/render/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "v1/simple_kv_offload/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "lora/punica_wrapper/punica_base.py",
+      "sha256": "1fec4fd96e8c6a266176b198cf18a7f81400eefcf190c52da2b313b3b535f7eb"
+    },
+    {
+      "path": "models/deepseek_v32/common/kernels.py",
+      "sha256": "5ec6e10857d5e345aa879900d1a079444cd632dc93c4952c4eb16edf6127e623"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/drafter/comm.py",
+      "sha256": "a2f43a20298cc98abe5e6580630428eca838e34a6db2f480bffdd0e3c3043a6a"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp4/flashinfer.py",
+      "sha256": "b43b47a7b5c5f8107d5fdd7dda269a2cef9d5254291ed5cdb574da05d66fd041"
+    },
+    {
+      "path": "model_executor/hw_agnostic/layers/layernorm.py",
+      "sha256": "2118dec2ca88013a09a2345bf95e9daf0567f6920199558c3362263c9b2a810a"
+    },
+    {
+      "path": "models/flint/gguf_nvfp4.py",
+      "sha256": "8931ab5f43c051c260a1698bcaf513bacd2f7600d3a931cac840acc8bae729dc"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/ops/latent_moe_tail.py",
+      "sha256": "3b2911f47b985354a84edc90bbda95ba7399e0dc142f30b8dddf8f22ad0efbed"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp4/b12x.py",
+      "sha256": "85f0c80485c996adb7b7d80b567296eb0426e48af1913d58327905db26021add"
+    },
+    {
+      "path": "model_executor/kernels/linear/mixed_precision/humming.py",
+      "sha256": "fcd3c22e9edf9c39340554bad2fb0e872d895fff72a4a33b84f40015971aeedb"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/moe/front.py",
+      "sha256": "5ce78481a47d6912d6364eb835298d5690b004cdc983b20632aba97bfe1d959c"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/lmcache_mp_connector.py",
+      "sha256": "94866a1eacb3b9a1678641d0dda606407f6f84ba933ecd25530414e382cea122"
+    },
+    {
+      "path": "models/deepseek_v41/common/ops/query_quant.py",
+      "sha256": "b8e2d49dcdc9e5aaf7092cd49e501250234dfe542cb7d76c346fab1103060de1"
+    },
+    {
+      "path": "compilation/passes/ir/inplace_functionalization.py",
+      "sha256": "5ad88d0b6c8c36fc369beb33994e27da32852bf93a2db682c9571cfac11723cc"
+    },
+    {
+      "path": "_custom_ops.py",
+      "sha256": "42849e6af9b40dfc77d1f47ce38e916c33ca37adf7acc98fc3b0c746010ab63b"
+    },
+    {
+      "path": "entrypoints/pooling/base/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "distributed/communication_op.py",
+      "sha256": "3c3f8ac60db38ece891d39dc1e2f6f1947ad438685893d2e5777d072320bd1b8"
+    },
+    {
+      "path": "v1/attention/ops/turboquant_soa/triton_turboquant_store.py",
+      "sha256": "122a6a4dd0a5d3392ae6100e78f7118b596a8b082ba9b048396aea5edc5f6877"
+    },
+    {
+      "path": "parser/engine/parser_engine.py",
+      "sha256": "b329dee37b8940fc7a7782bc0a6a9fc3fd1ad39b3870b22a8bd4bcb7faabe53a"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/dflash2/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "distributed/aux_output_connector/store.py",
+      "sha256": "245a6967bae72c3752b50add1133dc1c2a295a54202377d7af0de187dbf6d6a6"
+    },
+    {
+      "path": "transformers_utils/config.py",
+      "sha256": "3c0d651cc91060caeb06b5d20f298520aa4eabce479f1a0a51c147be4844ad1f"
+    },
+    {
+      "path": "models/minimax_m3/amd/mono/kernels/index_score.py",
+      "sha256": "e98cbb87483e6f15e7be870d632eab39b9ff22aaae5710f0a90ccc4739db65b9"
+    },
+    {
+      "path": "model_executor/models/gemma4.py",
+      "sha256": "e8b2ff4205d896280af469b033843af729483f6f5e23744c99329536c16094b4"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/router/aiter_shared_routed_fused_moe_router.py",
+      "sha256": "6770bca7f200330eed81bb9050977cdcda782121f1c101338399694cf2ec98f7"
+    },
+    {
+      "path": "benchmarks/sweep/startup.py",
+      "sha256": "d4688eb7d64adea71b99344a049c0b8908e507f8bb21a7f579579aba4295e4bd"
+    },
+    {
+      "path": "models/qwen4_exp/nvidia/model_state.py",
+      "sha256": "2f82dd672b43c4c055f784a7ec04bd8ef54ba7b86fdb76a1db90582cc620d392"
+    },
+    {
+      "path": "models/deepseek_v4/nvidia/mtp.py",
+      "sha256": "b69f2483e89916deedba9dce760edb2dfc8a6e220579252c5f098861c2a1f312"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/kv_balanced_mla/backend.py",
+      "sha256": "65d9928a6e302d25fce7c250b4eada28063c63a2a796c01a769ee8d1425714cb"
+    },
+    {
+      "path": "renderers/chat_utils/content_parser.py",
+      "sha256": "303c5cce7a8b4ab99ea9889e218842cd5114a552f9c8dc37a0058607552d463f"
+    },
+    {
+      "path": "v1/attention/backends/mla/prefill/flashinfer.py",
+      "sha256": "1f222fad27209e19e1a974ab7d9494f47278142cb8a58699cc9dc43d34b87bb7"
+    },
+    {
+      "path": "utils/sparse_utils.py",
+      "sha256": "9d5fa0e567f74d4e6b62d70c98cabcbe6ef2da750e9649bf2fe0622b75311488"
+    },
+    {
+      "path": "model_executor/models/bert_with_rope.py",
+      "sha256": "a7e313ad97763f3ded43d5be2b3b12d15c519baa2ce61c43ddb48e554fce6a74"
+    },
+    {
+      "path": "tool_parsers/abstract_tool_parser.py",
+      "sha256": "261e477a170acb0eb1b71a3254daecf733367e92049f59ccf93a2d7f357b4a8d"
+    },
+    {
+      "path": "model_executor/models/minicpm.py",
+      "sha256": "86821ab98aa14b3a7936437584790ca449cef43d503e3b8cb55eb70d3c18947c"
+    },
+    {
+      "path": "model_executor/kernels/linear/scaled_mm/xpu.py",
+      "sha256": "ec48adb246d7f980c65b76006eda6457469cc63ffb6b5ef73c4f2e05abbf2e8e"
+    },
+    {
+      "path": "lora/layers/fused_moe.py",
+      "sha256": "18ec13dda7fb81bafbbf5465aaa434dc67a88ac028e4735350d2a176ef510b8e"
+    },
+    {
+      "path": "models/kimi_k3/amd/specialized_decode/runtime/layers.py",
+      "sha256": "3cc66fb1b71d055f134ed457a2cd4b6af68c4124fb866841f4606e31122a4082"
+    },
+    {
+      "path": "config/reasoning.py",
+      "sha256": "2c4f7bdee48a9fb3d93787c4c32361c2411417cce452cfde86808d8759977861"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/latent_moe_runner.py",
+      "sha256": "b65966ae26adcbbd3f86d11211602950d28616a465717486b2aee304533e711e"
+    },
+    {
+      "path": "config/compilation.py",
+      "sha256": "01fc2b87924c0be62a755e0f7e42b411e02e9660b85101a4efede63e2fd53d3c"
+    },
+    {
+      "path": "v1/worker/gpu/sample/watermark.py",
+      "sha256": "bf09a9cdf300851e6ab82962c463534b30721a35f96908283af93baa2dfdda2f"
+    },
+    {
+      "path": "model_executor/layers/quantization/compressed_tensors/utils.py",
+      "sha256": "e7c4b3b9d5bb2a6c7abfdb3f3546aafcebb4c1526250d13e3c90de8bda474f78"
+    },
+    {
+      "path": "models/deepseek_v4/common/spec_decode.py",
+      "sha256": "cc7646ddcc7cf7da867ed7973a479bed0ae0ddb19ae8afc3e98eff2ffae04707"
+    },
+    {
+      "path": "models/deepseek_v41/amd/mono/sources.py",
+      "sha256": "7014ea3bc6f7eb718cf913b6de6909c44aa4c7eadcac57f9084541f416156084"
+    },
+    {
+      "path": "transformers_utils/processors/nvlm_d.py",
+      "sha256": "7be960ab7a79b2a50a05cbee57c5f82b5a7adfc0fd914e839eecb765238f1395"
+    },
+    {
+      "path": "tool_parsers/mimo_tool_parser.py",
+      "sha256": "fe2fd32e4603c411a0f146d495eec12767593bfa38cba2cf187bf77201edaa98"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/index_topk_decode/prefill_kernel.py",
+      "sha256": "7157bdc44172931eb523d036372357f894d00e71ac55e230ea86a055cdeb2db9"
+    },
+    {
+      "path": "model_executor/models/voyage.py",
+      "sha256": "2567cc3abb53993c2c9dd36f74c26534d65296f7a05669cbab12e0a279ff9e81"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/ops/attn_res.py",
+      "sha256": "38c4d67cdb8366cd7b959305ddd251c6b9c9fa408e7481d3dac05ebf3b44028c"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mono/attention/__init__.py",
+      "sha256": "b794eb4a648ebbd3c3428ebdbd992571606376cc1a9d5e6f971fe9c2e9c287f0"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mtp.py",
+      "sha256": "57dd4cda156c35796824e4fa36136ed74d14b17840a67c3912a45df908b0e40a"
+    },
+    {
+      "path": "models/deepseek_v4/cpu/model.py",
+      "sha256": "58070053dbbd35aa2b464ce7d0cf341a303fe479f7426c8d03f6740b89f0dc26"
+    },
+    {
+      "path": "models/step5/nvidia/layernorm.py",
+      "sha256": "f6213b9466d2bfe62fa9021dc8404b3c8413ff4a08e964b5b43dbe110d31b510"
+    },
+    {
+      "path": "tool_parsers/olmo3_tool_parser.py",
+      "sha256": "f9a20704b5f30069ed04d63813f842145fc9bde7fd91a3259fcd9f7abe90fd01"
+    },
+    {
+      "path": "distributed/weight_transfer/m2n_common.py",
+      "sha256": "ee82a9ee1dd81fee9cfaf4a58b658948f99979299c84254439a30bd14fa5bbea"
+    },
+    {
+      "path": "model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py",
+      "sha256": "6d6063375c8cb553814a83d1a6a7cb52268498cc7d0e74db6955dbee4289edb6"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/router/zero_expert_router.py",
+      "sha256": "c719ee43a4ad0f46406d8c62cb5a4f35df786cb671ef578690a7e952a5c4ce16"
+    },
+    {
+      "path": "v1/structured_output/utils.py",
+      "sha256": "ae98861ffcd4ea14e13948f19371b29bb9606c5394cd5b0c17de1f85d26cf6b8"
+    },
+    {
+      "path": "models/flint/ops/moe_cute.py",
+      "sha256": "30cd21f4f74301299ef0740f5b84470b221dfa875b52d0bc4d27c25a51247cc6"
+    },
+    {
+      "path": "entrypoints/pooling/scoring/protocol.py",
+      "sha256": "def22f9ed69f89cbb5402814585a614c5b72af9a9bf2cb50152b9be40ebccaf7"
+    },
+    {
+      "path": "models/kimi_k3/amd/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "models/deepseek_v4/xpu/xpu_qnorm_rope_kv_fp8_insert.py",
+      "sha256": "1d105bc5107da2cd533f3bb12cf590633140535271298b25d6f2a80e09dfeea0"
+    },
+    {
+      "path": "models/inkling/amd/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/mooncake/stats.py",
+      "sha256": "29469c688af6c4bc3a1129bb4d0da28519f4e812f5e64467abb07d3dae822f7d"
+    },
+    {
+      "path": "entrypoints/anthropic/api_router.py",
+      "sha256": "2eaef2cb6d7c71dde93db3766797ce4e860cd9b43de85270c2afc73707dd95ad"
+    },
+    {
+      "path": "v1/attention/ops/segmented_attention.py",
+      "sha256": "352658928b4bf112119bcec37b4440c273e27f1e69e7d9817a35bcfad63da613"
+    },
+    {
+      "path": "models/minimax_m3/amd/specialized_decode/mono/__init__.py",
+      "sha256": "3d76ce7a629def428b3d9103d052ebcaf1433ba02209c665e966d64faec40eed"
+    },
+    {
+      "path": "entrypoints/generate/generative_scoring/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "entrypoints/pooling/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/deepseek_v41/amd/mono/common/gfx942.py",
+      "sha256": "bad456407ce8a986ae0d8d83f9186916cae9ead0361c27d67fcf0beb32c3f340"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/dsa/query_stage.py",
+      "sha256": "55ba4ceacb28f7304d42ea2f5554625abac68779f549074481a36f1636e6d1aa"
+    },
+    {
+      "path": "renderers/embed_utils.py",
+      "sha256": "5d16e6830e8a03125ef110a37f9064893b189344aa3667af41e8f0521a659c75"
+    },
+    {
+      "path": "v1/attention/ops/ultraquant/triton_unified_attention.py",
+      "sha256": "714ceeb15a84c831a2281c923b18ba2411936c2ad91415e6070537870aecffef"
+    },
+    {
+      "path": "transformers_utils/processors/minicpmv.py",
+      "sha256": "4363c35078070100ab750dca3773d29e10d82265929a4088d7b6ff65cf4ab0bc"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/kv_balanced_mla/helpers.py",
+      "sha256": "532e19cfe74acf4c070e090d52fc152474eeb276366359d8a5da5941c7db1fd1"
+    },
+    {
+      "path": "models/kimi_k3/amd/specialized_decode/mono/attention/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "v1/engine/__init__.py",
+      "sha256": "958530bb501c9482d6bde820075e22d3ef59985abb307b13b946a05bce83cc71"
+    },
+    {
+      "path": "model_executor/kernels/linear/nvfp4/humming.py",
+      "sha256": "9af1bc08d1b15a8263775ba2b372b969da1b6ffff18a138cf62fd41ed78c69af"
+    },
+    {
+      "path": "multimodal/media/image.py",
+      "sha256": "34b69d8872fbb3fe640dece5719a36fcfcaaa207609d927bfad78743953ecfd7"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/expert_pool/layer.py",
+      "sha256": "755bdf65cc06b2bbfcafd3c3d7b90a7c5c63a2a1486c50a4273407e19cddc735"
+    },
+    {
+      "path": "engine/arg_utils.py",
+      "sha256": "6a971ede5109f81c1b83928bbcb935a27439379bcef474dc249a0e17f77797e8"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/eagle/utils.py",
+      "sha256": "b46baa2d2c3bb68d4ff69bfe11ccf3547afb60eddbe7fe064ab554d3e0280dc4"
+    },
+    {
+      "path": "tool_parsers/utils.py",
+      "sha256": "38c5a04801dd4fa0105423606a1fe55273c824b1fa4894d5e05822f197aa9d22"
+    },
+    {
+      "path": "distributed/device_communicators/cuda_wrapper.py",
+      "sha256": "99c3fc0e0c6639753b60754dc57ce79ccd30f30970ca24bd1099c4d720a6675e"
+    },
+    {
+      "path": "models/qwen3_5/nvidia/mtp.py",
+      "sha256": "01019860db10d86eee26ec4760bbc3f50b96eafd7ae771511338ca81b5370e43"
+    },
+    {
+      "path": "device_allocator/alloc_conf.py",
+      "sha256": "034ebfc47c8b00eab361a4358e9d577bde0e4078aa9fb530c2133be14d725c7d"
+    },
+    {
+      "path": "entrypoints/launchers/render/app_state.py",
+      "sha256": "ec53f468a4047acafe6e3f520434e806548ba666203125c3c23c9d62bc65dab6"
+    },
+    {
+      "path": "model_executor/layers/rotary_embedding/yarn_scaling_rope.py",
+      "sha256": "577d9589ac9b1e5c27e4114cbbe28b8a4bc70528bb14cba7eee9afbc245486a8"
+    },
+    {
+      "path": "models/glm5next/nvidia/specialized_decode/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "v1/core/kv_cache_metrics.py",
+      "sha256": "efedec04feff5f04a6d51c6c464290b52ab8c249d65121a9ab9f1370d6b67f47"
+    },
+    {
+      "path": "compilation/passes/fusion/add_rms_fusion.py",
+      "sha256": "e46998552628aa5cd5962fc39ea39ae824fd97e6aeba1d176e9cc7cade39837b"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/dsa/index.py",
+      "sha256": "5da0d6d7384bfaa806f6986b98723e1fb2b259db575cd874ed5631b1b98d6bc1"
+    },
+    {
+      "path": "parser/minicpmv.py",
+      "sha256": "b4f452fbd239d5df6d36af6dcee43423f26bfd69585fc8dfe6f1d2b0478b8aa4"
+    },
+    {
+      "path": "v1/attention/backends/rocm_attn.py",
+      "sha256": "7c4eb6a1460e38596c549d8fc2e10687c67a7fe73e00fb18b86ad60ed9ef5d8b"
+    },
+    {
+      "path": "models/qwen4_exp/amd/model_state.py",
+      "sha256": "58b96f47c74e1f471a83b480cff79a2fdec7fb39b263476cebf473b3f29a376e"
+    },
+    {
+      "path": "model_executor/models/mistral.py",
+      "sha256": "efe4303d49700769b3ff53b897c539e595386866b7adf230ea7d98e2b8ae8324"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp6/humming.py",
+      "sha256": "ec60fa8b6b76174a53c94576a6af8f5526e84faf6bbad7aca40be9da872b32be"
+    },
+    {
+      "path": "entrypoints/cli/snapshot.py",
+      "sha256": "4abaa5772a4dccca132e0915858ee093b1b1b199410ca4afb73008ce8578291b"
+    },
+    {
+      "path": "models/minimax_m3/amd/indexer_cp.py",
+      "sha256": "11d8e68c15e4a403b876f655cae4b2c2455e9519b04115beef18022b17beef30"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/cutedsl/draft/context.py",
+      "sha256": "0289effe035bbae583da06dcad40301cddd912247b35fedd78550d9416463c7d"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/index_topk_decode/host.py",
+      "sha256": "e914198da420c41b5f517adb0f1d46bc83c5a44bc0422ef47f1e45d1e74a126a"
+    },
+    {
+      "path": "model_executor/models/bailing_moe_mtp.py",
+      "sha256": "8c237f0f4373a8494a5d25b2c24a15e3bd3e95f20cdbb337cff73ea3a29fc615"
+    },
+    {
+      "path": "model_executor/models/transformers/fusers/mla.py",
+      "sha256": "09880eaa12eb3b5a899546b811b6fadd1b90e6515ec7260d8819d032dc8d28c0"
+    },
+    {
+      "path": "entrypoints/generate/beam_search/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/deepseek_v4/amd/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "transformers_utils/configs/kimi_linear.py",
+      "sha256": "bf6afbdd1ebb4fe59c5f399215f6b2ea8a3a35385b86606a699f8da8aa228ea2"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/mooncake/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "transformers_utils/configs/k3_dspark.py",
+      "sha256": "ff2e4f072d32dee101b0967dcc7621570cd2736f458e1eeaf7207098deb85398"
+    },
+    {
+      "path": "v1/structured_output/request.py",
+      "sha256": "053066a537c6d0888e002c41481864ce5a0c2294d7b3994ddffd2a47de0e7730"
+    },
+    {
+      "path": "model_executor/offloader/uva.py",
+      "sha256": "1064eaff828cda23308654d2186c08f2c336e7fa25e2e7b9f518b051ea89ce0c"
+    },
+    {
+      "path": "model_executor/models/transformers/multimodal.py",
+      "sha256": "b78383f7647e3a9b770837df1f79f5496696b22004320fd74467d024736dd0a2"
+    },
+    {
+      "path": "benchmarks/datasets/datasets.py",
+      "sha256": "510079823731c8ec68a9899b714e9a45a6f6eab78376e1769659fcd0e19ad7dc"
+    },
+    {
+      "path": "v1/sample/ops/topk_topp_sampler.py",
+      "sha256": "691d6eb6afa9c4b482422b2620c6129aa8723951351ac440915e536c2e2417d2"
+    },
+    {
+      "path": "model_executor/layers/minimax_rms_norm/lamport_workspace.py",
+      "sha256": "405f43eb8d4dd24998b14218971e03ab5f000c5df68f445e3d0e54f4387645c9"
+    },
+    {
+      "path": "compilation/passes/fusion/rocm_aiter_fusion.py",
+      "sha256": "1b119900d1b297b21200cdb7e595418e0b03b15d16cbca52b4ff6ae136edd0c7"
+    },
+    {
+      "path": "parser/response_template_grammar.py",
+      "sha256": "5c9ea556d1c170bd42eae2f5da98b288611fa47c39ac966ac989351e311b733e"
+    },
+    {
+      "path": "models/deepseek_v41/amd/mono/stages/dims.py",
+      "sha256": "bd4be3cb152464bca4c272854b23029d6ea1c33b4d5eabef95c3a5c6490de923"
+    },
+    {
+      "path": "model_executor/kernels/mhc/tilelang_kernels.py",
+      "sha256": "bfb9703ccd862529f08e20eabf99faae99b0b77cdd64e4c222159df3120b9c24"
+    },
+    {
+      "path": "model_executor/layers/quantization/quark/schemes/quark_w4a16_int4.py",
+      "sha256": "57ba1dd5bc86613c09a27864ed2144abf1aa6435e5b9598773c1cfb22c7a73b2"
+    },
+    {
+      "path": "model_executor/models/qwen3.py",
+      "sha256": "23c69a897deeb74a23f84c3d5ee0a321548af2cf9d5e5aedcf8668d5ca4ab16c"
+    },
+    {
+      "path": "triton_utils/allocation.py",
+      "sha256": "a06069929c3ba83e4c1fb64daf98dbef2d0825750f610c3abffed86bb6e00e10"
+    },
+    {
+      "path": "v1/worker/gpu/sample/states.py",
+      "sha256": "59099c6053c45b8299235eb4777a6427920cc5ca38ab3bedcc44fc6da85e83b4"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/offloading_connector.py",
+      "sha256": "f4b0becfc2dfd8f93d23b5eebcc98b4e7b115b6bd34cc3a9a8017fde391998ae"
+    },
+    {
+      "path": "model_executor/layers/mamba/linear/minimax_linear_attn.py",
+      "sha256": "e5993907f31370d04429d6d257e88dc191112b403f32be142802a6ec6713edfd"
+    },
+    {
+      "path": "models/step5/nvidia/ops/swa_decode.py",
+      "sha256": "6ec6222aa74b0b798fb433f7b7e3830ebfa8752bde4d31c64c011f44950a37c4"
+    },
+    {
+      "path": "v1/engine/input_processor.py",
+      "sha256": "2f4e9bda2042b383b8a53172766e5c750f6350e775023c7ca1f64759283a531f"
+    },
+    {
+      "path": "entrypoints/speech_to_text/base/utils.py",
+      "sha256": "d325dd8064bdd16aeab1f0f901f1667283740c8668675f466763c09401765396"
+    },
+    {
+      "path": "v1/token_buffer.py",
+      "sha256": "4517a15574c35c06a559a59c69d4e2da882d40bce1536a61087ddd5d053ae460"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/oracle/mxfp8.py",
+      "sha256": "0c8a2bb766e215eb236aaf2a152188452f5eb5bbe8dabc42ff8eac0b81bf4742"
+    },
+    {
+      "path": "tool_parsers/deepseekv31_tool_parser.py",
+      "sha256": "961f0d3bcd74d41bfb91227271a756e0be2c8e7e4605c191490a1d132edc2527"
+    },
+    {
+      "path": "entrypoints/cli/preload.py",
+      "sha256": "ceb1725d70cbf86997f9eedcef20a1ec372918b58eb18623d2956e600a70ce77"
+    },
+    {
+      "path": "ray/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/runtime/providers.py",
+      "sha256": "c0dcf149204e468b5ebac96d4c048245388f773bd33cb58171942aab65eaf45a"
+    },
+    {
+      "path": "models/minimax_m3/common/vision_tower.py",
+      "sha256": "93ce36c517d084c2557bd972ad714dfd37ceeb443498edd32dcd3a638efc79d9"
+    },
+    {
+      "path": "entrypoints/serve/utils/orca_metrics.py",
+      "sha256": "a41933d5e8d62d9b9001cd4a1bd1dcc160f72618f9fa2e3538fa5cb10d86fa26"
+    },
+    {
+      "path": "model_executor/models/nemotron.py",
+      "sha256": "694027b8949e6e474cdc31f355468861b6d80294899c390c48525759c2d93f83"
+    },
+    {
+      "path": "models/deepseek_v41/nvidia/specialized_decode/attention/indexer.py",
+      "sha256": "e8fd3d5cb52debb2233d7447c985c29f40c0d9fd95c19f2b2895c9d0a47e8808"
+    },
+    {
+      "path": "tool_parsers/cohere_command_tool_parser.py",
+      "sha256": "a28510d71b3c3689fb980600482c6822b9ddec31035da6e3d206223e21154e4a"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/runtime/hybrid.py",
+      "sha256": "b1fee36814e5fb89aa1c5c9b0ced91c7a82b2d02871075edbe8909b48308d8b0"
+    },
+    {
+      "path": "transformers_utils/processors/kimi_k25.py",
+      "sha256": "5d6718c0d0e2e412c8bc4b2f24c383050e48a883986ed6a07b62a517ae13cf6b"
+    },
+    {
+      "path": "model_executor/layers/mamba/ops/ssu_dispatch.py",
+      "sha256": "e9589bb637bfe73ad20efdfc79ca44408b6a9613085c3b11528eadaec9a52bdf"
+    },
+    {
+      "path": "model_executor/models/funaudiochat.py",
+      "sha256": "69a7948f016e1bfad240646baeedf12cfc722e847043f245f916ec86ea08ff92"
+    },
+    {
+      "path": "distributed/weight_transfer/sharded_rdt_fake.py",
+      "sha256": "4406de95570955f85880077a9e36c95c4e767461a25df9c2cd2385525072c340"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/prepare_finalize/no_dp_ep.py",
+      "sha256": "1f3c0bc71e01209690e787c52554eb358ae56eb78b730a9572ba047f8ba2593b"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/cutedsl/common/policy.py",
+      "sha256": "5cf8bca94bf3ed5b753eb23d618e53698a7891e5136d20794152600a5bf03b35"
+    },
+    {
+      "path": "models/kimi_k3/amd/ops/flydsl_sparse_mla.py",
+      "sha256": "5bdca53664dd61939b138d3476943f02cecb3d7dff553ba9d5daad044a221e16"
+    },
+    {
+      "path": "distributed/device_communicators/mnnvl_compat.py",
+      "sha256": "e5730d4b638384e5e9476a8e91a010a21a2fecc2bb12750f7e71586717219b07"
+    },
+    {
+      "path": "models/qwen4_exp/nvidia/ops/__init__.py",
+      "sha256": "5411ed7a26e8f839344d18eb2476b5b7ba85439177e37a59051e1010ce9af749"
+    },
+    {
+      "path": "model_executor/models/step_vl.py",
+      "sha256": "348a7e4d5260d68232d91fe13a3b1a9a6badca4799457f1b7c8a1a8a112adcb2"
+    },
+    {
+      "path": "model_executor/kernels/mhc/__init__.py",
+      "sha256": "18cc2ce76c323d5b3129092ca8503cd09b28c7075acffc72d333ec35248c6574"
+    },
+    {
+      "path": "model_executor/model_loader/reload/inplace.py",
+      "sha256": "e534194e0acdf27c694f6fb51a8904601fb144eaa798c17fb3e9bb6db126adf5"
+    },
+    {
+      "path": "tokenizers/alpamayo2_super.py",
+      "sha256": "dafe83fa9406ec7070a69cbbf58a529e66066343004471721b9d09f49f68c8b9"
+    },
+    {
+      "path": "entrypoints/speech_to_text/base/serving.py",
+      "sha256": "6cb1f58f69fcf439bedca70bece6ed4beea54d0c9ace43407b78fd2143886626"
+    },
+    {
+      "path": "lora/ops/torch_ops/lora_ops.py",
+      "sha256": "f954dbddf4639ec8455f4658f994386a63fd4f5545e36a4d247a30067b95310a"
+    },
+    {
+      "path": "utils/__init__.py",
+      "sha256": "c58b3f45deeb98bccca22c945526fd15d483a2f5eb8a3c62cf7df218b081885f"
+    },
+    {
+      "path": "models/minimax_m3/amd/specialized_decode/runtime/__init__.py",
+      "sha256": "d50c5b04f0d077fd102b7e77e11a9e60a93bec4d4be4715234c3bc1cc5c4fb3d"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/runtime/markov.py",
+      "sha256": "d703be093282351d321f7577f57f06845b072f134f1fd12cc4848bc74d63cfdf"
+    },
+    {
+      "path": "entrypoints/speech_to_text/realtime/api_router.py",
+      "sha256": "d9317fe25e86b1930039a8bd3452c079cb400e115b54fbd989e7a8166897ce42"
+    },
+    {
+      "path": "entrypoints/openai/decisions/state.py",
+      "sha256": "0bedf03db4c424b7d3c9a2a19c8bd58aa563dc8281edd8ee3375b7ad36a2dea0"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/model.py",
+      "sha256": "2c148a35c2fe44a2ec6dd47bd12e944f5d583d41a9f1e0e30581efd820aa4936"
+    },
+    {
+      "path": "entrypoints/serve/tokenize/protocol.py",
+      "sha256": "09db81bcd56b7121d9a0ff45c58555dad4ec597340385684504d740099bb4ac6"
+    },
+    {
+      "path": "models/minimax_m3/common/varlen_decode.py",
+      "sha256": "c345f6d8248d864063a76acce71acb4a7fd96fafee84448e219a5fea1a2a7587"
+    },
+    {
+      "path": "v1/worker/gpu/sample/output.py",
+      "sha256": "57798ee9f0ff8607dc0f294f41fcc0426cf4f4ddafeaca456a8e711a17940b24"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/index_cp/host.py",
+      "sha256": "420b600959b5c859552ebaebe0a85a445b2f0fe7a2fc3fb7d07616821b315d26"
+    },
+    {
+      "path": "v1/spec_decode/dynamic/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "parser/utils.py",
+      "sha256": "f1ae14a452e48f69c5f6647aa74ae3df20f04e7e50e264fda985f33e44107653"
+    },
+    {
+      "path": "models/muse_spark/nvidia/ops/all_reduce_dual_norm.py",
+      "sha256": "e5347a2ae581ab3229f6248668969b5e7a804b943a6e98c187d2e6ef279a487c"
+    },
+    {
+      "path": "model_executor/layers/attention/mm_encoder_attention.py",
+      "sha256": "4f60310135acf87c5b2655e008d5f24774fb0f2b608ecd8825e2942f1e30af5f"
+    },
+    {
+      "path": "v1/worker/lora_model_runner_mixin.py",
+      "sha256": "c897c4c0bbd713c3b8ec2d4f315d0a66928d7dc8dae4c2bf1aacbd27848b5baa"
+    },
+    {
+      "path": "models/glm5next/nvidia/specialized_decode/cutedsl/host.py",
+      "sha256": "0015d62dc328c1f7af5e0ce6c6e642c5f9fc40f98ec649331e94a6b544405566"
+    },
+    {
+      "path": "models/deepseek_v41/nvidia/specialized_decode/boundary/boundary.py",
+      "sha256": "419d8d2dae36fdd8045cfe9df28f5b7feca6d743ed6ba5927b3187ccd91d91a6"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/moe/shared.py",
+      "sha256": "7f29abd253940ec725b90338469f6cff29adf5d8f45633f4766328945c13775e"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/standalone_ar/config.py",
+      "sha256": "b56cdab81684e1b717edef6e3e4fffd9a74577f2db5950077e1b0d8799df3a1b"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/dflash/utils.py",
+      "sha256": "f0584417149c0a6fa67e700b2a725e40a41f4546a806b26e6cc64b64c59cfd66"
+    },
+    {
+      "path": "model_executor/layers/hpc/hpc_module.py",
+      "sha256": "d2fd36ad73e27fd2cb4b913bc1b35234f0fe4eb5c74752b301e72b6b4f86221b"
+    },
+    {
+      "path": "model_executor/layers/quantization/utils/flashinfer_mxint4_moe.py",
+      "sha256": "88ce56312f54125d2db2024967a317441f074841ecc288f88668adada5d70278"
+    },
+    {
+      "path": "models/beam/nvidia/moe.py",
+      "sha256": "92a2ef1233047a64dcad6950812eec7429739aff7e04b07440134ac14e1c0ae0"
+    },
+    {
+      "path": "entrypoints/openai/chat_completion/batch_serving.py",
+      "sha256": "06f31afff2541cda380b24333c907bd05b9963f7b592bcd59d1e31ec77f7c0b4"
+    },
+    {
+      "path": "tool_parsers/minimax_m3_tool_parser.py",
+      "sha256": "ffa4532be895351b7e38765be3730700e42e414cde1f8be6da59f28f24f8e08d"
+    },
+    {
+      "path": "models/deepseek_v41/common/engram.py",
+      "sha256": "a645fbb2bacdc4b999b5dc450980cbdb430edc69f1fb8911014cdbe37f9cf33c"
+    },
+    {
+      "path": "v1/structured_output/backend_lm_format_enforcer.py",
+      "sha256": "07c754ee35c8d55f6336d80f7c8ee0de58a3f9664311f5192c5db34159d3aa0b"
+    },
+    {
+      "path": "entrypoints/pooling/offline.py",
+      "sha256": "8ed69fe432d302afa8b8bd49f74a507315db2fbd443d4c403c8196ee813bb5c9"
+    },
+    {
+      "path": "model_executor/models/funasr.py",
+      "sha256": "8ea9c2e4c199f6994d75291ad29111b89b06aa33157c21432bd2db14e051ba62"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/nvfp4_sparse_decode/host.py",
+      "sha256": "305608913f0e6efce9ed882a34b328a92bd6a429adbaff882ac3d3e4d6e27456"
+    },
+    {
+      "path": "models/deepseek_v41/nvidia/specialized_decode/runtime/model_state.py",
+      "sha256": "cce09c08759f6a41f73962664be02669d21bf765297c89c93933d9716b98fa22"
+    },
+    {
+      "path": "model_executor/warmup/kernel_warmup.py",
+      "sha256": "2043dc2f6444a22906c3463f80f8a955d820eafd6fe7e37e6b30e41e6b2e5647"
+    },
+    {
+      "path": "models/minimax_m3/nvidia/mtp.py",
+      "sha256": "5d038738b6d50a1ee22a24a6781d07a4f6333728d422b6d49089a3ed331367aa"
+    },
+    {
+      "path": "entrypoints/cli/benchmark/mm_processor.py",
+      "sha256": "dbdc9e44e569fba83afdcc3fe919fbda72b055ed504714c82738eb9ce4240d68"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/index_topk_decode/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "tool_parsers/xlam_tool_parser.py",
+      "sha256": "43adf2bc03d7908ef79088aa1a1dae863453619a3b738f5b7173de5b7d8a2e02"
+    },
+    {
+      "path": "model_executor/model_loader/reload/geometry.py",
+      "sha256": "0cf3d8f3784f0857a74310e59396b0ed5953bb7a29b8798fb8e9c29cdbfdf7aa"
+    },
+    {
+      "path": "model_executor/layers/rotary_embedding/dynamic_ntk_alpha_rope.py",
+      "sha256": "8240ff3a622a76ec4852f060a84a85bb6d9d5439b8cf33a6b49e528114093807"
+    },
+    {
+      "path": "kernels/helion/register.py",
+      "sha256": "1fdbfbab63cc59461bf60120f4edccfcbee08f2d73b63f51d5014366549747bf"
+    },
+    {
+      "path": "utils/deep_gemm.py",
+      "sha256": "e1374206aa0f943a3ef3f69b6c7739e0872670624c386bb51eacd417fe7fef86"
+    },
+    {
+      "path": "utils/argparse_utils.py",
+      "sha256": "6f17fa24bb9f96375114ed464d066bf2064be63545f3d7aa3300d8495876b5c5"
+    },
+    {
+      "path": "model_executor/warmup/qwen4_exp_qsa_warmup.py",
+      "sha256": "165ccbb8eb59f1b4d6dc1921e3b3045dd1925171487a9b828e2538526eaeda44"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mono/dims.py",
+      "sha256": "f07cec3e63d028ce0cb7ec67ae01d6b422b80087ff7b5f8d47c1093c33735626"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/experts/batched_deep_gemm_moe.py",
+      "sha256": "01b7b43628e518608120295b55774f0a1c732bd1232126bfb50cec59d7ef770f"
+    },
+    {
+      "path": "model_executor/kernels/linear/mixed_precision/zentorch.py",
+      "sha256": "2808452f7a1f995cf5f93889149ac2f3f0d11ac595e8e5b3e209299e62c2b113"
+    },
+    {
+      "path": "model_executor/warmup/replayssm_warmup.py",
+      "sha256": "c753a8436e9184006e18e040bb654833d070a2ecb2a1490b5e199aaf20f3a5be"
+    },
+    {
+      "path": "entrypoints/pooling/pooling/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/drafter/model.py",
+      "sha256": "307cb59b2a2cc2b91ef2be73c554f2c2e4ec95659e048bc8ad68dcff068d54a5"
+    },
+    {
+      "path": "entrypoints/generate/base/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/glm5next/nvidia/specialized_decode/logits_gather.py",
+      "sha256": "e2f7cd499a731bebcb843edde68f839dd2dec2dc95e9da20864268461e40294b"
+    },
+    {
+      "path": "model_executor/models/granitemoeshared.py",
+      "sha256": "650ca359dd5d956c583e2ec7c57321ddf524665efbeac740b8d397659d8cb28f"
+    },
+    {
+      "path": "models/deepseek_v41/amd/mono/stages/seam.py",
+      "sha256": "68b5ce5f01e2d84b3cfbcecf0fdf5db70b07f0f4e33a3e09f1afa2a1090521ab"
+    },
+    {
+      "path": "v1/structured_output/__init__.py",
+      "sha256": "87ac14a71f26fe445bb7c73b46914e45b5aa9e3f7fd92c5629534fa5c5df5fc6"
+    },
+    {
+      "path": "models/qwen4_exp/common/ngram_embedding.py",
+      "sha256": "a339fec0afa5efb2890394e5142d577cddae52316d0508f3ad10f3a9de2505cf"
+    },
+    {
+      "path": "model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a8_int.py",
+      "sha256": "443ba6e35a7f775bca70030bb306625b37e3795b7d4f0715cf903be96d9f10d9"
+    },
+    {
+      "path": "model_executor/warmup/b12x_warmup.py",
+      "sha256": "2d44aabb9ef5858872b6be99ae38d0d813f9eb22e5bca433b1e2823a27fd4de1"
+    },
+    {
+      "path": "multimodal/video_prune/evs.py",
+      "sha256": "100cf3258edfe7ab02833c96e456e26d6556a15f8cf6a4e5fe5851c9e1f74cc9"
+    },
+    {
+      "path": "models/deepseek_v41/amd/mono/stages/moe.py",
+      "sha256": "bb0487de3c3ed97e3771c9d83de1139b18085cd43885419ef28300c370985c22"
+    },
+    {
+      "path": "model_executor/layers/mamba/ops/cpu/causal_conv1d.py",
+      "sha256": "95812d1f8d3527d07359639a08983de73b2ff0fbbf84f05c2ebe524785b5ebb1"
+    },
+    {
+      "path": "lora/lora_model.py",
+      "sha256": "5334b26c72c0953221f6acb2495ecadd7e042aec29a20c070d7033fbd875b71d"
+    },
+    {
+      "path": "renderers/chat_utils/tool_call.py",
+      "sha256": "bc17cbf2249b6a5efb977a6c660cc656061dc28d911e9086ac8e55545e1b91d8"
+    },
+    {
+      "path": "model_executor/kernels/linear/scaled_mm/flashinfer.py",
+      "sha256": "7c0598012e0a73b65d1d12fcb23b010e0f925d9c4de2c43f607e0c7c79704df1"
+    },
+    {
+      "path": "model_executor/layers/mamba/gdn/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "multimodal/utils.py",
+      "sha256": "ccaf3542ff9337b4d47ac7f5492c8ab2efe7c8a687d56e78537c6c6cb231ffcf"
+    },
+    {
+      "path": "v1/attention/ops/flydsl_kernels/ultraquant_decode_hd256.py",
+      "sha256": "6c43dcda562e160f7a6bbbd7056bce69e4b3733a63e225c54a6dbe8f251d00bb"
+    },
+    {
+      "path": "model_executor/layers/attention/rswa_attention.py",
+      "sha256": "f479094f93067428cccdba8f2673c5ffeab63ad7f986b129b54a593878f4c05b"
+    },
+    {
+      "path": "v1/worker/cpu/model_states/default.py",
+      "sha256": "98224cdbcc3777df084d7dbc6dd6c068f07c2c699d760b67e2e24c35c743bbf9"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/moe/routing.py",
+      "sha256": "00150172d1713b0dea326169acea6d83b263bc6ce1eaa6e99d324f45708f5f52"
+    },
+    {
+      "path": "model_executor/layers/fusion/relu2_nvfp4_quant.py",
+      "sha256": "440586c3e4220bddd24fcd75f47352e65c3ad7f2ca2489ba7a6a18b2911a4c7d"
+    },
+    {
+      "path": "v1/kv_offload/tiering/p2p/control/zmq.py",
+      "sha256": "f1594db61405ba3c7090b1be0c2374e37034cf094ad01de41be51e4c78987e72"
+    },
+    {
+      "path": "models/inkling/amd/mlp.py",
+      "sha256": "fe662a6450be0c80386d065dc3b60ec3db7cdadc2fb51f691c3d0774870adb3e"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/expert_substitution.py",
+      "sha256": "20a6eb1a67dca0c1649a2003ceaaf5fad62421b6ea07bf2993468d200f7ad54a"
+    },
+    {
+      "path": "v1/worker/gpu/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "model_executor/model_loader/reload/__init__.py",
+      "sha256": "7c34a846b4ce8afbe0f9b19217ca04d78aa89a24fdfeab9973307d8cafef17f4"
+    },
+    {
+      "path": "benchmarks/startup.py",
+      "sha256": "de8e2e46ab647db82f1c0bb0a06bb9808a7e0a80d19a5c5334e13ffd303a1f12"
+    },
+    {
+      "path": "models/minimax_m3/amd/mono/kernels/common.py",
+      "sha256": "728600417f0e070bb13fd4e1e4e9b8af7bc377c44364e7a035f2f474705acdb2"
+    },
+    {
+      "path": "model_executor/layers/quantization/utils/flashinfer_utils.py",
+      "sha256": "b275fdb8212686a602a70f5993505c1d95e6fde11d5d2ec4fdd0bf0d2604970a"
+    },
+    {
+      "path": "model_executor/layers/attention_layer_base.py",
+      "sha256": "2a621239e39a1121488af2ec4b8b36a5b086d62af367276a60c42455fd018a20"
+    },
+    {
+      "path": "model_executor/models/step3p5_mtp.py",
+      "sha256": "3fb0f0c26bdbae3a0d54c61c248be9ca0b3d31741bcfcd4088a3dfcf9f0b9f9a"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/fused_globalize_align_block_size.py",
+      "sha256": "a9069ec3f54132db6a175144806554f140b80f0c9a7860153650103af62615fc"
+    },
+    {
+      "path": "v1/hisparse/backend.py",
+      "sha256": "a6a577efe4f17be4416e2efbea8504f22c9efd0ad2ac5c4a3cbb4c1e8abcb7b5"
+    },
+    {
+      "path": "models/inkling/amd/ops/norm.py",
+      "sha256": "ba24cedb3bb06d66e96584592654f2e63e1b1b578d74a141501c1c338d747da2"
+    },
+    {
+      "path": "model_executor/layers/utils.py",
+      "sha256": "857f8d302c6cf1d39cc71846b663e697ae4aa416c1f4536003ee16ba55644653"
+    },
+    {
+      "path": "model_executor/models/moonvit.py",
+      "sha256": "43509af48e37ff054014d79075ee818caf3b5e189f2d417f74f675bc8b534da6"
+    },
+    {
+      "path": "renderers/chat_utils/chat_message.py",
+      "sha256": "a69b5a3912a88630a833eda47ad34c94a9bccc8df2fa354a48b51ddd1701d369"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp4/__init__.py",
+      "sha256": "b6ec045b6fb05be54bd7879ae25da54056b60127078a2e80faf69c61c42ceb14"
+    },
+    {
+      "path": "model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py",
+      "sha256": "0c3528ad577f50b19cfe77880be29e14dbc53914c8133557c122162cbe06bcfc"
+    },
+    {
+      "path": "models/beam/__init__.py",
+      "sha256": "ef7caaf6400d3cde93c08a9b380be8782631b9fd59fdf49ab0c734da9fffcc8f"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/utils.py",
+      "sha256": "f431690309960bed1ca0574ccfc0193d7b8c8c3fc3ffbd9edd91c7369fc53834"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/moe/ep/comm.py",
+      "sha256": "1935947bfcb619eaf8ee1671a4979c58ea5a3af7567d51627498c188ce615da6"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/drafter/attention.py",
+      "sha256": "0527716e797c202523013bcad0f3c319cb626395b29728fa51175b9adde31fa9"
+    },
+    {
+      "path": "models/flint/ops/qkv_fused.py",
+      "sha256": "2c343686b42818a5bbc49514eb6ba0a8871446a3052c2c22b20acbe0bd8b80f0"
+    },
+    {
+      "path": "parser/engine/parser_engine_config.py",
+      "sha256": "4984485e8f682cf2a9a5703f41c2a4ed0336c6c89915e148d22dfd5570218473"
+    },
+    {
+      "path": "model_executor/models/nemotron_parse3_5_mtp.py",
+      "sha256": "dadd016b8df5fb1f3a0d93c9cf85bfde960804540724d0ad535a089f13cfaaed"
+    },
+    {
+      "path": "v1/attention/backends/rocm_aiter_fa.py",
+      "sha256": "0f6c32a7eaae5ca7d178d4ad64b88fa48604840b750f14430965aea2ec32e7ac"
+    },
+    {
+      "path": "entrypoints/serve/middleware/log_response.py",
+      "sha256": "79d1a8111c2b19bcd2f110224acb2346caccd829557c61d8c25f3a98b7c66df8"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/gqa_draft.py",
+      "sha256": "9ba061bc4123481f64fee5dac6ff5a81f8639c27b5b4a6176ef9d985d3b8e27d"
+    },
+    {
+      "path": "v1/worker/gpu/dp_utils.py",
+      "sha256": "7e4755b4d6ea47c777dfdd4db1446129bc24872db8e06ad6b18b5a0636eed39f"
+    },
+    {
+      "path": "tokenizers/deepseek_v4_encoding.py",
+      "sha256": "aa407637bd2e58f20a16f781ea0bc519d06f74bed49deadaecb5aa5756d7230e"
+    },
+    {
+      "path": "tool_parsers/muse_glimmer_tool_parser.py",
+      "sha256": "f2fcda570ef6df8b12baa8ed7025bb3c778f760614585bb5850591be3dbbde8f"
+    },
+    {
+      "path": "entrypoints/serve/dev/sleep/api_router.py",
+      "sha256": "f07d0a565ff55cf3ba3d784636ff8a7a9bc670395f3d1bc6032a67c0a3a72e5d"
+    },
+    {
+      "path": "transformers_utils/configs/alpamayo2_super.py",
+      "sha256": "4a746fd76738fd8133fcfe4315363b61980a4c2a423f7d1c761a0ffa49542470"
+    },
+    {
+      "path": "model_executor/models/plamo3.py",
+      "sha256": "f24f72de6d1d2dce1c33c4d384dcf31105bee3bdf865850f9ff68c816bfabca3"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/moriio/moriio_engine.py",
+      "sha256": "f3228bdc145e6776c8aa8893abe535901ebf368d3457621c53ef767608d97472"
+    },
+    {
+      "path": "models/glm5next/nvidia/ops/fused_eh_norm.py",
+      "sha256": "5bfd685da6bc3d43f2bdffa48ac741454f026596bd26d8086f6afa93a60898e3"
+    },
+    {
+      "path": "v1/core/sched/interface.py",
+      "sha256": "8c22c37b74c2e2a791f0b8c66d74a0c8f61167c003691b68a144778bd8503613"
+    },
+    {
+      "path": "model_executor/kernels/linear/scaled_mm/b12x.py",
+      "sha256": "16d99389adaea9e315aaef347087c1cc03eeb7a94e04b7239e848f763542b350"
+    },
+    {
+      "path": "model_executor/layers/quantization/utils/flashinfer_fp4_moe.py",
+      "sha256": "9901020b2293ad0a1b5917363bbf3d8989e071e9767eb6d6c34c592055f79329"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py",
+      "sha256": "27f71ec37119f5b04fd35c7116c71f760438513806b630545495a5ef8ff751f2"
+    },
+    {
+      "path": "models/inkling/nvidia/sconv_swa_attn.py",
+      "sha256": "1a003f8075a3c8678dd9a1a380c0c37324673ffe1a331a390435de7e35e4bfb5"
+    },
+    {
+      "path": "distributed/device_communicators/all2all.py",
+      "sha256": "6742f0a423c98cdef2e73b808d84c6773271f4738a6ebab356dd21b2f241b5dc"
+    },
+    {
+      "path": "model_executor/models/qwen3_vl.py",
+      "sha256": "0d953c7963672c6297bfd95c3f1043362975c974025cafba8f40e7f4c9bc8b28"
+    },
+    {
+      "path": "model_executor/models/mixtral.py",
+      "sha256": "30ce726418ea476f456c162ac5c3579a6eff47f57c23c4ee73136174a287cd43"
+    },
+    {
+      "path": "models/beam/amd/__init__.py",
+      "sha256": "7dde1f532eff38b1cc186eb788447077ac276e12c0dad9bbfc39a555a7ad5ceb"
+    },
+    {
+      "path": "parser/engine/registered_adapters.py",
+      "sha256": "009ca46e6ec8dc7a65846f6c1011ec79a0dbc3119dd723a456a235418f548b95"
+    },
+    {
+      "path": "entrypoints/cli/run_batch.py",
+      "sha256": "7d453a22594cf94343fc9972adb3bee15a7cfcebf5aa6c5dc0398c3552b1dd26"
+    },
+    {
+      "path": "models/kimi_k3/amd/specialized_decode/runtime/guards.py",
+      "sha256": "abf70d6ca8c9d78a58a6841e2a4f04818521323724db43e2d38e89525e89e928"
+    },
+    {
+      "path": "v1/engine/utils.py",
+      "sha256": "3dd4ff2abb63d67bdb473c39a96caabf996fe805e1e2d5347882d3c1ea6bab97"
+    },
+    {
+      "path": "v1/executor/ray_env_utils.py",
+      "sha256": "220f9c29f1438748ca2d658ce6a738510d26424e136e2595adaf3669a26c7822"
+    },
+    {
+      "path": "v1/kv_offload/tiering/fs/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "model_executor/layers/quantization/compressed_tensors/transform/utils.py",
+      "sha256": "cceb7e3b402c67defc7a7b4fa0ab80aa0da0cc480c54ae45996d7819504b7eca"
+    },
+    {
+      "path": "_aiter_ops.py",
+      "sha256": "501179136d8c1e910cd931ecbc2e8a721c7292df55b5e77e8167c27fd327848f"
+    },
+    {
+      "path": "entrypoints/generate/label_reads.py",
+      "sha256": "7149166f7058146fb5580d68b6798a6871682d382126900250665b0ad5f5ef6f"
+    },
+    {
+      "path": "compilation/passes/fusion/act_quant_fusion.py",
+      "sha256": "0a64a72e973f8f36aee4e904b3799b8f83a2027ff884b989ad37129c86ad2daa"
+    },
+    {
+      "path": "logging_utils/dump_input.py",
+      "sha256": "8ea7ca4ea5366f63b883923f3f6b27ccfbae2059524d8837dc18d9e4ff3bf891"
+    },
+    {
+      "path": "v1/core/kv_cache_config_builder.py",
+      "sha256": "a7ebe89ffa0edb8c49e450a11c7a9a91ac15a063a627e033d441acc8085e6804"
+    },
+    {
+      "path": "v1/worker/cpu/rope.py",
+      "sha256": "578cb6a27c7ebe106bf0535200cb8d62009acf93797c5c8ca984c9a16f9a1bff"
+    },
+    {
+      "path": "v1/worker/gpu/kv_connector.py",
+      "sha256": "bb70716b5ed291af5e54e2ffa9ca4b549d51e92355fa65f3f88253c9500daeb4"
+    },
+    {
+      "path": "model_executor/models/paddleocr_vl.py",
+      "sha256": "d62212db9a5ab9fb290196318937b6cc8a8dd28aa7ce40790e3ec16ccabf5564"
+    },
+    {
+      "path": "models/deepseek_v41/nvidia/specialized_decode/engram/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "engine/async_llm_engine.py",
+      "sha256": "3f751c61135ff53e463bb8fe363d342d5b3639829bce5d22bdabc620b412db5b"
+    },
+    {
+      "path": "models/muse_spark/common/ops/fused_finalize.py",
+      "sha256": "3ab0b028647f6cee80363c5436fedc374416eb999720ae0c696f7c4a4e7017f3"
+    },
+    {
+      "path": "models/minimax_m3/nvidia/ops/index_decode_score.py",
+      "sha256": "916bec468cb8df37454d149c95a530e850a982c44b6519c0321842bacdbeeecb"
+    },
+    {
+      "path": "model_executor/models/nemotron_nas.py",
+      "sha256": "92017eeebf40e0c85feb74ec6651af861e28bb4984f4d4b9741f4685a08bab15"
+    },
+    {
+      "path": "models/minimax_m3/amd/sparse_attention_msa.py",
+      "sha256": "4136d55f52e6a788f294f9f5765c74c748d8ba66471188cf456c2affd3f5f049"
+    },
+    {
+      "path": "v1/attention/ops/rocm_rdna_hip.py",
+      "sha256": "b3d96019186ed9a58228b4dbdea2ff231823455b08b8ce5607a64e719b7bc692"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mono/attention/back.py",
+      "sha256": "83459214f0a1f0abd75e6dc6a3f61980c152cebd8b700ff7b88ab386213969b5"
+    },
+    {
+      "path": "entrypoints/cli/benchmark/forward.py",
+      "sha256": "77395daeaf1c8cbeeac2ed4b6c40cbeff39df0512b4dec0cb972763e26ad3c67"
+    },
+    {
+      "path": "models/minimax_m3/amd/mtp.py",
+      "sha256": "142f01c15f5ec4ec22614c6ad698b3158459270d1f3bab0143682c3aef6e0b27"
+    },
+    {
+      "path": "models/qwen4_exp/common/qsa_indexer.py",
+      "sha256": "474d0469c786f81e6b47190218ed12d67ecf1304c0e57c299aafe46146dc4312"
+    },
+    {
+      "path": "parser/llama_json.py",
+      "sha256": "28dad3332140d1a34e1ff3c2dc5a6025d1a1266cdd7bdbc8e90acaff4eb0633a"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/gather_scatter_helper.py",
+      "sha256": "067506f7900b718b375fb9b4f1c4f0839b24abeb1870ec012db4ead03b56872a"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/gemma_rmsnorm.py",
+      "sha256": "3da9d4867b3ed71d94349f8cbeca4df904146d6a8107925d1de54bc9be96e9ab"
+    },
+    {
+      "path": "models/glm5next/amd/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "model_executor/models/conformer_encoder.py",
+      "sha256": "8ca8b139570048c6adc09d11defbc46a29dba6a9482ae20093b691a3fda2e3fc"
+    },
+    {
+      "path": "entrypoints/generate/base/protocol.py",
+      "sha256": "e7994bb33524b297b7a473d22be85175c09ca1c8fc1addb5693654e5fcee0a4a"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/cutedsl/gemm/unpooler.py",
+      "sha256": "dcb196096097f27bd88fc39530f3d72fa12ea89e1a0f288f9c672daf3c1b2a0c"
+    },
+    {
+      "path": "model_executor/kernels/linear/cute_dsl/skinny_gemm.py",
+      "sha256": "01ab1f1e8ed3a0c1ce455f09cb63a0501f52c6169b21541cfc503b9b524bb897"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/common/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "models/inkling/amd/ops/gluon/rel_mha_extend_gfx950.py",
+      "sha256": "97b219b4b3a41c29cf7751d2d2b6089bcc781dac2362b644cfe9127ed7973b7d"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/recoverssm/cutedsl/verify_ws.py",
+      "sha256": "7338ca7d0c842860f8360e462f38327d6e4e0c43cfb1d9cc37bbdc309a3e0de5"
+    },
+    {
+      "path": "entrypoints/generate/beam_search/online.py",
+      "sha256": "5bde29b33b4545eee442347a12e63ab01ee9a20df8ac0f9e25dd75b3a0c31595"
+    },
+    {
+      "path": "distributed/ec_transfer/ec_connector/mooncake/memory.py",
+      "sha256": "d5e90b1348de670a70f110d58eedcbdbd053db72c21dd007c3f5275c53951149"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mono/common/mx.py",
+      "sha256": "b61e4afc8d0dc71e47ef5181a89ac7ab926d021d54750517a083641b091c3db2"
+    },
+    {
+      "path": "v1/worker/cpu/model_states/__init__.py",
+      "sha256": "2cf3feb9b3d6240903290ccce9c99b20d2805825a04b20ef62c8539bf7b6c148"
+    },
+    {
+      "path": "inputs/llm.py",
+      "sha256": "0fd0fbbbecb6f8ad8d73966dcabf11afc90f8df3f1727b40c0c016aaa34296ea"
+    },
+    {
+      "path": "models/deepseek_v4/common/rope.py",
+      "sha256": "3a77ebd2cbe03fb36820a307a8bc65020b4988906ddc33189b8ae517f3ecac44"
+    },
+    {
+      "path": "models/deepseek_v41/nvidia/model.py",
+      "sha256": "82adf28091ed147b56e484a563252a6b210b5b3ea7ef89f222604fe8ec231c31"
+    },
+    {
+      "path": "entrypoints/openai/models/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "model_executor/models/audioflamingo3.py",
+      "sha256": "c59aac72d3d36f1b28ebe90cb33251d1ed85a6f89396139496ea26e670b4a44e"
+    },
+    {
+      "path": "models/minimax_m3/nvidia/ops/norm_mxfp8.py",
+      "sha256": "c379d047790b06a08886ae02302b53913c4b2cba2c462ef371efba088c3a62da"
+    },
+    {
+      "path": "models/deepseek_v32/nvidia/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "entrypoints/launchers/api_server/app_state.py",
+      "sha256": "a6f28a9f713ab7a4fb1e6af3a277ce4477523a2ff64d08e7c2d5548d8975290e"
+    },
+    {
+      "path": "entrypoints/launchers/utils/constants.py",
+      "sha256": "0695267ee0ffba4c5c2f953e4efc872142f9bd28a85b59c41cc9692ce2526979"
+    },
+    {
+      "path": "model_executor/kernels/linear/scaled_mm/cpu.py",
+      "sha256": "da3b9b81d896f77bc9ddc9dd047c1d32dcc27847aee679ec875eb1d077bc55ee"
+    },
+    {
+      "path": "parser/minimax_m2.py",
+      "sha256": "2e3f1b510a1557452a827fe3a40cc2840cdea6d9fa31273ee10d7dc25f654443"
+    },
+    {
+      "path": "model_executor/hw_agnostic/layers/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "transformers_utils/processors/isaac.py",
+      "sha256": "32bf810c67f4eeef40a8f10f492fc25bd1b46ef45e95384224a3776c04439709"
+    },
+    {
+      "path": "v1/attention/backends/turboquant_attn.py",
+      "sha256": "f57db2ae2ea8dbf52a83df1245c32d8328a999e0940bd4513723bf2884ea42bf"
+    },
+    {
+      "path": "transformers_utils/runai_utils.py",
+      "sha256": "26389917fd3777e2c962b09ae1afc73bf6948c276e2759f8bf7752b055f0b50f"
+    },
+    {
+      "path": "entrypoints/openai/chat_completion/message_assembly.py",
+      "sha256": "cf030e0047673ab9822502adefd2d1725de782ef48883169fb623e2e489cc07b"
+    },
+    {
+      "path": "distributed/weight_transfer/sparse_nccl_engine.py",
+      "sha256": "6e9e0d43cf96eaa3418998647f0f68226ddbf6ad5dffbc284bd2ff4d163ffe71"
+    },
+    {
+      "path": "models/inkling/amd/ops/gluon/rel_mha_decode_gfx950.py",
+      "sha256": "5a3d4c7477f209b8172806e5f77075dcb2b5b31d711897b2f7da43bfcef695a6"
+    },
+    {
+      "path": "tokenizers/deepseek_v41_encoding.py",
+      "sha256": "c58e99d386716226242c6a278882decfa8a30f33be2d33f1b1549e2e8d9125f0"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py",
+      "sha256": "60c944deb34af7530f6220e484257940cdd2aa74c0eac4fa1f5ad647f667d22c"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/runtime/logits_gather.py",
+      "sha256": "a747c513aca326b30b11de15ce6e1898f617cacc8ea57b2ea978a47f7e2d6a69"
+    },
+    {
+      "path": "entrypoints/serve/exception_handling/error_response.py",
+      "sha256": "66f9eee71606efaf478aca09e271abeefe952f94f3c2d71dd5d697b121831481"
+    },
+    {
+      "path": "tool_parsers/inkling_tool_parser.py",
+      "sha256": "a23d1d7d492df8c2a2b518fbfb21c2f4382b96682825b60468a72a91dcab4354"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/cutedsl/draft/input_norm.py",
+      "sha256": "04ac7dc21e73de68e048d48513a73b1616ec1d1d26f59ef85a180422588a217f"
+    },
+    {
+      "path": "model_executor/kernels/linear/nvfp4/pytorch.py",
+      "sha256": "5d2adbf2ac8caa280124648fb91db221261186650690ccd883cdaf297cb1b572"
+    },
+    {
+      "path": "v1/attention/ops/triton_unified_attention_diffkv.py",
+      "sha256": "9afa267080a4298dfb12da010db44bd4e24d361b32610c39089302431275fbe5"
+    },
+    {
+      "path": "model_executor/layers/mamba/ops/scatter_states.py",
+      "sha256": "1879c4d2255d76c820c9e6ccce300a8edca0ec06e991f54f404e65462fa53fa2"
+    },
+    {
+      "path": "entrypoints/openai/decisions/api_router.py",
+      "sha256": "06dc7180a2aa2a03681649093a6f4ebcc2244726302aa0dbd1db23dcb761099d"
+    },
+    {
+      "path": "entrypoints/rl/offline.py",
+      "sha256": "6c18fb3806b100c19d1b3c01b17c6d040ef43a41dccc7f4e8112a353f9a089e8"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mono/stages/__init__.py",
+      "sha256": "3e14bfa90e59f8dcc02eba8f9441b9ecf5cc5abc6bac1ee44434879dc8ac1c25"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/ngram/config.py",
+      "sha256": "b526bf42eb45369a4b18feea36573a83b08d1f82ece98725e024bcae634495c0"
+    },
+    {
+      "path": "entrypoints/serve/dev/sleep/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "model_executor/layers/quantization/online/moe_base.py",
+      "sha256": "48159c2fe6ce645f33ee401a3030e15cac2582bf2250aceed94a687c784b2a45"
+    },
+    {
+      "path": "tool_parsers/kimi_k3_tool_parser.py",
+      "sha256": "3d3f4046f176f2419f83ffa34bafc414a4d0c2ef69a904d1e9e3383b62354126"
+    },
+    {
+      "path": "v1/attention/backends/linear_attn.py",
+      "sha256": "bc42144fcd027434c6a10dc9f4c5f991db8899d387af5f6485402ce097eb0513"
+    },
+    {
+      "path": "renderers/deepseek_v32.py",
+      "sha256": "accd5bd390c1dee4d093ffc92db6a343925ebb72cdc4798d04207fc87118d809"
+    },
+    {
+      "path": "transformers_utils/configs/nemotron3_5_transcribe.py",
+      "sha256": "ec4cf72a525d317571a2c377f5c04fb860ec073a9eb006328de12b40cc37f60d"
+    },
+    {
+      "path": "models/deepseek_v41/amd/mono/common/sync.py",
+      "sha256": "3c8c8e9b7cfc124c21c1f535077c18a3a7123cc6d9d70613c8fcce29a8a51012"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp4/aiter.py",
+      "sha256": "643386f8a2e551211738f58bb0fb2013eb5c6bb41c73f30fc810a1253ee1b6b4"
+    },
+    {
+      "path": "v1/attention/ops/rocm_aiter_mla_prefill.py",
+      "sha256": "f4d4cbed16f01b1bc1b2cd47d9f79301700df3afedadd6fa8680824c69ff865d"
+    },
+    {
+      "path": "sampling_params.py",
+      "sha256": "b72fe9f3dd5ce2e26f1494f59f428474041ee350b2ee5d03bac6efa23a8e4947"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/oracle/base.py",
+      "sha256": "1b7ca0ab01176bad31f3ee05b0d163c6cfdbc670ed131648218c62427d7c151c"
+    },
+    {
+      "path": "model_executor/layers/quantization/compressed_tensors/transform/module.py",
+      "sha256": "f86ba386de34ecb8e3319c76c745d43192596eddda2dfbb07bb6bbd42338e1de"
+    },
+    {
+      "path": "config/model.py",
+      "sha256": "11f48787bcb689a916ae5148ebb9710e3becd782bbd509c06349357bc61c00fd"
+    },
+    {
+      "path": "reasoning/beam_reasoning_parser.py",
+      "sha256": "fd8566213ac8b36f53f33511c804cffdaa492aab3a3ec8711c12ec3181f7754b"
+    },
+    {
+      "path": "v1/metrics/loggers.py",
+      "sha256": "1406f3bb56279ea00425c677389d796dde0f6b869ba142415b65bc96a5208a0b"
+    },
+    {
+      "path": "distributed/kv_events.py",
+      "sha256": "53f7eaa2363672623d56e862ea663248f22246b785d4db0ec8e4b3bf5fa8069f"
+    },
+    {
+      "path": "model_executor/layers/vocab_parallel_embedding.py",
+      "sha256": "0e3ca8f24d9d274edfb76a2ca66f7ee63bb92309fc8c6a11e31761685306d2b5"
+    },
+    {
+      "path": "transformers_utils/processors/step3_vl.py",
+      "sha256": "ce0265261a6bffaf40b98911ef5b9babe30d20443af83a4c8ecf251ce6a861fa"
+    },
+    {
+      "path": "v1/kv_offload/cpu/shared_offload_region.py",
+      "sha256": "93f7e3129c64164eb09dc626d86d0494ce83152b0a16328b58fe4c2c4cefd381"
+    },
+    {
+      "path": "entrypoints/serve/elastic_ep/api_router.py",
+      "sha256": "57ff464b2c9d9373aac70e3f97b0e2459e3c011532505ba4cee36e2bbb609f54"
+    },
+    {
+      "path": "models/hy_v4/__init__.py",
+      "sha256": "419dcf312387a2f2c87cb958f986b58bc7d94d31692b4845ba598d980ccd5220"
+    },
+    {
+      "path": "v1/worker/encoder_cudagraph.py",
+      "sha256": "dfef9837bfa44af78ed1ff939347c25c3aaa6e484f26ea6f2678febd2664e841"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/runtime/decode.py",
+      "sha256": "61f8a44543a66dccc5ad80f02c48e1dd53439091e368bb12406c6fa4c1c44654"
+    },
+    {
+      "path": "v1/attention/ops/cp_common.py",
+      "sha256": "cdd0f12c5c2fadeb490bd3fca84ee97c7f2599f35dec95a763a99c4b6866f0de"
+    },
+    {
+      "path": "model_executor/layers/fusion/relu2_fp8_quant.py",
+      "sha256": "e846b6f6f4952030be2d23883bf613a8d1c25ab2d9bf6851db1a0aacdf448e3d"
+    },
+    {
+      "path": "model_executor/models/mistral_eagle.py",
+      "sha256": "78558ae900a282ee3ad60c33c8b16167d779a7213832c222abee9e29dc0fa62f"
+    },
+    {
+      "path": "models/inkling/nvidia/short_conv.py",
+      "sha256": "7381a78e047d4cca1eb68ab1f373647d29bc024fb56310e9a03d246820506f24"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/common/primitives.py",
+      "sha256": "365c52864c36ccf77737ac0766c000b649d677e2bdbad769f5133b89558c9b11"
+    },
+    {
+      "path": "parser/engine/token_id_scanner.py",
+      "sha256": "9c84fc104978bfa64a5c8ca2c9b88f4f3a8bcfcedefe10a54b177dc3228d9e5d"
+    },
+    {
+      "path": "v1/hisparse/layout.py",
+      "sha256": "42b8d9c6c7df5588ab541976afc0e62003d87652f943c0868876acb15e9b9c62"
+    },
+    {
+      "path": "v1/attention/backends/mla/prefill/aiter_flash_attn.py",
+      "sha256": "69f01bbb1d6acee7b352a92d2eea5e0d26311ccf1407fdad407672139b3de899"
+    },
+    {
+      "path": "model_executor/models/lfm3_audio.py",
+      "sha256": "e57f89e7f62b6970bb9e33de168cd3a85c60f00984555c819321ba0c9c857704"
+    },
+    {
+      "path": "models/deepseek_v4/amd/mono/attention/front.py",
+      "sha256": "9b71d8b0d3a685d2fa661f4822452afbf9e2df2d715b616ccc1e255a1d580266"
+    },
+    {
+      "path": "models/deepseek_v41/nvidia/specialized_decode/moe/routed_expert_route_cute.py",
+      "sha256": "125af8a16ac2688bc37bdfc3ffaf9f47cbb11cec074d8a042c0bebf245431c2b"
+    },
+    {
+      "path": "model_executor/models/exaone.py",
+      "sha256": "f81273040ada885cb571810f18977d5e8d25fbbbe497023ae82e38f6aea45416"
+    },
+    {
+      "path": "models/muse_spark/amd/ops/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "model_executor/models/mllama4.py",
+      "sha256": "0767ba8690d4a4bbfca18fad329647bae64d6282f31116ad9f925064dac6d2a8"
+    },
+    {
+      "path": "models/kimi_k3/amd/specialized_decode/runtime/decode.py",
+      "sha256": "7416c55458070d067b01fc3a924aab7b6ccebcc837b66d61578bd13d535aa888"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/kda/prepared.py",
+      "sha256": "f248f13cbe0e9f435f659bb04bdc7b157943e0170e38fd5049577a1849c7fe37"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp6/emulation.py",
+      "sha256": "4547033229ec5d815de9fa36351408b9c2f0d64724bc055cb499b7504456540e"
+    },
+    {
+      "path": "vllm_flash_attn/__init__.py",
+      "sha256": "68d256feb9db6c1c397dc1458f6b42e2bbdc66429ae14d6a2d41c27ef0dbd878"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/experts/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/specialized_decode/cutedsl/common/policy.py",
+      "sha256": "ea8aa4ff9e7af62aa9391f9fabf1ab989ba766d20c2424d95800adf922c92015"
+    },
+    {
+      "path": "models/common/ops/sequence_parallel.py",
+      "sha256": "eeb9958f49644c12378a7ef20af514400ccdc3d778e7b3e11e7d869f230fc466"
+    },
+    {
+      "path": "utils/nccl.py",
+      "sha256": "d47f5aaaf9505337c42e4429cb0466361e9a50684a40fd17dced31e1a7d752db"
+    },
+    {
+      "path": "v1/worker/gpu/shutdown.py",
+      "sha256": "bb470f14b17c7e52571ef8938b2a9527e7c2846852ae8a3a94b69cd1c30aa4b1"
+    },
+    {
+      "path": "distributed/device_communicators/pynccl_allocator.py",
+      "sha256": "5eb6108ef0c8c2b83ff8d312b70a9e60203939edc04461bd4c54cadd30b1ff6b"
+    },
+    {
+      "path": "parser/harmony.py",
+      "sha256": "f3939416d997d6a5ba0bcaae63c83a1a2012acf37a4f72518f5e3dd6b52ccb71"
+    },
+    {
+      "path": "entrypoints/scale_out/render/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "v1/kv_hints/protocol.py",
+      "sha256": "c07e24c41dd695bf92eac6740c86bf9fc4d2140d410035b57f2d42e2afd802a3"
+    },
+    {
+      "path": "models/muse_spark/nvidia/specialized_decode/cutedsl/moe/pooler_gather.py",
+      "sha256": "9a56eb4b33b01a649a1d2fdd2a918f89414fa83208b56434def4567f0e534e0b"
+    },
+    {
+      "path": "platforms/__init__.py",
+      "sha256": "5460e7a751717eca51983d05891b33b1796963a419343a9c16f0a5858e014440"
+    },
+    {
+      "path": "transformers_utils/processors/fireredasr2.py",
+      "sha256": "82459eaf1bc027f2fa657351dfd0aed57430a9ed98c9341fb840b4de06128d10"
+    },
+    {
+      "path": "model_executor/layers/mamba/ops/cpu/gdn_attention.py",
+      "sha256": "bf76089107de44f43a9f7184d3c8ffa8c9df76a01096db3f20dbfbc296613db8"
+    },
+    {
+      "path": "entrypoints/openai/api_server.py",
+      "sha256": "34d8871fc5877cce014c69cebd105b756cce600d5e16f3b950041cbe5facd6a4"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/experts/fused_humming_moe.py",
+      "sha256": "411d19be9975f6311ed3bd1ae7f76572fcd1f4cb42c1ece9daad4bb224f336c8"
+    },
+    {
+      "path": "v1/kv_offload/tiering/p2p/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/ops/cute_dsl/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "v1/attention/backends/mla/index_group.py",
+      "sha256": "0a25c4558357f568144ac17d74c9fc796b576bf5c94817c95623c36fc9b860ba"
+    },
+    {
+      "path": "model_executor/models/nano_nemotron_vl.py",
+      "sha256": "46da7c0f79e9587076ecde70d4125d1e4114a48ca9fb81c7c1fc7b3df74c24de"
+    },
+    {
+      "path": "model_executor/models/internvl.py",
+      "sha256": "32aca0116ece9f898fbaec139872b5ea469e8099f7d6d215f6ac7d269ad63631"
+    },
+    {
+      "path": "model_executor/layers/linear.py",
+      "sha256": "1e28939de3073651453540bd73ac53e2f98c893cc535f62baa5f2eb089edd4a5"
+    },
+    {
+      "path": "models/minimax_m3/amd/ops/index_topk_decode/parallel_kernel.py",
+      "sha256": "021e9376f3beb867a713b01c2d5b3001aa18c0b0a2f953462a5bbca42a21601e"
+    },
+    {
+      "path": "model_executor/offloader/base.py",
+      "sha256": "98610377107b8e83d91f810134132877546400b1b09d9a7528d3ba1a2c791fdc"
+    },
+    {
+      "path": "v1/worker/gpu/sample/logits_processor/interface.py",
+      "sha256": "a5f483282b3df1f818f466fed7fee70533437341187c9edf57394c311b80fa63"
+    },
+    {
+      "path": "config/ec_manager_config.py",
+      "sha256": "066822eec2c59e3e26b0b23df86de4bc05a928c0a4e60ec2f4ad6077c1585aa3"
+    },
+    {
+      "path": "v1/worker/gpu/sample/penalties.py",
+      "sha256": "71b027bcdf6222d202768e6c5f220372c63d8d04822f22c9dab28ba518dfa06b"
+    },
+    {
+      "path": "v1/attention/backends/rocm_rdna_attn.py",
+      "sha256": "e041f4bb216e9ae3788643d39a73607f4660d3cca95d6de0554c3f8b557e8b6a"
+    },
+    {
+      "path": "reasoning/deepseek_v4_engine_reasoning_parser.py",
+      "sha256": "10e0989e12888d4a37ef9d2474a002a6b30f459be552bd621b541feb7a2606f0"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/umbp/stats.py",
+      "sha256": "db4038928697d0bbddf9211e294b9d899e586d2d9e25281697ed767c3620b220"
+    },
+    {
+      "path": "models/glm5next/nvidia/specialized_decode/cutedsl/finalize_publish.py",
+      "sha256": "e3b5e3445f41bfc6116fde4c44b78d59a8835686b48ef098dcb4c23dab1e4a92"
+    },
+    {
+      "path": "models/inkling/nvidia/ops/qkvr_prep.py",
+      "sha256": "0e0d513903d635a83e234aff593d53c97f9392b49738bc6d1ad5b368590f7c52"
+    },
+    {
+      "path": "model_executor/layers/mamba/ops/ssd_flashinfer.py",
+      "sha256": "40153dd6fac700e1a8bdceff13d0eb9d00df6f174ca66737ff6aa070e48b4094"
+    },
+    {
+      "path": "tool_parsers/deepseekv41_engine_tool_parser.py",
+      "sha256": "fa6ee39fd90feae5f7466afdda2c745173737b824c6d65c56f828304dc2114ee"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/autoregressive/cudagraph_utils.py",
+      "sha256": "a998dd516d899c48994504c04e1409b1c3abbc28a1901cda6e31ef35cdae38bc"
+    },
+    {
+      "path": "entrypoints/serve/exception_handling/handlers/http.py",
+      "sha256": "ae710c07f319f56e105a8d143300b0d1042ab4cdedc437da2c7dd88df21e5a18"
+    },
+    {
+      "path": "v1/kv_offload/cpu/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/extract_hidden_states.py",
+      "sha256": "8c81e82f537180f0ed47ba62b95d2ff0ca381adb7b4dc1a5ace92ecc0dfafb6a"
+    },
+    {
+      "path": "v1/structured_output/backend_guidance.py",
+      "sha256": "16790e85b93929fabfe494ad812f3c91f40d387c04d53c72a244ebcdb3fde7dc"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/experts/zentorch_moe.py",
+      "sha256": "c4507e4754b5d7157aa5d27d7acf8b55e375e934ab778ddf3a3f42c0bda16d6f"
+    },
+    {
+      "path": "model_executor/kernels/linear/mxfp4/rdna3_hip.py",
+      "sha256": "917d59530ce9f8eb106c4d078b2ca7f8a2db682744bf642760e49cd9db9239f9"
+    },
+    {
+      "path": "entrypoints/anthropic/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "entrypoints/pooling/scoring/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "lora/layers/custom_layer.py",
+      "sha256": "9f54939ccbf7d36d233f78aa5f045e3864c6b9fc346279a83ec75d06a49d2f46"
+    },
+    {
+      "path": "models/inkling/amd/model.py",
+      "sha256": "b0b4c15809001c7a75d5b7d53c4b8bdbc8650682906fafbd1b4c94387b798dfe"
+    },
+    {
+      "path": "tokenizers/registry.py",
+      "sha256": "61ee47bc6aa90e7890006bb3b33518f6c81de30015cb1a15e7cd37e7787efbd0"
+    },
+    {
+      "path": "models/deepseek_v41/amd/ops/topk_pack.py",
+      "sha256": "22c14c803888dc60f10408fbda79476b244514d61083cb70902cbadec2440fb4"
+    },
+    {
+      "path": "model_executor/kernels/attention/dsa/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "distributed/ec_transfer/ec_connector/cpu/data/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "models/glm5next/nvidia/specialized_decode/gemm.py",
+      "sha256": "c5cd1a644b52b423d9944b4b32c432d0f34ac632159650868a7ea319a1a18067"
+    },
+    {
+      "path": "entrypoints/pooling/classify/protocol.py",
+      "sha256": "5e8b0dadf22987f96a13f15c0be436e3ca6714273483d8574d1f313553848b47"
+    },
+    {
+      "path": "platforms/rocm.py",
+      "sha256": "39eb2ff463e8635de5fd0a4b0a42fa1d8d8a82e4f9df23191a40698b29c9a52e"
+    },
+    {
+      "path": "tokenizers/protocol.py",
+      "sha256": "15ec34808171509114ce97dd1fa903475ce2e4699a862321e3f59c075518573c"
+    },
+    {
+      "path": "logging_utils/uvicorn_logging.py",
+      "sha256": "f363f3f8bd2582665168bc948d720f622b6fa50337afc166ed1ccc06857d8b8a"
+    },
+    {
+      "path": "models/kimi_k3/amd/specialized_decode/hooks.py",
+      "sha256": "28f4b5179a29710fa5cf43259671e6b8ad66f8e149b290824d73d95d90cbde1f"
+    },
+    {
+      "path": "model_executor/models/gemma4_dspark.py",
+      "sha256": "b99b0e1c5b54909e51f4ba8a73d09f659b5903b177d281885fdfa726c2d4f92b"
+    },
+    {
+      "path": "utils/b12x.py",
+      "sha256": "8efa7b788b46a74a8d4688d03f91d76a377e59caf08887ecf0059d7702d09372"
+    },
+    {
+      "path": "model_executor/models/moss_transcribe_diarize.py",
+      "sha256": "415204cbe78197af9034c4ebe8820987a19ac13029343264d94a15a9137f2460"
+    },
+    {
+      "path": "transformers_utils/processors/internvl.py",
+      "sha256": "5d0c15c65fc09a3d21fd1b2c410f31869b88e8521416ca3da713df673f11a5c3"
+    },
+    {
+      "path": "models/glm5next/nvidia/specialized_decode/all_reduce_mhc.py",
+      "sha256": "87b86af3756c16cf5037e4c123e82f9261cdda5ae1ec84f74a14e104d98e881d"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/hisparse/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "model_executor/layers/pooler/abstract.py",
+      "sha256": "dbfe570a976ec26b70da4f5c9e3d8cdf89c9389425fc870e613abbf6f0b59916"
+    },
+    {
+      "path": "model_executor/layers/attention/sparse_mla_mask.py",
+      "sha256": "59562acfdd64194009e6b91fb867584a3138a987392d5ba23781c28ab67173aa"
+    },
+    {
+      "path": "lora/ops/triton_ops/lora_shrink_fp8_op.py",
+      "sha256": "11050dd01de393de36bbda269666b1bb68e977a19e945a6f0fe76edcc07c1e5d"
+    },
+    {
+      "path": "v1/worker/gpu/spec_decode/xpress/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "compilation/decorators.py",
+      "sha256": "807cd66f49dd26b3deb4cd5f0f304aed1a449ac60dabe88d2ca8a396926c720e"
+    },
+    {
+      "path": "model_executor/models/exaone_moe.py",
+      "sha256": "3ac05df11a0ed8843197f3e4203d1183d6c4c7d0e493180a44588ce4d57db50e"
+    },
+    {
+      "path": "model_executor/models/exaone_moe_mtp.py",
+      "sha256": "92f527277614be6f1bf042aef5732d770d0fd81dc6ee94a0eabc37449abcd71f"
+    },
+    {
+      "path": "tool_parsers/hermes_tool_parser.py",
+      "sha256": "43fcb35b2ad6737bafb0c5a5ae396ab1bc1a5d85a5ec0666e64290f92fc04e6f"
+    },
+    {
+      "path": "model_executor/layers/rotary_embedding/phi3_long_rope_scaled_rope.py",
+      "sha256": "013f3d8660460a6194b57d61a32e1a80a65f61d1ddf7c7899c4d5f1a5ce44150"
+    },
+    {
+      "path": "models/muse_spark/nvidia/ops/cute_dsl/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "parser/engine/streaming_parser_engine.py",
+      "sha256": "a17df2f43c3605ce0999c35a9d299df6e8cd9aaf482cc4d51a8d832764251089"
+    },
+    {
+      "path": "model_executor/layers/fused_moe/prepare_finalize/deepep_ht.py",
+      "sha256": "7b8270588bc8066f6b48987068d7342a617e12ab0edd877d9a800033490cf5a2"
+    },
+    {
+      "path": "models/glm5next/nvidia/sparse_indexer.py",
+      "sha256": "ca79da955a66c773d09ff129958bbf1b9d8ab37d8ca96bb07bf9536e32d619f1"
+    },
+    {
+      "path": "v1/worker/cpu_worker.py",
+      "sha256": "7bb914fa91919f95b1058693c7027da40890d5245448bd18c92bcac4b94473c4"
+    },
+    {
+      "path": "v1/structured_output/backend_xgrammar.py",
+      "sha256": "852d773079a80c8cdd408b1e43cbc235899a8478776f5b1face3a6ef2a2ed155"
+    },
+    {
+      "path": "model_executor/layers/logits_processor.py",
+      "sha256": "e1fac869aef80f6c398b92d61444186d1921740dab7df41b95a260b08b4c25d2"
+    },
+    {
+      "path": "models/deepseek_v32/amd/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "model_executor/models/ricursive.py",
+      "sha256": "009c3dda1d79cb84fbf6bc090e76c5ebeb39e24a1980f21307c2a835bd55d460"
+    },
+    {
+      "path": "models/minimax_m3/nvidia/ops/gather_nvfp4_index_k.py",
+      "sha256": "0afe6fb5446c6db3b356aaf03ae898ead7a049e66f63e023c1c4886db1fb5934"
+    },
+    {
+      "path": "model_executor/models/transformers/fusers/qkv.py",
+      "sha256": "358cff55b647e769a066ade3624602ddfee149b1d278d96a86539f89435e7152"
+    },
+    {
+      "path": "v1/pool/metadata.py",
+      "sha256": "a6baa8db4f6b431a0ec7215e80f16407ca73f4cb6069cf26e775a4a49ccd8587"
+    },
+    {
+      "path": "model_executor/models/ultravox.py",
+      "sha256": "2b7ed41075b13754e45763065a1087c5b812022b32f1f56c472770578f0f0c7a"
+    },
+    {
+      "path": "usage/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "config/kernel.py",
+      "sha256": "43c8581219419b64eef9a94d784a9f34928fade71e0976f675ac3c8726d99363"
+    },
+    {
+      "path": "entrypoints/openai/completion/protocol.py",
+      "sha256": "df7c46f381da27a1db19505d2607d0a7d4f8f2894c746084d14cb7f9ce6b504e"
+    },
+    {
+      "path": "models/inkling/amd/ops/silu_and_mul.py",
+      "sha256": "df255981b0d211d39a21252019134dce240b2868401944527fac90b193da2c79"
+    },
+    {
+      "path": "model_executor/layers/mamba/ops/gdn_chunk_cutedsl/kernel_o.py",
+      "sha256": "d4f8b1b2b4e0ff7663f06520d77222cedb43684485aa2f1e6f25de9c599127f5"
+    },
+    {
+      "path": "v1/attention/backends/gdn_attn.py",
+      "sha256": "4924f109591ab8d2b57ba08da1e2b862c05af41fc90466f253c6f87f702c2aa9"
+    },
+    {
+      "path": "model_executor/layers/hpc/__init__.py",
+      "sha256": "0192896f39f53055bd0b1e603605cf05cb4ac090561d765e397f04b904265360"
+    },
+    {
+      "path": "renderers/base.py",
+      "sha256": "f6200c1320347f0ad3227f05950f842c645f9b1985bbefc9f34d07c21c7fbfb0"
+    },
+    {
+      "path": "models/kimi_k3/nvidia/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58"
+    },
+    {
+      "path": "model_executor/models/minicpmv4_6.py",
+      "sha256": "4d0861e0d97ff4c838cab2eb94a86b41e353abc0531dc24acdf5b44f0819984f"
+    },
+    {
+      "path": "compilation/passes/fusion/qk_norm_rope_kvcache_fusion.py",
+      "sha256": "44f2cc1bdf991134708b6b377c59a15f93675c0b50b36ee94de42a71b7e4172c"
+    },
+    {
+      "path": "models/dots3_note/nvidia/attention.py",
+      "sha256": "b18c6b718f809133f827bc0bd9397569ad2d6158fe68d63fe2a6d17bc609bc00"
+    }
+  ],
+  "tokenizer_sha256": {
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+  },
+  "notes": [
+    "Public manifest records expected-answer hashes; regenerate expected codes from each recorded seed with validate_serving.py."
+  ],
+  "corpus_commit": "a6248e2f6f067a93aea1c28cbb014fb31dd461c1",
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4"
+}
