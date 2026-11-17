@@ -586,6 +586,24 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     assert communicator.all_gatherv(torch.empty(1)) is output
 
 
+def test_reduce_scatter_falls_back_when_pynccl_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.pynccl_comm = Mock(disabled=True)
+    fallback = Mock(return_value=torch.empty(2))
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.base_device_communicator."
+        "DeviceCommunicatorBase.reduce_scatter",
+        fallback,
+    )
+
+    inp = torch.empty(4)
+    assert communicator.reduce_scatter(inp, 0) is fallback.return_value
+    fallback.assert_called_once_with(inp, 0)
+
+
 @pytest.mark.parametrize(
     ("enabled", "world_size", "shape", "dim", "dtype", "transpose", "aiter_args"),
     [
