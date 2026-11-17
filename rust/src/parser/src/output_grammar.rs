@@ -215,7 +215,9 @@ pub(crate) fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<
             ToolParam::Function(FunctionToolParam::new(FunctionDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: Some(tool.parameters.clone()),
+                // An omitted schema is `Null`; `None` lets the builder accept any
+                // arguments, as Python does.
+                parameters: (!tool.parameters.is_null()).then(|| tool.parameters.clone()),
                 strict: Some(
                     strict_level >= ToolStrictLevel::Parameter || tool.strict == Some(true),
                 ),
