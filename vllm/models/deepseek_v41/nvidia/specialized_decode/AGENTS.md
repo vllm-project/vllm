@@ -3,8 +3,8 @@
 A decode executor for small decode batches of DeepSeek-V4.1 on GB300, enabled
 with `--additional-config '{"decode_backend": "latency_specialized"}'` (the
 default, `auto`, keeps the stock decode). With it off, the model runs exactly as
-without this package. The executor runs the target model; the DSpark draft
-model keeps its stock paths.
+without this package. One executor runs the target model and another the
+DSpark draft model, on the target's kernels and streams.
 
 ## Scope
 
@@ -75,15 +75,24 @@ Engram hashing as usual, then hands the decoder layers to the step. Only FULL
 CUDA graph captures of pure decode steps of up to 384 rows get one; every other
 forward runs the stock layers, which the executor does not modify.
 
+The DSpark draft model registers when it is built, and the model state builds
+its executor (`runtime/draft.py`) right after the target's, on the same fused
+kernel, mailbox and mHC side stream; the draft model's forward asks it for a
+step the same way. No capture size is required: a draft step without a FULL
+graph of at most 8 rows takes no low-batch GEMM, and the model state logs once
+when `decode_cudagraph_capture_request_sizes` leaves no one-request draft
+graph.
+
 | Package | Contents |
 | --- | --- |
-| `runtime/` | The executor and its per-step gates, the model state, warm-up, attention-metadata CUDA graphs |
+| `runtime/` | The target's and the draft's executors and their per-step gates, the model state, warm-up, attention-metadata CUDA graphs |
 | `boundary/` | The mHC between sublayers on the fused all-reduce + mHC kernel, and the publishing `wo_b` GEMM |
 | `attention/` | The attention step: low-batch MXFP8 and BF16 projections, the row-sharded indexer, candidate overlap, shared sparse-index tables and the sparse-MLA decode |
-| `moe/` | The MoE step with a deferred finalize, and the low-batch routed-expert GEMMs |
+| `moe/` | The MoE step with a deferred or in-layer finalize, and the low-batch routed-expert GEMMs |
 | `embedding/` | The embedding and first-layer hc streams from a replicated table |
 | `engram/` | The Engram WKV ahead of the decoder layers |
 | `logits/` | The low-batch LM head and the logits gather |
+| `sampling/` | The DSpark Markov chain sharded by vocabulary over the TP ranks |
 
 ## Paths
 
@@ -92,8 +101,11 @@ forward runs the stock layers, which the executor does not modify.
 | Fused Lamport all-reduce + mHC at every sublayer boundary; the next mHC coefficients on the side stream | all executor steps (up to 384 rows) |
 | Every MoE finalize deferred to the next boundary's fused kernel, in a residual-only variant before an Engram layer and after the last layer | all executor steps |
 | The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
+| DSpark draft layers through the same steps, finalizing their MoE in the layer; the last layer's output in the fused kernel's residual-only variant | all draft executor steps |
+| DSpark Markov sampling on the fused loop of `ops/fused_markov.py`, as with `dspark_fused_markov` | probabilistic drafting without adaptive verification, watermarking, FP64 Gumbel or batch-sharded sampling |
+| The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sampling/sharded_markov.py`) | the same, at up to 8 request rows (4 at 8 ranks) |
 | Aux hidden-state means on the mHC side stream | all executor steps |
-| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-192 rows |
+| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-192 rows; the DSpark draft's, with a finalize kernel, 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on the low-latency GEMM with a 16-, 32- or 48-row activation tile where its shape has a wide tactic, else on FlashInfer's `cute-dsl` MXFP8 GEMM with pinned tactics | 9-48 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's `cute-dsl` MXFP8 GEMM with pinned tactics instead of per-start autotuning | 49-384 rows |

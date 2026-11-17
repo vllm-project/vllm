@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import io
 import json
 
@@ -9,6 +10,7 @@ import numpy as np
 import pybase64 as base64
 import pytest
 import pytest_asyncio
+from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
 
 import vllm.envs as envs
@@ -484,10 +486,6 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="--tokens-only is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
 async def test_stop_strings_rejected_when_tokens_only(client):
     """--tokens-only forces detokenize=False after request validation, so
@@ -504,6 +502,33 @@ async def test_stop_strings_rejected_when_tokens_only(client):
     assert "stop strings" in resp.json()["error"]["message"]
 
     sampling_params["stop"] = None
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend has no --tokens-only and words this error differently",
+)
+@pytest.mark.parametrize(
+    "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
+)
+async def test_bad_words_rejected_without_tokenizer(client):
+    """bad_words are tokenized on the generate server, so a server without a
+    tokenizer must reject them explicitly rather than silently ignore them."""
+    sampling_params = {"max_tokens": 5, "bad_words": ["never"]}
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "bad_words" in resp.json()["error"]["message"]
+
+    sampling_params["bad_words"] = None
     resp = await client.post(GEN_ENDPOINT, json=payload)
     resp.raise_for_status()
 
@@ -656,6 +681,66 @@ async def test_render_then_generate_forwards_reasoning_ended(
     assert generate_request["reasoning_ended"] is True
     output = json.loads(tokenizer.decode(token_ids, skip_special_tokens=True))
     assert isinstance(output["count"], int)
+
+
+async def _usage(client, path: str, body: dict) -> dict:
+    if not body.get("stream"):
+        resp = await client.post(path, json=body)
+        resp.raise_for_status()
+        return resp.json()["usage"]
+    usage = None
+    async with client.stream("POST", path, json=body) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                usage = json.loads(line[len("data: ") :]).get("usage") or usage
+    assert usage is not None
+    return usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+@pytest.mark.parametrize(
+    ("stream", "include_reasoning"), [(False, True), (True, False)]
+)
+async def test_derender_mode_usage_reports_reasoning_tokens(
+    client, messages, stream, include_reasoning
+):
+    """Derender usage reports `reasoning_tokens` summed over the choices, as
+    `/v1/chat/completions` does, even when the reasoning is hidden."""
+    chat = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 32,
+        "temperature": 1.0,
+        "seed": 0,
+        "n": 2,
+        "include_reasoning": include_reasoning,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    if stream:
+        chat |= {"stream": True, "stream_options": {"include_usage": True}}
+    render = await client.post("/v1/chat/completions/render", json=chat)
+    render.raise_for_status()
+    generate_request = {**render.json(), "output_mode": "derender"}
+    if stream:
+        generate_request |= {"stream": True, "stream_options": {"include_usage": True}}
+
+    expected = (await _usage(client, "/v1/chat/completions", chat))[
+        "completion_tokens_details"
+    ]
+    got = (await _usage(client, GEN_ENDPOINT, generate_request))[
+        "completion_tokens_details"
+    ]
+
+    assert expected["reasoning_tokens"] > 0
+    assert got == expected
 
 
 def _chat_prompt_token_ids(tokenizer, messages) -> list[int]:
@@ -839,10 +924,6 @@ async def test_derender_mode_with_parser_matches_chat_completions(client, messag
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="--tokens-only is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
 async def test_text_mode_rejected_when_tokens_only(client):
     """Without a tokenizer the detokenizer returns "", so the request must
@@ -858,10 +939,6 @@ async def test_text_mode_rejected_when_tokens_only(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /inference/v1/abort_requests",
-)
 @pytest.mark.parametrize("output_mode", ["tokens", "text"])
 async def test_stream_delivers_abort_finish_chunk(
     client, tokenizer, messages, output_mode
@@ -905,10 +982,6 @@ async def test_stream_delivers_abort_finish_chunk(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /inference/v1/abort_requests",
-)
 async def test_abort_requests_is_served_without_tokens_only(client):
     resp = await client.post(
         ABORT_ENDPOINT, json={"request_ids": ["generate-tokens-unknown"]}
@@ -923,6 +996,96 @@ async def test_abort_requests_is_served_without_tokens_only(client):
         "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
     )
     assert resp.status_code == 404
+
+
+async def _wait_for_gauge(client, name: str, value: float) -> None:
+    while True:
+        resp = await client.get("/metrics")
+        resp.raise_for_status()
+        total = sum(
+            sample.value
+            for family in text_string_to_metric_families(resp.text)
+            for sample in family.samples
+            if sample.name == name
+        )
+        if total == value:
+            return
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
+    indirect=True,
+)
+async def test_generate_priority_header_overrides_body(client):
+    """`X-Vllm-Priority` overrides the body priority, as on the coupled APIs."""
+    finished = []
+
+    async def generate(name, max_tokens, priority=0, headers=None):
+        payload = {
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": max_tokens,
+                "ignore_eos": True,
+                "temperature": 0,
+            },
+            "priority": priority,
+        }
+        resp = await client.post(GEN_ENDPOINT, json=payload, headers=headers)
+        resp.raise_for_status()
+        finished.append(name)
+
+    # One sequence runs at a time, so the two short requests wait behind the
+    # long one and leave the queue in priority order.
+    long = asyncio.create_task(generate("long", 900))
+    await asyncio.wait_for(
+        _wait_for_gauge(client, "vllm:num_requests_running", 1), timeout=60
+    )
+    queued = [
+        asyncio.create_task(generate("body", 5)),
+        asyncio.create_task(
+            generate("header", 5, priority=1, headers={"X-Vllm-Priority": "-1"})
+        ),
+    ]
+    await asyncio.wait_for(
+        _wait_for_gauge(client, "vllm:num_requests_waiting", 2), timeout=60
+    )
+    await asyncio.gather(long, *queued)
+
+    assert finished == ["long", "header", "body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
+    indirect=True,
+)
+async def test_generate_priority_is_bounded_to_int32(client):
+    """A priority outside int32 is rejected with a 400, in the header or the body."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 1},
+    }
+    for priority, expected in ((2**31 - 1, 200), (2**31, 400)):
+        resp = await client.post(
+            GEN_ENDPOINT, json=payload, headers={"X-Vllm-Priority": str(priority)}
+        )
+        assert resp.status_code == expected, f"header {priority}: {resp.text}"
+        resp = await client.post(GEN_ENDPOINT, json={**payload, "priority": priority})
+        assert resp.status_code == expected, f"body {priority}: {resp.text}"
 
 
 @pytest.mark.asyncio
