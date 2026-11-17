@@ -113,6 +113,16 @@ def _workspace_shapes(
     return shapes
 
 
+def quantize_query(
+    q: torch.Tensor, cu_seqlens_q: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize q once for an extend step to reuse over its context chunks."""
+    buf = current_workspace_manager().get_simultaneous(
+        *_workspace_shapes(q.shape[0], 0, q.shape[1], 0)
+    )[0]
+    return _quant(q, buf, q.shape[1], cu_seqlens_q.numel() - 1)
+
+
 def profile(
     query: torch.Tensor,
     num_q_heads: int,
@@ -213,9 +223,16 @@ def triton_fp8_prefill_attn(*, orig: Callable[..., Any], **kwargs: Any) -> Any:
     ``k``/``v`` are either in ``q``'s dtype, or FP8 with one ``descale_k`` and
     ``descale_v`` scale each, which ``orig`` cannot take.
     """
-    # Not a CK argument, so it cannot stay in the fallback kwargs.
+    # Not CK arguments, so they cannot stay in the fallback kwargs.
     kv_quant_scales = kwargs.pop("kv_quant_scales", None)
-    return _triton_or_orig(orig, kwargs, kv_quant_scales=kv_quant_scales, **kwargs)
+    quantized_q = kwargs.pop("quantized_q", None)
+    return _triton_or_orig(
+        orig,
+        kwargs,
+        kv_quant_scales=kv_quant_scales,
+        quantized_q=quantized_q,
+        **kwargs,
+    )
 
 
 def _triton_or_orig(
@@ -241,6 +258,7 @@ def _triton_or_orig(
     descale_k=None,
     descale_v=None,
     kv_quant_scales=None,
+    quantized_q=None,
     **extra,
 ):
     kv_is_fp8 = descale_k is not None
@@ -278,7 +296,8 @@ def _triton_or_orig(
             q.shape[0], 0 if kv_is_fp8 else k.shape[0], n_q_heads, n_kv_heads
         )
     )
-    q8, dq = _quant(q, bufs[0], n_q_heads, batch)
+    # bufs[0] is where quantize_query wrote, so k/v below cannot overwrite a reused q.
+    q8, dq = quantized_q or _quant(q, bufs[0], n_q_heads, batch)
     if kv_is_fp8:
         k8, v8 = k, v
         dk = _descale(descale_k, n_kv_heads, batch)

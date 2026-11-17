@@ -307,6 +307,40 @@ def test_short_causal_prefill_stays_on_ck(monkeypatch, fp8, kernel):
     assert len(kernel) == 2 and len(orig.calls) == 1
 
 
+def test_reused_query_survives_kv_quantization(fp8, kernel):
+    """A q quantized once reaches the kernel unchanged after k/v use the workspace."""
+    args = _inputs()
+    quantized_q = fp8.quantize_query(args["q"], args["cu_seqlens_q"])
+    expected = quantized_q[0].clone()
+
+    fp8.triton_fp8_prefill_attn(orig=_Orig(), quantized_q=quantized_q, **args)
+
+    assert len(kernel) == 1
+    torch.testing.assert_close(kernel[0].q.float(), expected.float(), atol=0, rtol=0)
+    torch.testing.assert_close(
+        kernel[0].descale_q.float(), quantized_q[1].float(), atol=0, rtol=0
+    )
+
+
+def test_reused_query_matches_per_call_quantization(fp8, kernel):
+    """Hoisting the q quantization gives the kernel the same q as quantizing per call."""
+    args = _inputs()
+    fp8.triton_fp8_prefill_attn(orig=_Orig(), **args)
+    fp8.triton_fp8_prefill_attn(
+        orig=_Orig(),
+        quantized_q=fp8.quantize_query(args["q"], args["cu_seqlens_q"]),
+        **args,
+    )
+
+    assert len(kernel) == 2
+    torch.testing.assert_close(
+        kernel[1].q.float(), kernel[0].q.float(), atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        kernel[1].descale_q.float(), kernel[0].descale_q.float(), atol=0, rtol=0
+    )
+
+
 @pytest.mark.parametrize("failure", ["import_error", "signature_drift", "dao_ai_impl"])
 def test_aiter_api_drift_keeps_ck(monkeypatch, fp8, failure):
     import aiter.ops.triton.attention.mha as mha

@@ -1138,10 +1138,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
+        # The causal call and every context chunk quantize the same q to the same scale.
+        q_quant: dict[str, Any] = {}
+        if self.fp8_prefill:
+            q_quant["quantized_q"] = _fp8_prefill.quantize_query(query, cu_seqlens_q)
         out, lse = self._prefill_attn(
             q=query,
             k=key,
             v=value,
+            **q_quant,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
@@ -1206,6 +1211,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 q=query,
                 k=key_fetched[:n_ctx],
                 v=value_fetched[:n_ctx],
+                **q_quant,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
