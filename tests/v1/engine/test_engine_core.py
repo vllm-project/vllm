@@ -62,6 +62,141 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 _REQUEST_COUNTER = 0
 
 
+def _load_complete_update_checkpoint(worker):
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+
+    engine = worker.weight_transfer_engine
+    with set_current_vllm_config(worker.vllm_config):
+        engine.model.load_weights(
+            DefaultModelLoader(worker.load_config).get_all_weights(
+                engine.model_config, engine.model
+            )
+        )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("multiprocess", [False, True])
+@pytest.mark.parametrize("with_draft", [False, True])
+@pytest.mark.parametrize("eager", [False, True])
+def test_pending_weight_update_rejects_inference_until_repaired(
+    monkeypatch, multiprocess, with_draft, eager
+):
+    """A failed update remains non-serving until a full update succeeds."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", str(int(multiprocess)))
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    llm = LLM(
+        model=MODEL_NAME,
+        enforce_eager=eager,
+        async_scheduling=not eager,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=64 * 1024 * 1024,
+        enable_prefix_caching=False,
+        weight_transfer_config={"backend": "ipc"},
+        speculative_config={
+            "method": "draft_model",
+            "model": MODEL_NAME,
+            "num_speculative_tokens": 2,
+        }
+        if with_draft
+        else None,
+    )
+    params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+    before = llm.generate(PROMPT, params, use_tqdm=False)[0]
+
+    def assert_rejected():
+        output = llm.generate(PROMPT, params, use_tqdm=False)[0]
+        error = getattr(output, "error", None)
+        assert error is not None
+        assert error.code == "weight_update_incomplete"
+        assert error.retryable
+        assert all(not item.token_ids for item in output.outputs)
+        assert not llm.llm_engine.has_unfinished_requests()
+
+    llm.collective_rpc("start_weight_update")
+    assert_rejected()
+    # Invalid trainer metadata fails before receipt, but the opened update
+    # session still needs a subsequent complete update.
+    with pytest.raises(Exception, match="Invalid update_info"):
+        llm.collective_rpc("update_weights", args=({"names": ["missing-metadata"]},))
+    assert llm.collective_rpc("has_incomplete_weight_update") == [True]
+    assert_rejected()
+
+    client = llm.llm_engine.engine_core
+
+    def utility(method, *args):
+        if multiprocess:
+            return client.call_utility(method, *args)
+        return getattr(client.engine_core, method)(*args)
+
+    utility("pause_scheduler", "abort")
+    with pytest.raises(Exception, match="Cannot resume generation"):
+        utility("resume_scheduler")
+
+    if with_draft:
+        llm.collective_rpc("start_draft_weight_update")
+        llm.collective_rpc(_load_complete_update_checkpoint)
+        llm.collective_rpc("finish_weight_update")
+        assert llm.collective_rpc("has_incomplete_weight_update") == [True]
+        assert_rejected()
+
+    llm.collective_rpc("start_weight_update")
+    llm.collective_rpc(_load_complete_update_checkpoint)
+    llm.collective_rpc("finish_weight_update")
+    assert llm.collective_rpc("has_incomplete_weight_update") == [False]
+    utility("resume_scheduler")
+    after = llm.generate(PROMPT, params, use_tqdm=False)[0]
+    assert after.error is None
+    assert after.outputs[0].token_ids == before.outputs[0].token_ids
+
+    # A start refused before touching weights must not poison the target.
+    if not with_draft:
+        with pytest.raises(Exception, match="[Dd]raft"):
+            llm.collective_rpc("start_draft_weight_update")
+        assert llm.collective_rpc("has_incomplete_weight_update") == [False]
+        assert llm.generate(PROMPT, params, use_tqdm=False)[0].error is None
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("paused", [False, True])
+def test_weight_update_refuses_outstanding_requests(monkeypatch, running, paused):
+    """The update must refuse before it can modify an outstanding request's model."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    llm = LLM(
+        model=MODEL_NAME,
+        enforce_eager=True,
+        async_scheduling=False,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.2,
+        kv_cache_memory_bytes=64 * 1024 * 1024,
+        weight_transfer_config={"backend": "ipc"},
+    )
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    llm.enqueue(PROMPT, params)
+    if running:
+        llm.llm_engine.step()
+    core = llm.llm_engine.engine_core.engine_core
+    if paused:
+        core.pause_scheduler("keep", clear_cache=False)
+    with pytest.raises(RuntimeError, match="queued or running requests"):
+        llm.collective_rpc("start_weight_update")
+    assert llm.collective_rpc("has_incomplete_weight_update") == [False]
+    if paused:
+        core.resume_scheduler()
+    output = llm.wait_for_completion(use_tqdm=False)[0]
+    assert output.outputs[0].finish_reason == "length"
+    assert len(output.outputs[0].token_ids) == 8
+
+
 def make_request() -> EngineCoreRequest:
     global _REQUEST_COUNTER
     _REQUEST_COUNTER += 1
@@ -781,7 +916,7 @@ def test_idle_dp_rank_announces_wave_for_new_work(
     core.scheduler = MagicMock(pause_state=pause_state)
     core.output_queue = MagicMock()
 
-    with patch.object(EngineCore, "add_request"):
+    with patch.object(EngineCore, "add_request", return_value=None):
         core.add_request(MagicMock(), request_wave)
 
     if announces:
@@ -813,6 +948,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core._checkpoint_state = CheckpointState.RUNNING
     core._checkpoint_error = None
     core._kv_cache_reclaimable = False
+    core._weights_may_be_incomplete = False
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
@@ -845,7 +981,7 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     core.shutdown_state = EngineShutdownState.RUNNING
     core.reject_new_requests = False
     core.scheduler.has_request.return_value = kind == "session"
-    core.add_request = MagicMock()
+    core.add_request = MagicMock(return_value=None)
     core._send_finish_outputs_to_client = MagicMock()
     request = MagicMock(
         request_id="r",

@@ -142,6 +142,8 @@ class EngineCore:
         self._checkpoint_error: str | None = None
         # Whether the workers' extensible KV cache holds nothing to keep.
         self._kv_cache_reclaimable = False
+        # Query workers only after a weight-update control call, not per decode.
+        self._weights_may_be_incomplete = False
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -549,7 +551,9 @@ class EngineCore:
             )
         return metadata
 
-    def add_request(self, request: Request, request_wave: int = 0):
+    def add_request(
+        self, request: Request, request_wave: int = 0
+    ) -> RequestError | None:
         """Add request to the scheduler.
 
         `request_wave`: indicate which wave of requests this is expected to
@@ -559,6 +563,16 @@ class EngineCore:
         if not isinstance(request.request_id, str):
             raise TypeError(
                 f"request_id must be a string, got {type(request.request_id)}"
+            )
+
+        if not request.abort_immediately and self._has_incomplete_weight_update():
+            return RequestError(
+                code="weight_update_incomplete",
+                message=(
+                    "Model weights are being updated or a previous update failed. "
+                    "Retry after a successful full weight update."
+                ),
+                retryable=True,
             )
 
         if pooling_params := request.pooling_params:
@@ -594,6 +608,7 @@ class EngineCore:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
+        return None
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -1067,6 +1082,10 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        if self._has_incomplete_weight_update():
+            raise RuntimeError(
+                "Cannot resume generation before a weight update finishes successfully"
+            )
         self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
@@ -1246,7 +1265,39 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        if method in ("start_weight_update", "start_draft_weight_update"):
+            self._prepare_weight_update()
+        if method in (
+            "start_weight_update",
+            "start_draft_weight_update",
+            "update_weights",
+            "finish_weight_update",
+        ):
+            # Also check after failures: a refused start can leave weights intact,
+            # but a failed transfer or post-load hook can leave either model dirty.
+            self._weights_may_be_incomplete = True
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+
+    def _prepare_weight_update(self) -> None:
+        # Pausing hides requests from has_unfinished_requests(), not their KV.
+        if any(self.scheduler.get_request_counts()):
+            raise RuntimeError(
+                "Cannot start a weight update with queued or running requests. "
+                "Drain or abort requests before updating weights."
+            )
+        # Async scheduling can leave cleanup batches after the final user
+        # output. Retire those responses before changing the model layout.
+        while self.scheduler.has_requests() or self.batch_queue:
+            _, model_executed = self.step_fn()
+            self.post_step(model_executed)
+        self.model_executor.collective_rpc("synchronize_device")
+
+    def _has_incomplete_weight_update(self) -> bool:
+        if self._weights_may_be_incomplete:
+            self._weights_may_be_incomplete = any(
+                self.model_executor.collective_rpc("has_incomplete_weight_update")
+            )
+        return self._weights_may_be_incomplete
 
     def set_weight_version(self, weight_version: str) -> None:
         self._weight_version = weight_version
@@ -1971,7 +2022,14 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
-            self.add_request(req, request_wave)
+            error = self.add_request(req, request_wave)
+            if error is not None:
+                self._send_finish_outputs_to_client(
+                    [req.request_id], req.client_index, FinishReason.ERROR, error
+                )
+                if req.kv_transfer_params:
+                    req.abort_immediately = True
+                    self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
@@ -2650,8 +2708,12 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return False
 
-    def add_request(self, request: Request, request_wave: int = 0):
-        super().add_request(request, request_wave)
+    def add_request(
+        self, request: Request, request_wave: int = 0
+    ) -> RequestError | None:
+        error = super().add_request(request, request_wave)
+        if error is not None:
+            return error
         if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
@@ -2664,6 +2726,15 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
+        return None
+
+    def _prepare_weight_update(self) -> None:
+        if not self.ignore_start_dp_wave or self.pending_pause or self.engines_running:
+            raise RuntimeError(
+                "Data-parallel weight updates require a completed pause on all "
+                "ranks. Await pause_generation() before updating weights."
+            )
+        super()._prepare_weight_update()
 
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
@@ -2676,6 +2747,16 @@ class DPEngineCoreProc(EngineCoreProc):
         if not self.ignore_start_dp_wave:
             logger.debug("Resume called while engines are not paused, ignoring.")
             return
+
+        # All ranks are stopped here. Refuse collectively before any rank
+        # resumes or enters the resume barrier with a dirty peer left behind.
+        if ParallelConfig.has_unfinished_dp(
+            self.dp_group, self._has_incomplete_weight_update()
+        ):
+            raise RuntimeError(
+                "Cannot resume generation before weight updates finish "
+                "successfully on all data-parallel ranks"
+            )
 
         super().resume_scheduler()
         self.ignore_start_dp_wave = False

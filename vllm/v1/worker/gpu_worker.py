@@ -1753,13 +1753,12 @@ class Worker(WorkerBase):
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            # Head sharing and engine preparation may already change weights.
+            self._incomplete_weight_updates.add(is_draft)
             if draft_model is not None:
                 # Load through the unquantized target head, as without
                 # draft_lm_head_quantization; finish re-derives the copies.
                 share_source_lm_heads(draft_model)
-            # Starting may already move weights; only a successful finish
-            # restores them.
-            self._incomplete_weight_updates.add(is_draft)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
@@ -1847,11 +1846,11 @@ class Worker(WorkerBase):
             finally:
                 self._weight_update_kv_cache_loan.close()
             self._end_weight_update(refresh=True)
-            self._incomplete_weight_updates.discard(self._weight_update_is_draft)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.on_target_weights_replaced()
+        self._incomplete_weight_updates.discard(self._weight_update_is_draft)
 
     def shutdown(self) -> None:
         gc.unfreeze()

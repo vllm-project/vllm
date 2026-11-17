@@ -27,6 +27,29 @@ engine drives on your behalf:
 3. **Weight Update** (`update_weights`): transfers updated weights. May be called one or more times (e.g. for chunked transfers).
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
+### Inference during an update
+
+Drain or abort queued and running requests before starting a target or draft
+weight update. Starting an update with outstanding requests is rejected before
+the workers change model weights.
+
+Once an update has started, new inference requests receive the retryable
+`weight_update_incomplete` error, and scheduling cannot resume until the update
+finishes successfully. A transfer or finalization failure keeps inference
+blocked. Start a new update and resend the complete checkpoint to recover;
+finishing a draft update does not repair a failed target update, or vice versa.
+
+Offline `LLM.generate()` returns the rejection in `RequestOutput.error`, with no
+generated tokens. Async generation raises the corresponding retryable exception.
+
+For MoE data parallelism, await a completed pause on every rank before starting
+an update. Resume must also be called on every rank: it collectively refuses
+while any rank has an incomplete update. The existing pause consensus prevents
+dummy forwards from reading weights during an update. Serialize these control
+operations across the replicas. In-process data-parallel weight updates are
+rejected before changing weights; use the multiprocessing engine for coordinated
+updates.
+
 ## Available Backends
 
 | Backend | Transport | Use Case |
@@ -187,9 +210,10 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 
 !!! warning
     If `/update_weights` fails, the model is left mid-reload while `/health`
-    stays 200, and `/finish_weight_update` is rejected. Before generating again,
-    resend a full `/start_weight_update` → `/update_weights` →
-    `/finish_weight_update` (see [#57854](https://github.com/vllm-project/vllm/pull/57854)).
+    stays 200. New inference requests are rejected, and `/finish_weight_update`
+    cannot complete the failed session. Resend a full `/start_weight_update` →
+    `/update_weights` → `/finish_weight_update` before generating again
+    (see [#57854](https://github.com/vllm-project/vllm/pull/57854)).
 
 The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, sparse-NCCL, or sharded-RDT transport.
 

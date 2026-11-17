@@ -420,6 +420,7 @@ class RequestState:
             finished,
             kv_transfer_params,
             ec_transfer_params,
+            error=error,
         )
 
     def _new_request_output(
@@ -473,6 +474,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            error=error,
         )
 
     def _new_completion_output(
@@ -765,9 +767,18 @@ class OutputProcessor:
                 continue
 
             error = engine_core_output.error
-            if error is not None and req_state.queue is not None:
+            if error is not None:
                 # Rejected on arrival, e.g. by a paused engine; nothing was run.
-                req_state.queue.put(error.to_exception())
+                if req_state.queue is not None:
+                    req_state.queue.put(error.to_exception())
+                elif request_output := req_state.make_request_output(
+                    [],
+                    EMPTY_CPU_TENSOR if req_state.detokenizer is None else None,
+                    FinishReason.ERROR,
+                    None,
+                    error=error,
+                ):
+                    request_outputs.append(request_output)
                 self._finish_request(req_state)
                 if req_state.streaming_input:
                     # Input chunks sent since may re-create the session.
