@@ -2050,7 +2050,10 @@ def _quark_static_int8_dp_ep_worker(
     torch.testing.assert_close(out, expected, rtol=0.02, atol=0.02)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA GPUs")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or torch.accelerator.device_count() < 2,
+    reason="requires two CUDA or ROCm GPUs",
+)
 @pytest.mark.parametrize("enable_expert_parallel", [True, False])
 def test_static_int8_naive_dp_ep_uses_target_rank_scales(
     enable_expert_parallel: bool,

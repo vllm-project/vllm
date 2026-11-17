@@ -2943,7 +2943,7 @@ def test_static_int8_modular_matches_legacy(
         assert empty.dtype == dtype
 
         if dtype == torch.bfloat16 and per_out_ch_quant and weight_on_input:
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 captured = modular(x, router, ids)
