@@ -1315,25 +1315,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
-            if self.use_aiter_fused_gdn_decode:
-                normed_out = torch.empty(
-                    (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-                    dtype=hidden_states.dtype,
-                    device=hidden_states.device,
-                )
-                torch.ops.vllm.qwen_gdn_attention_core_fused_norm_rocm(
-                    projected_states_qkvz,
-                    projected_states_ba,
-                    normed_out,
-                    layer_name=_encode_layer_name(self.prefix),
-                )
-                output, _ = self.out_proj(normed_out.flatten(-2))
-                return output
             core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
+            if self.use_aiter_fused_gdn_decode:
+                torch.ops.vllm.qwen_gdn_attention_core_fused_norm_rocm(
+                    projected_states_qkvz,
+                    projected_states_ba,
+                    core_attn_out,
+                    layer_name=_encode_layer_name(self.prefix),
+                )
+                output, _ = self.out_proj(core_attn_out.flatten(-2))
+                return output
             z = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=projected_states_qkvz.dtype,
