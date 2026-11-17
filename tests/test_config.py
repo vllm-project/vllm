@@ -4085,7 +4085,8 @@ def test_is_chunked_prefill_supported(
     reason: str,
     caplog_vllm,
 ):
-    model_config = ModelConfig(model_id, trust_remote_code=True)
+    trust_remote_code = model_id == "internlm/internlm2-1_8b-reward"
+    model_config = ModelConfig(model_id, trust_remote_code=trust_remote_code)
     assert model_config.attn_type == expected_attn_type
     with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_chunked_prefill_supported == expected_result
@@ -4204,7 +4205,8 @@ def test_is_prefix_caching_supported(
     reason: str,
     caplog_vllm,
 ):
-    model_config = ModelConfig(model_id, trust_remote_code=True)
+    trust_remote_code = model_id == "internlm/internlm2-1_8b-reward"
+    model_config = ModelConfig(model_id, trust_remote_code=trust_remote_code)
     assert model_config.attn_type == expected_attn_type
     with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_prefix_caching_supported == expected_result
@@ -4764,9 +4766,7 @@ def test_renderer_num_workers_with_mm_cache():
 
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
-    target_model_config = ModelConfig(
-        "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
-    )
+    target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
     speculative_config = SpeculativeConfig(
         model="vllm-project/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
