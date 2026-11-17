@@ -126,6 +126,7 @@ pub(crate) fn prepare_responses_request(
         min_tokens,
         logit_bias,
         stop_token_ids,
+        thinking_token_budget,
         request_id: _,
         session_id,
         priority,
@@ -229,7 +230,7 @@ pub(crate) fn prepare_responses_request(
             seed,
             max_tokens: max_output_tokens,
             min_tokens,
-            thinking_token_budget: None,
+            thinking_token_budget,
             logprobs: None,
             prompt_logprobs: None,
             prompt_logprob_token_ids: None,
@@ -340,7 +341,6 @@ fn normalize_tool_choice(
     };
     Ok(Some(match tool_choice {
         ResponseToolChoice::Value(ToolChoiceValue::None) => ChatToolChoice::None,
-        ResponseToolChoice::Value(ToolChoiceValue::Auto) if tools_empty => ChatToolChoice::None,
         ResponseToolChoice::Value(ToolChoiceValue::Auto) => ChatToolChoice::Auto,
         ResponseToolChoice::Value(ToolChoiceValue::Required) => ChatToolChoice::Required,
         ResponseToolChoice::Object(ResponseToolChoiceObject::Function(FunctionChoice { name })) => {
@@ -800,17 +800,6 @@ mod tests {
 
     use super::*;
     use crate::model_names::ServedModelNames;
-
-    #[test]
-    fn auto_tool_choice_without_tools_normalizes_to_none() {
-        let tool_choice = serde_json::from_value(json!("auto")).unwrap();
-
-        assert_eq!(
-            normalize_tool_choice(Some(tool_choice), &[], &ResponsesToolNames::default(), true)
-                .unwrap(),
-            Some(ChatToolChoice::None)
-        );
-    }
 
     #[test]
     fn responses_function_tool_defaults_parameters_to_null() {
