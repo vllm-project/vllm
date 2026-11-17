@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm MoE implementation for Muse Spark checkpoints."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 
 import torch
@@ -71,6 +72,24 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
 _FINALIZE_CHUNK_ELEMS = 32 * 1024 * 1024
 # Below this, one custom all-reduce beats the two-RCCL-kernel RS + AG pair.
 _TOKEN_SHARDED_MIN_TOKENS = 256
+# Set while the model's residual stream is token-sharded across the TP ranks.
+_token_sharded_output = False
+
+
+@contextmanager
+def token_sharded_moe_output() -> Iterator[None]:
+    """Make the TP finalize write only current rank's rows of a token-sharded stream.
+
+    Rank `r` keeps rows `[r * R, (r + 1) * R)` with `R = ceil(T / tp)`, the
+    rows its reduce-scatter receives; the other rows of the output are left
+    unwritten.
+    """
+    global _token_sharded_output
+    previous, _token_sharded_output = _token_sharded_output, True
+    try:
+        yield
+    finally:
+        _token_sharded_output = previous
 
 
 def _validate_tp_post_norm_deployment(
@@ -93,7 +112,7 @@ def _validate_tp_post_norm_deployment(
         raise NotImplementedError(
             f"Muse Spark {precision} on ROCm does not support MoE LoRA."
         )
-    if moe_config.skip_final_all_reduce:
+    if moe_config.skip_final_all_reduce and parallel_config.tp_size > 1:
         raise NotImplementedError(
             f"Muse Spark {precision} performs the TP reduction before its post-expert "
             "norm and cannot return an unreduced MoE output."
@@ -218,6 +237,21 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             routed.masked_fill_((expert_map[topk_ids.long()] < 0).unsqueeze(-1), 0)
             expert_map = None
 
+        if _token_sharded_output and self.pre_norm_all_reduce:
+            if self.fused_norm is None or routed.dtype != self.reduce_dtype:
+                raise NotImplementedError(
+                    "A token-sharded Muse Spark stream needs the fused post-expert "
+                    "norm and VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE=bf16."
+                )
+            self._token_sharded_finalize(
+                routed,
+                topk_weights,
+                output,
+                get_tensor_model_parallel_world_size(),
+                gather=False,
+            )
+            return output
+
         token_sharded = (
             self.pre_norm_all_reduce
             and self.fused_norm is not None
@@ -274,7 +308,11 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         topk_weights: torch.Tensor,
         out: torch.Tensor,
         tp_size: int,
+        gather: bool = True,
     ) -> None:
+        """Reduce-scatter `rows` by token, finalize the current rank's tokens, and
+        all-gather them into `out`. Without `gather`, only current rank's rows
+        are written to `out`."""
         num_tokens, top_k, hidden_dim = rows.shape
         pad = (-num_tokens) % tp_size
         if pad:
@@ -286,8 +324,9 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         per_rank = local.shape[0]
         rank = get_tensor_model_parallel_rank()
         tw_local = topk_weights[rank * per_rank : (rank + 1) * per_rank]
-        gather_in_place = not pad and out.is_contiguous()
-        if gather_in_place:
+        owned = max(0, min(per_rank, num_tokens - rank * per_rank))
+        gather_in_place = gather and not pad and out.is_contiguous()
+        if gather_in_place or (not gather and owned == per_rank):
             out_local = out[rank * per_rank : (rank + 1) * per_rank]
         else:
             out_local = torch.empty(
@@ -304,6 +343,10 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             norm.applies_weight_before_norm,
             out_local,
         )
+        if not gather:
+            if owned != per_rank:
+                out[rank * per_rank : rank * per_rank + owned].copy_(out_local[:owned])
+            return
         if gather_in_place:
             dist.all_gather_into_tensor(
                 out, out_local, group=get_tp_group().device_group
@@ -859,5 +902,6 @@ __all__ = [
     "MuseSparkTritonExperts",
     "validate_bf16_deployment",
     "validate_fp8_deployment",
+    "token_sharded_moe_output",
     "validate_mxfp4_deployment",
 ]
