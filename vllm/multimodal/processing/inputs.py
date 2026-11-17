@@ -26,7 +26,7 @@ _MM_HASH_TAG_CONTENT = "content:"
 _MM_HASH_TAG_UUID = "uuid:"
 
 
-@dataclass
+@dataclass(slots=True)
 class ProcessorInputs:
     """Represents the keyword arguments to
     [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].

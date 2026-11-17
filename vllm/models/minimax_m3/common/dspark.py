@@ -446,6 +446,18 @@ class MiniMaxM3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 from vllm.models.minimax_m3.amd.ops import fused_markov
 
                 self.sample_sequential = fused_markov.sample_sequential
+        extra = vllm_config.additional_config
+        if (
+            current_platform.is_cuda()
+            and isinstance(extra, dict)
+            and extra.get("decode_backend") == "latency_specialized"
+        ):
+            # The MiniMax-M3 specialized decode's drafter kernels.
+            from vllm.models.minimax_m3.nvidia.specialized_decode.drafter import (
+                attach_drafter,
+            )
+
+            attach_drafter(self, vllm_config)
 
     @staticmethod
     def _rename_checkpoint_weights(

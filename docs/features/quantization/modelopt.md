@@ -70,9 +70,13 @@ optimization for comparisons.
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
+FP8 weights get random codes across the FP8 range, as checkpoints use it, so
+compute-bound steps draw realistic power (a narrow range runs faster than real
+weights on power-capped GPUs).
 ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
 gate/up global scales, including for FlashInfer MegaMoE
-(`--moe-backend flashinfer_moe_ep_cutedsl`).
+(`--moe-backend flashinfer_moe_ep_cutedsl`). On SM107 GPUs, see
+[FlashInfer MegaMoE on SM107](../../serving/expert_parallel_deployment.md#flashinfer-megamoe-on-sm107).
 Muse Spark's NVIDIA `deep_gemm_mega_moe` backend also supports dummy loading:
 it initializes valid NVFP4 scales and finalizes its expert weights and residual
 constants before the first forward. Enable expert parallelism for this backend.

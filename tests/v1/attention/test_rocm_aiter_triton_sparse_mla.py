@@ -447,6 +447,7 @@ def _swa_forward_mqa_case(
     attn.attn_sink = torch.randn(num_heads, device=device)
     attn.kv_cache_dtype = "fp8_ds_mla"
     attn._has_kv_transfer = False
+    attn.use_pcp = False
     attn.rotary_emb = SimpleNamespace(cos_sin_cache=cos_sin_cache)
 
     q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
