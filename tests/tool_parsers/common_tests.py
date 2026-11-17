@@ -13,7 +13,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
 
 
-@dataclass
+@dataclass(slots=True)
 class ToolParserTestConfig:
     """Configuration for a tool parser's common tests.
 

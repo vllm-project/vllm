@@ -21,7 +21,12 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import CpuArchEnum, Platform, PlatformEnum
+from .interface import (
+    CpuArchEnum,
+    Platform,
+    PlatformEnum,
+    get_assigned_physical_gpu_ids,
+)
 
 logger = init_logger(__name__)
 
@@ -148,7 +153,13 @@ class CpuPlatform(Platform):
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if attn_selector_config.use_mla:
+            if kv_cache_dtype not in (None, "auto", "bfloat16", "float16"):
+                raise ValueError(
+                    f"--kv-cache-dtype {kv_cache_dtype} is not supported by "
+                    "MLA attention on CPU."
+                )
             amx_available = (
                 cls.get_cpu_architecture() == CpuArchEnum.X86
                 and torch.cpu._is_amx_tile_supported()
@@ -176,6 +187,13 @@ class CpuPlatform(Platform):
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
+        if not AttentionBackendEnum.CPU_ATTN.get_class().supports_kv_cache_dtype(
+            kv_cache_dtype
+        ):
+            raise ValueError(
+                f"--kv-cache-dtype {kv_cache_dtype} is not supported by the CPU "
+                "attention backend on this host."
+            )
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
@@ -220,10 +238,9 @@ class CpuPlatform(Platform):
         # which is still being resolved while this platform class is loading.
         from vllm.triton_utils import HAS_TRITON
 
+        # Non-x86 CPUs without Triton use the standalone CPU model runner.
         if cls.get_cpu_architecture() == CpuArchEnum.X86 and not HAS_TRITON:
-            logger.warning_once(
-                "Triton is not installed. triton-cpu is expected on x86 CPUs."
-            )
+            raise RuntimeError("vLLM on x86 CPUs requires Triton (triton-cpu).")
 
         cache_config = vllm_config.cache_config
 
@@ -346,7 +363,7 @@ class CpuPlatform(Platform):
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
-        # Note: workaround for v1 gpu_model_runner
+        # CPU doesn't capture CUDA graphs. compile_sizes can expand these sizes.
         from vllm.config import CompilationMode
 
         vllm_config.compilation_config.cudagraph_capture_sizes = []
@@ -632,6 +649,13 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        # Only non-x86 CPUs have a standalone no-Triton MRV2 runner.
+        from vllm.triton_utils import HAS_TRITON
+
+        return not HAS_TRITON and cls.get_cpu_architecture() != CpuArchEnum.X86
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.get_num_threads()
 
@@ -675,69 +699,15 @@ class CpuPlatform(Platform):
                 logger.warning_once("Failed to import from vllm._C: %s", repr(e))
 
     @classmethod
-    def register_triton_kernel_overrides(cls) -> None:
-        """Fallback C++ implementations for core Triton kernels.
-
-        Used when the Triton-CPU backend is unavailable. When Triton-CPU is
-        present, the Triton kernels can run natively and the overrides
-        would only shadow them, so registration is skipped.
-        """
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            return
-
-        from vllm.triton_utils.dispatcher import register_kernels
-        from vllm.utils import cpu_triton_utils as cpu_tl
-
-        register_kernels(
-            {
-                "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel": (
-                    cpu_tl._compute_slot_mapping_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel": (
-                    cpu_tl._eagle_step_slot_mapping_metadata_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.eagle_prepare_inputs_padded_kernel": (
-                    cpu_tl._eagle_prepare_inputs_padded_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.eagle_prepare_next_token_padded_kernel": (
-                    cpu_tl._eagle_prepare_next_token_padded_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.copy_and_expand_eagle_inputs_kernel": (
-                    cpu_tl._copy_and_expand_eagle_inputs_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.copy_and_expand_dflash_inputs_kernel": (
-                    cpu_tl._copy_and_expand_dflash_inputs_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel": (
-                    cpu_tl._rejection_greedy_sample_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel": (
-                    cpu_tl._rejection_random_sample_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.expand_kernel": (
-                    cpu_tl._expand_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel": (
-                    cpu_tl._sample_recovered_tokens_kernel_impl
-                ),
-                "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": (
-                    cpu_tl._batch_memcpy_impl
-                ),
-            }
-        )
-
-    @classmethod
     def pack_kv_cache(
         cls,
         kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
         """Rewrite the kv cache shape for the current platform."""
-        # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
+        # Import lazily: cpu_attn pulls in _cpu_ops, which needs a fully
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
-        from vllm._custom_ops import cpu_attn_reshape_and_cache
+        from vllm._cpu_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
         # MLA uses a single latent cache of shape [N, block_size, head_size],
@@ -788,7 +758,7 @@ class CpuPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        allowed_mem_node_list = get_visible_memory_node()
+        allowed_mem_node_list = get_visible_memory_node(get_assigned_physical_gpu_ids())
         mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
         memory_usage = 0
         for s in mem_status_list:

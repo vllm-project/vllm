@@ -28,7 +28,7 @@ from .protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from .typing import ScoreInput
+from .types import ScoreInput
 
 logger = init_logger(__name__)
 

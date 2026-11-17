@@ -66,8 +66,7 @@ def _get_tuned_standalone_max_size(
     max_size_mb = FI_MNNVL_ALLREDUCE_MAX_SIZE_MB.get(
         (capability.to_int(), world_size, _node_count(group))
     )
-    # Tuned cutoffs are exclusive; store the largest accepted size.
-    return None if max_size_mb is None else int(max_size_mb * MiB) - 1
+    return None if max_size_mb is None else int(max_size_mb * MiB)
 
 
 def _create_workspace(
@@ -144,7 +143,7 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A ``(backend, allow_trtllm_fallback)`` tuple. ``backend`` is ``None``
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
         when automatic selection has no supported backend for the process
         group.
 
@@ -258,7 +257,7 @@ def get_fi_ar_quant_workspace(
     """Return the allreduce workspace for quant patterns, initializing if needed.
 
     Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
-    non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
+    non-quant fusion. With `auto` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
@@ -490,8 +489,14 @@ class FlashInferAllReduce:
             return False
 
         num_tokens, hidden_dim = input_tensor.shape
+        element_size = input_tensor.element_size()
+
+        # The fusion kernels load each token row as float4, so a row must be a
+        # whole number of 16-byte vectors. MNNVL asserts on this.
+        if hidden_dim * element_size % 16 != 0:
+            return False
+
         if not self.max_num_tokens:
-            element_size = torch.tensor([], dtype=input_tensor.dtype).element_size()
             self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
 
         if num_tokens > self.max_num_tokens:

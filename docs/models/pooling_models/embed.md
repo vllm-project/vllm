@@ -45,6 +45,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | `GteModel` | Arctic-Embed-2.0-M | `Snowflake/snowflake-arctic-embed-m-v2.0`. | | |
 | `GteNewModel` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc. | | |
 | `JinaEmbeddingsV5Model`<sup>C</sup> | Qwen3-decoder or EuroBERT-encoder backbone with task-specific LoRA adapters | `jinaai/jina-embeddings-v5-text-small`, `jinaai/jina-embeddings-v5-text-nano` (see note) | ✅︎ | ✅︎ |
+| `Lfm2BidirectionalModel` | LFM2.5 dense embedding | `LiquidAI/LFM2.5-Embedding-350M` | | |
 | `LlamaBidirectionalModel`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-embed-1b-v2`, etc. | ✅︎ | ✅︎ |
 | `LlamaModel`<sup>C</sup>, `LlamaForCausalLM`<sup>C</sup>, `MistralModel`<sup>C</sup>, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ |
 | `ModernBertModel` | ModernBERT-based | `Alibaba-NLP/gte-modernbert-base`, etc. | ✅︎ | |
@@ -487,6 +488,8 @@ You can enable or disable normalize via `use_activation`.
     ```json
     {"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
     ```
+
+For supported models, `dimensions` must not exceed the model's output embedding size, which can differ from its hidden size. For example, `voyageai/voyage-4-nano` supports `dimensions=2048` even though its hidden size is 1024. Models with `matryoshka_dimensions` also restrict requests to the listed values.
 
 #### Manually enable Matryoshka Embeddings
 

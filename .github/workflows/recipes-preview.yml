@@ -1,0 +1,69 @@
+name: Recipes Preview
+
+# Tells vllm-project/recipes when recipes/ changes, instead of waiting for its
+# scheduled polling, which GitHub runs hours late:
+#   - a recipe PR is opened, pushed or reopened: rebuild its preview branch
+#     `preview/vllm-pr-<N>`, which Vercel deploys at the environment URL below
+#     (recipes debounces bursts of pushes);
+#   - a recipe PR is closed: delete that branch;
+#   - recipe changes reach main: sync recipes.vllm.ai (`recipes-updated`).
+#
+# Runs on pull_request_target so fork PRs can reach the dispatch token. This
+# is safe only because no step checks out or runs PR code, and only the PR
+# number leaves this workflow. Keep it that way. The token comes from a GitHub
+# App installed only on vllm-project/recipes with contents: write; its key
+# lives in the `recipes-preview` environment, which only main may use.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - 'recipes/**'
+  push:
+    branches: [main]
+    paths:
+      - 'recipes/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recipes-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    if: github.repository == 'vllm-project/vllm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: recipes-preview
+      url: >-
+        ${{ github.event_name == 'push' && 'https://recipes.vllm.ai' ||
+        (github.event.action != 'closed' &&
+        format('https://vllm-recipes-git-preview-vllm-pr-{0}-inferact-inc.vercel.app', github.event.pull_request.number) ||
+        '') }}
+    steps:
+      - name: Create a token for vllm-project/recipes
+        id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RECIPES_APP_ID }}
+          private-key: ${{ secrets.RECIPES_APP_PRIVATE_KEY }}
+          owner: vllm-project
+          repositories: recipes
+          permission-contents: write
+
+      - name: Dispatch to vllm-project/recipes
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            gh api repos/vllm-project/recipes/dispatches -f event_type=recipes-updated
+            exit 0
+          fi
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "Invalid PR number: $PR"; exit 1; }
+          gh api repos/vllm-project/recipes/dispatches \
+            -f event_type=preview-pr -F "client_payload[pr]=${PR}"

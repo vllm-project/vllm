@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the fused Muse-Spark QK-norm + RoPE + KV-insert kernel vs unfused.
 
-``tuned_us`` forces the cp.async schedule ``fused_qk_norm_rope`` only auto-selects
-on SM 9.0; ``unfused_us`` is what production runs.
+`tuned_us` forces the cp.async schedule `fused_qk_norm_rope` only auto-selects
+on SM 9.0; `unfused_us` is what production runs.
 """
 
 import argparse
@@ -15,6 +15,16 @@ import vllm._custom_ops as ops
 
 HEAD_DIM = 64
 DEFAULT_TOKENS = [1, 8, 64, 256, 1024, 4096, 8192, 16384, 32768, 65536]
+
+try:
+    from vllm.models.muse_spark.nvidia.ops.cute_dsl.qk_norm import (
+        qk_norm,
+        supports_qk_norm,
+    )
+
+    HAS_CUTEDSL = supports_qk_norm(torch.bfloat16, HEAD_DIM)
+except ImportError:
+    HAS_CUTEDSL = False
 
 
 def make_cos_sin_cache(max_pos, rotary_dim, base, device):
@@ -135,6 +145,12 @@ class Case:
         )
         self._insert()
 
+    def unfused_nope(self):
+        q, k, _ = self.views()
+        qk_norm(q, HEAD_DIM, self.eps)
+        qk_norm(k, HEAD_DIM, self.eps)
+        self._insert()
+
     def fused_bytes(self):
         el = self.qkv.element_size()
         cache_el = self.kv_cache.element_size()
@@ -181,7 +197,7 @@ def time_eager(fn, warmup=20, iters=100) -> float:
 
 
 def time_graph(fn, warmup=10, iters=50, inner=32) -> float:
-    """GPU time per call; ``inner`` calls per graph amortize the ~2 us replay."""
+    """GPU time per call; `inner` calls per graph amortize the ~2 us replay."""
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -260,7 +276,7 @@ def main():
         f"dtype={args.dtype} kv_cache={args.kv_cache_dtype}\n"
     )
 
-    modes = ["rope"]
+    modes = ["rope", "nope"]
     l2 = _l2_bytes(device)
     print(
         f"rows marked * have a working set inside the {l2 / 2**20:.0f} MiB L2, "
@@ -274,6 +290,9 @@ def main():
     for mode, use_graph in itertools.product(modes, [False, True]):
         if use_graph and args.no_graph:
             continue
+        if mode == "nope" and not HAS_CUTEDSL:
+            print("skipping the NoPE baseline: CuTe-DSL qk_norm unavailable")
+            continue
         label = "graph" if use_graph else "eager"
         print(f"── {mode} layer, {label} ──")
         print(header)
@@ -282,7 +301,7 @@ def main():
             case = Case(nt, args.nq, args.nkv, dtype, args.kv_cache_dtype, device)
             use_rope = mode == "rope"
             fused_us = timer(lambda c=case, r=use_rope: c.fused(r))
-            baseline = case.unfused_rope
+            baseline = case.unfused_rope if use_rope else case.unfused_nope
             unfused_us = timer(baseline)
             tuned_us = (
                 min(timer(lambda c=case, t=t: c.unfused_rope(t)) for t in (4, 8))

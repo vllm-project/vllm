@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for :class:`ParserEngine` — the glue layer between
-:class:`StreamingParserEngine` events and the serving layer's
+"""Tests for `ParserEngine` — the glue layer between
+`StreamingParserEngine` events and the serving layer's
 DeltaMessage / ExtractedToolCallInformation protocol.
 """
 
@@ -26,7 +26,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
-from vllm.parser.engine.adapters import make_adapters
+from vllm.parser.engine.adapters import (
+    ParserEngineReasoningAdapter,
+    ParserEngineToolAdapter,
+    make_adapters,
+)
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine, ReasoningEnd
 from vllm.parser.engine.parser_engine_config import (
@@ -36,6 +40,7 @@ from vllm.parser.engine.parser_engine_config import (
 )
 from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
+from vllm.parser.qwen3 import Qwen3Parser
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -376,7 +381,9 @@ class TestEventsToDelta:
         assert len(indices) == len(set(indices)), (
             f"Duplicate indices in tool_calls: {delta.tool_calls}"
         )
-        assert delta.tool_calls[0].function.name == "get_weather"
+        function = delta.tool_calls[0].function
+        assert function is not None
+        assert function.name == "get_weather"
         assert delta.tool_calls[0].id is not None
 
 
@@ -426,8 +433,10 @@ class TestCoalesceToolCallDeltas:
         assert result[0].index == 0
         assert result[0].id == "call_1"
         assert result[0].type == "function"
-        assert result[0].function.name == "get_weather"
-        assert result[0].function.arguments == '{"city":"Tokyo"}'
+        function = result[0].function
+        assert function is not None
+        assert function.name == "get_weather"
+        assert function.arguments == '{"city":"Tokyo"}'
 
     def test_empty_list(self):
         assert ParserEngine._coalesce_tool_call_deltas([]) == []
@@ -462,8 +471,10 @@ class TestCoalesceToolCallDeltas:
         result = ParserEngine._coalesce_tool_call_deltas(deltas)
         assert len(result) == 2
         assert result[0].index == 0
-        assert result[0].function.name == "f1"
-        assert result[0].function.arguments == '{"x":1}'
+        function = result[0].function
+        assert function is not None
+        assert function.name == "f1"
+        assert function.arguments == '{"x":1}'
         assert result[1].index == 1
 
     def test_id_type_from_later_entry(self):
@@ -483,8 +494,10 @@ class TestCoalesceToolCallDeltas:
         assert len(result) == 1
         assert result[0].id == "call_1"
         assert result[0].type == "function"
-        assert result[0].function.name == "f"
-        assert result[0].function.arguments == '{"a":1}'
+        function = result[0].function
+        assert function is not None
+        assert function.name == "f"
+        assert function.arguments == '{"a":1}'
 
 
 # ── TestContentWhitespaceHandling ────────────────────────────────────
@@ -1007,8 +1020,8 @@ def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
     assert parser_cls is not None
     assert issubclass(parser_cls, DelegatingParser)
     parser = parser_cls(make_mock_tokenizer(_VOCAB))
-    assert parser.reasoning_parser is not None
-    assert parser.tool_parser is not None
+    assert isinstance(parser.reasoning_parser, ParserEngineReasoningAdapter)
+    assert isinstance(parser.tool_parser, ParserEngineToolAdapter)
     assert parser.reasoning_parser._parser_engine_cls is _CombinedTestEngine
     assert parser.tool_parser._parser_engine_cls is _CombinedTestEngine
     request = _make_delegating_request()
@@ -1035,8 +1048,10 @@ def test_parser_manager_preserves_shared_engine_reasoning_wiring():
         make_mock_tokenizer(_VOCAB),
         chat_template_kwargs={"enable_thinking": False},
     )
-    assert parser.reasoning_parser is not None
-    assert parser.reasoning_parser._parser_engine.thinking_enabled is False
+    assert isinstance(parser.reasoning_parser, ParserEngineReasoningAdapter)
+    engine = parser.reasoning_parser._parser_engine
+    assert isinstance(engine, Qwen3Parser)
+    assert engine.thinking_enabled is False
 
 
 def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
@@ -1181,12 +1196,12 @@ class _ReasoningOnlyDelegating(DelegatingParser):
 
 class TestReasoningOnlyEndTokenLeak:
     """When there is no tool parser, the content passthrough must not
-    re-emit the end-of-reasoning marker (e.g. ``</think>``) as content.
+    re-emit the end-of-reasoning marker (e.g. `</think>`) as content.
 
-    Regression test for the scenario where ``</think>`` arrives as a
+    Regression test for the scenario where `</think>` arrives as a
     single-token delta: the engine correctly consumes it (emitting
     REASONING_END with no content), but the content passthrough
-    fired because ``delta_message is None`` and reasoning had just ended.
+    fired because `delta_message is None` and reasoning had just ended.
     """
 
     def test_think_end_not_leaked_as_content(self):
@@ -1302,10 +1317,10 @@ class TestSkipToolSpanForwarding:
     """Reasoning (skip_tool_parsing) pass: tool syntax is forwarded verbatim
     for the tool pass, and the lexical passthrough flag never goes stale.
 
-    ``_combined_config`` defines ``</tool_call>`` only from ``TOOL_ARGS``; the
-    skip pass stays in ``CONTENT``, so the closer arrives with no current-state
+    `_combined_config` defines `</tool_call>` only from `TOOL_ARGS`; the
+    skip pass stays in `CONTENT`, so the closer arrives with no current-state
     transition. It must still be forwarded and must clear the span — otherwise
-    ``_in_skipped_tool_span`` stays True for the rest of the request. This is the
+    `_in_skipped_tool_span` stays True for the rest of the request. This is the
     shape of every current engine grammar whose wrapper closer has no CONTENT
     transition (qwen3, deepseek, glm47_moe, nemotron_v3).
     """
@@ -1345,9 +1360,9 @@ class TestSkipToolSpanForwarding:
         that also closes text blocks must be consumed, not leaked as content.
 
         The config combines the two real patterns — a qwen3-style tool-only
-        closer with no CONTENT transition (``</a>``) and an inkling-style token
-        that closes both tool and text blocks (``</b>``). A stale span would
-        route the trailing ``</b>`` down the forward path and leak it.
+        closer with no CONTENT transition (`</a>`) and an inkling-style token
+        that closes both tool and text blocks (`</b>`). A stale span would
+        route the trailing `</b>` down the forward path and leak it.
         """
         ts, close_a, close_b = "<tc>", "</a>", "</b>"
         cfg = ParserEngineConfig(
@@ -1692,9 +1707,9 @@ class TestArgDeltaWithConverter:
 
 
 def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineConfig:
-    """``_kv_converter`` plus an extender for its trailing ``k=v`` record,
+    """`_kv_converter` plus an extender for its trailing `k=v` record,
     which is open until whitespace follows it; mirrors
-    ``_glm47_arg_value_extender``."""
+    `_glm47_arg_value_extender`."""
 
     def factory(raw_args: str):
         if re.search(r"\w+=\S+$", raw_args) is None:
@@ -1715,12 +1730,12 @@ def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineCo
 
 
 class TestArgValueExtender:
-    """Engine contract for ``ParserEngineConfig.arg_value_extender``."""
+    """Engine contract for `ParserEngineConfig.arg_value_extender`."""
 
     def test_live_extender_sees_deltas_without_structural_chars(self):
         """A delta without structural chars must still reach the live
-        extender: gating it out drops ``el`` from the streamed value and the
-        next accepted delta ``l=`` lands on the gap, so the converted JSON
+        extender: gating it out drops `el` from the streamed value and the
+        next accepted delta `l=` lands on the gap, so the converted JSON
         no longer extends what was streamed."""
         engine = _make_engine(_extender_config(structural=frozenset("= ")))
         assert _run_streaming_tool(engine, "f", ["a", "=h", "el", "l=", "o "]) == {
@@ -1885,6 +1900,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("hello<bos>world", [72, 204, 73])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.content is not None
         assert "<bos>" not in delta.content
         assert delta.content == "helloworld"
 
@@ -1897,6 +1913,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("thinking<eos>more", [72, 205, 73])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<eos>" not in delta.reasoning
         assert delta.reasoning == "thinkingmore"
 
@@ -1911,6 +1928,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("hello<bos>world", [])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<bos>" not in delta.reasoning
 
     def test_regular_tokens_spelling_special_survive(self):
@@ -1927,6 +1945,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("h<bos>w", [72, 73, 74, 75, 76])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<bos>" in delta.reasoning
 
     def test_configured_terminal_not_treated_as_drop(self):
@@ -1981,6 +2000,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("hello<bos>world", [])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<bos>" in delta.reasoning
 
     def test_drops_applied_with_skip_tool_parsing(self):
@@ -2060,8 +2080,8 @@ class TestDropSpecialTokens:
 
 class TestTruncatedToolOpenerStreamParity:
     """Regression tests for #47137: when generation terminates inside a
-    ``<tool_call>`` opener that has not been promoted to a tool call
-    (via ``max_tokens`` or a ``stop`` string), the non-streaming path
+    `<tool_call>` opener that has not been promoted to a tool call
+    (via `max_tokens` or a `stop` string), the non-streaming path
     must drop the incomplete markup, matching the streaming path."""
 
     _QWEN3_VOCAB = {
@@ -2076,6 +2096,7 @@ class TestTruncatedToolOpenerStreamParity:
             tool_parser_name="qwen3_coder",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         tokenizer = make_mock_tokenizer(self._QWEN3_VOCAB)
         return parser_cls(tokenizer, [])
 
@@ -2191,6 +2212,7 @@ class TestThinkMarkupWithoutReasoningParser:
             tool_parser_name=tool_parser_name,
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         tokenizer = make_mock_tokenizer(self._VOCAB)
         return parser_cls(tokenizer, [])
 

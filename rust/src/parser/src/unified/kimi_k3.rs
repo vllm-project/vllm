@@ -34,35 +34,35 @@
 //! the incremental detokenizer: fed unattributed text, it treats every marker
 //! as content. Channel names such as `think` are ordinary text either way.
 //!
-//! Argument decoding mirrors the renderer's type tagging (inverse encoding):
-//! `type="string"` values pass the raw text through, other types are
-//! JSON-decoded, and a raw `json` block is passed through unmodified. Attribute
-//! values reverse the renderer escaping (`&quot;` before `&amp;`).
+//! Arguments mirror the renderer's type tagging (inverse encoding). A
+//! `type="string"` value is raw text, which streams as it arrives, escaped into
+//! a JSON string. Any other value is JSON text, whose validity is known only at
+//! its end, so it is written once complete: as spelled when it is valid JSON,
+//! and otherwise as a JSON string of the text, like the Python parser. A raw
+//! `json` block is the whole arguments object and streams through unmodified.
+//! Attribute values reverse the renderer escaping (`&quot;` before `&amp;`).
 //!
-//! Known limitation (shared with the Python parser): string argument and
-//! response bodies are emitted raw, so a value that literally contains
-//! `<|close|>argument<|sep|>` or `<|close|>response<|sep|>` is
-//! indistinguishable from a real closing marker. With token attribution this
-//! now only applies to `argument` and `json` blocks inside a call body, which
-//! are still parsed from text.
+//! String argument and response bodies are emitted raw, so in text a value that
+//! literally contains `<|close|>argument<|sep|>` or `<|close|>response<|sep|>`
+//! is indistinguishable from a real closing marker, a known limitation of the
+//! Python parser. With token attribution only the special tokens close a block.
 
 mod grammar;
 
-use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, preceded, repeat, seq, terminated};
+use winnow::combinator::{alt, eof, preceded, repeat, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
-use winnow::token::{literal, rest, take_till, take_until, take_while};
+use winnow::token::{literal, rest, take_till, take_while};
 
-use super::{Result, UnifiedParser, UnifiedParserOutput, special_token};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, special_token};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{JsonStyle, OpenToolCall, Tool};
 use crate::unified::parsing_failed;
 use crate::utils::{
     Attributed, AttributedExt as _, Marker, MarkerScanState, SpecialToken,
-    parse_buffered_event_attributed, safe_text_len_mul, take_until_marker,
+    parse_buffered_event_attributed, safe_text_len, safe_text_len_mul, take_until_marker,
 };
 
 const OPEN: &str = "<|open|>";
@@ -128,6 +128,13 @@ struct Markers {
     /// `<|open|>call`; the tag attributes and the terminating `<|sep|>` follow.
     call_open: Marker,
     call_close: Marker,
+    /// `<|open|>argument`; the tag attributes and the terminating `<|sep|>`
+    /// follow.
+    argument_open: Marker,
+    argument_close: Marker,
+    /// `<|open|>json`; the tag attributes and the terminating `<|sep|>` follow.
+    json_open: Marker,
+    json_close: Marker,
     sep: Marker,
 }
 
@@ -149,6 +156,10 @@ impl Markers {
             end_of_msg: Marker::special(&tokens.end_of_msg),
             call_open: Marker::special(&tokens.open).then_text("call"),
             call_close: close("call"),
+            argument_open: Marker::special(&tokens.open).then_text("argument"),
+            argument_close: close("argument"),
+            json_open: Marker::special(&tokens.open).then_text("json"),
+            json_close: close("json"),
             sep: Marker::special(&tokens.sep),
         }
     }
@@ -170,21 +181,42 @@ enum KimiK3Event {
     MessageEnd,
     CallOpen {
         name: String,
-        index: Option<String>,
     },
-    CallComplete {
-        arguments: String,
+    /// An `argument` block opens; `is_string` tells whether its `type`
+    /// attribute is `string`, the default.
+    ArgumentOpen {
+        key: String,
+        is_string: bool,
     },
+    /// The drained text continues the open string argument value.
+    ArgumentText,
+    ArgumentClose,
+    /// The complete value of a typed (non-string) argument, through its close
+    /// marker.
+    TypedValue {
+        value: String,
+    },
+    /// A raw `json` block, the whole arguments object, opens.
+    JsonOpen,
+    /// The drained text continues the raw `json` block.
+    JsonText,
+    JsonClose,
+    CallClose,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 enum KimiK3Mode {
     /// Before any channel opens: channel opens are expected, but raw text
     /// falls through as visible text so marker-free output still streams.
     #[default]
     Idle,
-    /// Inside the `think` channel.
+    /// Inside the `think` channel the model opened.
     Reasoning,
+    /// Inside the `think` channel the prompt opened, before the model emitted
+    /// any channel marker. The model may skip thinking and open `response`
+    /// directly, which also ends this channel; a generated `think` open moves
+    /// to [`KimiK3Mode::Reasoning`].
+    PrefilledReasoning,
     /// Inside the `response` channel.
     Response,
     /// After the `response` (or `tools`) channel closed: only a `tools`
@@ -192,14 +224,35 @@ enum KimiK3Mode {
     Epilogue,
     /// Inside the `tools` channel, between `call` blocks.
     Tools,
-    /// Inside one `call` block, buffering its body until the close marker.
+    /// Inside one `call` block, streaming its arguments.
     Call {
-        name: String,
-        index: Option<String>,
-        scan: MarkerScanState,
+        /// The call being emitted, or `None` for a call without a tool name,
+        /// which is parsed but dropped.
+        call: Option<OpenToolCall>,
+        body: CallBody,
     },
     /// After the message closed: ignore the rest (EOS leakage guard).
     Done,
+}
+
+/// Where the parser is inside a `call` block.
+#[derive(Debug)]
+enum CallBody {
+    /// Before the first argument, where a raw `json` block may open instead.
+    Start,
+    /// Between `argument` blocks.
+    Arguments,
+    /// Inside a string `argument` value, which streams as it arrives.
+    Argument,
+    /// Inside a typed `argument` value, which is written once complete.
+    TypedArgument {
+        key: String,
+        value_end_scan: MarkerScanState,
+    },
+    /// Inside a raw `json` block.
+    Json,
+    /// After a raw `json` block.
+    AfterJson,
 }
 
 /// Unified parser for Kimi K3 XTML think / response / tools channels.
@@ -256,7 +309,7 @@ impl KimiK3UnifiedParser {
             return;
         };
         self.mode = match tag.trim() {
-            "think" => KimiK3Mode::Reasoning,
+            "think" => KimiK3Mode::PrefilledReasoning,
             "response" => KimiK3Mode::Response,
             _ => KimiK3Mode::Idle,
         };
@@ -280,36 +333,100 @@ impl KimiK3UnifiedParser {
             KimiK3Event::ToolsOpen => self.mode = KimiK3Mode::Tools,
             KimiK3Event::ToolsClose => self.mode = KimiK3Mode::Epilogue,
             KimiK3Event::MessageEnd => self.mode = KimiK3Mode::Done,
-            KimiK3Event::CallOpen { name, index } => {
+            KimiK3Event::CallOpen { name } => {
+                // An empty/garbage call block without a tool name is dropped,
+                // matching the Python parser.
+                let call = (!name.is_empty()).then(|| {
+                    let tool_index = self.emitted_call_count;
+                    self.emitted_call_count += 1;
+                    // The template renders compact JSON values.
+                    OpenToolCall::new(name, tool_index, JsonStyle::Compact)
+                });
                 self.mode = KimiK3Mode::Call {
-                    name,
-                    index,
-                    scan: MarkerScanState::default(),
+                    call,
+                    body: CallBody::Start,
                 };
             }
-            KimiK3Event::CallComplete { arguments } => {
+            KimiK3Event::ArgumentOpen { key, is_string } => {
+                let (call, body) = self.call_mut()?;
+                if is_string {
+                    *body = CallBody::Argument;
+                    if let Some(call) = call {
+                        call.arguments.open_string(&key);
+                    }
+                } else {
+                    *body = CallBody::TypedArgument {
+                        key,
+                        value_end_scan: MarkerScanState::default(),
+                    };
+                }
+            }
+            KimiK3Event::ArgumentText => {
+                if let (Some(call), _) = self.call_mut()? {
+                    call.arguments.push(&piece.text);
+                }
+            }
+            KimiK3Event::ArgumentClose => {
+                let (call, body) = self.call_mut()?;
+                *body = CallBody::Arguments;
+                if let Some(call) = call {
+                    call.arguments.close();
+                }
+            }
+            KimiK3Event::TypedValue { value } => {
+                let (call, body) = self.call_mut()?;
+                let CallBody::TypedArgument { key, .. } =
+                    std::mem::replace(body, CallBody::Arguments)
+                else {
+                    return Err(parsing_failed!(
+                        "Kimi K3 typed value outside a typed argument"
+                    ));
+                };
+                if let Some(call) = call {
+                    call.arguments.write_json(&key, &value);
+                }
+            }
+            KimiK3Event::JsonOpen => *self.call_mut()?.1 = CallBody::Json,
+            KimiK3Event::JsonText => {
+                if let (Some(call), _) = self.call_mut()? {
+                    call.arguments.push_raw_arguments(&piece.text);
+                }
+            }
+            KimiK3Event::JsonClose => *self.call_mut()?.1 = CallBody::AfterJson,
+            KimiK3Event::CallClose => {
                 let mode = std::mem::replace(&mut self.mode, KimiK3Mode::Tools);
-                let KimiK3Mode::Call { name, .. } = mode else {
+                let KimiK3Mode::Call { call, body, .. } = mode else {
                     return Err(parsing_failed!(
                         "Kimi K3 call completion without an active tool call"
                     ));
                 };
-                // An empty/garbage call block without a tool name is dropped,
-                // matching the Python parser.
-                if name.is_empty() {
-                    return Ok(());
+                // A raw `json` block already is the whole arguments object.
+                if let Some(call) = call
+                    && !matches!(body, CallBody::AfterJson)
+                {
+                    output.push_call(call.finish());
                 }
-
-                let tool_index = self.emitted_call_count;
-                self.emitted_call_count += 1;
-                output.push_call(ToolCallDelta {
-                    tool_index,
-                    name: Some(name),
-                    arguments,
-                });
             }
         }
+        if let KimiK3Mode::Call {
+            call: Some(call), ..
+        } = &mut self.mode
+            && let Some(delta) = call.take_delta()
+        {
+            output.push_call(delta);
+        }
         Ok(())
+    }
+
+    /// The active call and the position inside its block, for an event inside
+    /// a `call` block.
+    fn call_mut(&mut self) -> Result<(Option<&mut OpenToolCall>, &mut CallBody)> {
+        match &mut self.mode {
+            KimiK3Mode::Call { call, body, .. } => Ok((call.as_mut(), body)),
+            _ => Err(parsing_failed!(
+                "Kimi K3 call event without an active tool call"
+            )),
+        }
     }
 
     fn reset_state(&mut self) -> String {
@@ -367,7 +484,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
             KimiK3Mode::Idle | KimiK3Mode::Response => {
                 output.push_text(self.buffer.take().text);
             }
-            KimiK3Mode::Reasoning => {
+            KimiK3Mode::Reasoning | KimiK3Mode::PrefilledReasoning => {
                 output.push_reasoning(self.buffer.take());
             }
             KimiK3Mode::Epilogue | KimiK3Mode::Done => self.buffer.clear(),
@@ -375,7 +492,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
             // closing markers; keep the calls already emitted.
             KimiK3Mode::Tools if self.buffer.text.is_empty() => {}
             KimiK3Mode::Tools | KimiK3Mode::Call { .. } => {
-                return Err(parsing_failed!("incomplete Kimi K3 tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Kimi K3" });
             }
         }
 
@@ -396,10 +513,11 @@ fn parse_next_kimi_k3_event(
     match mode {
         KimiK3Mode::Idle => parse_idle_event(input),
         KimiK3Mode::Reasoning => parse_reasoning_event(input),
+        KimiK3Mode::PrefilledReasoning => parse_prefilled_reasoning_event(input),
         KimiK3Mode::Response => parse_response_event(input),
         KimiK3Mode::Epilogue => parse_epilogue_event(input),
         KimiK3Mode::Tools => parse_tools_event(input),
-        KimiK3Mode::Call { scan, .. } => call_body_event(input, scan),
+        KimiK3Mode::Call { body, .. } => parse_call_event(input, body),
         KimiK3Mode::Done => parse_done_event(input),
     }
 }
@@ -426,6 +544,22 @@ fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event
         // `include_stop_str_in_output`; never leak it into reasoning.
         markers.end_of_msg.value(KimiK3Event::MessageEnd),
         safe_reasoning_event,
+    ))
+    .parse_next(input)
+}
+
+/// Parse an event inside the `think` channel the prompt opened.
+///
+/// Like Python, a `response` open ends reasoning only while the model has not
+/// emitted its own `think` open.
+fn parse_prefilled_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    alt((
+        markers.think_close.value(KimiK3Event::ThinkClose),
+        markers.think_open.value(KimiK3Event::ThinkOpen),
+        markers.response_open.value(KimiK3Event::ResponseOpen),
+        markers.end_of_msg.value(KimiK3Event::MessageEnd),
+        safe_prefilled_reasoning_event,
     ))
     .parse_next(input)
 }
@@ -503,6 +637,22 @@ fn safe_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event>
         .map(|_| KimiK3Event::Reasoning)
 }
 
+/// Parse safe reasoning before the next marker of a prefilled `think`
+/// channel.
+fn safe_prefilled_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(
+        input,
+        &[
+            &markers.think_close,
+            &markers.think_open,
+            &markers.response_open,
+            &markers.end_of_msg,
+        ],
+    )
+    .map(|_| KimiK3Event::Reasoning)
+}
+
 /// Parse safe response text before the next channel marker.
 fn safe_response_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
     let markers = input.markers();
@@ -547,7 +697,7 @@ fn skip_tools_noise_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Even
     .map(|_| KimiK3Event::Skip)
 }
 
-/// Parse a `call` open tag into its tool name and one-based index.
+/// Parse a `call` open tag into its tool name.
 ///
 /// The attributes end at the structural `<|sep|>`; an ordinary spelling of
 /// `<|sep|>` inside an attribute value stays attribute text.
@@ -564,92 +714,97 @@ fn call_open_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 
     Ok(KimiK3Event::CallOpen {
         name: attr_value(&attrs, "tool").unwrap_or_default().to_string(),
-        index: attr_value(&attrs, "index")
-            .filter(|index| !index.is_empty())
-            .map(str::to_string),
     })
 }
 
-/// Parse the buffered call body through `<|close|>call<|sep|>` into a
-/// completed call.
-fn call_body_event(
-    input: &mut KimiK3Input<'_>,
-    scan: &mut MarkerScanState,
-) -> ModalResult<KimiK3Event> {
+/// Parse an event inside a `call` block at position `body`.
+fn parse_call_event(input: &mut KimiK3Input<'_>, body: &mut CallBody) -> ModalResult<KimiK3Event> {
     let markers = input.markers();
-    let (body,) = seq!(
-        take_until_marker(&markers.call_close, scan),
-        _: &markers.call_close,
-    )
-    .parse_next(input)?;
-    let arguments = parse_call_arguments(body)?;
-
-    Ok(KimiK3Event::CallComplete { arguments })
+    let call_close = markers.call_close.value(KimiK3Event::CallClose);
+    match body {
+        CallBody::Start => {
+            preceded(ws0, alt((argument_open_event, json_open_event, call_close))).parse_next(input)
+        }
+        CallBody::Arguments => {
+            preceded(ws0, alt((argument_open_event, call_close))).parse_next(input)
+        }
+        CallBody::Argument => alt((
+            markers.argument_close.value(KimiK3Event::ArgumentClose),
+            safe_argument_text_event,
+        ))
+        .parse_next(input),
+        CallBody::TypedArgument { value_end_scan, .. } => typed_value_event(input, value_end_scan),
+        CallBody::Json => alt((
+            markers.json_close.value(KimiK3Event::JsonClose),
+            safe_json_text_event,
+        ))
+        .parse_next(input),
+        CallBody::AfterJson => preceded(ws0, call_close).parse_next(input),
+    }
 }
 
-/// Parse a complete `call` body into the OpenAI-style arguments JSON string.
+/// Parse an `argument` open tag into its key and whether its value is a
+/// string.
 ///
-/// The body is either one raw `json` block (passed through unmodified) or a
-/// sequence of typed `argument` blocks (converted per their `type` tags).
-fn parse_call_arguments(body: &str) -> ModalResult<String> {
-    let mut input = body;
-    terminated(
-        delimited(ws0, alt((json_block_arguments, typed_arguments)), ws0),
-        eof,
-    )
-    .parse_next(&mut input)
-    .map_err(|_| xtml_error("Kimi K3 call body"))
-}
-
-/// Parse one raw `json` argument block, passing its body through unmodified.
-fn json_block_arguments(input: &mut &str) -> ModalResult<String> {
-    let (raw,) = seq!(
-        _: literal(JSON_OPEN),
-        _: take_until(0.., SEP), // attrs (`type="object"`), unused on decode
-        _: literal(SEP),
-        take_until(0.., JSON_CLOSE),
-        _: literal(JSON_CLOSE),
-    )
-    .parse_next(input)?;
-    Ok(raw.to_string())
-}
-
-/// Parse typed `argument` blocks into a serialized JSON object, preserving
-/// argument order.
-fn typed_arguments(input: &mut &str) -> ModalResult<String> {
-    let pairs: Vec<(String, Value)> =
-        repeat(0.., terminated(argument_block, ws0)).parse_next(input)?;
-    let arguments = pairs.into_iter().collect::<Map<String, Value>>();
-    serde_json::to_string(&arguments).map_err(|_| xtml_error("Kimi K3 arguments"))
-}
-
-/// Parse one typed `argument` block into its key/value pair.
-fn argument_block(input: &mut &str) -> ModalResult<(String, Value)> {
-    let (attrs, raw) = seq!(
-        _: literal(ARG_OPEN),
-        take_until(0.., SEP),
-        _: literal(SEP),
-        take_until(0.., ARG_CLOSE),
-        _: literal(ARG_CLOSE),
+/// A `string` value, the default, is raw text, and a value of any other type is
+/// JSON text. The attributes end at the structural `<|sep|>`.
+fn argument_open_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    let mut scan = MarkerScanState::default();
+    let (attrs,) = seq!(
+        _: &markers.argument_open,
+        take_until_marker(&markers.sep, &mut scan),
+        _: &markers.sep,
     )
     .parse_next(input)?;
     let attrs = parse_tag_attrs(attrs)?;
 
-    let key = attr_value(&attrs, "key").unwrap_or_default().to_string();
-    let arg_type = attr_value(&attrs, "type").unwrap_or("string");
-    Ok((key, decode_argument_value(arg_type, raw)))
+    Ok(KimiK3Event::ArgumentOpen {
+        key: attr_value(&attrs, "key").unwrap_or_default().to_string(),
+        is_string: attr_value(&attrs, "type").unwrap_or("string") == "string",
+    })
 }
 
-/// Decode one typed argument value per its XTML `type` tag.
-///
-/// `string` values pass the raw text through (the renderer emits them
-/// unescaped); other types are JSON-decoded, falling back to the raw text on
-/// malformed payloads so one quirky value does not fail the whole call.
-fn decode_argument_value(arg_type: &str, raw: &str) -> Value {
-    if arg_type == "string" {
-        return Value::String(raw.to_string());
-    }
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+/// Parse a raw `json` block open tag; its attributes (`type="object"`) are
+/// unused on decode.
+fn json_open_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    let mut scan = MarkerScanState::default();
+    seq!(
+        _: &markers.json_open,
+        _: take_until_marker(&markers.sep, &mut scan),
+        _: &markers.sep,
+    )
+    .value(KimiK3Event::JsonOpen)
+    .parse_next(input)
+}
+
+/// Parse safe argument value text before the argument close marker.
+fn safe_argument_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len(input, &markers.argument_close).map(|_| KimiK3Event::ArgumentText)
+}
+
+/// Parse a complete typed argument value through the argument close marker.
+fn typed_value_event(
+    input: &mut KimiK3Input<'_>,
+    value_end_scan: &mut MarkerScanState,
+) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    let (value,) = seq!(
+        take_until_marker(&markers.argument_close, value_end_scan),
+        _: &markers.argument_close,
+    )
+    .parse_next(input)?;
+    Ok(KimiK3Event::TypedValue {
+        value: value.to_string(),
+    })
+}
+
+/// Parse safe raw `json` block text before the block close marker.
+fn safe_json_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len(input, &markers.json_close).map(|_| KimiK3Event::JsonText)
 }
 
 /// Parse a complete XTML attribute string like ` tool="get_weather" index="1"`.
@@ -693,6 +848,7 @@ fn xtml_error(label: &'static str) -> ErrMode<ContextError> {
 mod tests {
     use std::sync::Arc;
 
+    use expect_test::expect;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
     use vllm_tokenizer::DecodedText;
@@ -769,14 +925,19 @@ mod tests {
                 .collect()
         }
 
+        /// Tool calls with their argument deltas merged.
         fn calls(&self) -> Vec<ToolCallDelta> {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
-                })
-                .collect()
+            let mut calls = Vec::<ToolCallDelta>::new();
+            for event in &self.events {
+                let UnifiedParserEvent::ToolCall(delta) = event else {
+                    continue;
+                };
+                match calls.iter_mut().find(|call| call.tool_index == delta.tool_index) {
+                    Some(call) => call.arguments.push_str(&delta.arguments),
+                    None => calls.push(delta.clone()),
+                }
+            }
+            calls
         }
     }
 
@@ -977,6 +1138,41 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k3_response_open_ends_prefilled_reasoning() {
+        let prompt = structural("<|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>");
+        let text = format!(
+            "{RESPONSE_OPEN}answer{RESPONSE_CLOSE}{TOOLS_OPEN}{}{TOOLS_CLOSE}<|close|>message{SEP}",
+            call("tool=\"calc\" index=\"1\"", &arg("x", "number", "42")),
+        );
+
+        for size in [1, 3, 7, text.len()] {
+            let chunks = char_chunks(&text, size);
+            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let mut parser = test_parser();
+            parser.initialize(&prompt).unwrap();
+            let output = collect_stream(&mut parser, &chunk_refs);
+
+            assert_eq!(output.reasoning_text(), "", "chunk size {size}");
+            assert_eq!(output.normal_text(), "answer", "chunk size {size}");
+            assert_eq!(first_call(&output).arguments, r#"{"x":42}"#);
+        }
+    }
+
+    #[test]
+    fn kimi_k3_response_open_stays_in_explicitly_opened_reasoning() {
+        let mut parser = test_parser();
+        start_in_reasoning(&mut parser);
+        let output = parser
+            .parse_complete(&format!(
+                "{THINK_OPEN}draft {RESPONSE_OPEN}x{THINK_CLOSE}{RESPONSE_OPEN}answer{RESPONSE_CLOSE}"
+            ))
+            .unwrap();
+
+        assert_eq!(output.reasoning_text(), format!("draft {RESPONSE_OPEN}x"));
+        assert_eq!(output.normal_text(), "answer");
+    }
+
+    #[test]
     fn kimi_k3_initialize_response_prefill_starts_in_response() {
         let mut parser = test_parser();
         let prompt = tokenizer()
@@ -1020,24 +1216,35 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_tool_call_waits_for_close_marker() {
+    fn kimi_k3_tool_call_streams_before_close_marker() {
         let mut parser = test_parser();
         let mut output = UnifiedParserOutput::default();
 
-        let argument = arg("x", "number", "1");
+        // The call and its arguments so far, after each chunk.
+        let mut progress = Vec::new();
         for chunk in [
             TOOLS_OPEN,
             "<|open|>call tool=\"calc\" index=\"1\"<|sep|>",
-            argument.as_str(),
+            "<|open|>argument key=\"note\" type=\"string\"<|sep|>half",
+            " \"done\"<|close|>argument<|sep|>",
+            &arg("x", "number", "1"),
+            "<|close|>call<|sep|>",
         ] {
             output.append(parser.parse_chunk(chunk).unwrap());
-            assert!(output.calls().is_empty());
+            progress.push(match output.calls().first() {
+                Some(call) => format!("{}({})", call.name.as_deref().unwrap(), call.arguments),
+                None => "no call".to_string(),
+            });
         }
 
-        output.append(parser.parse_chunk("<|close|>call<|sep|>").unwrap());
-
-        assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
-        assert_eq!(first_call(&output).arguments, r#"{"x":1}"#);
+        expect![[r#"
+            no call
+            calc()
+            calc({"note":"half)
+            calc({"note":"half \"done\"")
+            calc({"note":"half \"done\"","x":1)
+            calc({"note":"half \"done\"","x":1})"#]]
+        .assert_eq(&progress.join("\n"));
     }
 
     #[test]
@@ -1101,20 +1308,45 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_malformed_typed_argument_falls_back_to_raw_text() {
-        let text = thinking_output(
-            "t",
-            "",
-            &call(
-                "tool=\"calc\" index=\"1\"",
-                &arg("x", "number", "not a number"),
-            ),
-        );
+    fn kimi_k3_typed_arguments_keep_json_spelling_or_fall_back_to_strings() {
+        // Non-string values are JSON text: valid text keeps its spelling, and
+        // malformed or empty text becomes a string, as in the Python parser.
+        let body = [
+            arg("x", "number", "1.50"),
+            arg("filters", "object", r#"{"kind": "rain"}"#),
+            arg("y", "number", "not a number"),
+            arg("z", "boolean", ""),
+        ]
+        .concat();
+        let text = thinking_output("t", "", &call("tool=\"calc\" index=\"1\"", &body));
 
         let mut parser = test_parser();
         let output = parser.parse_complete(&text).unwrap();
 
-        assert_eq!(first_call(&output).arguments, r#"{"x":"not a number"}"#);
+        assert_eq!(
+            first_call(&output).arguments,
+            r#"{"x":1.50,"filters":{"kind": "rain"},"y":"not a number","z":""}"#
+        );
+    }
+
+    #[test]
+    fn kimi_k3_ordinary_argument_close_inside_string_value_stays_value() {
+        let quoted = "<|close|>argument<|sep|><|close|>call<|sep|>";
+        let mut ids = structural(&format!(
+            "{TOOLS_OPEN}{OPEN}call tool=\"write\" index=\"1\"{SEP}\
+             {OPEN}argument key=\"content\" type=\"string\"{SEP}a"
+        ));
+        ids.extend(ordinary(quoted));
+        ids.extend(structural(&format!(
+            "b<|close|>argument{SEP}<|close|>call{SEP}{TOOLS_CLOSE}"
+        )));
+
+        let output = parse_decoded(&mut test_parser(), decode_ids(&ids));
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
+            json!({ "content": format!("a{quoted}b") })
+        );
     }
 
     #[test]
