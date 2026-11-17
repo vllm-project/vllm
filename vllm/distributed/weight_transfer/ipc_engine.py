@@ -4,7 +4,7 @@
 
 import pickle
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import pybase64 as base64
 import torch
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedBufferImporter,
-    packed_ipc_consumer,
+    PackedIpcConsumer,
     packed_ipc_producer,
 )
 
@@ -38,8 +38,8 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 
     `packed` is a must-agree wire param: the trainer ships it here at the init
     handshake so the worker decodes with the same setting the trainer encoded
-    with. The consumer rebuilds from the IPC handle + `tensor_sizes`, so it does
-    not need the buffer size (producer-only)."""
+    with. The consumer takes the chunk size from the size of the shared buffer,
+    so it does not need the buffer size (producer-only)."""
 
     packed: bool = False
 
@@ -64,6 +64,7 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Per-round update info for the IPC weight transfer backend."""
 
     names: list[str]
+    """Packed mode: the tensors that start in this chunk (`PackedIpcChunk`)."""
     dtype_names: list[str]
     shapes: list[list[int]]
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple] | None = None
@@ -72,9 +73,6 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     For packed mode: single handle dict for the packed buffer."""
     ipc_handles_pickled: str | None = None
     """Base64-encoded pickled IPC handles, used for HTTP transport."""
-    tensor_sizes: list[int] | None = None
-    """Per-parameter sizes in bytes within the packed buffer.
-    Required when packed=True, unused otherwise."""
 
     def __post_init__(self):
         if self.ipc_handles_pickled is not None:
@@ -145,6 +143,8 @@ class IPCWeightTransferEngine(
         # Shared across all chunks of every packed transfer this engine
         # receives; see PackedBufferImporter for the refcount contract.
         self._packed_importer = PackedBufferImporter()
+        # The current packed transfer: split tensors persist across chunks.
+        self._packed_consumer = PackedIpcConsumer(self._packed_importer)
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """Initialize the weight transfer mechanism. No data-plane rendezvous is
@@ -162,6 +162,7 @@ class IPCWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import start_reload
 
         start_reload(self.model)
+        self._packed_consumer = PackedIpcConsumer(self._packed_importer)
 
     def finish_weight_update(self) -> None:
         """Finish reloading after all weights have been received."""
@@ -174,6 +175,7 @@ class IPCWeightTransferEngine(
         # that skip finish are still covered by the replace-on-next-export
         # path inside the importer.
         self._packed_importer.close()
+        self._packed_consumer = PackedIpcConsumer(self._packed_importer)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via CUDA IPC handles and load them.
@@ -196,17 +198,13 @@ class IPCWeightTransferEngine(
         device_index = self.device.index
 
         if self.packed:
-            if update_info.tensor_sizes is None:
-                raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
-            weights = packed_ipc_consumer(
+            weights = self._packed_consumer.receive(
                 ipc_handle=update_info.ipc_handles,
                 names=update_info.names,
                 shapes=update_info.shapes,
                 dtype_names=update_info.dtype_names,
-                tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
-                importer=self._packed_importer,
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
@@ -425,7 +423,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
                 dtype_names=chunk.dtype_names,
                 shapes=chunk.shapes,
                 ipc_handles=ipc_handle,
-                tensor_sizes=chunk.tensor_sizes,
             )
             # Per-chunk barrier: the producer reuses a single IPC buffer across
             # chunks, but only the sender waits for the consumers (via _do_send).
@@ -440,7 +437,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         dtype_names: list[str],
         shapes: list[list[int]],
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
-        tensor_sizes: list[int] | None = None,
     ) -> None:
         """Build one update payload and ship it via the client. Only the sender
         ships (non-sender ranks already contributed to the handle all-gather).
@@ -450,14 +446,10 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         """
         if not self.is_sender:
             return
-        update_fields: dict[str, Any] = {
-            "names": names,
-            "dtype_names": dtype_names,
-            "shapes": shapes,
-            "ipc_handles": ipc_handles,
-        }
-        if tensor_sizes is not None:
-            update_fields["tensor_sizes"] = tensor_sizes
-
-        update_info = IPCWeightTransferUpdateInfo(**update_fields)
+        update_info = IPCWeightTransferUpdateInfo(
+            names=names,
+            dtype_names=dtype_names,
+            shapes=shapes,
+            ipc_handles=ipc_handles,
+        )
         self.client.update_weights(asdict(update_info))

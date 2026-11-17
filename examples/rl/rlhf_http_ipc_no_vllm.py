@@ -82,7 +82,6 @@ def update_weights(
     weights: Weights,
     names: list[str],
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
-    tensor_sizes: list[int] | None = None,
 ) -> None:
     w = next(iter(weights.values()))
     update_info = {
@@ -91,8 +90,6 @@ def update_weights(
         "shapes": [list(w[n].shape) for n in names],
         "ipc_handles_pickled": base64.b64encode(pickle.dumps(ipc_handles)).decode(),
     }
-    if tensor_sizes is not None:
-        update_info["tensor_sizes"] = tensor_sizes
     post("/update_weights", {"update_info": update_info})
 
 
@@ -105,34 +102,43 @@ def send_unpacked(weights: Weights, names: list[str]) -> list[torch.Tensor]:
 
 
 def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tensor]:
-    """One /update_weights call per chunk; one {uuid: args} dict per chunk."""
+    """One /update_weights call per chunk; one {uuid: args} dict per chunk.
+
+    The tensors form one byte stream, each starting 16-byte aligned, cut into
+    chunks of the buffer size (a multiple of 16); a tensor crossing a cut is
+    split. Each chunk names the tensors whose first bytes it holds."""
+    cap -= cap % 16  # the server takes the chunk size from the buffer's size
     buffers = {
         u: torch.empty(cap, dtype=torch.uint8, device=w[names[0]].device)
         for u, w in weights.items()
     }
     handle = {u: reduce_tensor(b)[1] for u, b in buffers.items()}  # export once
-    chunk: list[str] = []
-    sizes: list[int] = []
+    started: list[str] = []  # the tensors starting in the current chunk
+    used = 0  # bytes of the current chunk taken
 
     def flush() -> None:
         for b in buffers.values():
             torch.accelerator.synchronize(b.device)  # copies must land before the read
-        update_weights(weights, chunk, handle, sizes)
-        chunk.clear()
-        sizes.clear()
+        update_weights(weights, started, handle)
+        started.clear()
 
     for n in names:
-        nbytes = next(iter(weights.values()))[n].nbytes
-        assert nbytes <= cap, f"{n} ({nbytes} B) exceeds the buffer"
-        if chunk and sum(sizes) + nbytes > cap:  # close *before* overflowing
-            flush()
-        offset = sum(sizes)
-        for u, w in weights.items():
-            flat = w[n].contiguous().view(-1).view(torch.uint8)
-            buffers[u][offset : offset + nbytes].copy_(flat)
-        chunk.append(n)
-        sizes.append(nbytes)
-    if chunk:
+        used = (used + 15) // 16 * 16
+        started.append(n)
+        nbytes, start = next(iter(weights.values()))[n].nbytes, 0
+        while True:
+            end = min(nbytes, start + cap - used)
+            for u, w in weights.items():
+                flat = w[n].contiguous().view(-1).view(torch.uint8)
+                buffers[u][used : used + end - start].copy_(flat[start:end])
+            used += end - start
+            start = end
+            if (used + 15) // 16 * 16 == cap:  # full: send it
+                flush()
+                used = 0
+            if start == nbytes:
+                break
+    if started or used:
         flush()
     return list(buffers.values())
 

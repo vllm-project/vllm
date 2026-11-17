@@ -15,11 +15,11 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     ALIGN,
     DEFAULT_PACKED_NUM_BUFFERS,
     Chunk,
+    PackedIpcConsumer,
     Piece,
     _get_streams,
     _nbytes,
     chunks,
-    packed_ipc_consumer,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
@@ -399,6 +399,46 @@ class TestPackedIpcProducer:
         )
 
         assert len(chunks) > 1
+        # each tensor is named once, by the chunk holding its first bytes
+        assert [n for c in chunks for n in c.names] == [n for n, _ in params]
+
+    def test_producers_pack_parameters(self):
+        """Parameters (requiring grad), whole and split, pack like tensors."""
+        params = [
+            (f"p{i}", torch.nn.Parameter(torch.randn(n, device="cuda")))
+            for i, n in enumerate([5, 300, 7])
+        ]
+        ipc = list(
+            packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid="uuid",
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=512,
+            )
+        )
+        assert len(ipc) == 3
+        group = MockCommunicationGroup()
+        packed_nccl_broadcast_producer(
+            iterator=iter(params),
+            group=group,
+            src=0,
+            post_iter_func=lambda x: x[1],
+            buffer_size_bytes=512,
+        )
+        tensors = [t.detach().cpu() for _, t in params]
+        layout = list(chunks(((t.shape, t.dtype) for t in tensors), 512))
+        sent = [t.cpu().numpy().tobytes() for t in group.broadcasted_tensors]
+        expected = _layout_bytes(layout, tensors)
+        assert len(sent) == len(expected) == len(layout)
+
+        def pieces(chunk_bytes: bytes, chunk: Chunk) -> list[bytes]:
+            # the alignment padding between tensors is never written
+            return [
+                chunk_bytes[p.offset : p.offset + p.end - p.start] for p in chunk.pieces
+            ]
+
+        for got, want, chunk in zip(sent, expected, layout):
+            assert pieces(got, chunk) == pieces(want, chunk)
 
     def test_producer_ipc_handle_has_uuid(self):
         """Test that each chunk's ipc_handle is keyed by the given UUID."""
@@ -460,16 +500,16 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
     try:
         torch.accelerator.set_device_index(device_index)
         all_results = []
+        consumer = PackedIpcConsumer()
         while True:
             cd = cmd_q.get()
             if cd is None:
                 break
-            result = packed_ipc_consumer(
+            result = consumer.receive(
                 ipc_handle=cd["ipc_handle"],
                 names=cd["names"],
                 shapes=cd["shapes"],
                 dtype_names=cd["dtype_names"],
-                tensor_sizes=cd["tensor_sizes"],
                 device_index=device_index,
             )
             for name, tensor in result:
@@ -538,7 +578,6 @@ class TestPackedIpcRoundtrip:
                         "names": chunk.names,
                         "shapes": chunk.shapes,
                         "dtype_names": chunk.dtype_names,
-                        "tensor_sizes": chunk.tensor_sizes,
                     }
                 )
                 if ack_q.get(timeout=timeout) != "ack":
@@ -665,13 +704,17 @@ class TestPackedIpcRoundtrip:
             assert res_tensor.dtype == orig_tensor.dtype
             assert torch.allclose(res_tensor, orig_tensor.cpu(), rtol=1e-4, atol=1e-6)
 
-    def test_roundtrip_misaligned_entries(self):
-        """A 3-byte entry shifts every later entry off its dtype's alignment;
-        the consumer copies those instead of failing to view them."""
+    @pytest.mark.parametrize("buffer_size_bytes", [10_000_000, 64, 50])
+    def test_roundtrip_odd_sized_and_split_entries(self, buffer_size_bytes):
+        """Odd-sized entries (a 3-byte one first), a 0-dim and an empty one,
+        and with a small buffer tensors split across chunks, including chunks
+        that name no tensor."""
         params = [
             ("tag", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
             ("w", torch.randn(4, 8, dtype=torch.float32).cuda()),
             ("b", torch.randn(5, dtype=torch.bfloat16).cuda()),
+            ("s", torch.tensor(2.5).cuda()),
+            ("e", torch.empty(0, 3).cuda()),
             ("i", torch.arange(3, dtype=torch.int64).cuda()),
         ]
         num_chunks, result = self._run_roundtrip(
@@ -679,17 +722,56 @@ class TestPackedIpcRoundtrip:
                 iterator=iter(params),
                 gpu_uuid=self._get_gpu_uuid(),
                 post_iter_func=lambda x: x[1],
-                buffer_size_bytes=10_000_000,
+                buffer_size_bytes=buffer_size_bytes,
             ),
             torch.cuda.current_device(),
         )
-        assert num_chunks == 1
+        assert (num_chunks == 1) == (buffer_size_bytes == 10_000_000)
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(
             params, result, strict=True
         ):
             assert orig_name == res_name
             assert res_tensor.dtype == orig_tensor.dtype
             assert torch.equal(res_tensor, orig_tensor.cpu())
+
+    def test_roundtrip_tensor_over_the_buffer(self):
+        """A tensor larger than the IPC buffer is split across chunks."""
+        params = [
+            ("small", torch.randn(10, device="cuda")),
+            ("big", torch.randn(100, 100, device="cuda")),  # 40000 B
+            ("after", torch.randn(7, device="cuda", dtype=torch.float16)),
+        ]
+        num_chunks, result = self._run_roundtrip(
+            packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid=self._get_gpu_uuid(),
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=4096,
+            ),
+            torch.cuda.current_device(),
+        )
+        assert num_chunks == 10
+        assert [n for n, _ in result] == [n for n, _ in params]
+        for (_, orig), (_, res) in zip(params, result):
+            assert torch.equal(res, orig.cpu())
+
+    def test_roundtrip_ending_with_a_chunk_of_no_bytes(self):
+        params = [
+            ("full", torch.randn(8, device="cuda")),  # 32 B: two full chunks
+            ("empty", torch.empty(0, 4, device="cuda")),
+        ]
+        num_chunks, result = self._run_roundtrip(
+            packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid=self._get_gpu_uuid(),
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=16,
+            ),
+            torch.cuda.current_device(),
+        )
+        assert num_chunks == 3
+        for (n, orig), (m, res) in zip(params, result, strict=True):
+            assert n == m and torch.equal(res, orig.cpu())
 
     def test_consumer_wrong_uuid_raises(self):
         """Test that consumer raises ValueError for unknown GPU UUID."""
@@ -709,12 +791,11 @@ class TestPackedIpcRoundtrip:
         fake_handle = {"fake-uuid-12345": c.ipc_handle[gpu_uuid]}
 
         with pytest.raises(ValueError, match="IPC handle not found"):
-            packed_ipc_consumer(
+            PackedIpcConsumer().receive(
                 ipc_handle=fake_handle,
                 names=c.names,
                 shapes=c.shapes,
                 dtype_names=c.dtype_names,
-                tensor_sizes=c.tensor_sizes,
                 device_index=torch.cuda.current_device(),
             )
 
@@ -758,7 +839,7 @@ class TestChunkLayout:
     def test_layout_is_the_aligned_stream_cut_into_buffer_sized_chunks(self, limit):
         """The wire bytes are every tensor back to back, each starting
         `ALIGN`-aligned, cut into chunks of the buffer size (rounded down to
-        `ALIGN`); only the last chunk is shorter."""
+        `ALIGN`), without a chunk's trailing padding."""
         tensors = _mixed_tensors()
         layout = list(chunks(((t.shape, t.dtype) for t in tensors), limit))
         stream = b""
@@ -767,7 +848,10 @@ class TestChunkLayout:
             stream += _flat(t).numpy().tobytes()
         size = round_down(limit, ALIGN)
         expected = [stream[i : i + size] for i in range(0, len(stream), size)]
-        assert _layout_bytes(layout, tensors) == expected
+        got = _layout_bytes(layout, tensors)
+        assert len(got) == len(expected)
+        for b, e in zip(got, expected):
+            assert b == e[: len(b)] and len(e) - len(b) < ALIGN
         # a tensor inside one chunk starts aligned, so it views as its dtype
         for _, pieces in layout:
             assert all(p.offset % ALIGN == 0 for p in pieces)
@@ -790,6 +874,21 @@ class TestChunkLayout:
             Chunk(16, [Piece(0, 0, 16, 0)]),
             Chunk(0, [Piece(1, 0, 0, 0), Piece(2, 0, 0, 0)]),
         ]
+
+    def test_a_full_chunk_is_yielded_before_the_next_spec_is_pulled(self):
+        """Also when only the padding is left: the IPC consumer derives each
+        chunk from the specs received with it and before."""
+        pulled = []
+
+        def specs():
+            for spec in [((7,), torch.float32), ((2,), torch.float32)]:
+                pulled.append(spec)
+                yield spec
+
+        layout = chunks(specs(), 32)
+        assert next(layout) == Chunk(28, [Piece(0, 0, 28, 0)])
+        assert len(pulled) == 1
+        assert next(layout) == Chunk(8, [Piece(1, 0, 8, 0)])
 
     def test_buffer_under_the_alignment_is_rejected(self):
         with pytest.raises(ValueError, match="at least 16 bytes"):
