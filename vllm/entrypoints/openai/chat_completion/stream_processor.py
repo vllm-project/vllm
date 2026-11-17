@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
@@ -27,7 +28,8 @@ class ChatStreamProcessor:
     Shared by `OpenAIServingChat` streaming and streaming chat derender, so
     both emit the same `reasoning` / `content` / `tool_calls` deltas and
     `finish_reason` for the same chunks. Use one instance per choice and call
-    `step` once per chunk, in order and with the chunking the engine produced.
+    `step` (or `step_plain_text`) once per chunk, in order and with the
+    chunking the engine produced.
     """
 
     def __init__(
@@ -99,3 +101,12 @@ class ChatStreamProcessor:
                 finish_reason, self.request, self.tools_streamed
             )
         return ChatStreamStep(delta, finish_reason)
+
+    def step_plain_text(self, delta_token_ids: Sequence[int]) -> None:
+        """Advance over a non-final chunk without building its delta.
+
+        Only valid without a parser, where `step` would return
+        `DeltaMessage(content=delta_text)` for any non-final chunk that has
+        text or tokens. For callers that serialize the text themselves.
+        """
+        self.num_output_tokens += len(delta_token_ids)

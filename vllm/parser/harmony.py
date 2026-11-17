@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -87,6 +88,18 @@ class Segment(NamedTuple):
 class ChunkResult:
     segments: list[Segment]
     reasoning_token_count: int
+
+
+@functools.cache
+def _stop_token_ids() -> frozenset[int]:
+    """Tokens after which ``StreamableParser`` may complete a message.
+
+    The parser appends to ``messages`` only when it consumes one of these
+    tokens or on ``process_eos()``. Reading ``messages`` re-serializes every
+    completed message, so polling it after every token costs O(output length)
+    per token.
+    """
+    return frozenset(get_encoding().stop_tokens())
 
 
 class HarmonyParser(DelegatingParser):
@@ -334,6 +347,7 @@ class HarmonyParser(DelegatingParser):
 
         segments: list[Segment] = []
         reasoning_token_count = 0
+        stop_token_ids = _stop_token_ids()
         for token_id in token_ids:
             try:
                 self._harmony_parser.process(token_id)
@@ -344,7 +358,9 @@ class HarmonyParser(DelegatingParser):
                 self._harmony_parser.current_recipient
             )
             delta = self._harmony_parser.last_content_delta or ""
-            completed_message = self._poll_completed_message()
+            completed_message = (
+                self._poll_completed_message() if token_id in stop_token_ids else None
+            )
 
             if completed_message is not None:
                 self._current_message_tokens.clear()
