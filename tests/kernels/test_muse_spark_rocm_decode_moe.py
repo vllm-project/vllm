@@ -9,7 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
-from vllm.models.muse_spark.amd.muse_moe_runner import MuseSparkAiterExperts
+from vllm.models.muse_spark.amd.muse_moe_runner import MuseSparkAiterMxfp4Experts
 from vllm.models.muse_spark.amd.ops import decode_moe as dmoe
 from vllm.models.muse_spark.amd.ops.compact_moe import MAX_TOKENS as COMPACT_MAX_TOKENS
 from vllm.platforms import current_platform
@@ -155,7 +155,7 @@ def _per_route_and_native(
         device="cuda",
         routing_method=RoutingMethodType.Renormalize,
     )
-    experts = MuseSparkAiterExperts(config, quant_config)
+    experts = MuseSparkAiterMxfp4Experts(config, quant_config)
     norm_weight = torch.randn(hidden_size, dtype=dtype, device=device) * 0.1
 
     route_buffer, launch = _route_launcher(

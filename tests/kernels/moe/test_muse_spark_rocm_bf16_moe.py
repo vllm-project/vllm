@@ -56,8 +56,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
-    MuseSparkAiterExperts,
     MuseSparkAiterFp8Experts,
+    MuseSparkAiterMxfp4Experts,
     MuseSparkOnlineMXFP4FusedMoE,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkQuarkOCPMXMoEQuantConfig,
@@ -155,7 +155,7 @@ def _rms_norm(x: torch.Tensor, *, out_dtype: torch.dtype | None = None) -> torch
 
 
 def _route_launcher(
-    experts: MuseSparkTritonExperts | MuseSparkAiterExperts,
+    experts: MuseSparkTritonExperts | MuseSparkAiterMxfp4Experts,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -208,7 +208,7 @@ def _route_launcher(
 
 def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None:
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
-    experts = MuseSparkAiterExperts(
+    experts = MuseSparkAiterMxfp4Experts(
         config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
     )
     calls: list[dict[str, torch.Tensor | bool]] = []
@@ -291,7 +291,7 @@ def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
     monkeypatch.setattr(QuarkOCP_MX_MoEMethod, "__init__", _fake_quark_init)
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
     method = MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
-    assert method.experts_cls is MuseSparkAiterExperts
+    assert method.experts_cls is MuseSparkAiterMxfp4Experts
 
     state["scheme"] = "w_mxfp4"
     with pytest.raises(NotImplementedError, match="W4A4"):
@@ -633,7 +633,7 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         / intermediate_size**0.5
     )
     w13, w2, quant_config = _mxfp4_weights(w13_float, w2_float)
-    experts = MuseSparkAiterExperts(config, quant_config)
+    experts = MuseSparkAiterMxfp4Experts(config, quant_config)
     reducer = experts.finalize_weight_and_reduce_impl()
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -867,13 +867,13 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
             device="cuda",
             routing_method=RoutingMethodType.Renormalize,
         )
-        experts: MuseSparkTritonExperts | MuseSparkAiterExperts
+        experts: MuseSparkTritonExperts | MuseSparkAiterMxfp4Experts
         if backend == "triton":
             experts = MuseSparkTritonExperts(config, _quant_config(_rms_norm))
             kernel_map = expert_map
         else:
             w13, w2, quant_config = _mxfp4_weights(w13, w2)
-            experts = MuseSparkAiterExperts(config, quant_config)
+            experts = MuseSparkAiterMxfp4Experts(config, quant_config)
             kernel_map = expert_mask
         route_buffer, launch = _route_launcher(
             experts,

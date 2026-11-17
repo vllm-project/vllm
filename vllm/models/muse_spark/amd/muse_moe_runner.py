@@ -632,7 +632,7 @@ class MuseSparkAiterRouteExperts(_RouteOutputHandoff, AiterExperts):
         )
 
 
-class MuseSparkAiterExperts(MuseSparkAiterRouteExperts, AiterMxfp4Experts):
+class MuseSparkAiterMxfp4Experts(MuseSparkAiterRouteExperts, AiterMxfp4Experts):
     """AITER MXFP4 experts that return one unweighted output per route."""
 
     _MUSE_QUANT_CONFIG = MuseSparkQuarkOCPMXMoEQuantConfig
@@ -710,7 +710,7 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
                 "AITER_MXFP4_MXFP4 backend; got "
                 f"{self.mxfp4_backend.value}."
             )
-        self.experts_cls = MuseSparkAiterExperts
+        self.experts_cls = MuseSparkAiterMxfp4Experts
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -988,7 +988,7 @@ class MuseMoERunner(MoERunner):
 __all__ = [
     "MuseMoERunner",
     "MuseSparkRouter",
-    "MuseSparkAiterExperts",
+    "MuseSparkAiterMxfp4Experts",
     "MuseSparkQuarkFp8MoEQuantConfig",
     "MuseSparkQuarkOCPMXFusedMoE",
     "MuseSparkQuarkW8A8Fp8FusedMoE",
