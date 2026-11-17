@@ -83,7 +83,7 @@ _GFX1100_2D_DECODE_CONFIGS = {
 # the batch for all but 512.
 _GFX1201_3D_HEADS = (64, 128, 256, 512)
 # gfx1100: padded head size -> (T, (TILE_SIZE, num_warps, num_stages)), with
-# next_pow2(T / (requests x KV heads)) segments.
+# next_pow2(T / (requests x KV heads)) segments, never fewer than the default.
 _GFX1100_3D_CONFIGS = {
     64: (512, (16, 2, 1)),
     128: (128, (16, 4, 1)),
@@ -1307,8 +1307,10 @@ def unified_attention(
                     max_rows
                 ):
                     segments //= 2
-                if segments > num_par_softmax_segments:
-                    num_par_softmax_segments = segments
+                # The tuned launch also runs the default segment count without a
+                # sliding window.
+                if segments > num_par_softmax_segments or sliding_window_val == 0:
+                    num_par_softmax_segments = max(segments, num_par_softmax_segments)
                     TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = (
                         _GFX1100_3D_CONFIGS[head_size_padded][1]
                     )
