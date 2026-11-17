@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import subprocess
 import tempfile
 import time
@@ -122,6 +123,41 @@ def test_bench_serve(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+@pytest.mark.benchmark
+def test_bench_serve_steady_state(server, tmp_path):
+    # Steady-state metrics are saved for closed-loop runs and null otherwise.
+    def run(*args):
+        command = [
+            "vllm",
+            "bench",
+            "serve",
+            "--host",
+            server.host,
+            "--port",
+            str(server.port),
+            "--input-len",
+            "32",
+            "--output-len",
+            "4",
+            "--num-prompts",
+            "8",
+            "--max-concurrency",
+            "2",
+            "--save-result",
+            "--result-dir",
+            str(tmp_path),
+            "--result-filename",
+            "result.json",
+            *args,
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+        assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+        return json.loads((tmp_path / "result.json").read_text())["steady_state"]
+
+    assert run()["window"]["target_concurrency"] == 2
+    assert run("--request-rate", "100") is None
 
 
 @pytest.mark.benchmark

@@ -45,6 +45,7 @@
 --no-oversample
 --no-reranker
 --no-self-timed
+--no-steady-state
 --no-stream
 --num-prompts
 --num-warmups
@@ -91,6 +92,8 @@
 --speed-bench-category
 --speed-bench-dataset-subset
 --speed-bench-output-len
+--steady-state-min-window
+--steady-state-threshold
 --temperature
 --timed-trace-chunk-hash-size
 --timed-trace-label-hash-ids
