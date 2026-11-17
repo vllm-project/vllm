@@ -77,7 +77,11 @@ class GPUWatermarkSampler(Sampler):
             )
 
         processed_logits = apply_top_k_top_p(
-            processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+            processed_logits,
+            top_k,
+            top_p,
+            has_topp_only_rows=has_topp_only_rows,
+            top_k_bounds=self.sampling_states.top_k_bounds(idx_mapping_np),
         )
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None

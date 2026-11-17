@@ -120,6 +120,13 @@ class SamplingStates:
         )
         return top_k, top_p, has_topp_only_rows
 
+    def top_k_bounds(self, idx_mapping_np: np.ndarray) -> tuple[int, int] | None:
+        """Returns the host-side (min, max) of the batch top-k values."""
+        top_k_np = self.top_k.np[idx_mapping_np]
+        if top_k_np.size == 0:
+            return None
+        return int(top_k_np.min()), int(top_k_np.max())
+
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
@@ -132,7 +139,11 @@ class SamplingStates:
         if top_k is None and top_p is None:
             return logits
         return apply_top_k_top_p(
-            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+            logits,
+            top_k,
+            top_p,
+            has_topp_only_rows=has_topp_only_rows,
+            top_k_bounds=self.top_k_bounds(idx_mapping_np),
         )
 
     def masks_logits(self, req_idx: int) -> bool:
