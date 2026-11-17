@@ -633,24 +633,12 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
 async def test_streaming_input_overflow_chunk_dropped_session_continues(
     engine: AsyncLLM,
 ):
-    """A chunk whose merged session would exceed max_model_len is dropped and
-    the session stays resumable (#62707).
-
-    The dropped chunk's reply ends with an empty, length-capped turn so the
-    output stream keeps its one-boundary-per-chunk rhythm, and a later chunk
-    that fits continues the session. On main the overflow chunk was merged
-    unconditionally; the scheduler then clamped its remaining prefill to zero
-    tokens and the session wedged in RUNNING without further outputs (or
-    crashed the model runner with a negative token count on older builds), so
-    the client hung forever.
-    """
+    """A chunk that would overflow max_model_len gets an empty "length" turn
+    and a later chunk that fits continues the session (#62707)."""
     request_id = "test_overflow_dropped"
     sampling_params = get_sampling_params(max_tokens=10)
 
-    # opt-125m has max_model_len 2048. The first chunk plus its kept outputs
-    # hold ~1509 tokens; the second chunk would merge to ~2209 tokens, which
-    # leaves no room for a sampling step, so it must be dropped. The third
-    # chunk fits and must continue the session.
+    # max_model_len is 2048: the second chunk overflows, the third fits.
     first_chunk = "hello " * 1500
     overflow_chunk = "world " * 700
     fitting_chunk = " The end is near and"
@@ -661,8 +649,6 @@ async def test_streaming_input_overflow_chunk_dropped_session_continues(
     async def input_generator() -> AsyncGenerator[StreamingInput, None]:
         yield StreamingInput(prompt=first_chunk)
         yield StreamingInput(prompt=overflow_chunk)
-        # Wait for the first turn to complete: by then the overflow chunk has
-        # been dropped at the turn boundary and the session is parked.
         await first_turn_done.wait()
         yield StreamingInput(prompt=fitting_chunk)
 
@@ -684,8 +670,6 @@ async def test_streaming_input_overflow_chunk_dropped_session_continues(
 
     await asyncio.wait_for(consume(), timeout=180)
 
-    # Three turn boundaries: the first turn, the dropped chunk's empty
-    # length-capped reply, and the final turn that closes the stream.
     assert finish_count == 3
     assert outputs[-1].finished
     assert len(full_text) > 0

@@ -28,7 +28,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -356,77 +356,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         assert session.status == RequestStatus.RUNNING
 
-    def test_update_request_as_session_rejects_overflow_and_keeps_state(self):
-        """An update whose merged session leaves no room for a sampling step
-        within max_model_len must be rejected without mutating the session.
-
-        The merged session holds (num_tokens - 1) + len(update tokens) tokens:
-        the last sampled token is dropped and the update is appended (#62707).
-        """
-        scheduler = create_scheduler(max_model_len=8)
-
-        session = DummyRequest("session", prompt_token_ids=[1, 2, 3, 4])
-        session.append_output_token_ids([10, 11])
-        session.num_computed_tokens = 4  # 4 prompt + 1 computed output
-        session.status = RequestStatus.FINISHED_STOPPED
-
-        # Merged: (6 - 1) + 3 = 8 tokens; 8 + 1 sampled > max_model_len 8.
-        overflow = StreamingUpdate.from_request(
-            DummyRequest("session", prompt_token_ids=[7, 8, 9])
-        )
-        assert scheduler._update_request_as_session(session, overflow)
-        assert session.prompt_token_ids == [1, 2, 3, 4]
-        assert session._all_token_ids == [1, 2, 3, 4, 10, 11]
-        assert session._output_token_ids == [10, 11]
-        assert session.num_computed_tokens == 4
-        assert session.status == RequestStatus.FINISHED_STOPPED
-
-        # One token less fits: (6 - 1) + 2 = 7, leaving room for a sample.
-        fitting = StreamingUpdate.from_request(
-            DummyRequest("session", prompt_token_ids=[7, 8])
-        )
-        assert not scheduler._update_request_as_session(session, fitting)
-        assert session.prompt_token_ids == [1, 2, 3, 4, 10, 7, 8]
-        assert session.status == RequestStatus.WAITING
-
-    def test_streaming_update_overflow_via_queue_parks_session(self):
-        """A queued update that does not fit must not kill the session: the
-        turn stays finished, the session parks, and a later shorter update
-        continues it (softer outcome requested in the #42502 review)."""
-        scheduler = create_scheduler(max_model_len=8)
-        session = DummyRequest("session", prompt_token_ids=[1, 2, 3, 4])
-        session.append_output_token_ids([10, 11])
-        session.num_computed_tokens = 5  # 4 prompt + 1 computed output
-        session.status = RequestStatus.FINISHED_STOPPED
-        session.streaming_queue = deque(
-            [
-                StreamingUpdate.from_request(
-                    DummyRequest("session", prompt_token_ids=[7, 8, 9])
-                )
-            ]
-        )
-        scheduler.requests[session.request_id] = session
-
-        assert not scheduler._handle_stopped_request(session)
-
-        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        assert scheduler.num_waiting_for_streaming_input == 1
-        assert session.prompt_token_ids == [1, 2, 3, 4]
-        assert session._all_token_ids == [1, 2, 3, 4, 10, 11]
-        assert session.num_computed_tokens == 5
-        # The dropped update must be reported so the frontend gets an empty
-        # turn boundary for it.
-        assert scheduler.take_dropped_streaming_updates() == [(0, "session", 1)]
-
-        # A shorter update continues the parked session.
-        scheduler.add_request(DummyRequest("session", prompt_token_ids=[7, 8]))
-        assert session.status == RequestStatus.WAITING
-        assert session.prompt_token_ids == [1, 2, 3, 4, 10, 7, 8]
-        assert scheduler.num_waiting_for_streaming_input == 0
-        assert not scheduler.take_dropped_streaming_updates()
-
     def test_streaming_update_overflow_via_queue_drains_to_fitting_update(self):
-        """Updates queued behind a dropped one still continue the session."""
         scheduler = create_scheduler(max_model_len=8)
         session = DummyRequest("session", prompt_token_ids=[1, 2, 3, 4])
         session.append_output_token_ids([10, 11])
@@ -434,6 +364,7 @@ class TestStreamingScheduler(unittest.TestCase):
         session.status = RequestStatus.FINISHED_STOPPED
         session.streaming_queue = deque(
             [
+                # (6 - 1) + 3 = 8 tokens leaves no room to sample: dropped.
                 StreamingUpdate.from_request(
                     DummyRequest("session", prompt_token_ids=[7, 8, 9])
                 ),
@@ -446,38 +377,10 @@ class TestStreamingScheduler(unittest.TestCase):
 
         assert not scheduler._handle_stopped_request(session)
 
-        # The session started the next turn with the fitting update.
         assert session.status == RequestStatus.WAITING
         assert session.prompt_token_ids == [1, 2, 3, 4, 10, 7, 8]
         assert scheduler.num_waiting_for_streaming_input == 0
-        assert scheduler.take_dropped_streaming_updates() == [(0, "session", 1)]
-
-    def test_streaming_update_overflow_via_add_request_drops_chunk(self):
-        """An update that does not fit is dropped while the session stays
-        parked and resumable for a shorter update."""
-        scheduler = create_scheduler(max_model_len=8)
-        session = DummyRequest("session", prompt_token_ids=[1, 2, 3, 4])
-        session.append_output_token_ids([10, 11])
-        session.num_computed_tokens = 5
-        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
-        session.streaming_queue = deque()
-        scheduler.requests[session.request_id] = session
-        scheduler.num_waiting_for_streaming_input = 1
-
-        scheduler.add_request(DummyRequest("session", prompt_token_ids=[7, 8, 9]))
-
-        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        assert scheduler.num_waiting_for_streaming_input == 1
-        assert session.prompt_token_ids == [1, 2, 3, 4]
-        assert session._all_token_ids == [1, 2, 3, 4, 10, 11]
-        # The dropped chunk is reported for the empty turn boundary.
-        assert scheduler.take_dropped_streaming_updates() == [(0, "session", 1)]
-
-        scheduler.add_request(DummyRequest("session", prompt_token_ids=[7, 8]))
-        assert session.status == RequestStatus.WAITING
-        assert session.prompt_token_ids == [1, 2, 3, 4, 10, 7, 8]
-        assert scheduler.num_waiting_for_streaming_input == 0
-        assert not scheduler.take_dropped_streaming_updates()
+        assert scheduler.dropped_streaming_updates == [session]
 
     def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()
@@ -906,13 +809,8 @@ def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
     assert "req" not in scheduler.schedule().num_scheduled_tokens
 
 
-def test_overflow_update_never_schedules_nonpositive_tokens():
-    """Regression test for #62707: a streaming update that pushes the session
-    past max_model_len used to be merged unconditionally. The scheduler then
-    clamped ``num_new_tokens`` to a negative value once ``num_computed_tokens``
-    passed max_model_len, and the model runner died on ``assert num_tokens > 0``
-    (EngineDeadError for the client). The update must be rejected instead,
-    keeping the session resumable for a shorter follow-up chunk."""
+def test_overflow_update_is_dropped_and_session_resumes():
+    """Regression test for #62707."""
     scheduler = create_async_scheduler(
         max_num_seqs=4,
         max_model_len=16,
@@ -922,51 +820,39 @@ def test_overflow_update_never_schedules_nonpositive_tokens():
     session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=32)
     scheduler.add_request(session)
 
-    def step(token_ids: list[int]):
+    def step(token_ids: list[int]) -> list[EngineCoreOutput]:
         output = scheduler.schedule()
-        assert all(count > 0 for count in output.num_scheduled_tokens.values()), (
-            f"non-positive scheduled tokens: {output.num_scheduled_tokens}"
-        )
-        return scheduler.update_from_output(output, _model_output("session", token_ids))
+        assert all(count > 0 for count in output.num_scheduled_tokens.values())
+        ecos = scheduler.update_from_output(output, _model_output("session", token_ids))
+        return ecos[session.client_index].outputs
 
-    # Turn 1: prefill [1, 2, 3], decode 10, then stop. The next 5-token chunk
-    # is queued mid-turn and merges into a 9-token session at the stop.
     step([10])
     scheduler.add_request(
         DummyRequest("session", prompt_token_ids=[20, 21, 22, 23, 24])
     )
     step([STOP_TOKEN])
-
-    # Turn 2: prefill the 5 new tokens, decode twice, then stop. An 8-token
-    # chunk is queued that would merge into a 19-token session (> 16).
     step([11])
     step([12])
-    scheduler.add_request(DummyRequest("session", prompt_token_ids=list(range(30, 38))))
-    stop_ecos = step([STOP_TOKEN])
-
-    # The overflowing update must be dropped: the session parks, and the
-    # dropped chunk's reply ends with an empty, length-capped turn so the
-    # frontend's per-chunk bookkeeping stays in sync. On main the update was
-    # merged, and the following steps scheduled 5 tokens (bringing
-    # num_computed_tokens to 16) and then -1 token, wedging the engine.
-    [turn_output, dropped_output] = stop_ecos[session.client_index].outputs
+    # Merging this chunk would give 19 tokens > max_model_len.
+    overflow_chunk = list(range(30, 38))
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=overflow_chunk))
+    turn_output, dropped_output = step([STOP_TOKEN])
     assert turn_output.new_token_ids == [STOP_TOKEN]
     assert dropped_output.new_token_ids == []
     assert dropped_output.finish_reason == FinishReason.LENGTH
-    assert not scheduler.take_dropped_streaming_updates()
-
     assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
     assert scheduler.num_waiting_for_streaming_input == 1
-    assert len(session.all_token_ids) == 12
 
-    # Nothing to run while the session is parked.
-    parked_output = scheduler.schedule()
-    assert not parked_output.num_scheduled_tokens
+    # Dropped on arrival at the parked session; the pending empty turn keeps
+    # the engine stepping.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=overflow_chunk))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.has_requests()
 
-    # A shorter update fits (12 - 1 + 3 = 14 tokens) and the session resumes.
+    # A fitting update (12 - 1 + 3 = 14 tokens) resumes the session, and its
+    # output follows the dropped chunk's empty turn.
     scheduler.add_request(DummyRequest("session", prompt_token_ids=[40, 41, 42]))
-    assert session.status == RequestStatus.WAITING
-    resumed = scheduler.schedule()
-    assert resumed.num_scheduled_tokens["session"] == 3
-    scheduler.update_from_output(resumed, _model_output("session", [13]))
+    dropped_output, resumed_output = step([13])
+    assert dropped_output.finish_reason == FinishReason.LENGTH
+    assert resumed_output.new_token_ids == [13]
     assert list(session.all_token_ids)[-4:] == [40, 41, 42, 13]
