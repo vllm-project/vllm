@@ -227,7 +227,7 @@ class DeepseekV32Model(torch.nn.Module):
         speculative_config = vllm_config.speculative_config
         attention_config = vllm_config.attention_config
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
-        self.attention_sequence_parallel = (
+        self.use_sp_attention = (
             parallel_config.use_sequence_parallel_attention
             and vllm_config.lora_config is None
             and attention_config.hisparse_config is None
@@ -264,10 +264,13 @@ class DeepseekV32Model(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[0]
-        use_sequence_parallel = self.use_sequence_parallel or (
-            self.attention_sequence_parallel
-            and is_sequence_parallel_active(True, full_num_tokens, self.sp_min_tokens)
+        use_sequence_parallel = (
+            self.use_sequence_parallel
+            or is_sequence_parallel_active(
+                self.use_sp_attention, full_num_tokens, self.sp_min_tokens
+            )
         )
+
         attn_in = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
