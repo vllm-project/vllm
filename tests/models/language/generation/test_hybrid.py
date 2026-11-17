@@ -26,16 +26,13 @@ pytestmark = pytest.mark.hybrid_model
 
 APC_MULTIPLY_BY = 300
 
+# Not compared against Transformers, whose Mamba2 does not support n_groups > 1:
+# https://github.com/huggingface/transformers/pull/40861
 SSM_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "tiiuae/falcon-mamba-tiny-dev",
-    # mamba2-codestral in transformers is broken pending:
-    # https://github.com/huggingface/transformers/pull/40861
-    # "vllm-project/mamba2-codestral-v0.1-tiny-random",
+    "vllm-project/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
     "Zyphra/Zamba2-1.2B-instruct",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
@@ -44,12 +41,10 @@ HYBRID_MODELS = [
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 FP32_STATE_MODELS = [
-    "state-spaces/mamba-130m-hf",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -67,7 +62,7 @@ def _set_conv_state_layout(monkeypatch, layout: str) -> None:
     mamba_utils.get_conv_state_layout.cache_clear()
 
 
-@pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
+@pytest.mark.parametrize("model", HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -883,7 +878,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+@pytest.mark.parametrize("model", ["mistralai/Mamba-Codestral-7B-v0.1"])
 def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
@@ -938,7 +933,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
 # we have to use a real large model to get reasonable results
 # the model can't be a hybrid model as we need block_size 16
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+@pytest.mark.parametrize("model", ["mistralai/Mamba-Codestral-7B-v0.1"])
 def test_apc_common_prefix_same_batch(
     model: str,
     monkeypatch,

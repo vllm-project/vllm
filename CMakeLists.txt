@@ -474,7 +474,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/attention/merge_attn_states.cu"
     "csrc/sampler.cu"
     "csrc/topk.cu"
-    "csrc/mamba/selective_scan_fwd.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
     "csrc/custom_all_gather_reduce_scatter.cu"

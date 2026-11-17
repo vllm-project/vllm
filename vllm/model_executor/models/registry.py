@@ -106,7 +106,6 @@ _TEXT_GENERATION_MODELS = {
     "ExaoneMoeForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
-    "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
     "FlintForCausalLM": ("vllm.models.flint", "FlintForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
@@ -142,7 +141,6 @@ _TEXT_GENERATION_MODELS = {
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
-    "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "K2HorizonForCausalLM": ("k2_horizon", "K2HorizonForCausalLM"),
     "KimiLinearForCausalLM": (
         "vllm.models.kimi_k3",
@@ -161,7 +159,6 @@ _TEXT_GENERATION_MODELS = {
         "longcat_flash_ngram",
         "LongcatFlashNgramForCausalLM",
     ),
-    "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
@@ -324,7 +321,6 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
-    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
@@ -941,6 +937,10 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "KeyeVL1_5ForConditionalGeneration": "0.33.0",
     "TeleChat2ForCausalLM": "0.34.0",
     "TeleChat3ForCausalLM": "0.34.0",
+    "FalconMambaForCausalLM": "0.34.0",
+    "JambaForCausalLM": "0.34.0",
+    "JambaForSequenceClassification": "0.34.0",
+    "MambaForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

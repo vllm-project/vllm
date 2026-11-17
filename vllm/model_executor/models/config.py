@@ -968,15 +968,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         MambaModelConfig.verify_and_update_config(vllm_config)
 
 
-class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        pooler_config = model_config.pooler_config
-        assert pooler_config is not None
-        if pooler_config.use_activation is None:
-            pooler_config.use_activation = False
-
-
 class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
     """Config handler for Jina Embeddings V5 embedding models."""
 
@@ -1601,7 +1592,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
-    "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
@@ -1615,7 +1605,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
-    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
@@ -1629,7 +1618,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
-    "MambaForCausalLM": MambaModelConfig,
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),

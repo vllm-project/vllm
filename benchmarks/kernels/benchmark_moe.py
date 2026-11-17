@@ -867,11 +867,6 @@ def get_model_params(config):
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
         hidden_size = config.hidden_size
-    elif architecture == "JambaForCausalLM":
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
-        hidden_size = config.hidden_size
     elif architecture in (
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
