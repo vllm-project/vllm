@@ -259,15 +259,20 @@ class DraftVocab:
 
     Args:
         logits_processor: Logits processor of the draft lm_head.
-        vocab_size: Target vocabulary size. A smaller draft vocabulary gets a
-            `draft_id_to_target_id` parameter for the model to register and
-            load.
+        vocab_size: Width of the target-vocabulary logits. A smaller draft
+            vocabulary gets a `draft_id_to_target_id` parameter for the model to
+            register and load.
 
     """
 
     def __init__(self, logits_processor: LogitsProcessor, vocab_size: int):
         self.logits_processor = logits_processor
         self.vocab_size = vocab_size
+        if logits_processor.vocab_size > vocab_size:
+            raise ValueError(
+                f"The draft vocabulary ({logits_processor.vocab_size}) is larger "
+                f"than the target vocabulary ({vocab_size})."
+            )
         self.draft_id_to_target_id: nn.Parameter | None = None
         if logits_processor.vocab_size < vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
