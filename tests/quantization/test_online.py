@@ -54,6 +54,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -1380,6 +1381,7 @@ def test_online_requantized_moe_reload(
         w13_num_shards=2,
         has_bias=False,
         is_act_and_mul=True,
+        activation=MoEActivation.SILU,
         tp_size=1,
         use_mxfp4_w4a4_dsv4=False,
     )
