@@ -82,10 +82,6 @@ def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
     mean = peel(nodes[0])
     if not is_op(mean, "mean"):
         return None
-    dim = _operand(mean, 1, "dim")
-    dims = dim if isinstance(dim, (list, tuple)) else (dim,)
-    if tuple(dims) != (-1,):
-        return None
     if not _is_squared(_operand(mean, 0, "input"), x):
         return None
     return float(consts[0])
