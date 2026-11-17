@@ -296,6 +296,7 @@ def _prefill_metadata(
             chunks=chunks,
             shardq_split=split and split[0],
             shardq_gather_indices=split and split[1],
+            shardq_rows=None,
         ),
         prefill_plans=plans,
         gather_launches=plan_gather_launches(chunks, plans, gather_rows),

@@ -694,6 +694,8 @@ class DeepseekV32IndexerPrefillMetadata:
     # over those tokens.
     shardq_split: ShardQSplit | None = None
     shardq_query_start_loc_cpu: torch.Tensor | None = None
+    # The tokens' rows on the device, uploaded by the first layer to exchange.
+    shardq_rows: torch.Tensor | None = None
 
 
 @dataclass

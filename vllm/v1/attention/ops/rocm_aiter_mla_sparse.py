@@ -1346,7 +1346,9 @@ def exchange_shardq_topk(
     group = get_tp_group()
     local = topk_buffer[start : start + sizes[group.rank_in_group], :width]
     gathered = group.all_gatherv(local.contiguous(), dim=0, sizes=sizes)
-    rows = async_tensor_h2d(split.token_ids + start, device=topk_buffer.device)
+    if (rows := prefill_metadata.shardq_rows) is None:
+        rows = async_tensor_h2d(split.token_ids + start, device=topk_buffer.device)
+        prefill_metadata.shardq_rows = rows
     topk_buffer[:, :width].index_copy_(0, rows, gathered)
 
 
