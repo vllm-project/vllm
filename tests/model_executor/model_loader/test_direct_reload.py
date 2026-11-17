@@ -19,12 +19,12 @@ Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
 """
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
+    log_direct_reload_support,
     record_checkpoint_layout,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -334,6 +335,15 @@ class TestUnsent:
         _assert_same(after, _state(_cold_start(expected)))
 
 
+def _assert_refused_at_update(model: _ToyModel, match: str) -> None:
+    """Cold start succeeded; the update is refused before it changes the model."""
+    before = _state(model)
+    with pytest.raises(RuntimeError, match=match):
+        start_reload(model)
+    _assert_same(_state(model), before, addresses=True)
+    assert "_direct_reload_begun" not in model.__dict__
+
+
 class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
@@ -350,6 +360,17 @@ class TestRefusals:
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        # cold start serves it; only the update is refused
+        monkeypatch.setattr(
+            Fp8PerTensorOnlineLinearMethod,
+            "process_weights_after_loading",
+            lambda self, layer: None,
+        )
+        from vllm.model_executor.model_loader import utils as loader_utils
+
+        monkeypatch.setattr(
+            loader_utils, "online_quantization_timing_context", lambda *a: nullcontext()
+        )
         init = _ToyModel.__init__
 
         def with_online_layer(self):
@@ -357,8 +378,7 @@ class TestRefusals:
             self.proj.quant_method = online
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
+        _assert_refused_at_update(_cold_start(_checkpoint()), "online quantization")
 
     def test_online_shared_experts_refused(self, monkeypatch):
         # post-load processing deletes the staging parameters a reload loads
@@ -366,18 +386,22 @@ class TestRefusals:
 
         def with_online_shared_experts(self):
             init(self)
-            self.proj.shared_expert_online_loader = object()
+            self.proj.shared_expert_online_loader = SimpleNamespace(
+                finalize=lambda module: None
+            )
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
+        _assert_refused_at_update(_cold_start(_checkpoint()), "online quantization")
 
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
     def test_humming_refused(self, monkeypatch, method_cls):
         # its post-load processing runs only once per quant method
         from vllm.model_executor.layers.quantization import humming as humming_mod
 
-        humming = object.__new__(getattr(humming_mod, method_cls))
+        cls = getattr(humming_mod, method_cls)
+        humming = object.__new__(cls)
+        # cold start serves it; only the update is refused
+        monkeypatch.setattr(cls, "process_weights_after_loading", lambda s, layer: None)
         init = _ToyModel.__init__
 
         def with_humming_layer(self):
@@ -385,8 +409,7 @@ class TestRefusals:
             self.proj.quant_method = humming
 
         monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
-        with pytest.raises(RuntimeError, match="humming"):
-            _cold_start(_checkpoint())
+        _assert_refused_at_update(_cold_start(_checkpoint()), "humming")
 
     def test_replaced_param_refused(self):
         # a new Parameter under a checkpoint name has no checkpoint layout:
@@ -565,6 +588,7 @@ def _config(**overrides) -> SimpleNamespace:
     [
         ("direct", {}, None),
         ("layerwise", {"lora_config": object()}, None),
+        (None, {"lora_config": object()}, "LoRA"),  # direct is the default
         (
             "direct",
             {
@@ -618,6 +642,7 @@ def _config(**overrides) -> SimpleNamespace:
     ids=[
         "defaults",
         "layerwise-lora",
+        "default-mode-lora",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
@@ -627,11 +652,18 @@ def _config(**overrides) -> SimpleNamespace:
         "sharded-rdt",
     ],
 )
-def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    config = _config(**overrides)
-    if match is None:
-        VllmConfig._verify_direct_reload_compat(config)
+def test_config_refusals(monkeypatch, mode, overrides, match):
+    # checked when an update starts or an engine is set up, never at cold start
+    if mode is None:
+        monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     else:
-        with pytest.raises(ValueError, match=match):
-            VllmConfig._verify_direct_reload_compat(config)
+        monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _cold_start(_checkpoint())
+    config = _config(**overrides)
+    log_direct_reload_support(model, config)  # cold start records, never raises
+    if match is None:
+        start_reload(model)
+    else:
+        with pytest.raises(RuntimeError, match=match) as err:
+            start_reload(model)
+        assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)

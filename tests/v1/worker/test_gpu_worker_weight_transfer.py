@@ -325,3 +325,21 @@ def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
+
+
+def test_init_engine_refuses_an_unsupported_model(monkeypatch):
+    # refused before a trainer sends anything, in the default mode
+    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    engine = _RecordingEngine()
+    initialized: list[object] = []
+    monkeypatch.setattr(engine, "parse_init_info", lambda info: info, raising=False)
+    monkeypatch.setattr(
+        engine, "init_transfer_engine", initialized.append, raising=False
+    )
+    worker = _make_worker(engine)
+    model = nn.Module()
+    model.__dict__["_direct_reload_refusals"] = ["LoRA"]  # as cold start records
+    monkeypatch.setattr(worker.model_runner, "get_model", lambda: model)
+    with pytest.raises(RuntimeError, match="LoRA"):
+        Worker.init_weight_transfer_engine(worker, {})
+    assert not initialized

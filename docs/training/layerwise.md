@@ -54,9 +54,10 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         layer._already_called_process_weights_after_loading = True
 ```
 
-For RL weight updates, prefer [Direct Weight Reload](direct_reload.md)
-(`VLLM_RELOAD_MODE=direct`), which reloads in place without layerwise
-buffering; use layerwise reload for the configurations it refuses.
+Weight updates use [Direct Weight Reload](direct_reload.md) by default, which
+reloads in place without layerwise buffering. Set `VLLM_RELOAD_MODE=layerwise`
+to reload layerwise instead, for example for the configurations direct reload
+refuses.
 
 ## Example Usages
 

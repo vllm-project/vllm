@@ -1697,6 +1697,12 @@ class Worker(WorkerBase):
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
+        from vllm.model_executor.model_loader.reload.direct import (
+            check_direct_reload,
+        )
+
+        # refuse a model direct reload cannot update before a trainer sends
+        check_direct_reload(self.model_runner.get_model())
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)

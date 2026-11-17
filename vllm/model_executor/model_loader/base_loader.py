@@ -13,6 +13,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload.direct import log_direct_reload_support
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -121,6 +122,7 @@ class BaseModelLoader(ABC):
 
             process_weights_after_loading(model, model_config, target_device)
             log_online_quantization_time(vllm_config)
+            log_direct_reload_support(model, vllm_config)
 
             gc.collect()
             torch.accelerator.empty_cache()

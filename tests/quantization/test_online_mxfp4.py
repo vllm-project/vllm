@@ -7,6 +7,8 @@ tensor to MXFP4, the result is dequantized back to bf16/fp16, and compared
 against the pure-torch reference in `reference_mxfp4.py`.
 """
 
+import os
+
 import pytest
 import torch
 
@@ -46,6 +48,17 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import PlatformEnum, current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
+
+
+@pytest.fixture(autouse=True)
+def _layerwise_reload_mode(monkeypatch):
+    # These tests cover the online quantization methods and their layerwise
+    # processing. Direct reload (the default) replaces supported schemes with
+    # quantize-on-load checkpoint methods, covered by test_online_loading.py,
+    # test_direct_reload.py and test_reload.py. An explicit VLLM_RELOAD_MODE
+    # is kept, so the end-to-end tests here can also run in direct mode.
+    if "VLLM_RELOAD_MODE" not in os.environ:
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
 
 
 def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:

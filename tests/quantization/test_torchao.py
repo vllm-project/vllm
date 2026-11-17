@@ -181,8 +181,10 @@ def test_online_quant_config_file(vllm_runner):
     on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
     reason="requires torchao>=0.18.0 on gfx950",
 )
-def test_reload_weights():
+def test_reload_weights(monkeypatch):
     import json
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")  # direct refuses torchao
 
     from torchao.core.config import config_to_dict
     from torchao.quantization import Float8DynamicActivationFloat8WeightConfig, PerRow

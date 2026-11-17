@@ -7,7 +7,12 @@ import torch
 
 from vllm.config import ModelConfig
 
-from .direct import begin_direct_reload, direct_reload_enabled, finish_direct_reload
+from .direct import (
+    begin_direct_reload,
+    check_direct_reload,
+    direct_reload_enabled,
+    finish_direct_reload,
+)
 from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
 
 __all__ = ["finish_reload", "start_reload", "weight_update_active"]
@@ -27,6 +32,7 @@ def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update in the configured mode."""
     global _weight_update_active
     if direct_reload_enabled():
+        check_direct_reload(model)  # before anything changes the model
         begin_direct_reload(model)
     else:
         initialize_layerwise_reload(model)

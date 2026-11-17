@@ -1,16 +1,9 @@
 # Direct Weight Reload
 
-Direct reload updates a running model's weights in place. Set the
-`VLLM_RELOAD_MODE` environment variable to `direct`; the default is
-`layerwise` (see [Layerwise (Re)loading](layerwise.md)).
-
-!!! tip
-    Prefer direct reload for RL weight updates. Use layerwise reload only for
-    the configurations direct reload refuses (see below).
-
-```bash
-VLLM_RELOAD_MODE=direct vllm serve <model>
-```
+Direct reload updates a running model's weights in place. It is the default
+weight-update mode (`VLLM_RELOAD_MODE=direct`); set `VLLM_RELOAD_MODE=layerwise`
+for [Layerwise (Re)loading](layerwise.md) instead, for example for the
+configurations direct reload refuses (see below).
 
 ## How It Works
 
@@ -33,7 +26,7 @@ matching pre-quantized checkpoint; the trainer keeps sending BF16 weights under
 their checkpoint names.
 
 ```bash
-VLLM_RELOAD_MODE=direct vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block
+vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block
 ```
 
 | `--quantization` | Linear layers | MoE layers |
@@ -50,16 +43,20 @@ arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
-Direct reload raises an error for the following; use
-`VLLM_RELOAD_MODE=layerwise` for them instead:
+These configurations start and serve as usual, but direct reload refuses to
+update their weights: setting up a weight transfer engine, or starting a weight
+update (`reload_weights`, `start_weight_update`), raises an error that lists
+the reasons. A model loaded with one of them logs this once at startup. Use
+`VLLM_RELOAD_MODE=layerwise` to update them:
 
 - Online quantization not in the table above: `mxfp4` and `mxfp4_hadamard32`
   linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
   lm_head, activation overrides, `hadamard_size`, and re-quantization of
-  checkpoint-quantized layers.
+  checkpoint-quantized layers. These layers keep their online quantization
+  at cold start, as in layerwise mode.
 - gpt-oss models with online quantization.
-- `fp8_per_block` linear layers whose tensor-parallel shards are not
-  multiples of 128.
+- `fp8_per_block` layers whose tensor-parallel shards are not multiples of
+  128 (they keep their online quantization at cold start).
 - The NCCL weight transfer load plan (`use_load_plan`) with online
   quantization.
 - `torchao` quantization, Humming kernels, LoRA, weight offloading,

@@ -5,6 +5,7 @@
 import importlib
 import inspect
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -192,6 +193,18 @@ from vllm.utils.flashinfer import (
     has_flashinfer_trtllm_fused_moe,
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
+
+
+@pytest.fixture(autouse=True)
+def _layerwise_reload_mode(monkeypatch):
+    # These tests cover the online quantization methods and their layerwise
+    # processing. Direct reload (the default) replaces supported schemes with
+    # quantize-on-load checkpoint methods, covered by test_online_loading.py,
+    # test_direct_reload.py and test_reload.py. An explicit VLLM_RELOAD_MODE
+    # is kept, so the end-to-end tests here can also run in direct mode.
+    if "VLLM_RELOAD_MODE" not in os.environ:
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
