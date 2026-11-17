@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -51,7 +52,7 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
@@ -706,6 +707,19 @@ def init_vllm_registered_model(
         hf_config = vllm_config.model_config.hf_config
 
     if hf_config is not None:
+        # Top-level Qwen2 uses the Transformers backend, but inner Qwen2 models stay
+        # native so that composite models can keep using their submodules.
+        # `with_hf_config` infers missing architectures from `model_type`
+        if (archs := architectures or hf_config.architectures) is not None:
+            is_qwen2 = "Qwen2ForCausalLM" in archs
+        else:
+            is_qwen2 = hf_config.model_type == "qwen2"
+        if is_qwen2:
+            from vllm.model_executor.models.qwen3 import use_qwen2_attention
+
+            hf_config = copy.deepcopy(hf_config)
+            use_qwen2_attention(hf_config.get_text_config())
+            architectures = ["Qwen3ForCausalLM"]
         vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
 
     return initialize_model(vllm_config=vllm_config, prefix=prefix)

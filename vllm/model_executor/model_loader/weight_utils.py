@@ -1622,12 +1622,24 @@ def composed_weight_loader(
     return composed_loader
 
 
-# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or the FP8 dummy
-# range below, the dequantized weights stay small and finite.
+# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or full-range FP8
+# (|x| <= 448), the dequantized weights stay small and finite.
 _DUMMY_E8M0_SCALE_BYTE = 120
-# Default dummy range of 8-bit floats. +-1e-3 is below FP8 E4M3's smallest
-# normal (2**-6), so it would mostly round to zero or subnormals.
-_DUMMY_FP8_RANGE = 1.0
+
+
+def _fill_random_fp8_codes(param: torch.Tensor, generator: torch.Generator) -> None:
+    """Fill an 8-bit float tensor with random finite codes across its range.
+
+    Real checkpoints scale FP8 weights to use the whole range, and the bit
+    activity of the operands sets GEMM power draw: values from a narrow range
+    (few exponent codes) let power-capped GPUs run measurably faster than real
+    weights do.
+    """
+    raw = param.view(torch.uint8)
+    raw.random_(0, 256, generator=generator)
+    codes = torch.arange(256, dtype=torch.uint8).view(param.dtype).float()
+    for code in (~codes.isfinite()).nonzero().flatten().tolist():
+        raw[raw == code] = 0
 
 
 @torch.no_grad()
@@ -1642,9 +1654,10 @@ def initialize_single_dummy_weight(
 
     8-bit integer and packed FP4 params get random bytes (every FP4 code is
     finite), except uint8 params named like a scale, which hold E8M0 scales
-    and get a fixed exponent. Other integer params (e.g. indices) are left
-    untouched. Float params are sampled from `[low, high]`, which defaults to
-    +-1e-3, or +-1 for 8-bit floats.
+    and get a fixed exponent. 8-bit float params get random finite codes
+    across their range, as real checkpoints use it, unless `low`/`high` are
+    given. Other integer params (e.g. indices) are left untouched. Other float
+    params are sampled from `[low, high]`, which defaults to +-1e-3.
     """
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
@@ -1672,6 +1685,18 @@ def initialize_single_dummy_weight(
             param.view(torch.uint8).random_(0, 256, generator=generator)
         return
 
+    if (
+        torch.is_floating_point(param)
+        and torch.finfo(param.dtype).bits == 8
+        and low is None
+        and high is None
+        and not current_platform.is_tpu()
+    ):
+        generator = torch.Generator(device=param.device)
+        generator.manual_seed(seed)
+        _fill_random_fp8_codes(param, generator)
+        return
+
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
             # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
@@ -1681,9 +1706,7 @@ def initialize_single_dummy_weight(
         return
 
     if low is None or high is None:
-        dummy_range = 1e-3
-        if torch.finfo(param.dtype).bits < 16:
-            dummy_range = _DUMMY_FP8_RANGE
+        dummy_range = 1e-3 if torch.finfo(param.dtype).bits >= 16 else 1.0
         low = -dummy_range if low is None else low
         high = dummy_range if high is None else high
 

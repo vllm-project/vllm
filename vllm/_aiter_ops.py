@@ -236,7 +236,11 @@ def is_aiter_found_and_supported_on_rdna() -> bool:
 
 
 def _triton_gemm_config_is_tuned(
-    config_name: str, N: int, K: int, B: int | None = None
+    config_name: str,
+    N: int,
+    K: int,
+    B: int | None = None,
+    M: int | None = None,
 ) -> bool:
     from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
 
@@ -244,7 +248,8 @@ def _triton_gemm_config_is_tuned(
     M_TUNE_PROBE = 128
 
     batch = {} if B is None else {"B": B}
-    return get_gemm_config(config_name, M_TUNE_PROBE, N, K, **batch)[1]
+    m = M_TUNE_PROBE if M is None else M
+    return get_gemm_config(config_name, m, N, K, **batch)[1]
 
 
 def _ck_gemm_shape_is_tuned(
@@ -1007,6 +1012,48 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
+
+
+def _rocm_aiter_triton_per_tensor_fp8_gemm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out_dtype: torch.dtype,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None,
+    x_scale_vec: torch.Tensor,
+    w_scale_vec: torch.Tensor,
+    max_m: int,
+) -> torch.Tensor:
+    # Checked inside the op so torch.compile does not specialize on M.
+    if bias is None and 5 <= A.shape[0] <= max_m:
+        from aiter.ops.triton.gemm.basic.gemm_a8w8 import gemm_a8w8
+
+        return gemm_a8w8(
+            A, B.t(), x_scale_vec, w_scale_vec, dtype=out_dtype, backend="triton"
+        )
+
+    from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+        rocm_per_tensor_float_w8a8_scaled_mm_impl,
+    )
+
+    return rocm_per_tensor_float_w8a8_scaled_mm_impl(A, B, out_dtype, As, Bs, bias)
+
+
+def _rocm_aiter_triton_per_tensor_fp8_gemm_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out_dtype: torch.dtype,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None,
+    x_scale_vec: torch.Tensor,
+    w_scale_vec: torch.Tensor,
+    max_m: int,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[1]
+    return torch.empty(m, n, dtype=out_dtype, device=A.device)
 
 
 def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
@@ -2792,6 +2839,19 @@ class rocm_aiter_ops:
         )
 
     @classmethod
+    @if_aiter_supported
+    def is_mega_mhc_available(cls) -> bool:
+        """Whether AITER's single-launch HIP Mega-MHC can serve the fused
+        delayed mHC seam.
+
+        It ships tuned kernels for gfx950 only (gfx942 has a generic one that
+        vLLM does not use).
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() == 4
+
+    @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
         """Whether the AITER FlyDSL GDN prefill path can be used.
@@ -3250,6 +3310,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_per_tensor_fp8_gemm",
+                op_func=_rocm_aiter_triton_per_tensor_fp8_gemm_impl,
+                fake_impl=_rocm_aiter_triton_per_tensor_fp8_gemm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl,
                 fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake,
@@ -3593,6 +3659,22 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
+        )
+
+    @staticmethod
+    def triton_per_tensor_fp8_gemm(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        x_scale_vec: torch.Tensor,
+        w_scale_vec: torch.Tensor,
+        max_m: int,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_per_tensor_fp8_gemm(
+            A, B, out_dtype, As, Bs, bias, x_scale_vec, w_scale_vec, max_m
         )
 
     @staticmethod
@@ -4718,6 +4800,22 @@ class rocm_aiter_ops:
             return False
 
     @staticmethod
+    @functools.cache
+    def is_triton_gemm_a8w8_tuned(n: int, k: int, max_m: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        # Probe every M_LEQ bucket from 8 up to max_m.
+        probes = [8]
+        while probes[-1] < max_m:
+            probes.append(probes[-1] * 2)
+        try:
+            return all(
+                _triton_gemm_config_is_tuned("GEMM-A8W8", n, k, M=m) for m in probes
+            )
+        except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
     @if_aiter_supported
     def is_triton_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
         from aiter.ops.triton.utils.gemm_config_utils import (
@@ -4764,6 +4862,31 @@ class rocm_aiter_ops:
             logger.warning_once(
                 "AITER MXFP8 tuned-config lookup failed for N=%d, K=%d: %s", n, k, e
             )
+            return False
+
+    @staticmethod
+    @functools.cache
+    def is_mxfp8_block32_bpreshuffle_gemm_tuned(
+        n: int, k: int, batch: int | None = None
+    ) -> bool:
+        """Whether AITER has tuned 32x32 E8M0 rows for its preshuffled-weight GEMM
+        on (N, K), or with `batch`, for its batched GEMM on [batch, N, K]."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            from aiter.ops.batched_gemm_op_a8w8 import lookup_mxscale_bmm_config
+            from aiter.ops.gemm_op_a8w8 import get_mxscale_bpreshuffle_config
+
+            return all(
+                get_mxscale_bpreshuffle_config(m, n, k, "32x32")
+                if batch is None
+                else lookup_mxscale_bmm_config(
+                    batch, m, n, k, w_scale_block="32x32", bpreshuffle=True
+                )
+                for m in (1, 8192)
+            )
+        except Exception:
+            # No AITER or a broken table: the layer keeps the Triton GEMM.
             return False
 
     @staticmethod
@@ -5365,6 +5488,116 @@ class rocm_aiter_ops:
             )
         )
         return post_mix, comb_mix, layer_input, next_pre_mix
+
+    @staticmethod
+    def mega_mhc_pack_fn(fn: torch.Tensor) -> torch.Tensor:
+        """Pack the fp32 `fn` (hc_mult3, hc_mult * hidden_size) into the bf16
+        hi/lo MFMA operand layout `mhc_mega_post_pre_delayed_rms_norm`
+        reads."""
+        from aiter.ops.mega_mhc import mega_mhc_shuffle_fn
+
+        return mega_mhc_shuffle_fn(fn)
+
+    @staticmethod
+    def mhc_mega_post_pre_delayed_rms_norm(
+        residual: torch.Tensor,
+        fn_packed: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        residual_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """`mhc_fused_post_pre_delayed_rms_norm` in one launch of AITER's
+        HIP Mega-MHC, reading `fn` packed by `mega_mhc_pack_fn`.
+
+        Its split-K scratch is per stream and cannot be allocated under CUDA
+        graph capture; see `mega_mhc_prepare_stream`.
+        """
+        from aiter.ops.mega_mhc import mega_mhc
+
+        hc_mult, hidden_size = residual.shape[-2:]
+        outer_shape = residual.shape[:-2]
+        residual_flat = residual.contiguous().view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        if pre_mix is not None:
+            pre_mix = pre_mix.reshape(num_tokens, hc_mult).contiguous()
+        post_kwargs: dict[str, torch.Tensor] = {}
+        if sublayer_out is not None:
+            assert post_layer_mix is not None and comb_res_mix is not None
+            assert residual_out is not None
+            post_kwargs = dict(
+                sublayer_out=sublayer_out.reshape(num_tokens, hidden_size).contiguous(),
+                post_layer_mix=post_layer_mix.reshape(num_tokens, hc_mult).contiguous(),
+                comb_res_mix=comb_res_mix.reshape(
+                    num_tokens, hc_mult, hc_mult
+                ).contiguous(),
+                residual_out=residual_out.view(num_tokens, hc_mult, hidden_size),
+            )
+        _, post_mix, comb_mix, layer_input, next_pre_mix = mega_mhc(
+            residual_flat,
+            fn_packed,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix,
+            norm_weight=norm_weight.contiguous(),
+            norm_eps=norm_eps,
+            w_preshuffle_bf16=True,
+            **post_kwargs,
+        )
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+            next_pre_mix.view(*outer_shape, hc_mult),
+        )
+
+    @staticmethod
+    def mega_mhc_prepare_stream(
+        num_tokens: int, hidden_size: int, device: torch.device
+    ) -> None:
+        """Allocate Mega-MHC's split-K scratch on the current stream for every
+        token count up to `num_tokens`, with one eager call on zeros. It runs
+        while the model loads, under the model's default dtype."""
+        from aiter.ops.mega_mhc import mega_mhc, mega_mhc_shuffle_fn
+
+        hc_mult = 4
+        hc_mult3 = hc_mult * (2 + hc_mult)
+        fn = torch.zeros(
+            hc_mult3, hc_mult * hidden_size, dtype=torch.float32, device=device
+        )
+        # AITER sizes the scratch by device, stream, num_tokens and hidden_size only,
+        # so the eps, post-multiplier and Sinkhorn values below are arbitrary.
+        mega_mhc(
+            torch.zeros(
+                num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=device
+            ),
+            mega_mhc_shuffle_fn(fn),
+            torch.zeros(3, dtype=torch.float32, device=device),
+            torch.zeros(hc_mult3, dtype=torch.float32, device=device),
+            rms_eps=1e-6,
+            hc_pre_eps=1e-6,
+            hc_sinkhorn_eps=1e-6,
+            hc_post_mult_value=1.0,
+            sinkhorn_repeat=20,
+            pre_mix=None,
+            norm_weight=torch.ones(hidden_size, dtype=torch.bfloat16, device=device),
+            w_preshuffle_bf16=True,
+        )
 
     @staticmethod
     def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:

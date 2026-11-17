@@ -149,11 +149,7 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype=dtype,
-        seed=42,
-        hf_overrides=hf_overrides or {},
+        model=model, dtype=dtype, seed=42, hf_overrides=hf_overrides or {}
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -465,7 +461,7 @@ class TestExampleConnector(ExampleConnector):
         return attr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
