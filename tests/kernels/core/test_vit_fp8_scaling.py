@@ -448,7 +448,9 @@ def test_scale_save_armed_on_first_rank_only(tmp_path, monkeypatch, first_rank):
 
 
 @pytest.mark.parametrize("head_dim", [72, 80])
-@pytest.mark.parametrize("num_tokens", [1444, 4144])
+# With 16 heads: 10 partial maxima and a short last row tile; the 256-partial
+# cap with a short last tile; the cap with full tiles only.
+@pytest.mark.parametrize("num_tokens", [37, 1445, 4144])
 def test_fused_dynamic_quant_matches_unfused(monkeypatch, head_dim, num_tokens):
     """With dynamic scales and head_dim padding, Q, K and V are quantized by
     the fused kernels, bit-identical to the code they replace (amax record and
