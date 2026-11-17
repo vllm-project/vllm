@@ -173,8 +173,7 @@ class _RDTProducerServer:
         }
         self._unit_of = dict(units)
         self._arena_bytes = int(arena_bytes)
-        # A bucket over this (one piece over `buffer_bytes`) is not packed
-        # into the arena: see `_serve_oversize`.
+        # the largest bucket a consumer may register (its `buffer_bytes`)
         self._bucket_bytes = int(bucket_bytes or arena_bytes)
         self._stall_timeout = float(stall_timeout_s)
 
@@ -216,11 +215,6 @@ class _RDTProducerServer:
         # concurrent packs only convoy on it, which multiplies the cost of
         # every tensor op. The device sync after a pack is outside it.
         self._pack_lock = threading.Lock()
-        # Returns an oversize bucket's temporary to the device once it is
-        # freed (`_freed_oversize`), off the thread that freed it.
-        self._cache_releaser = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="rdt-release"
-        )
 
         # A frozen post-init object graph keeps gen-2 GC from stopping the
         # world mid-serve.
@@ -411,12 +405,11 @@ class _RDTProducerServer:
                 raise ValueError(
                     f"consumer {consumer_id} bucket {i} spans units {sorted(units)}"
                 )
-            if nbytes > self._bucket_bytes and len(pieces) > 1:
+            if nbytes > self._bucket_bytes:
                 raise ValueError(
-                    f"consumer {consumer_id} bucket {i} is {nbytes} B in "
-                    f"{len(pieces)} pieces, over the {self._bucket_bytes} B "
-                    "bucket: the consumer cut its buckets with a larger "
-                    "buffer_bytes"
+                    f"consumer {consumer_id} bucket {i} is {nbytes} B, over "
+                    f"the {self._bucket_bytes} B bucket: the consumer cut its "
+                    "buckets with a larger buffer_bytes"
                 )
             layout = flat_layout(boxes, dtypes)
             ends = [start for start, *_ in layout[1:]] + [nbytes]
@@ -455,7 +448,6 @@ class _RDTProducerServer:
                 f"consumer {consumer_id} pulled bucket {seq}, which it never "
                 "registered here"
             ) from None
-        oversize = spec.nbytes > self._bucket_bytes
         t0 = time.perf_counter()
         with self._cond:
             if sync_idx < self._sync_idx:
@@ -464,49 +456,46 @@ class _RDTProducerServer:
                 lambda: (
                     self._sync_idx != sync_idx
                     or spec.unit not in self._unit_names
-                    or (not oversize and self._carve(spec.nbytes, dry_run=True) < 0)
+                    or self._carve(spec.nbytes, dry_run=True) < 0
                 ),
                 f"unit {spec.unit} of sync {sync_idx} and arena room",
             )
-            offset = -1 if oversize else self._carve(spec.nbytes)
+            offset = self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            gen = self._unit_gen[spec.unit]
-            ready = self._ready.get(spec.unit)
-            sources = self._sources.get((consumer_id, seq))
-            if sources is None or sources.gen != gen:
-                # the unit stays cached until this bucket is freed
-                tensors = [self._cache[name] for name, _ in spec.pieces]
+            job = self._job((consumer_id, seq), spec)
             self._progress()
+        flat = self._pack_job(spec, offset, job)
+        self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
+        return [flat]
+
+    def _job(self, key: tuple[int, int], spec: _ServedBucket) -> tuple:
+        """What packing bucket `key` needs from the unit's published state.
+        Caller holds `_cond`; the unit stays cached until the bucket is
+        freed."""
+        gen = self._unit_gen[spec.unit]
+        sources = self._sources.get(key)
+        tensors = None
+        if sources is None or sources.gen != gen:
+            tensors = [self._cache[name] for name, _ in spec.pieces]
+        return key, gen, self._ready.get(spec.unit), sources, tensors
+
+    def _pack_job(self, spec: _ServedBucket, offset: int, job: tuple) -> torch.Tensor:
+        """Pack one bucket, one pack at a time, and wait for its copies."""
+        key, gen, ready, sources, tensors = job
         with self._pack_lock:
             if ready is not None:
                 torch.cuda.current_stream(self._device_index).wait_event(ready)
             if sources is None or sources.gen != gen:
-                sources = self._sources[consumer_id, seq] = _sources(
+                sources = self._sources[key] = _sources(
                     gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
                 )
-                del tensors
-            if oversize:
-                flat = self._serve_oversize(sources, spec)
-            else:
-                flat = self._pack(sources, spec, offset)
+            del tensors
+            flat = self._pack(sources, spec, offset)
         if flat.is_cuda:
             # Ray synchronizes the device under its cache lock; do it here so
             # its wait is empty.
             torch.cuda.current_stream(flat.device).synchronize()
-        self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
-        return [flat]
-
-    @staticmethod
-    def _serve_oversize(sources: _Sources, spec: _ServedBucket) -> torch.Tensor:
-        """A bucket over `bucket_bytes`, one piece, outside the arena: copied
-        into a temporary that Ray registers for the pull. Not the source
-        itself: it is CUDA-IPC memory from the trainer, which NIXL cannot
-        register. The finalizer frees it like any bucket, so the unit stays
-        held until Ray drops it."""
-        (src,) = sources.byte_srcs or sources.typed_srcs
-        flat = torch.empty(spec.layout[0][1], dtype=torch.uint8, device=src.device)
-        flat.view(src.dtype).view(src.shape).copy_(src)
         return flat
 
     def _carve(self, nbytes: int, *, dry_run: bool = False) -> int:
@@ -572,25 +561,7 @@ class _RDTProducerServer:
         unit's count for that consumer stays short, so the watchdog and the
         next (degraded) sync handle it as before. If Ray fails to store the
         return, the consumer's `ray.get` fails the sync."""
-        offset = key[-1]
-        weakref.finalize(
-            flat, self._freed_bucket if offset >= 0 else self._freed_oversize, *key
-        )
-
-    def _freed_oversize(self, *key: int) -> None:
-        """An oversize bucket's temporary is free: account it, then give its
-        memory back to the device. The caching allocator would otherwise
-        keep it reserved on the trainer's GPU, and this process allocates
-        nothing else but the arena, so emptying the cache returns only
-        these."""
-        self._freed_bucket(*key)
-        if not self._shutdown:
-            self._cache_releaser.submit(self._empty_cache)
-
-    def _empty_cache(self) -> None:
-        if torch.cuda.is_available():
-            with torch.cuda.device(self._device_index):
-                torch.cuda.empty_cache()
+        weakref.finalize(flat, self._freed_bucket, *key)
 
     def _freed_bucket(
         self, consumer_id: int, unit: int, sync_idx: int, offset: int
@@ -621,7 +592,6 @@ class _RDTProducerServer:
 
     def shutdown(self) -> None:
         self._shutdown = True
-        self._cache_releaser.shutdown(wait=False, cancel_futures=True)
         with self._cond:
             self._cache.clear()
             self._unit_names.clear()

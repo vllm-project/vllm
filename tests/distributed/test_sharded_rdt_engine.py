@@ -182,7 +182,7 @@ class _Fleet:
                 },
                 units=units,
                 arena_bytes=1 << 22,
-                bucket_bytes=buffer_bytes,  # oversize pieces bypass the arena
+                bucket_bytes=buffer_bytes,
                 stall_timeout_s=5,
             )
             for p in range(num_producers)
@@ -307,17 +307,42 @@ def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
         fleet.sync(_checkpoint(_TOY_SHAPES, seed=1), 1)
 
 
-def test_a_piece_over_buffer_bytes_lands_in_rays_buffer(monkeypatch):
-    """A bucket larger than `buffer_bytes` (one large piece) is pulled
-    without a target, so the arena stays `num_buffers * buffer_bytes`, and
-    is copied out of the buffer Ray returns."""
+def test_pieces_over_buffer_bytes_go_in_row_segments(monkeypatch):
+    """A piece over `buffer_bytes` is cut into segments of whole rows: a
+    direct destination's land in its rows, a fallback's are joined and
+    loaded whole; every pull fits a receive slot."""
     model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48, num_buffers=2)
+    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=24, num_buffers=2)
     _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
-    oversize = {id(b) for b in fleet.engine._buckets if b.nbytes > 48}
-    assert oversize and {id(b) for b in fleet.loopback.untargeted} == oversize
-    assert all(len(b.pieces) == 1 for b in fleet.loopback.untargeted)
-    assert fleet.engine._arena.numel() <= 2 * 48
+    pieces = [(n, box) for b in fleet.engine._buckets for n, box in b.pieces]
+    split = {n for n, _ in pieces if sum(m == n for m, _ in pieces) > 1}
+    loads = {
+        n for b in fleet.engine._buckets for n in b.loads if isinstance(n, str)
+    } | {
+        s.name
+        for b in fleet.engine._buckets
+        for s in b.loads
+        if isinstance(s, engine_mod._Segment)
+    }
+    assert split - loads and split & loads  # a direct and a fallback split
+    assert all(b.nbytes <= 24 for b in fleet.engine._buckets)
+    assert fleet.engine._joins == {}  # joined and loaded
+
+
+def test_a_row_over_buffer_bytes_is_refused_at_plan_time(monkeypatch):
+    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
+    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=4)
+    with pytest.raises(RuntimeError, match="raise buffer_bytes"):
+        fleet.sync(_checkpoint(_TOY_SHAPES, seed=1), 1)
+
+
+def test_rows_round_down_to_whole_rows_within_the_budget():
+    t = torch.zeros(10, 3, dtype=torch.bfloat16)  # rows of 6 B
+    piece = ("w", ((0, 10), (0, 3)), torch.bfloat16, [t], None)
+    segs = engine_mod._rows(piece, 32)  # 5 rows = 30 B, with alignment 32
+    assert [seg[1][0] for seg in segs] == [(0, 5), (5, 10)]
+    assert [seg[3][0].data_ptr() for seg in segs] == [t.data_ptr(), t[5].data_ptr()]
+    assert engine_mod._rows(piece, 64) == [piece]
 
 
 def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
@@ -329,7 +354,7 @@ def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
     for sync_idx in (1, 2):
         fleet.sync(_checkpoint(_TOY_SHAPES, seed=sync_idx), sync_idx)
         (arena,) = fleet.loopback.pinned
-        slot = max(b.nbytes for b in fleet.engine._buckets if b.nbytes <= 48)
+        slot = max(b.nbytes for b in fleet.engine._buckets)
         assert arena.numel() == 3 * slot and arena is fleet.engine._arena
     hooks = fleet.engine._hooks
     fleet.engine.shutdown()
@@ -376,15 +401,15 @@ def test_experts_under_ep_owned_by_one_producer(monkeypatch, ep_rank):
     _check_equals_cold_start(fleet, make, _EXPERT_SHAPES)
     assert {b.producer for b in fleet.engine._buckets} == {1}
     for b in fleet.engine._buckets:
-        for _, box in b.pieces:
-            assert box[0] == (2 * ep_rank, 2 * ep_rank + 2)
+        for _, box in b.pieces:  # its own experts' rows (maybe in segments)
+            assert 2 * ep_rank <= box[0][0] < box[0][1] <= 2 * ep_rank + 2
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("buffer_bytes", [16, 1 << 20])
 def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes):
     """Gate and up rows are two boxes of one name, landing strided; with
-    16 B budgets each piece is its own pull."""
+    16 B budgets each row of each piece is its own pull."""
     make = _experts_model(0, 1, tp_rank, 2)
     model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
     fleet = _Fleet(monkeypatch, model, _EXPERT_SHAPES, buffer_bytes=buffer_bytes)
@@ -395,9 +420,11 @@ def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes):
         for name, box in b.pieces
         if name == "experts.gate_up_proj"
     ]
-    assert len(gate_up) == 2
     if buffer_bytes == 16:
+        assert len(gate_up) > 2  # segments of whole rows
         assert all(len(b.pieces) == 1 for b in fleet.engine._buckets)
+    else:
+        assert len(gate_up) == 2
 
 
 def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):

@@ -21,7 +21,7 @@ Requirements:
 
 At the first `start_weight_update`, each worker builds the load plan (`plan_loads`) for the trainer's metadata, on the tensors [direct reload](../direct_reload.md) has just viewed back to their checkpoint layout. For every checkpoint name, the plan gives the boxes of the tensor this worker needs (`get_boxes`) and the live tensors they are written to (`get_dest`). A name the loaders transform rather than copy is a *fallback*: the worker needs it in full, through `load_weights`. A name another worker owns (another expert, another pipeline stage) needs nothing.
 
-Each box is a *piece*. The worker routes every piece to one trainer rank that owns the name. Every pull lands in a slot of the worker's *receive arena*, a buffer it registers with NIXL once at plan time (a pull larger than `buffer_bytes`, one large piece such as a fallback embedding, lands in a buffer Ray allocates instead); the worker then copies each piece into its `get_dest` tensors (the contiguous ones with one fused byte copy per pull; pieces are ordered by destination address, so slices of one fused tensor, such as per-expert weights, merge into one copy) and passes fallbacks to `load_weights`. NIXL never writes into model memory, so the engine registers none of it. The copy lists are built once, at plan time.
+Each box is a *piece*. The worker routes every piece to one trainer rank that owns the name. Every pull lands in a slot of the worker's *receive arena*, a buffer it registers with NIXL once at plan time; the worker then copies each piece into its `get_dest` tensors (the contiguous ones with one fused byte copy per pull; pieces are ordered by destination address, so slices of one fused tensor, such as per-expert weights, merge into one copy) and passes fallbacks to `load_weights`. A piece larger than `buffer_bytes` is cut along its first dimension into segments of whole rows, so every pull fits a slot; a fallback's segments are joined into one full tensor on the worker as they land, and loaded once the last one is in. NIXL never writes into model memory, so the engine registers none of it. The copy lists are built once, at plan time.
 
 The plan and the receive arena are reused by every later sync. Re-initializing the engine (a new trainer, new metadata) drops both, and the next `start_weight_update` plans again.
 
@@ -70,7 +70,7 @@ VLLM_RELOAD_MODE=direct vllm serve my-model \
 Everything else (the producers, the metadata, the ownership table, `buffer_bytes` and `num_buffers`) arrives from the trainer at the init handshake.
 
 !!! warning "Leave headroom for the receive arena"
-    From the first `start_weight_update` on, each worker holds a receive arena on its GPU: `num_buffers` slots of at most `buffer_bytes`, so at most 2 GiB at the defaults. A piece larger than `buffer_bytes` is received into a buffer Ray allocates for that pull, which PyTorch's caching allocator may keep reserved. Neither counts against `gpu_memory_utilization`, so leave room for them (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)).
+    From the first `start_weight_update` on, each worker holds a receive arena on its GPU: `num_buffers` slots of at most `buffer_bytes`, so at most 2 GiB at the defaults. A fallback larger than `buffer_bytes` (an embedding loaded in full, say) is joined into one full tensor while its segments land, which PyTorch's caching allocator keeps reserved afterwards. Neither counts against `gpu_memory_utilization`, so leave room for them (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)).
 
 ## Trainer Side
 
@@ -109,12 +109,12 @@ To adapt a trainer that is not a plain `nn.Module` (a Megatron export, a raw sha
 | `num_consumers` | — | Inference workers across the whole fleet (TP × PP × DP) |
 | `workers_per_replica` | 0 | Workers per inference deployment, when several independent deployments share the trainer; 0 means one |
 | `trainer_actor_namespace` | `None` | Ray namespace for the producer actors; the workers resolve them by name there |
-| `buffer_bytes` | 1 GiB | Most bytes one pull moves, and the size of a gather unit |
+| `buffer_bytes` | 1 GiB | Most bytes one pull moves, and the size of a gather unit. It must hold one row (first dimension) of every tensor a worker receives |
 | `num_buffers` | 2 | Pulls each worker keeps in flight |
 | `gather_lookahead` | 2 | Units the gather loop runs ahead of the workers; at most `gather_lookahead + 1` units are resident on a trainer rank |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a worker that dies mid-sync, not a latency target |
 
-Each trainer rank's GPU holds its arena, `(num_buffers × workers pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. A tensor piece larger than `buffer_bytes` is served outside the arena, from a temporary copy that lives for that pull. With EP every worker may pull from every rank, so the arena grows with the number of workers.
+Each trainer rank's GPU holds its arena, `(num_buffers × workers pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. With EP every worker may pull from every rank, so the arena grows with the number of workers.
 
 For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 2), that is a 5 GiB arena plus up to three gathered units (≤ 3 GiB) per trainer rank, and a receive arena of at most 2 GiB per worker. The lookahead's memory does not depend on the number of workers; measured, lookahead 2 over 1 costs 2.4–3.1 GiB of peak trainer memory on 235B (one more unit plus allocator slack) and makes `fsdp=2` 7.5% faster. For more speed at more memory, `num_buffers=4` holds a 9 GiB arena per trainer rank (4 GiB more, and growing with the number of workers) and a receive arena of at most 4 GiB per worker; on 235B `pp=2` it transfers about 11% faster than the defaults.
 

@@ -28,7 +28,9 @@ Plan (a consumer's first `start_weight_update`):
     weights, are adjacent and land with one copy) and cuts them into buckets
     of at most `buffer_bytes`. A piece is one box of one name: copied into
     its `get_dest` tensors, or loaded in full through `load_weights` (a
-    fallback). The consumer sends each producer, once,
+    fallback). A piece over `buffer_bytes` is cut along dim 0 into segments
+    of whole rows, each an ordinary piece; a fallback's segments are joined
+    into the whole tensor before it is loaded. The consumer sends each producer, once,
     `register_consumer(consumer_id, buckets)`: per bucket, in pull order, a
     list of `(name, box)`.
 
@@ -37,15 +39,14 @@ Sync (`update_weights`, one per sync):
     order within each `RdtRouter.components` coupling component, interleaving
     components so independent pipeline stages pull in parallel.
     A pull is `bucket(consumer_id, seq, sync_idx)`: only the index travels.
-    The producer waits until the bucket's unit is gathered in sync `sync_idx`,
-    then packs its boxes, with one fused copy, into one byte tensor (pieces
-    at `flat_layout`) carved from an arena it registered with NIXL once, so
-    Ray only describes it. The consumer receives the bucket into a slice of
-    its own receive arena, registered with NIXL once per plan (per pull in
-    flight, one slot of the largest bucket of at most `buffer_bytes`; a
-    larger bucket, one large piece, lands in a buffer Ray allocates), copies
-    every piece into its destinations with one fused copy, and loads the
-    fallbacks. Ray holds a
+    The producer waits until the bucket's unit is gathered in sync
+    `sync_idx`, then packs its boxes, with one fused copy, into one byte
+    tensor (pieces at `flat_layout`) carved from an arena it registered with
+    NIXL once, so Ray only describes it. The consumer
+    receives the bucket into a slot of its own receive arena, registered
+    with NIXL once per plan (one slot of the largest bucket per pull in
+    flight), issues its next pulls, then copies every piece into its
+    destinations with one fused copy and loads the fallbacks. Ray holds a
     target only weakly and silently receives into a buffer of its own when
     the target is gone, so the consumer keeps each slot view alive until its
     pull is applied and fails the sync if a pull did not land in its slot.
@@ -61,8 +62,7 @@ Release:
 Arena: each producer registers an arena of `arena_bytes(...)` at startup and
 admits a bucket only while a block for it can be carved from the arena next
 to the served, unfreed ones, so a full arena slows pulls down instead of
-failing them. A bucket over `buffer_bytes` (one piece) is served outside the
-arena, from a temporary copy for that pull.
+failing them.
 """
 
 import itertools
@@ -345,7 +345,6 @@ class RdtRouter:
 def arena_bytes(*, buffer_bytes: int, num_buffers: int, num_consumers: int) -> int:
     """The NIXL arena one producer registers: `num_buffers` buckets of at most
     `buffer_bytes` for each consumer that may pull from it, plus one of slack
-    for a free still on its way and for fragmentation. A bucket larger than
-    that, one piece over `buffer_bytes`, is served outside the arena."""
+    for a free still on its way and for fragmentation."""
     bucket = buffer_bytes + _PIECE_ALIGNMENT
     return (num_buffers * max(1, num_consumers) + 1) * bucket

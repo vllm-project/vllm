@@ -346,49 +346,9 @@ class TestRegister:
         with pytest.raises(ValueError, match=match):
             server().register_consumer(0, [bucket])
 
-    def test_a_bucket_of_several_pieces_over_bucket_bytes_is_refused(self, server):
+    def test_a_bucket_over_bucket_bytes_is_refused(self, server):
         with pytest.raises(ValueError, match="larger buffer_bytes"):
-            server(bucket_bytes=16).register_consumer(
-                0, [[(N, [[0, 4], [0, 4]]), (M, [[0, 4]])]]
-            )
-
-    def test_an_oversize_piece_is_served_outside_the_arena(self, server):
-        """One piece over `bucket_bytes`: a temporary copy, not an arena
-        block (nor the CUDA-IPC source, which NIXL cannot register), and its
-        unit stays held until Ray frees it."""
-        s = server(cls=_RDTProducerServer, arena_bytes=64, bucket_bytes=16)
-        released = []
-        s._empty_cache = lambda: released.append(True)
-        s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
-        s.begin_sync([0], 0)
-        w = _weights()
-        _publish(s, w, 0)
-        ray_store = s.bucket(0, 0, 0)
-        (flat,) = ray_store
-        assert flat.data_ptr() != w[N].data_ptr() and flat.numel() == 64
-        assert torch.equal(flat.view(torch.bfloat16).view(8, 4), w[N])
-        assert s._blocks == {}  # no arena block
-        del flat
-        gc.collect()
-        assert s._freed_pending == []  # the unit is held: Ray still has it
-        del ray_store
-        assert s.wait_freed() == [0]
-        # and its memory goes back to the device, off the freeing thread
-        s._cache_releaser.shutdown(wait=True)
-        assert released == [True]
-
-    def test_an_oversize_strided_piece_is_served_through_a_temporary(self, server):
-        s = server(cls=_RDTProducerServer, arena_bytes=64, bucket_bytes=8)
-        s.register_consumer(0, [[(N, [[0, 8], [1, 3]])]])  # columns: strided
-        s.begin_sync([0], 0)
-        w = _weights()
-        _publish(s, w, 0)
-        ray_store = s.bucket(0, 0, 0)
-        (flat,) = ray_store
-        assert flat.data_ptr() != w[N].data_ptr() and s._blocks == {}
-        assert torch.equal(flat.view(torch.bfloat16).view(8, 2), w[N][:, 1:3])
-        del flat, ray_store
-        assert s.wait_freed() == [0]
+            server(bucket_bytes=16).register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
 
     def test_publish_checks_the_metadata(self, server):
         s = server()
