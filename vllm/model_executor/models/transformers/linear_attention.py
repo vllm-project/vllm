@@ -231,7 +231,7 @@ class TransformersMamba2SSM(Mamba2SSM):
         A = torch.empty(sizes.num_heads // self.tp_size, dtype=torch.float32)
         self.register_buffer("A", A, persistent=False)
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         mixer = self.mixer
         self.A.copy_(-torch.exp(mixer.A_log.float()))
         # Views of the mixer's loaded weights, so they are not parameters of this
