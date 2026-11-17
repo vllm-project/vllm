@@ -518,13 +518,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
             assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
             default = getattr(quant_method_cls, "activation_quant_key", None)
             if envs.VLLM_RELOAD_MODE == "direct":
+                # Quantize while loading into the matching checkpoint method,
+                # so direct reload can update it. Without one, keep the online
+                # method: it serves as before and direct reload refuses it.
                 method = checkpoint_method(layer, quant_spec, default)
-                if method is None:
-                    raise NotImplementedError(
-                        f"{prefix}: online {quant_key_str} does not support "
-                        "VLLM_RELOAD_MODE=direct"
-                    )
-                return method
+                if method is not None:
+                    return method
             kwargs = {}
             if quant_method_cls.accepts_activation_override:
                 kwargs["activation_quant_key"] = quant_spec.activation

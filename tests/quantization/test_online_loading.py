@@ -102,3 +102,54 @@ def test_quantizer_gets_contiguous_tensor():
     layer.weight.weight_loader(layer.weight, transposed)
     assert torch.equal(layer.weight, transposed.to(torch.int8))
     assert layer.weight_scale.item() == 23
+
+
+def test_layer_writing_outside_its_loaders_keeps_the_online_method():
+    # e.g. gpt-oss experts: quantizing on load would miss those writes
+    layer = SimpleNamespace(writes_outside_weight_loaders=True)
+    assert loading.checkpoint_method(layer, spec=None, default=None) is None
+
+
+@pytest.fixture
+def tp2(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.distributed.get_tensor_model_parallel_world_size", lambda: 2
+    )
+
+
+def test_replicated_layer_fits_the_block_method(tp2):
+    # a replicated layer picks its method before it sets its partition sizes
+    layer = SimpleNamespace(input_size=200, output_size=300)
+    assert loading._block_shapes_fit(layer)
+
+
+def test_unaligned_tp_shard_keeps_the_online_method(tp2):
+    layer = SimpleNamespace(
+        tp_size=2,
+        input_size=256,
+        output_size=384,
+        input_size_per_partition=256,
+        output_partition_sizes=[192],  # not a multiple of 128
+    )
+    assert not loading._block_shapes_fit(layer)
+
+
+def test_moe_block_shapes_are_left_to_the_moe_method(monkeypatch):
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization import fp8
+    from vllm.model_executor.layers.quantization.utils import quant_utils as qu
+
+    def not_checked(layer):
+        raise AssertionError("MoE layers refine their own blocks")
+
+    class MoEMethod:
+        def __init__(self, config, layer):
+            self.create_weights = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(loading, "_block_shapes_fit", not_checked)
+    monkeypatch.setattr(fp8, "Fp8MoEMethod", MoEMethod)
+    spec = SimpleNamespace(
+        weight=qu.kFp8Static128BlockSym, activation=None, hadamard_size=None
+    )
+    layer = object.__new__(RoutedExperts)
+    assert isinstance(loading.checkpoint_method(layer, spec, None), MoEMethod)

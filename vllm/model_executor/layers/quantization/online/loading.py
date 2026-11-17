@@ -107,6 +107,30 @@ def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
     method.process_weights_after_loading = process_weights_after_loading
 
 
+def _block_shapes_fit(layer: torch.nn.Module) -> bool:
+    """Whether the 128x128 block FP8 checkpoint linear method accepts this
+    layer's tensor-parallel shards (the online method takes any). MoE needs no
+    check: the checkpoint MoE method refines its blocks to fit the shards."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        validate_fp8_block_shape,
+    )
+
+    # the sizes `create_weights` gets; a replicated layer may not have set its
+    # partition sizes yet, and its shards are the whole tensor
+    try:
+        validate_fp8_block_shape(
+            layer,
+            layer.input_size,
+            layer.output_size,
+            getattr(layer, "input_size_per_partition", layer.input_size),
+            getattr(layer, "output_partition_sizes", [layer.output_size]),
+            [128, 128],
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     """The pre-quantized checkpoint method that `spec` stands for, if any."""
     from compressed_tensors.quantization import QuantizationArgs
@@ -121,6 +145,8 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     from vllm.model_executor.layers.quantization.utils import quant_utils as qu
     from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
+    if getattr(layer, "writes_outside_weight_loaders", False):
+        return None  # its loads bypass the loaders that would quantize them
     is_moe = isinstance(layer, RoutedExperts)
     moe: Any = getattr(layer, "moe_config", None)
     method: Any  # the checkpoint method of the matching pre-quantized scheme
@@ -131,6 +157,8 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
         return None
     weight, ckpt = spec.weight, modelopt.CkptCtx()
     block = weight == qu.kFp8Static128BlockSym
+    if block and not is_moe and not _block_shapes_fit(layer):
+        return None  # the block checkpoint method would refuse these shapes
     if weight in (qu.kFp8StaticTensorSym, qu.kFp8Static128BlockSym):
         cfg = fp8.Fp8Config(weight_block_size=[128, 128] if block else None)
         method = fp8.Fp8MoEMethod(cfg, layer) if is_moe else fp8.Fp8LinearMethod(cfg)

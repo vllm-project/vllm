@@ -200,6 +200,11 @@ class OAIAttention(nn.Module):
 class GptOssRoutedExperts(RoutedExperts):
     """Load one GPT-OSS expert at a time without assembling the global stack."""
 
+    # `GptOssModel.load_weights` writes full-checkpoint experts with
+    # `param.copy_`: online quantization keeps its online method for them
+    # instead of quantizing on load (direct reload refuses it)
+    writes_outside_weight_loaders = True
+
     @staticmethod
     def _narrow_for_rank(
         loaded_weight: torch.Tensor,
@@ -498,12 +503,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
-        # its expert loading writes BF16 into the experts outside their loaders
-        if any(getattr(m, "quantizes_on_load", False) for m in self.modules()):
-            raise NotImplementedError(
-                "gpt-oss does not support online quantization with "
-                "VLLM_RELOAD_MODE=direct"
-            )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )

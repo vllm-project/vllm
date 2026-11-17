@@ -63,6 +63,15 @@ def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
+def test_reload_mode_is_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Under direct reload online-quantized layers get the checkpoint methods,
+    # so the two modes compile different graphs.
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    direct = envs.compile_factors()["VLLM_RELOAD_MODE"]
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    assert envs.compile_factors()["VLLM_RELOAD_MODE"] != direct
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
