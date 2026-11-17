@@ -5963,6 +5963,7 @@ dependencies = [
  "hmac",
  "memmap2",
  "rand 0.9.5",
+ "rustix",
  "sha2",
  "thiserror 2.0.18",
  "thiserror-ext",

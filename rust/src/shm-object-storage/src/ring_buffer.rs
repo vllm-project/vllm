@@ -7,11 +7,12 @@
 //! `vllm/distributed/device_communicators/shm_object_storage.py`.
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::File;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use memmap2::MmapMut;
+use rustix::fs::Mode;
+use rustix::shm;
 
 use crate::error::{Error, Result, bail_shm_storage_create};
 
@@ -49,9 +50,8 @@ pub struct NotEnoughSpace;
 /// only in this process: readers locate a chunk by the address in its handle
 /// and check its `monotonic_id` to detect reuse after wraparound.
 pub struct SingleWriterShmRingBuffer {
-    /// POSIX shm object name without the leading slash, as reported to the
-    /// Python engine via `VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME`.
-    name: String,
+    /// Unlinks the segment when the writer drops.
+    _unlink_guard: ShmUnlinkGuard,
     data_buffer_size: usize,
     map: MmapMut,
     /// monotonic_id -> start address.
@@ -63,45 +63,44 @@ pub struct SingleWriterShmRingBuffer {
 }
 
 impl SingleWriterShmRingBuffer {
-    /// Create a new shared memory buffer, failing if `name` already exists.
+    /// Create a new POSIX shared memory segment named `name` (without the
+    /// leading slash), failing if the name is taken.
     ///
-    /// Python's `shared_memory.SharedMemory(name=X, create=True)` maps to the
-    /// file `/dev/shm/X` (tmpfs), so a plain exclusive-create file plus
-    /// `memmap2` is layout-compatible with it.
+    /// Like Python's `shared_memory.SharedMemory(name, create=True)`, this
+    /// uses `shm_open`, so Python readers attach by the same name.
     pub fn create(data_buffer_size: usize, name: &str) -> Result<Self> {
         if data_buffer_size == 0 {
             bail_shm_storage_create!(name = name.to_string(), "buffer size must be positive");
         }
-        let path = format!("/dev/shm/{name}");
+        let shm_name = format!("/{name}");
 
         // Fail without unlinking when the name is taken: the existing segment
         // belongs to another writer.
-        let file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) => bail_shm_storage_create!(name = name.to_string(), "{error}"),
-        };
-        let create_result = (|| {
-            file.set_len((data_buffer_size + DATA_OFFSET) as u64)?;
-            // SAFETY: `file` is a fresh shm file of at least the mapped size.
-            unsafe { MmapMut::map_mut(&file) }
-        })();
-        let map = match create_result {
-            Ok(map) => map,
+        let fd = match shm::open(
+            &shm_name,
+            shm::OFlags::CREATE | shm::OFlags::EXCL | shm::OFlags::RDWR,
+            Mode::RUSR | Mode::WUSR,
+        ) {
+            Ok(fd) => fd,
             Err(error) => {
-                // On failure after creation, unlink the segment we created.
-                let _ = std::fs::remove_file(&path);
-                bail_shm_storage_create!(name = name.to_string(), "{error}");
+                bail_shm_storage_create!(name = name.to_string(), "{}", std::io::Error::from(error))
             }
+        };
+        // From here on, the segment is ours: unlink it on failure or drop.
+        let unlink_guard = ShmUnlinkGuard(shm_name);
+
+        let file = File::from(fd);
+        let map = match file
+            .set_len((data_buffer_size + DATA_OFFSET) as u64)
+            // SAFETY: `file` is a fresh shm file of at least the mapped size.
+            .and_then(|()| unsafe { MmapMut::map_mut(&file) })
+        {
+            Ok(map) => map,
+            Err(error) => bail_shm_storage_create!(name = name.to_string(), "{error}"),
         };
 
         let mut buffer = Self {
-            name: name.to_string(),
+            _unlink_guard: unlink_guard,
             data_buffer_size,
             map,
             metadata: HashMap::new(),
@@ -329,10 +328,13 @@ impl SingleWriterShmRingBuffer {
     }
 }
 
-impl Drop for SingleWriterShmRingBuffer {
+/// Unlinks the POSIX shm object it names on drop. Existing mappings stay
+/// valid; the memory is released once the last process unmaps it.
+struct ShmUnlinkGuard(String);
+
+impl Drop for ShmUnlinkGuard {
     fn drop(&mut self) {
-        // `MmapMut` unmaps on drop; the writer also unlinks the segment.
-        let _ = std::fs::remove_file(format!("/dev/shm/{}", self.name));
+        let _ = shm::unlink(&self.0);
     }
 }
 
@@ -367,6 +369,26 @@ mod tests {
             std::path::Path::new(&format!("/dev/shm/{name}")).exists(),
             "a failed create must not unlink the existing segment"
         );
+    }
+
+    #[test]
+    fn create_failure_after_open_unlinks_the_new_segment() {
+        let name = unique_name();
+        // The segment size does not fit `off_t`, so resizing fails after the
+        // segment was created.
+        let result = SingleWriterShmRingBuffer::create(usize::MAX / 2, &name);
+        assert!(result.is_err());
+        assert!(!std::path::Path::new(&format!("/dev/shm/{name}")).exists());
+    }
+
+    #[test]
+    fn drop_unlinks_the_segment() {
+        let name = unique_name();
+        let buffer = SingleWriterShmRingBuffer::create(1024, &name).unwrap();
+        let path = format!("/dev/shm/{name}");
+        assert!(std::path::Path::new(&path).exists());
+        drop(buffer);
+        assert!(!std::path::Path::new(&path).exists());
     }
 
     #[test]
