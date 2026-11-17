@@ -54,6 +54,7 @@ class NvFp4MoeBackend(Enum):
     MARLIN = "MARLIN"
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
+    AITER_NVFP4 = "AITER_NVFP4"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
 
 
@@ -156,6 +157,13 @@ def backend_to_kernel_cls(
             HummingGroupedExperts,
             HummingIndexedExperts,
         ]
+    elif backend == NvFp4MoeBackend.AITER_NVFP4:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_nvfp4_moe import (
+            AiterNvfp4ExpertsMonolithic,
+        )
+
+        return [AiterNvfp4ExpertsMonolithic]
+
     elif backend == NvFp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
             Nvfp4QuantizationEmulationTritonExperts,
@@ -185,6 +193,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "marlin": NvFp4MoeBackend.MARLIN,
         "humming": NvFp4MoeBackend.HUMMING,
         "emulation": NvFp4MoeBackend.EMULATION,
+        "aiter_nvfp4": NvFp4MoeBackend.AITER_NVFP4,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -243,6 +252,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.HUMMING,
+        NvFp4MoeBackend.AITER_NVFP4,
         NvFp4MoeBackend.EMULATION,
     ]
     AVAILABLE_BACKENDS = prioritize_humming(AVAILABLE_BACKENDS)
@@ -256,6 +266,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.EMULATION,
+        NvFp4MoeBackend.AITER_NVFP4,
         NvFp4MoeBackend.HUMMING,
     }
 
@@ -496,6 +507,13 @@ def convert_to_nvfp4_moe_kernel_format(
     elif nvfp4_backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
         # The megakernel transforms the checkpoint tensors itself at init.
         pass
+    elif nvfp4_backend == NvFp4MoeBackend.AITER_NVFP4:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_nvfp4_moe import (
+            prepare_nvfp4_moe_weights_for_aiter_nvfp4,
+        )
+
+        w13, w13_scale = prepare_nvfp4_moe_weights_for_aiter_nvfp4(w13, w13_scale)
+        w2, w2_scale = prepare_nvfp4_moe_weights_for_aiter_nvfp4(w2, w2_scale)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -551,6 +569,21 @@ def make_nvfp4_moe_quant_config(
             gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+    elif backend == NvFp4MoeBackend.AITER_NVFP4:
+        # AITER_NVFP4: pass global scales directly as g1/g2_alphas
+        # The expert class uses them to scale the NVFP4 weights
+        return nvfp4_moe_quant_config(
+            g1_alphas=w13_scale_2,
+            g2_alphas=w2_scale_2,
+            a1_gscale=a13_scale,
+            a2_gscale=a2_scale,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
+
     elif backend == NvFp4MoeBackend.EMULATION:
         return nvfp4_moe_quant_config(
             g1_alphas=w13_scale_2,
