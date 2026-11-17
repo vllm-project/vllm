@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -204,6 +205,10 @@ class WorkerSentinel:
 
         self._redistribute_experts(dead_ep_ranks)
 
+        self._retire_device_communicators(
+            (get_dp_group(), get_ep_group(), get_eplb_group())
+        )
+
         logger.info(
             "[FT] Worker scale_down complete: dp_group_size=%d, "
             "dp_group_rank=%d, dead_ep_ranks=%s, eplb_suppressed=True",
@@ -211,6 +216,42 @@ class WorkerSentinel:
             ft_request.params["dp_group_rank"],
             sorted(dead_ep_ranks),
         )
+
+    @staticmethod
+    def _retire_device_communicators(groups: Sequence["GroupCoordinator"]) -> None:
+        """Retire stale device communicators while preserving group metadata."""
+        # Slot identities stay frozen, but these NCCL groups still include
+        # dead peers. Keep the FT all2all buffers and TP/PP groups intact.
+        for group in groups:
+            communicator = getattr(group.device_communicator, "pynccl_comm", None)
+            if (
+                communicator is not None
+                and communicator.available
+                and not communicator.disabled
+            ):
+                logger.info(
+                    "[FT] Retiring %s PyNCCL communicator: original ranks=%s",
+                    group.unique_name,
+                    group.ranks,
+                )
+                communicator.destroy()
+
+            # EPLB profiling also initializes a separate PyTorch NCCL communicator.
+            # Abort only that backend, preserving group metadata and Gloo backends.
+            device_group = group.device_group
+            if device_group is None:
+                continue
+            for device in device_group._device_types:
+                if device.type != "cuda":
+                    continue
+                backend = device_group._get_backend(device)
+                if isinstance(backend, torch.distributed.ProcessGroupNCCL):
+                    logger.info(
+                        "[FT] Aborting %s PyTorch NCCL backend: original ranks=%s",
+                        group.unique_name,
+                        group.ranks,
+                    )
+                    backend.abort()
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Query the mask on a side stream."""
