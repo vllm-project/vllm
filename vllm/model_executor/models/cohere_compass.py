@@ -2101,11 +2101,6 @@ class CohereCompassForConditionalGeneration(
         return num_mm_embeds * merge_size**2, num_mm_embeds
 
 
-@lru_cache
-def _cached_tensor(x, device) -> torch.Tensor:
-    return torch.tensor(x, device=device)
-
-
 class CohereCompassAttention(nn.Module):
     def __init__(
         self,
