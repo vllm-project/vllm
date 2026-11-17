@@ -753,15 +753,9 @@ _BACKEND_LAYOUTS = [
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("rms_norm_eps", [1e-6])
 @pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
-# The fused_qk_norm_rope_cache kernel used by this test aborts on AITER < 0.1.20
-# (fused_qk_norm_rope_cache_quant.cu: "k_cache/v_cache must be contiguous within
-# a block")
 @pytest.mark.skipif(
-    not Version(version("amd_aiter")) >= Version("0.1.20"),
-    reason=(
-        "Requires AITER >= 0.1.20; older kernels abort on "
-        "fused_qk_norm_rope_cache (k_cache/v_cache contiguity)"
-    ),
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
 )
 def test_qk_norm_rope_kvcache_fusion(
     num_tokens: int,
@@ -827,8 +821,8 @@ _MODEL_CONFIGS = [
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
-    not Version(version("amd_aiter")) >= Version("0.1.20"),
-    reason="Requires AITER >= 0.1.20",
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
 )
 def test_qk_norm_rope_kvcache_fusion_k_out_unquantized_and_q_out_fp8(
     num_heads: int,
@@ -1092,8 +1086,8 @@ def test_mrope_attention_context_failure_propagates(
 
 
 @pytest.mark.skipif(
-    not Version(version("amd_aiter")) >= Version("0.1.20"),
-    reason="Requires AITER >= 0.1.20",
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
 )
 def test_qk_norm_rope_kvcache_fusion_interleaves_every_layer(
     monkeypatch: pytest.MonkeyPatch,
