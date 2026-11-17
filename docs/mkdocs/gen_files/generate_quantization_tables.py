@@ -628,6 +628,8 @@ def parse_methods() -> tuple[list[Method], set[str]]:
         raise source.error("get_quantization_config not found")
 
     # Classes behind local variables (`deepseek_config = ...`) and import aliases.
+    # A variable assigned per platform is shown by class name only: the two
+    # `DeepseekV4FP8Config` classes of `deepseek_v4` and `deepseek_v41` are one row.
     variables: dict[str, list[str]] = {}
     aliases: dict[str, str] = {}
     table: ast.expr | None = None
