@@ -446,20 +446,16 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path.
 
-Triton must currently be installed from source for Rubin compatibility.
-Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO` and its revision
-with `TRITON_INSTALL_FROM_SOURCE_REVISION`. Use the Triton commit that the
-pinned PyTorch nightly requires (`triton==3.9.0+gitb7ddcf86`, the Triton 3.9.0
-release), so that the image's PyTorch and Triton requirements agree. Triton
-`main` no longer has the `ptxas-blackwell` override this build relies on. The
-tested revision lowers SM107 through LLVM's SM100 target. On CUDA 13.5 images,
-the build downloads ptxas 13.4.92, which Triton then uses for SM90 and newer
-GPUs, because ptxas 13.5.37 silently miscompiles some `sm_107a` code. This
-enables vLLM's default compiled mode on VR200 and R100.
-
-BuildKit does not automatically invalidate cached layers when a mutable Git
-ref changes. Use `--no-cache-filter extensions-build` to refresh a branch or
-tag revision.
+Triton is the version that the pinned PyTorch nightly requires
+(`triton==3.9.0+gitb7ddcf86`, the Triton 3.9.0 release), installed from
+PyTorch's nightly index. It lowers SM107 through LLVM's SM100 target, which
+enables vLLM's default compiled mode on VR200 and R100. Rubin images set
+`TRITON_PTXAS_BLACKWELL_PATH` to the `ptxas-blackwell` 13.4 that this wheel
+bundles, which Triton uses for SM90 and newer GPUs. Without it, importing
+FlashInfer points Triton at the CUDA 13.5.0 ptxas on `PATH` (13.5.37), which
+silently miscompiles some `sm_107a` code. The build fails if Triton would still
+use ptxas 13.5.37, for example after a PyTorch nightly bump brings a Triton
+that bundles it.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.5.0-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
@@ -486,8 +482,6 @@ version (13.5): the runtime stage installs the matching CUDA packages.
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=b7ddcf86c095de79527ba3098503e73158bb94bd \
       --build-arg CUDA_VERSION=13.5 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
@@ -507,8 +501,6 @@ version (13.5): the runtime stage installs the matching CUDA packages.
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=b7ddcf86c095de79527ba3098503e73158bb94bd \
       --build-arg CUDA_VERSION=13.5 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \

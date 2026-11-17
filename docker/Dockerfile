@@ -26,8 +26,6 @@ ARG CUDA_VERSION=13.2.1
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
-ARG TRITON_INSTALL_FROM_SOURCE_REPO=
-ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -507,12 +505,8 @@ FROM scratch AS kernel-symbol-map
 COPY --from=csrc-build /workspace/dist/kernel_symbol_map.json.gz /kernel_symbol_map.json.gz
 
 FROM base AS extensions-build
-ARG TARGETARCH
 ARG CUDA_VERSION
 ARG INSTALL_RUBIN_PRERELEASE
-ARG TRITON_INSTALL_FROM_SOURCE_REPO
-ARG TRITON_INSTALL_FROM_SOURCE_REVISION
-ARG max_jobs
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -550,50 +544,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
-
-# Build Triton from source when a repository is configured. Rubin builds use the
-# Triton commit that their PyTorch nightly requires, and bundle the builder's
-# system ptxas as Triton's ptxas-blackwell. The final image's Triton install
-# step replaces it with the ptxas that Triton uses at runtime.
-COPY tools/build_triton_from_source.sh /tmp/build_triton_from_source.sh
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=cache,id=triton-source-${TARGETARCH},target=/root/.triton,sharing=locked \
-    --mount=type=cache,id=triton-source-ccache-${TARGETARCH},target=/root/.cache/ccache,sharing=locked \
-    set -eux; \
-    TRITON_WORKSPACE=/tmp/triton_from_source_workspace; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] \
-        && [ -z "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
-        echo "Rubin prerelease builds require TRITON_INSTALL_FROM_SOURCE_REPO" >&2; \
-        exit 1; \
-    elif [ -z "${TRITON_INSTALL_FROM_SOURCE_REPO}" ] \
-        && [ -n "${TRITON_INSTALL_FROM_SOURCE_REVISION}" ]; then \
-        echo "TRITON_INSTALL_FROM_SOURCE_REVISION requires TRITON_INSTALL_FROM_SOURCE_REPO" >&2; \
-        exit 1; \
-    elif [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
-        dnf install -y --setopt=install_weak_deps=False zlib-devel; \
-        dnf clean all; \
-        rm -rf /var/cache/dnf; \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
-        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-            case "${CUDA_MAJOR_MINOR}" in \
-                13.4|13.5) \
-                    export TRITON_PTXAS_BLACKWELL_PATH=/usr/local/cuda/bin/ptxas \
-                    ;; \
-                *) \
-                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-                    exit 1 \
-                    ;; \
-            esac; \
-        fi; \
-        TRITON_WORKSPACE="${TRITON_WORKSPACE}" \
-        MAX_JOBS="${max_jobs:-}" \
-            bash /tmp/build_triton_from_source.sh; \
-    else \
-        mkdir -p "${TRITON_WORKSPACE}/dist"; \
-        printf '%s\n' disabled > "${TRITON_WORKSPACE}/dist/build-state"; \
-        (cd "${TRITON_WORKSPACE}/dist" \
-            && sha256sum build-state > wheel.sha256); \
-    fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -1263,14 +1213,23 @@ RUN mv vllm src/vllm
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
+# Rubin images keep Triton on the ptxas-blackwell that its wheel bundles.
+# Importing FlashInfer otherwise points Triton at the ptxas on PATH, and CUDA
+# 13.5.0's ptxas 13.5.37 silently miscompiles some sm_107a code. Other images
+# leave TRITON_PTXAS_BLACKWELL_PATH unset.
+FROM vllm-base AS vllm-base-rubin-true
+ARG PYTHON_VERSION
+ENV TRITON_PTXAS_BLACKWELL_PATH=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton/backends/nvidia/bin/ptxas-blackwell
+
+FROM vllm-base AS vllm-base-rubin-false
+
 # base openai image with additional requirements, for any subsequent openai-style images
-FROM vllm-base AS vllm-openai-base
+FROM vllm-base-rubin-${INSTALL_RUBIN_PRERELEASE} AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
-ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
 ARG VLLM_BUILD_COMMIT
 ARG VLLM_BUILD_PIPELINE
@@ -1364,78 +1323,19 @@ RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
 # here so the image does not override mooncake's own default.
 
-# Install Rubin prerelease dependencies when explicitly requested. Keep this
-# after the public vLLM and KV connector dependency pins installed above.
+# Install Rubin prerelease dependencies when explicitly requested. Keep this the
+# last Python install: it restores the torch nightly and the Triton it requires
+# after the vLLM and KV connector installs above. The check fails the build if
+# Triton, with FlashInfer imported, would assemble SM107 with ptxas 13.5.37.
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \
             --prerelease=allow --index-strategy unsafe-first-match \
-            -r /tmp/vllm-requirements/rubin-prerelease.txt; \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt \
+        && python3 -c 'import subprocess, flashinfer.triton; from triton.backends.nvidia.compiler import get_ptxas; out = subprocess.check_output([get_ptxas(107).path, "--version"], text=True); assert "V13.5.37" not in out, out'; \
     fi
-
-# Install source-built Triton last so dependency resolution cannot restore the
-# previously installed version. Triton 3.9 assembles SM90 and newer kernels with
-# its ptxas-blackwell, which the install script links to the given ptxas. CUDA
-# 13.5 Rubin images link ptxas 13.4.92 because ptxas 13.5.37 miscompiles some
-# sm_107a code.
-ARG RUBIN_TRITON_PTXAS_VERSION=13.4.92
-ARG RUBIN_TRITON_PTXAS_SHA256_AARCH64=8aebd451afb3984bc0019e803ae8a01a3837b7c69f36db779a7ce77e70831f5f
-ARG RUBIN_TRITON_PTXAS_SHA256_X86_64=60998f40cc9df5826b2a846e2dcc328133fbc5ef539398ce0a21cf5dcac7193d
-COPY --from=extensions-build \
-    /tmp/triton_from_source_workspace/dist/wheel.sha256 \
-    /tmp/triton-source-wheel.sha256
-COPY tools/install_triton_from_source.sh /tmp/install_triton_from_source.sh
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,from=extensions-build,source=/tmp/triton_from_source_workspace/dist,target=/tmp/triton-source-dist,ro \
-    if [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
-        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-            case "${CUDA_MAJOR_MINOR}" in \
-                13.4) \
-                    TRITON_SYSTEM_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-                    TRITON_EXPECTED_PTXAS_VERSION=13.4 \
-                        bash /tmp/install_triton_from_source.sh \
-                            /tmp/triton-source-dist \
-                            /tmp/triton-source-wheel.sha256 \
-                    ;; \
-                13.5) \
-                    case "$(uname -m)" in \
-                        aarch64) PTXAS_PLATFORM=sbsa; PTXAS_SHA256="${RUBIN_TRITON_PTXAS_SHA256_AARCH64}" ;; \
-                        x86_64) PTXAS_PLATFORM=x86_64; PTXAS_SHA256="${RUBIN_TRITON_PTXAS_SHA256_X86_64}" ;; \
-                        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
-                    esac \
-                    && PTXAS_ARCHIVE="cuda_nvcc-linux-${PTXAS_PLATFORM}-${RUBIN_TRITON_PTXAS_VERSION}-archive" \
-                    && curl -fsSL --retry 3 --retry-all-errors \
-                        "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-${PTXAS_PLATFORM}/${PTXAS_ARCHIVE}.tar.xz" \
-                        -o "/tmp/${PTXAS_ARCHIVE}.tar.xz" \
-                    && echo "${PTXAS_SHA256}  /tmp/${PTXAS_ARCHIVE}.tar.xz" | sha256sum -c - \
-                    && mkdir -p /usr/local/triton-ptxas/bin \
-                    && python3 -c 'import sys, tarfile; open(sys.argv[3], "wb").write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())' \
-                        "/tmp/${PTXAS_ARCHIVE}.tar.xz" "${PTXAS_ARCHIVE}/bin/ptxas" /usr/local/triton-ptxas/bin/ptxas \
-                    && chmod 0755 /usr/local/triton-ptxas/bin/ptxas \
-                    && rm -f "/tmp/${PTXAS_ARCHIVE}.tar.xz" \
-                    && TRITON_SYSTEM_PTXAS_PATH=/usr/local/triton-ptxas/bin/ptxas \
-                    TRITON_EXPECTED_PTXAS_VERSION=13.4 \
-                        bash /tmp/install_triton_from_source.sh \
-                            /tmp/triton-source-dist \
-                            /tmp/triton-source-wheel.sha256 \
-                    ;; \
-                *) \
-                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-                    exit 1 \
-                    ;; \
-            esac; \
-        else \
-            bash /tmp/install_triton_from_source.sh \
-                /tmp/triton-source-dist \
-                /tmp/triton-source-wheel.sha256; \
-        fi; \
-    fi \
-    && rm -f \
-        /tmp/install_triton_from_source.sh \
-        /tmp/triton-source-wheel.sha256
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
