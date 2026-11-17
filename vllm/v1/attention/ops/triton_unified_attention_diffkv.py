@@ -202,6 +202,7 @@ def kernel_unified_attention_diffkv(
         SLIDING_WINDOW,
         False,  # USE_MM_PREFIX
         IS_3D,
+        NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS_PER_SEQ,
     )
 
     for j in range(loop_lo, loop_hi):
