@@ -3,7 +3,7 @@
 """Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
 
 Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``). The +1 look-ahead
+position ahead of the target model (`draft_lookahead`). The +1 look-ahead
 feature past the processed boundary is used when its encoder output is present
 and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
@@ -30,6 +30,7 @@ from vllm.multimodal.inputs import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import reserve_encoder_cache_residency
 
 pytestmark = pytest.mark.cpu_test
 
@@ -74,6 +75,9 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
     manager.is_captured.return_value = True
     manager.supports_modality.side_effect = lambda modality: (
         EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    manager.supports_batch.side_effect = lambda modality, mm_kwargs: (
+        EncoderCudaGraphManager.supports_batch(manager, modality, mm_kwargs)
     )
     runner.cudagraph_manager = manager
     with patch(
@@ -471,3 +475,37 @@ def test_consumed_cpu_input_releases_storage_before_request_finishes():
     cache.update_encoder_inputs("a", {0: None})
     assert ref() is None
     assert "a" in cache.mm_features
+
+
+# ------------------ encoder cache residency profiling ------------------ #
+def _dummy_outputs(num_items: int, tokens: int, hidden: int = 16):
+    return [torch.zeros(tokens, hidden, dtype=torch.bfloat16) for _ in range(num_items)]
+
+
+def test_residency_reservation_covers_the_cache_shortfall():
+    """The dummy batch only covers the compute budget; the cache may hold more."""
+    cache: dict[str, torch.Tensor] = {}
+    outputs = _dummy_outputs(num_items=2, tokens=100)
+
+    cache_bytes = reserve_encoder_cache_residency(cache, outputs, 1000)
+
+    # 1000 tokens of capacity, 200 already resident in the dummy outputs.
+    assert cache["tmp_residency"].shape == (800, 16)
+    assert cache["tmp_residency"].dtype == torch.bfloat16
+    assert cache_bytes == 1000 * 16 * 2
+
+
+def test_residency_reservation_is_a_noop_when_the_batch_already_fills_the_cache():
+    cache: dict[str, torch.Tensor] = {}
+    outputs = _dummy_outputs(num_items=2, tokens=100)
+
+    cache_bytes = reserve_encoder_cache_residency(cache, outputs, 200)
+
+    assert cache == {}
+    assert cache_bytes == 200 * 16 * 2
+
+
+def test_residency_reservation_tolerates_no_dummy_outputs():
+    cache: dict[str, torch.Tensor] = {}
+    assert reserve_encoder_cache_residency(cache, [], 1000) == 0
+    assert cache == {}

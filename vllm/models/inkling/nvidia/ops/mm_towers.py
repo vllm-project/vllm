@@ -3,7 +3,7 @@
 """Fused CUDA kernels for the Inkling vision/audio towers.
 
 Both kernels keep the reference paths' fp32 accumulation and per-op bf16
-rounding points (native ``rms_norm`` / ``F.gelu``); outputs are frequently
+rounding points (native `rms_norm` / `F.gelu`); outputs are frequently
 bit-identical and otherwise differ by 1-2 bf16 ulps from reduction-order
 (real-checkpoint-weight cosine vs reference > 0.9999998).
 """
@@ -59,7 +59,7 @@ def dmel_embed_sum_norm(
     norm_weight: torch.Tensor | None,
     eps: float,
 ) -> torch.Tensor:
-    """``rmsnorm(sum_b weight[b * VOCAB + idx[:, b]])`` in one launch (no
+    """`rmsnorm(sum_b weight[b * VOCAB + idx[:, b]])` in one launch (no
     [T, NB, D] intermediate)."""
     T, nb = dmel_idx.shape
     D = weight.shape[1]
@@ -149,9 +149,9 @@ def rmsnorm_gelu(
     gelu: bool = True,
     fold: tuple[int, int] | None = None,  # (t_fold, hw_fold) of the NEXT fold
 ) -> torch.Tensor:
-    """Fused ``gelu(rmsnorm(x))`` (or plain rmsnorm); multiple rows per block
-    when D is small. With ``fold``, x must be [N, T, H, W, D] and the output
-    comes back as ``fold_timespace_to_depth(result, *fold)``."""
+    """Fused `gelu(rmsnorm(x))` (or plain rmsnorm); multiple rows per block
+    when D is small. With `fold`, x must be [N, T, H, W, D] and the output
+    comes back as `fold_timespace_to_depth(result, *fold)`."""
     D = x.shape[-1]
     flat = x.reshape(-1, D)
     assert flat.stride(1) == 1 and flat.stride(0) == D

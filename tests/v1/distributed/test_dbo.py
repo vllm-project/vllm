@@ -61,15 +61,16 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     _run_dbo_gsm8k(all2all_backend, num_gpus_available)
 
 
-# Combinations the V2 runner supports only (DBO picks V1 unless told otherwise).
-# ngram verifies multi-token queries without a draft model; DCP shards the KV
-# cache across each DP rank's TP group.
+# Features combined with DBO. ngram verifies multi-token queries without a
+# draft model; DCP shards the KV cache across each DP rank's TP group.
 V2_FEATURES = {
     "spec_decode": (
         [
             "--speculative-config",
-            '{"method": "ngram", "num_speculative_tokens": 2, '
-            '"prompt_lookup_max": 4, "prompt_lookup_min": 2}',
+            (
+                '{"method": "ngram", "num_speculative_tokens": 2, '
+                '"prompt_lookup_max": 4, "prompt_lookup_min": 2}'
+            ),
         ],
         1,
     ),
@@ -80,14 +81,13 @@ V2_FEATURES = {
 @pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
 @pytest.mark.parametrize("feature", list(V2_FEATURES))
 def test_dbo_v2_features_gsm8k(feature: str, num_gpus_available):
-    """Test V2-runner DBO combined with spec decode or DCP."""
+    """Test DBO combined with spec decode or DCP."""
     extra_args, tp_size = V2_FEATURES[feature]
     _run_dbo_gsm8k(
         "deepep_low_latency",
         num_gpus_available,
         extra_args=extra_args,
         tp_size=tp_size,
-        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
     )
 
 
@@ -96,7 +96,6 @@ def _run_dbo_gsm8k(
     num_gpus_available: int,
     extra_args: list[str] | None = None,
     tp_size: int = 1,
-    env_dict: dict[str, str] | None = None,
 ):
     lm_eval = pytest.importorskip("lm_eval")
     required_gpus = DP_SIZE * tp_size
@@ -110,7 +109,6 @@ def _run_dbo_gsm8k(
         "4096",
         "--max-num-seqs",
         str(MAX_NUM_SEQS),  # Use larger batch to trigger decode DBO
-        "--trust-remote-code",
         # Note: Not using --enforce-eager to test DBO's alternate CUDA graph dispatching
         "--data-parallel-size",
         str(DP_SIZE),
@@ -125,6 +123,13 @@ def _run_dbo_gsm8k(
         all2all_backend,
         *(extra_args or []),
     ]
+
+    # Single-node test: keep NVSHMEM on NVLink and off host NICs to prevent
+    # intermittent IB transport setup hangs (ibv_modify_qp) across NUMA sockets.
+    env_dict = {
+        "NVSHMEM_REMOTE_TRANSPORT": "none",
+        "NVSHMEM_HCA_LIST": "none",
+    }
 
     with RemoteOpenAIServer(
         MODEL_NAME,

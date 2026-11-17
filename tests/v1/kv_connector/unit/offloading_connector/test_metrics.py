@@ -238,7 +238,7 @@ def _make_stats_data(
 
     Values for unlabeled metrics may be passed flat (wrapped here under the
     empty label tuple); values for labeled metrics must already be passed as
-    a ``{labelvalues: value}`` map.
+    a `{labelvalues: value}` map.
     """
     metric_types = {}
     data = {}

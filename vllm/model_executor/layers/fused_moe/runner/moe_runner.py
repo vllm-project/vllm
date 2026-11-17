@@ -24,16 +24,27 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPMonolithic,
+    _quantize_input,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
+)
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
@@ -65,7 +76,7 @@ def register_layer_for_moe_forward_op(
     prefix = layer.layer_name
     compilation_config = vllm_config.compilation_config
     if prefix in compilation_config.static_forward_context:
-        raise ValueError("Duplicate layer name: {}".format(prefix))
+        raise ValueError(f"Duplicate layer name: {prefix}")
     compilation_config.static_forward_context[prefix] = layer
     compilation_config.static_all_moe_layers.append(prefix)
 
@@ -261,6 +272,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -268,6 +280,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
+        self.routed_scale_mode = routed_scale_mode
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
@@ -409,18 +422,22 @@ class MoERunner(MoERunnerInterface):
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Apply routed_scaling_factor to the output with FP16 overflow
-        protection.
+        """Apply routed_scaling_factor to the output.
 
-        Scale the fused expert output by routed_scaling_factor. For FP16,
-        avoid overflow by dividing shared_output by the scale instead
-        (the decoder layer compensates with matching divisions).
+        Scale the fused expert output by routed_scaling_factor. With
+        RoutedScaleMode.OUTPUT_FP16_GUARD, FP16 outputs with shared experts
+        avoid overflow by dividing shared_output by the scale instead; the
+        model's decoder layer must compensate with matching divisions.
         """
         if self.routed_scaling_factor != 1.0:
-            if fused_output.dtype != torch.float16 or shared_output is None:
-                fused_output *= self.routed_scaling_factor
-            elif shared_output is not None:
+            if (
+                self.routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
+                and shared_output is not None
+                and fused_output.dtype == torch.float16
+            ):
                 shared_output *= 1.0 / self.routed_scaling_factor
+            else:
+                fused_output *= self.routed_scaling_factor
         return shared_output, fused_output
 
     @property
@@ -466,10 +483,10 @@ class MoERunner(MoERunnerInterface):
         transforms are applied.
 
         A transform that commutes with the TP sum is exempt: if
-        ``sum_r T(x_r) == T(sum_r x_r)``, applying the transform to the local
+        `sum_r T(x_r) == T(sum_r x_r)`, applying the transform to the local
         partial output and letting the existing late all-reduce sum the
         combined result is equivalent, and costs one collective instead of two.
-        Such a transform opts out by setting ``reduce_commutative = True``.
+        Such a transform opts out by setting `reduce_commutative = True`.
         The default is False, so transforms that do not declare themselves
         keep being reduced early.
         """
@@ -606,6 +623,7 @@ class MoERunner(MoERunnerInterface):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
+        hidden_states_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -616,20 +634,46 @@ class MoERunner(MoERunnerInterface):
         `shared_experts_overlapping` should be True only if using multi-stream
         overlap. Then the shared expert was already launched in a separate
         stream, so the results only have to be awaited here.
+
+        `hidden_states_scale` is set when `hidden_states` were quantized before
+        the PCP all-gather.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.routed_experts.quant_method.is_monolithic:
+        if (
+            self.routed_experts.quant_method.is_monolithic
+            and self.moe_config.dp_size > 1
+            and self.routed_experts.supports_precomputed_routing
+            # The simulator feeds the kernel random logits to route itself.
+            and not isinstance(self.router, RoutingSimulatorRouter)
+            and (is_padding := get_moe_padding_mask(hidden_states.shape[0])) is not None
+        ):
+            # The kernel's own routing would send padding rows to experts; use
+            # vLLM's top-k, which marks them -1.
+            topk_weights, topk_ids = self.router.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                topk_indices_dtype=torch.int32,
+                input_ids=input_ids,
+            )
+            if not self.router.masks_padding:
+                topk_ids = topk_ids.masked_fill(is_padding.unsqueeze(1), -1)
+            fused_out = self.routed_experts.forward_monolithic_routed(
+                hidden_states, topk_weights, topk_ids
+            )
+        elif self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                x_scale=hidden_states_scale,
             )
         else:
+            assert hidden_states_scale is None
             # Modular kernels: select experts first, then call routed_experts
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
@@ -807,11 +851,35 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
         ) and not self._quant_method.supports_internal_mk
 
+    def _quantizes_before_pcp_gather(self) -> bool:
+        """Whether the routed experts take input quantized row by row by a plain
+        monolithic prepare: dynamic per-token-group fp8, or NVFP4 with a static
+        global scale and unswizzled block scales."""
+        kernel = self._quant_method.moe_kernel
+        qc = self._quant_method.moe_quant_config
+        if (
+            not self._quant_method.accepts_quantized_input
+            or kernel is None
+            or not isinstance(
+                kernel.prepare_finalize, MoEPrepareAndFinalizeNoDPEPMonolithic
+            )
+            or kernel.fused_experts.expects_unquantized_inputs
+            or qc is None
+        ):
+            return False
+        if qc.use_nvfp4_w4a4:
+            return qc.a1_gscale is not None and not qc.is_scale_swizzled
+        return (
+            qc.quant_dtype == current_platform.fp8_dtype()
+            and qc.block_shape is not None
+            and qc.a1_scale is None
+        )
+
     def _maybe_dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
         # router logits to all experts.
         # NOTE: this will be removed once all kernels are migrated into the
@@ -825,14 +893,23 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
+        hidden_states_scale = None
         if (
             self.moe_config.pcp_size > 1
             and not self.moe_config.moe_parallel_config.use_all2all_kernels
         ):
-            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
-            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
+            pcp_group = get_pcp_group()
+            if self._quantizes_before_pcp_gather():
+                qc = self._quant_method.moe_quant_config
+                assert qc is not None
+                # The same quantization the prepare step would apply.
+                hidden_states, hidden_states_scale = _quantize_input(hidden_states, qc)
+            hidden_states = pcp_group.all_gather(hidden_states, dim=0)
+            if hidden_states_scale is not None:
+                hidden_states_scale = pcp_group.all_gather(hidden_states_scale, dim=0)
+            router_logits = pcp_group.all_gather(router_logits, dim=0)
 
-        return hidden_states, router_logits
+        return hidden_states, router_logits, hidden_states_scale
 
     def _maybe_combine(
         self,
@@ -910,8 +987,6 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                if self._combined_gate_weight is None:
-                    self.process_weights_after_loading()
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )
@@ -922,7 +997,7 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            hidden_states, router_logits = self._maybe_dispatch(
+            hidden_states, router_logits, hidden_states_scale = self._maybe_dispatch(
                 hidden_states,
                 router_logits,
             )
@@ -933,6 +1008,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
+                hidden_states_scale=hidden_states_scale,
             )
 
             return self._maybe_combine(

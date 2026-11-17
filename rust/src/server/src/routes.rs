@@ -45,7 +45,6 @@ const SCALE_OUT_DISABLED_MESSAGE: &str =
 /// Scale-out routes that Python registers together with
 /// `/inference/v1/generate` but the Rust frontend does not implement yet.
 const UNIMPLEMENTED_SCALE_OUT_ROUTES: &[&str] = &[
-    "/inference/v1/abort_requests",
     "/v1/chat/completions/render",
     "/v1/completions/render",
     "/v1/messages/render",
@@ -89,13 +88,6 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
     )
 }
 
-fn server_dev_mode_enabled() -> bool {
-    std::env::var("VLLM_SERVER_DEV_MODE")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .is_some_and(|value| value != 0)
-}
-
 fn runtime_lora_updating_enabled() -> bool {
     std::env::var("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
         .ok()
@@ -126,7 +118,7 @@ struct RouteGates {
 impl RouteGates {
     fn resolve(state: &AppState) -> Self {
         Self {
-            dev_mode: server_dev_mode_enabled(),
+            dev_mode: state.api_server_options.server_dev_mode,
             runtime_lora_updating: runtime_lora_updating_enabled(),
             scale_out: state.api_server_options.enable_scale_out,
             cohere_api: cohere_api_enabled(),
@@ -179,14 +171,19 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .route("/detokenize", post(tokenize::detokenize));
 
     if gates.scale_out {
-        router = router.route("/inference/v1/generate", post(inference::generate));
+        router = router.route("/inference/v1/generate", post(inference::generate)).route(
+            "/inference/v1/abort_requests",
+            post(inference::abort_requests),
+        );
         // TODO: implement the remaining scale-out routes.
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(not_supported));
         }
     } else {
         info!("{SCALE_OUT_DISABLED_MESSAGE}");
-        router = router.route("/inference/v1/generate", post(disabled_scale_out));
+        router = router
+            .route("/inference/v1/generate", post(disabled_scale_out))
+            .route("/inference/v1/abort_requests", post(disabled_scale_out));
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
         }
@@ -285,6 +282,7 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
+    let log_error_stack = state.api_server_options.log_error_stack;
     let enable_api_key_auth = state.has_api_keys();
     let enable_access_log = state.access_log.enabled;
     let mut router = router
@@ -301,6 +299,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .layer(from_fn(middleware::track_http_metrics))
         .layer(middleware::cors_layer(&state.cors))
         .layer(from_fn(middleware::strip_cors_on_no_origin));
+
+    if log_error_stack {
+        router = router.layer(from_fn(middleware::log_error_response));
+    }
 
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(

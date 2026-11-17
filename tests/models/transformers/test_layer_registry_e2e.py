@@ -46,7 +46,7 @@ _ATTN_BACKEND = "attn_backend"
 
 def _layer_providers(model) -> dict[str, str]:
     """Map each covered layer type present in the model to the provider its
-    implementation came from (``hw_agnostic`` or ``vllm``).
+    implementation came from (`hw_agnostic` or `vllm`).
     """
     from vllm.model_executor.layers.attention import Attention
 

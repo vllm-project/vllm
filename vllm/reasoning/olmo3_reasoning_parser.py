@@ -10,6 +10,7 @@ import regex as re
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_token_sequences
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -22,7 +23,7 @@ class Olmo3ReasoningState(enum.Enum):
     CONTENT = 2
 
 
-@dt.dataclass(frozen=True)
+@dt.dataclass(frozen=True, slots=True)
 class Indices:
     start: int
     end: int
@@ -72,7 +73,7 @@ def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
     return None, None
 
 
-@dt.dataclass
+@dt.dataclass(slots=True)
 class Olmo3ReasoningBuffer:
     think_start: str = "<think>"
     think_end: str = "</think>"
@@ -250,14 +251,8 @@ class Olmo3ReasoningParser(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         rest_ids = self.think_end_rest_token_ids
-        rest_len = len(rest_ids)
-        for i in range(len(input_ids) - rest_len, -1, -1):
-            if (
-                list(input_ids[i + 1 : i + 1 + rest_len]) == rest_ids
-                and input_ids[i] in self.think_end_first_token_ids
-            ):
-                return True
-        return False
+        markers = [(first, *rest_ids) for first in self.think_end_first_token_ids]
+        return rfind_token_sequences(input_ids, markers)[0] >= 0
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for Olmo 3 streaming reason parsing, the stream parse

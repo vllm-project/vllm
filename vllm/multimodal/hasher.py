@@ -188,7 +188,7 @@ class MultiModalHasher:
         key: str,
         obj: object,
     ) -> Iterable[bytes | memoryview]:
-        """Yield the digest input for a single ``key``/``obj`` pair."""
+        """Yield the digest input for a single `key`/`obj` pair."""
         yield from _framed(key.encode("utf-8"))
         yield from cls.iter_value_to_bytes(obj)
 

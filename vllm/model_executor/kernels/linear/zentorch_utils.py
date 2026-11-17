@@ -33,7 +33,7 @@ def _moe_activation_to_str(activation: object) -> str:
 
 
 def has_zentorch_op(op_names: list[str]) -> bool:
-    """Return ``True`` when running on Zen CPU with all named ops registered."""
+    """Return `True` when running on Zen CPU with all named ops registered."""
     if not op_names:
         raise ValueError("has_zentorch_op requires at least one op name")
     if not current_platform.is_zen_cpu():

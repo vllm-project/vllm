@@ -49,7 +49,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
-    get_marlin_input_dtype,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -332,7 +331,6 @@ class AutoAWQConfig(QuantizationConfig):
                     )
                     return AutoAWQLinearMethod(self)
                 quant_method = AutoAWQMarlinLinearMethod(self)
-                quant_method.input_dtype = get_marlin_input_dtype(prefix)
                 return quant_method
 
             return AutoAWQLinearMethod(self)
@@ -407,7 +405,6 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AutoAWQConfig) -> None:
         self.quant_config = quant_config
         self.quant_type = scalar_types.uint4
-        self.input_dtype = None
 
         # Skip Marlin verification on CPU/XPU - they use dedicated WNA16
         # kernels (CPUWNA16LinearKernel / XPUwNa16LinearKernel) instead.
@@ -449,7 +446,7 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
                 output_size_per_partition,
             ),
             weight_type=self.quant_config.quant_type,
-            act_type=params_dtype if self.input_dtype is None else self.input_dtype,
+            act_type=params_dtype,
             group_size=self.quant_config.group_size,
             zero_points=self.quant_config.zero_point,
         )
@@ -549,7 +546,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         if self.quant_config.weight_bits != 4:
             raise ValueError("AutoAWQMoEMethod only supports 4bit now.")
         self.quant_type = scalar_types.uint4
-        self.input_dtype = None
         self.use_marlin = True
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
@@ -569,7 +565,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.input_dtype = self.input_dtype
         extra_weight_attrs.update(
             {
                 "is_transposed": True,
@@ -662,7 +657,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=self.input_dtype,
             w13=layer.w13_qweight,
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
@@ -685,8 +679,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2_scale,
             w13_qzeros,
             w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
             w13_bias,
             w2_bias,
         ) = converted
@@ -705,12 +697,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_scales", w2_scale)
         _replace_or_register_parameter(layer, "w13_qzeros", w13_qzeros)
         _replace_or_register_parameter(layer, "w2_qzeros", w2_qzeros)
-        _replace_or_register_parameter(
-            layer, "w13_input_global_scale", w13_input_global_scale
-        )
-        _replace_or_register_parameter(
-            layer, "w2_input_global_scale", w2_input_global_scale
-        )
         _replace_or_register_parameter(layer, "w13_bias", w13_bias)
         _replace_or_register_parameter(layer, "w2_bias", w2_bias)
 
@@ -752,8 +738,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            a1_gscale=getattr(layer, "w13_input_global_scale", None),
-            a2_gscale=getattr(layer, "w2_input_global_scale", None),
             gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
