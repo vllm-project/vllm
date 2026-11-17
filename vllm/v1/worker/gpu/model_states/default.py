@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_transferred_mrope_position_delta,
 )
@@ -44,7 +45,14 @@ class DefaultModelState(ModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
 
         self.prompt_embeds_state: PromptEmbedsState | None = None
+        self.stores_prompt_embeds = False
         if self.model_config.enable_prompt_embeds:
+            # Only the first PP rank reads prompt_embeds (later ranks receive
+            # hidden states), so only it holds them and reserves their memory.
+            self.stores_prompt_embeds = (
+                self.vllm_config.parallel_config.pipeline_parallel_size == 1
+                or get_pp_group().is_first_rank
+            )
             max_num_rows = self.scheduler_config.max_num_prompt_embeds_tokens
             assert max_num_rows is not None
             self.prompt_embeds_state = PromptEmbedsState(
@@ -120,7 +128,7 @@ class DefaultModelState(ModelState):
                 mm_features=mm_features,
                 position_delta=position_delta,
             )
-        if self.prompt_embeds_state is not None:
+        if self.prompt_embeds_state is not None and self.stores_prompt_embeds:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def get_mrope_position_delta(self, req_index: int) -> int | None:

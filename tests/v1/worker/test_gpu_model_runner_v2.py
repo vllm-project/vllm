@@ -202,7 +202,9 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     vllm_config = SimpleNamespace(
         aux_output_config=SimpleNamespace(enabled=enabled),
         max_concurrent_batches=1,
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8, max_num_prompt_embeds_tokens=None
+        ),
     )
 
     def allocate(**kwargs):
@@ -759,6 +761,44 @@ def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
     assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
     torch.testing.assert_close(inputs_embeds[:5], expected)
     torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
+
+
+@pytest.mark.parametrize("is_first_rank", [True, False])
+def test_prompt_embeds_held_only_on_first_pp_rank(monkeypatch, is_first_rank):
+    """Later PP ranks never read prompt_embeds and do not reserve their memory,
+    so they must not hold them; otherwise rows stay until the request finishes
+    while the scheduler budget assumes they are freed after prefill."""
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.default.get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=is_first_rank),
+    )
+    model_config = ModelConfig(
+        model="facebook/opt-125m", dtype="float32", enable_prompt_embeds=True
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+            max_model_len=64,
+            is_encoder_decoder=False,
+        ),
+    )
+    # Validating a PP=2 ParallelConfig needs two GPUs; only the size is read.
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    model = _EmbeddingModel(32, model_config.get_inputs_embeds_size())
+    state = DefaultModelState(vllm_config, model, None, torch.device("cpu"))
+    new_req_data = SimpleNamespace(
+        req_id="a",
+        prompt_embeds=torch.zeros(4, model_config.get_inputs_embeds_size()),
+        prompt_is_token_ids=None,
+        mm_features=[],
+    )
+
+    state.add_request(0, new_req_data)
+
+    assert state.prompt_embeds_state is not None
+    assert ("a" in state.prompt_embeds_state.gpu_tensors) == is_first_rank
 
 
 def test_speculator_request_hooks(gpu_model_runner_for_requests):
