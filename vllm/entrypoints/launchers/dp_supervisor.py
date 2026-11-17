@@ -259,7 +259,8 @@ def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
 
     name = f"APIServer_DP{child_args.data_parallel_rank}"
     set_process_title(name)
-    decorate_logs(name)
+    if child_args.log_prefix:
+        decorate_logs(name)
     if envs.VLLM_USE_RUST_FRONTEND and envs.VLLM_RUST_FRONTEND_PATH:
         _run_rust_vllm_dp_server(child_args)
     else:
@@ -286,7 +287,8 @@ class DPSupervisor:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        decorate_logs("DPSupervisor")
+        if self.args.log_prefix:
+            decorate_logs("DPSupervisor")
 
         # K8s sends SIGTERM for shutdown - begin graceful termination.
         for sig in (signal.SIGTERM, signal.SIGINT):
