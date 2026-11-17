@@ -228,6 +228,40 @@ class TestServe:
         a, b = _boxes(s, flat)
         assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
 
+    def test_new_unit_tensors_rebuild_the_cached_sources(self, server):
+        """A bucket's source boxes are cached per publish of its unit: new
+        tensors (a changed storage) are served, not the cached boxes."""
+        s = server()
+        s.register_consumer(0, [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]])
+        for sync_idx, seed in enumerate((0, 1)):
+            s.begin_sync([0], sync_idx)
+            w = _weights(seed)
+            _publish(s, w, 0)
+            (flat,) = s.bucket(0, 0, sync_idx)
+            a, b = _boxes(s, flat)
+            assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
+            free(s)
+
+    def test_the_same_unit_tensors_reuse_the_cached_sources(self, server):
+        """Republishing the same tensors (an identical CUDA-IPC publish)
+        keeps the cached boxes, which read the tensors' current bytes."""
+        s = server()
+        s.register_consumer(0, [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]])
+        w = _weights()
+        unit0 = {n: w[n] for n, u in _UNITS.items() if u == 0}
+        for sync_idx in (0, 1):
+            s.begin_sync([0], sync_idx)
+            for t in unit0.values():
+                t.add_(1)
+            s._publish(0, unit0)
+            (flat,) = s.bucket(0, 0, sync_idx)
+            if sync_idx == 0:
+                cached = s._sources[0, 0]
+            a, b = _boxes(s, flat)
+            assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
+            free(s)
+        assert s._sources[0, 0] is cached
+
     def test_a_pull_waits_for_its_unit(self, server):
         s = server()
         s.register_consumer(0, [[(E, [[0, 2], [0, 6]])]])

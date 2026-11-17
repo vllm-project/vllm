@@ -119,6 +119,33 @@ class _ServedBucket:
     splits: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _Sources:
+    """One bucket's source boxes for one generation of its unit: the
+    contiguous ones as bytes and the strided ones as they are, with the index
+    of the piece each fills."""
+
+    gen: int
+    byte_idx: tuple[int, ...]
+    byte_srcs: tuple[torch.Tensor, ...]
+    typed_idx: tuple[int, ...]
+    typed_srcs: tuple[torch.Tensor, ...]
+
+
+def _sources(gen: int, views: list[torch.Tensor]) -> _Sources:
+    byte_idx, byte_srcs, typed_idx, typed_srcs = [], [], [], []
+    for i, view in enumerate(views):
+        if view.is_contiguous():
+            byte_idx.append(i)
+            byte_srcs.append(view.view(-1).view(torch.uint8))
+        else:
+            typed_idx.append(i)
+            typed_srcs.append(view)
+    return _Sources(
+        gen, tuple(byte_idx), tuple(byte_srcs), tuple(typed_idx), tuple(typed_srcs)
+    )
+
+
 def _ray_stored(tensor: torch.Tensor) -> bool:
     """Whether Ray holds `tensor` as part of an RDT object.
 
@@ -184,6 +211,15 @@ class _RDTProducerServer:
             max_workers=max(1, max_outstanding), thread_name_prefix="rdt-free"
         )
         self._base_cache: dict[tuple, torch.Tensor] = {}
+        # Per unit, the last publish and its rebuilt tensors (an identical
+        # publish reuses them), and their generation: a new one whenever a
+        # unit's tensors change. Per (consumer, seq), the bucket's source
+        # boxes, built once per generation of its unit.
+        self._published: dict[int, tuple[Any, dict[str, torch.Tensor]]] = {}
+        self._unit_tensors: dict[int, dict[str, torch.Tensor]] = {}
+        self._unit_gen: dict[int, int] = {}
+        self._gens = itertools.count(1)
+        self._sources: dict[tuple[int, int], _Sources] = {}
 
         # A frozen post-init object graph keeps gen-2 GC from stopping the
         # world mid-serve.
@@ -253,6 +289,12 @@ class _RDTProducerServer:
 
         """
         storages, views = entries
+        signature = (tuple(storages.items()), views)
+        published = self._published.get(unit)
+        if published is not None and published[0] == signature:
+            # the same storages and views as last sync: same tensors
+            self._publish(unit, published[1])
+            return
         bases: dict[int, torch.Tensor] = {}
         for sid, reduce_args in storages.items():
             cached = self._base_cache.get(reduce_args)
@@ -268,6 +310,7 @@ class _RDTProducerServer:
                 bases[sid].view(dtype), shape, stride, offset
             )
         self._publish(unit, rebuilt)
+        self._published[unit] = (signature, rebuilt)
 
     def _publish(self, unit: int, tensors: dict[str, torch.Tensor]) -> None:
         """Make one unit's tensors servable.
@@ -276,13 +319,18 @@ class _RDTProducerServer:
             ValueError: a tensor does not match its metadata.
 
         """
-        for name, t in tensors.items():
-            if self._served.get(name) != (t.dtype, tuple(t.shape)):
-                raise ValueError(
-                    f"{name!r} is {t.dtype} {tuple(t.shape)}, but its metadata "
-                    f"says {self._served.get(name)}"
-                )
+        fresh = tensors is not self._unit_tensors.get(unit)
+        if fresh:
+            for name, t in tensors.items():
+                if self._served.get(name) != (t.dtype, tuple(t.shape)):
+                    raise ValueError(
+                        f"{name!r} is {t.dtype} {tuple(t.shape)}, but its "
+                        f"metadata says {self._served.get(name)}"
+                    )
         with self._cond:
+            if fresh:
+                self._unit_tensors[unit] = tensors
+                self._unit_gen[unit] = next(self._gens)
             self._cache.update(tensors)
             self._unit_names[unit] = list(tensors)
             self._inflight_units.append(unit)
@@ -371,6 +419,9 @@ class _RDTProducerServer:
             )
         with self._cond:
             self._buckets[consumer_id] = served
+            self._sources = {
+                k: v for k, v in self._sources.items() if k[0] != consumer_id
+            }
             self._needs[consumer_id] = Counter(b.unit for b in served)
             for unit in list(self._inflight_units):
                 self._release_if_done(unit)
@@ -408,12 +459,18 @@ class _RDTProducerServer:
             offset = self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            # the unit stays cached until this bucket is freed
-            tensors = [self._cache[name] for name, _ in spec.pieces]
+            gen = self._unit_gen[spec.unit]
+            sources = self._sources.get((consumer_id, seq))
+            if sources is None or sources.gen != gen:
+                # the unit stays cached until this bucket is freed
+                tensors = [self._cache[name] for name, _ in spec.pieces]
             self._progress()
-        views = [t[slices] for t, (_, slices) in zip(tensors, spec.pieces)]
-        del tensors
-        flat = self._pack(views, spec, offset)
+        if sources is None or sources.gen != gen:
+            sources = self._sources[consumer_id, seq] = _sources(
+                gen, [t[sl] for t, (_, sl) in zip(tensors, spec.pieces)]
+            )
+            del tensors
+        flat = self._pack(sources, spec, offset)
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
 
@@ -432,34 +489,34 @@ class _RDTProducerServer:
         return start
 
     def _pack(
-        self, views: list[torch.Tensor], spec: _ServedBucket, offset: int
+        self, sources: _Sources, spec: _ServedBucket, offset: int
     ) -> torch.Tensor:
         """Pack a bucket into its arena block: the contiguous boxes as bytes,
         with one fused copy, and the strided ones (e.g. TP column slices)
         typed. One strided box or a second dtype would otherwise put every
         box on the per-tensor path, a kernel each."""
         if self._arena is None:  # warmup_nixl never ran (tests)
+            some = (sources.byte_srcs or sources.typed_srcs)[0]
             self._arena = torch.empty(
-                self._arena_bytes, dtype=torch.uint8, device=views[0].device
+                self._arena_bytes, dtype=torch.uint8, device=some.device
             )
         flat = self._arena[offset : offset + spec.nbytes]
-        # every piece's bytes, from one split; per piece op count matters,
-        # since a MoE bucket has hundreds
+        # every piece's bytes, from one split; per piece tensor ops are what
+        # a busy producer pays for, and a MoE bucket has hundreds of pieces
         chunks = flat.split(spec.splits)[::2]
-        byte_dsts, byte_srcs, dsts, srcs = [], [], [], []
-        for chunk, (_, _, dtype, shape), view in zip(
-            chunks, spec.layout, views, strict=True
-        ):
-            if view.is_contiguous():
-                byte_dsts.append(chunk)
-                byte_srcs.append(view.view(-1).view(torch.uint8))
-            else:
-                dsts.append(chunk.view(dtype).view(shape))
-                srcs.append(view)
-        if byte_dsts:
-            torch._foreach_copy_(byte_dsts, byte_srcs)
-        if dsts:
-            torch._foreach_copy_(dsts, srcs)
+        if sources.byte_srcs:
+            torch._foreach_copy_(
+                [chunks[i] for i in sources.byte_idx], list(sources.byte_srcs)
+            )
+        if sources.typed_srcs:
+            layout = spec.layout
+            torch._foreach_copy_(
+                [
+                    chunks[i].view(layout[i][2]).view(layout[i][3])
+                    for i in sources.typed_idx
+                ],
+                list(sources.typed_srcs),
+            )
         if flat.is_cuda:
             # Ray synchronizes the device under its cache lock; do it here so
             # its wait is empty.
@@ -532,6 +589,9 @@ class _RDTProducerServer:
         with self._cond:
             self._cache.clear()
             self._unit_names.clear()
+            self._sources.clear()
+            self._published.clear()
+            self._unit_tensors.clear()
         self._waiters.shutdown(wait=False, cancel_futures=True)
         if self._arena is not None and self._arena.is_cuda:
             with contextlib.suppress(Exception):
