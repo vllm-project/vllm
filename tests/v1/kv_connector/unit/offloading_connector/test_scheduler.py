@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
 )
@@ -116,6 +117,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_group_idx,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -249,6 +251,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         offload_prompt_only=True,
         async_init=False,
         extra_config={},
+        access_mode=OffloadAccessMode.READWRITE,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
@@ -5570,6 +5573,83 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
         for key in call.args[0]
     }
     assert len(offered_keys) == num_prompt_blocks
+
+
+def _make_access_mode_scheduler(
+    access_mode: str,
+) -> tuple[OffloadingConnectorScheduler, MockOffloadingSpec]:
+    vllm_config = _make_vllm_config(extra_config={"access_mode": access_mode})
+    kv_cache_config = _make_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    return (
+        OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config),
+        spec,
+    )
+
+
+def _empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=[],
+            new_token_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[],
+        ),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "access_mode, reads",
+    [("readwrite", True), ("read", True), ("write", False)],
+)
+def test_read_access_mode_gates_lookups(access_mode: str, reads: bool):
+    """A connector that cannot read (write mode) never queries the tiers, so it
+    serves no external hit; read and readwrite still look up."""
+    scheduler, spec = _make_access_mode_scheduler(access_mode)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+
+    num_hit_tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
+
+    if reads:
+        spec.manager.lookup.assert_called()
+    else:
+        spec.manager.lookup.assert_not_called()
+        assert num_hit_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "access_mode, writes",
+    [("readwrite", True), ("write", True), ("read", False)],
+)
+def test_write_access_mode_gates_store_handlers(
+    access_mode: str, writes: bool, monkeypatch
+):
+    """A connector that cannot write (read mode) runs no store handler, so the
+    manager receives no store and no GPU block is fenced."""
+    scheduler, spec = _make_access_mode_scheduler(access_mode)
+    calls: list[StoreTrigger] = []
+    for handler in scheduler._store_handlers.values():
+        monkeypatch.setattr(
+            handler, "build_store_jobs", lambda *a, **kw: calls.append(True)
+        )
+
+    meta = scheduler.build_connector_meta(_empty_scheduler_output())
+
+    if writes:
+        assert calls
+    else:
+        assert calls == []
+        assert meta.store_jobs == {}
+        spec.manager.prepare_store.assert_not_called()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

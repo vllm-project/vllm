@@ -437,28 +437,6 @@ def test_factory_forwards_access_mode_to_fs_tier(tmp_path):
         tier.shutdown()
 
 
-def test_write_access_mode_stores_but_never_reports_a_hit(tmp_path):
-    """`write` publishes blocks to a shared cache that this tier never reads."""
-    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
-    tier = FileSystemTierManager(
-        offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=memoryview(tensor.numpy()),
-        tier_type="fs",
-        root_dir=str(tmp_path),
-        n_read_threads=1,
-        n_write_threads=1,
-        access_mode="write",
-    )
-    try:
-        tier.submit_store(make_job(1, [key(1)], [0]))
-        assert all(r.success for r in drain(tier))
-        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
-        # The block is on disk, but a write-only tier still reports a miss.
-        assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
-    finally:
-        tier.shutdown()
-
-
 def test_read_access_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
     """`read` creates no files but reads blocks written by another instance."""
     root = str(tmp_path)

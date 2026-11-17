@@ -337,21 +337,6 @@ def test_access_mode_sets_can_read_and_can_write(access_mode, can_read, can_writ
     assert tier.access_mode.can_write is can_write
 
 
-def test_write_access_mode_stores_but_never_reports_a_hit():
-    tier, agent = _make_tier(access_mode="write")
-    tier.submit_store(make_job(1, [key(1)], [0]))
-    assert all(r.success for r in drain(tier))
-    # The object was written, but a write-only tier still reports a miss.
-    assert tier._file_mapper.get_file_name(key(1)) in agent._stored_obj_keys
-    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
-
-
-def test_read_access_mode_reports_a_hit_without_storing():
-    tier, agent = _make_tier(access_mode="read")
-    agent._stored_obj_keys.add(tier._file_mapper.get_file_name(key(1)))
-    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
-
-
 class TestMockObjTierBasic:
     def setup_method(self):
         self.tier, self.agent = _make_tier(num_blocks=4)

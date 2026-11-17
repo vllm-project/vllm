@@ -322,9 +322,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        if not self.access_mode.can_read:
-            # A write-only tier never serves loads.
-            return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY

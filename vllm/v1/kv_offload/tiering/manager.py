@@ -772,6 +772,9 @@ class TieringOffloadingManager(OffloadingManager):
         for i, tier in enumerate(self.secondary_tiers):
             if i == exclude_tier_idx:
                 continue
+            if not tier.access_mode.can_read:
+                # A write-only tier never serves loads.
+                continue
             if not req_context.load_tier_filter.allows(tier.medium, tier.locality):
                 continue
             labelvalues = self._metrics.tier_label(i)

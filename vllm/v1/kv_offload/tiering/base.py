@@ -201,7 +201,7 @@ class SecondaryTierManager(ABC):
         backpressure_detector: Optional `BackpressureDetector`.
         access_mode: Direction(s) in which this tier may transfer data. The
             tiering manager skips stores to a tier whose access_mode cannot
-            write, and the tier returns MISS from lookups it cannot read.
+            write, and lookups of a tier whose access_mode cannot read.
 
         """
         self._offloading_spec = offloading_spec

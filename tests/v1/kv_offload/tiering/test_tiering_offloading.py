@@ -511,6 +511,21 @@ class TestTieringOffloadingManager:
             assert chunk is not None
             assert chunk.ref_cnt == 1
 
+    def test_write_only_tier_is_never_looked_up(self, manager_setup, monkeypatch):
+        """The manager does not query a tier that cannot read, so a write-only
+        tier never serves a load."""
+        chunk = to_keys([1])[0]
+        self.secondary_tier1.access_mode = OffloadAccessMode.WRITE
+        self.secondary_tier1.chunks[chunk] = True
+        tier1_lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+        monkeypatch.setattr(self.secondary_tier1, "lookup", tier1_lookup)
+
+        self._start_request()
+        result = self.manager.lookup(chunk, _CTX)
+
+        tier1_lookup.assert_not_called()
+        assert result is LookupResult.MISS
+
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects chunks during cascade."""
         chunks = to_keys(range(3))
@@ -2114,6 +2129,37 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+def test_spec_parses_access_mode_from_extra_config():
+    """OffloadingSpec.__init__ parses the connector-level access_mode, so its
+    managers can see which directions this instance may transfer."""
+    spec = TieringOffloadingSpec(
+        make_offloading_config(
+            spec_name="TieringOffloadingSpec",
+            extra_config={"access_mode": "read"},
+        )
+    )
+    assert spec.access_mode is OffloadAccessMode.READ
+    assert spec.access_mode.can_read
+    assert not spec.access_mode.can_write
+
+
+def test_spec_access_mode_defaults_to_readwrite():
+    spec = TieringOffloadingSpec(
+        make_offloading_config(spec_name="TieringOffloadingSpec")
+    )
+    assert spec.access_mode is OffloadAccessMode.READWRITE
+
+
+def test_spec_rejects_invalid_access_mode():
+    with pytest.raises(ValueError, match="Invalid access_mode"):
+        TieringOffloadingSpec(
+            make_offloading_config(
+                spec_name="TieringOffloadingSpec",
+                extra_config={"access_mode": "both"},
+            )
+        )
 
 
 def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
