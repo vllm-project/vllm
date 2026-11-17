@@ -3,6 +3,7 @@
 """Packed tensor utilities for efficient weight transfer."""
 
 import math
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cache
@@ -104,6 +105,8 @@ class ChunkLayout:
 
     chunks: list[list[Piece]]
     sizes: list[int]
+    # (shape, dtype) of every tensor, in order
+    specs: list[tuple[tuple[int, ...], torch.dtype]]
 
     def views(self, k: int, buf: torch.Tensor) -> list[torch.Tensor]:
         """Chunk k's pieces in `buf`: typed, or raw bytes for a piece at an
@@ -151,7 +154,7 @@ def chunk_layout(
         sizes.append(last.offset + last.nbytes)
     else:
         chunks.pop()
-    return ChunkLayout(chunks, sizes)
+    return ChunkLayout(chunks, sizes, full)
 
 
 def _source(piece: Piece, tensor: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
@@ -192,7 +195,8 @@ def packed_nccl_broadcast_producer(
                     Both producer and consumer must use the same value.
         layout: `chunk_layout` of what `iterator` yields, for a caller that
             sends the same parameters again: its buffers and views are built
-            once, so a chunk then costs no per-tensor Python.
+            once, so a chunk then costs no per-tensor Python. Each tensor is
+            checked against it.
         segments: split tensors over the buffer along dim 0. Both sides
             must agree (`chunk_layout`); ignored when `layout` is given.
 
@@ -203,7 +207,7 @@ def packed_nccl_broadcast_producer(
     done: list[torch.Event | None] = [None] * num_buffers
     held: list[Any] = [None] * num_buffers  # alive until their broadcast ends
     for k, (buf, views, srcs) in enumerate(
-        _chunks(tensors, buffer_size_bytes, num_buffers, layout, segments)
+        _chunks(tensors, buffer_size_bytes, num_buffers, layout, segments, group)
     ):
         slot = k % num_buffers
         prev = done[slot]
@@ -221,29 +225,55 @@ def packed_nccl_broadcast_producer(
         stream.synchronize()
 
 
+def _check_spec(layout: ChunkLayout, index: int, tensor: torch.Tensor) -> None:
+    shape, dtype = layout.specs[index]
+    if tuple(tensor.shape) != shape or tensor.dtype != dtype:
+        raise ValueError(
+            f"packed transfer: tensor {index} is {list(tensor.shape)} {tensor.dtype}, "
+            f"but the layout it is sent with expects {list(shape)} {dtype}"
+        )
+
+
 def _chunks(
     tensors: Iterator[torch.Tensor],
     limit: int,
     num_buffers: int,
     layout: ChunkLayout | None,
     segments: bool,
+    group: Any,
 ) -> Iterator[tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]]:
     """(buffer, piece views, piece sources) per chunk."""
     if layout is not None:
-        bufs = slot_buffers(num_buffers, max(layout.sizes, default=0))
+        bufs = slot_buffers(num_buffers, max(layout.sizes, default=0), group)
         bound = layout.__dict__.get("_bound")
-        if bound is None:
-            bound = layout.__dict__["_bound"] = [
-                layout.views(k, bufs[k % num_buffers]) for k in range(len(layout.sizes))
-            ]
+        if bound is None or bound[0] is not bufs:
+            bound = layout.__dict__["_bound"] = (
+                bufs,
+                [
+                    layout.views(k, bufs[k % num_buffers])
+                    for k in range(len(layout.sizes))
+                ],
+            )
         index, tensor = -1, torch.empty(0)
         for k, pieces in enumerate(layout.chunks):
             srcs = []
-            for piece, view in zip(pieces, bound[k]):
-                if piece[0] != index:
-                    index, tensor = piece[0], next(tensors)
+            for piece, view in zip(pieces, bound[1][k]):
+                if piece.index != index:
+                    index = piece.index
+                    tensor = next(tensors, None)
+                    if tensor is None:
+                        raise ValueError(
+                            f"packed transfer: {index} tensors sent, but the "
+                            f"layout has {len(layout.specs)}"
+                        )
+                    _check_spec(layout, index, tensor)
                 srcs.append(_source(piece, tensor, view))
-            yield bufs[k % num_buffers][: layout.sizes[k]], bound[k], srcs
+            yield bufs[k % num_buffers][: layout.sizes[k]], bound[1][k], srcs
+        if next(tensors, None) is not None:
+            raise ValueError(
+                f"packed transfer: more tensors sent than the layout's "
+                f"{len(layout.specs)}"
+            )
         return
     stash: dict[int, torch.Tensor] = {}
 
@@ -263,7 +293,7 @@ def _chunks(
 
 
 def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
-    one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes])
+    one = ChunkLayout([pieces], [pieces[-1].offset + pieces[-1].nbytes], [])
     device = stash[pieces[0].index].device
     buf = torch.empty(one.sizes[0], dtype=torch.uint8, device=device)
     views = one.views(0, buf)
@@ -273,20 +303,29 @@ def _fresh_chunk(pieces: list[Piece], stash: dict[int, torch.Tensor]):
     return buf, views, srcs
 
 
-_SLOTS: dict[tuple[int, int], list[torch.Tensor]] = {}
+# Per communicator: two transfers that may run at once in one process (a
+# sender and a receiver sharing a process, or two groups) never share buffers.
+_SLOTS: "weakref.WeakKeyDictionary[Any, dict[tuple[int, int], list[torch.Tensor]]]"
+_SLOTS = weakref.WeakKeyDictionary()
 
 
-def slot_buffers(num_buffers: int, nbytes: int) -> list[torch.Tensor]:
-    """This device's reused packed buffers, at least `nbytes` each. Shared by
-    every transfer on the device, so memory is one set of buffers however many
-    senders there are. They grow in place and `release_slot_buffers` frees
-    their memory between updates: views of them stay valid either way."""
-    key = (torch.accelerator.current_device_index(), num_buffers)
-    if key not in _SLOTS:
-        _SLOTS[key] = [
-            torch.empty(0, dtype=torch.uint8, device="cuda") for _ in range(num_buffers)
+def slot_buffers(num_buffers: int, nbytes: int, group: Any) -> list[torch.Tensor]:
+    """`group`'s reused packed buffers on this device, at least `nbytes` each.
+    Shared by every transfer on that communicator (one set of buffers however
+    many senders take turns on it). They grow in place and
+    `release_slot_buffers` frees their memory between updates: views of them
+    stay valid either way."""
+    index = torch.accelerator.current_device_index()
+    per_group = _SLOTS.setdefault(group, {})
+    key = (index, num_buffers)
+    if key not in per_group:
+        accelerator = torch.accelerator.current_accelerator()
+        assert accelerator is not None
+        device = torch.device(accelerator.type, index)
+        per_group[key] = [
+            torch.empty(0, dtype=torch.uint8, device=device) for _ in range(num_buffers)
         ]
-    bufs = _SLOTS[key]
+    bufs = per_group[key]
     for buf in bufs:
         if buf.numel() < nbytes:
             buf.resize_(nbytes)
@@ -295,10 +334,13 @@ def slot_buffers(num_buffers: int, nbytes: int) -> list[torch.Tensor]:
     return bufs
 
 
-def release_slot_buffers() -> None:
-    for bufs in _SLOTS.values():
-        for buf in bufs:
-            buf.untyped_storage().resize_(0)
+def release_slot_buffers(group: Any = None) -> None:
+    """Free the memory of `group`'s buffers (every group's if `None`)."""
+    groups = list(_SLOTS.values()) if group is None else [_SLOTS.get(group, {})]
+    for per_group in groups:
+        for bufs in per_group.values():
+            for buf in bufs:
+                buf.untyped_storage().resize_(0)
 
 
 def packed_nccl_broadcast_consumer(

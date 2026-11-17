@@ -373,7 +373,7 @@ class NCCLWeightTransferEngine(
         finish_reload(self.model, self.model_config, self.device)
         # The receive buffers' memory goes back (the KV cache wakes into it);
         # their views stay valid and the storage regrows at the next update.
-        release_slot_buffers()
+        release_slot_buffers(self.model_update_group)
         # Release the cached receive buffers and post-load temporaries so memory
         # allocated outside torch (NCCL, other processes on the GPU) can use it.
         torch.accelerator.empty_cache()
@@ -472,20 +472,27 @@ class NCCLWeightTransferEngine(
         """Per packed chunk, the copies from the receive buffer into the
         model, built once per update metadata: an update then runs no
         per-tensor Python."""
-        import gc
-
         import regex as re
 
         nbuf = self.packed_num_buffers
         cache = self.__dict__.setdefault("_layouts", {})
+        key = (
+            list(update_info.names),
+            list(update_info.dtype_names),
+            [list(s) for s in update_info.shapes],
+        )
         layout = cache.get(src)
-        if layout is not None and layout["names"] == update_info.names:
+        if layout is not None and layout["key"] == key:
             return layout
         names, shapes = update_info.names, update_info.shapes
         dtypes = [getattr(torch, d) for d in update_info.dtype_names]
-        wire = chunk_layout(zip(shapes, dtypes), self.packed_buffer_size_bytes)
+        wire = chunk_layout(
+            zip(shapes, dtypes),
+            self.packed_buffer_size_bytes,
+            self.packed_wire_segments,
+        )
         need = max(wire.sizes, default=0)
-        bufs = slot_buffers(nbuf, need)
+        bufs = slot_buffers(nbuf, need, self.model_update_group)
         index_of = re.compile(r"\.\d+(?=\.|$)")
         chunks = []
         for k, pieces in enumerate(wire.chunks):
@@ -496,7 +503,7 @@ class NCCLWeightTransferEngine(
             pending: list = []  # unaligned, or split and needed whole: per receive
             fallbacks: list = []
             for piece, view in zip(pieces, wire.views(k, bufs[k % nbuf])):
-                index, rows, dtype = piece[0], piece[1], piece[3]
+                index, rows, dtype = piece.index, piece.rows, piece.dtype
                 name = names[index]
                 dest = plan.get_dest(name)
                 ops = (
@@ -539,15 +546,11 @@ class NCCLWeightTransferEngine(
                 (wire.sizes[k], dsts, srcs, reshaped, pending, fallbacks, fb_bytes)
             )
         layout = cache[src] = {
-            "names": list(names),
+            "key": key,
             "shapes": shapes,
             "chunks": chunks,
             "need": need,
         }
-        # These views live as long as the engine: keep the collector from
-        # rescanning ~1e5 of them mid-transfer (full collections cost ~0.3 s).
-        gc.collect()
-        gc.freeze()
         return layout
 
     def _receive_planned(
@@ -555,14 +558,34 @@ class NCCLWeightTransferEngine(
     ) -> None:
         """Packed receive into reused buffers, then one batched copy per chunk;
         fallback names still go through `load_weights` in arrival order."""
+        import gc
+
+        # The cached copies hold ~1e5 views: a full collection mid-transfer
+        # rescans them all (~0.3 s), so the collector waits for the end.
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            self._receive_planned_chunks(update_info, src, plan)
+        finally:
+            if enabled:
+                gc.enable()
+
+    def _receive_planned_chunks(
+        self, update_info: NCCLWeightTransferUpdateInfo, src: int, plan
+    ) -> None:
         from vllm.distributed.weight_transfer.packed_tensor import _get_streams
 
         layout = self._planned_layout(update_info, src, plan)
         nbuf = self.packed_num_buffers
-        bufs = slot_buffers(nbuf, layout["need"])  # regrows released storage
-        streams = _get_streams(torch.accelerator.current_device_index(), nbuf)
         group = self.model_update_group
         assert group is not None
+        bufs = slot_buffers(nbuf, layout["need"], group)  # regrows released storage
+        streams = _get_streams(torch.accelerator.current_device_index(), nbuf)
+        # Copies into the model must follow what the caller queued before the
+        # receive, e.g. begin's padding fill, which would otherwise erase them.
+        caller_stream = torch.accelerator.current_stream()
+        for stream in streams:
+            stream.wait_stream(caller_stream)
         slot_done: list[torch.Event | None] = [None] * nbuf
         prev: torch.Event | None = None
         deferred: list[tuple[str, torch.Tensor]] = []
@@ -592,7 +615,13 @@ class NCCLWeightTransferEngine(
                     deferred = []
                 else:
                     deferred.extend((n, t.clone()) for n, t in fallbacks)
-                for (index, rows, shape, dtype, _, _), view, name, ops in pending:
+                for piece, view, name, ops in pending:
+                    index, rows, shape, dtype = (
+                        piece.index,
+                        piece.rows,
+                        piece.shape,
+                        piece.dtype,
+                    )
                     full = view if view.dtype == dtype else view.clone().view(dtype)
                     full = full.view(shape)
                     pairs = (
