@@ -157,7 +157,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     ):
         return
 
-    with info.restore_device:
+    with torch.device("cpu") if info.stage_on_cpu else info.restore_device:
         for name, tensor in get_layer_tensors(layer).items():
             if name not in SKIP_TENSORS and tensor.is_meta:
                 setattr(layer, name, materialize_meta_tensor(tensor))
