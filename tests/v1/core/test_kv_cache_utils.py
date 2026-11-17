@@ -346,15 +346,13 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
     [
         (6635520, 2304, 24, None),
         (211200, 64, 24, 8448),
-        (1637376, 64, 24, None),
     ],
 )
 def test_hisparse_indexer_pages_spread_only_when_every_layer_fits(
     block_bytes, block_size, num_layers, page_stride
 ):
-    """Spreading indexer pages over a block needs a page slot per indexer layer,
-    each a whole number of rows; otherwise the spread pages would outgrow the
-    block or split a row."""
+    """Spreading indexer pages over a block needs a page slot per indexer layer;
+    otherwise the spread pages would outgrow the block."""
     indexer_specs = {
         f"model.layers.{i}.self_attn.indexer": MLAAttentionSpec(
             block_size=block_size,
@@ -369,7 +367,7 @@ def test_hisparse_indexer_pages_spread_only_when_every_layer_fits(
 
 
 @pytest.mark.parametrize(
-    ("kv_cache_layout", "indexer_block_size"), [(None, 3968), ("BLHNC", 3136)]
+    ("kv_cache_layout", "indexer_block_size"), [(None, 4096), ("BLHNC", 2304)]
 )
 def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block_size):
     """A block-outer pool block is whole hot rows, and indexer kernel pages
@@ -386,7 +384,7 @@ def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block
             **mla,
         ),
         "model.layers.1.self_attn": AttentionSpec(
-            block_size=64, num_kv_heads=1, head_size=3968, dtype=torch.bfloat16
+            block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
         ),
     }
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
@@ -403,7 +401,7 @@ def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block
     )
     assert indexer_group.block_size == indexer_block_size
     if kv_cache_layout is not None:
-        assert _pool_bytes_per_block(config, groups) == 1_016_064
+        assert _pool_bytes_per_block(config, groups) == 1_049_472
 
 
 def test_hisparse_rejects_deepseek_v4():

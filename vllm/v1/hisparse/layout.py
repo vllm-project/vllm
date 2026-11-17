@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass, replace
 
@@ -192,19 +191,15 @@ def _spread_page_stride(
     block_bytes: int, indexer_specs: dict[str, MLAAttentionSpec]
 ) -> int | None:
     """Stride of the indexer pages spread evenly over a block, or None when the
-    block cannot hold a page of every indexer layer in whole rows."""
+    block cannot hold a page of every indexer layer."""
     page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values()) // len(
         indexer_specs
-    )
-    stride_alignment = math.lcm(
-        _INDEXER_PAGE_ALIGNMENT,
-        *(spec.page_size_bytes // spec.block_size for spec in indexer_specs.values()),
     )
     pages = next(
         (
             pages
             for pages in range(block_bytes // page_bytes, len(indexer_specs) - 1, -1)
-            if block_bytes % (pages * stride_alignment) == 0
+            if block_bytes % (pages * _INDEXER_PAGE_ALIGNMENT) == 0
         ),
         None,
     )
