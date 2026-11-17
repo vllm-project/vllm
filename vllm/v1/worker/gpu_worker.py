@@ -205,8 +205,10 @@ def get_compile_warmup_sizes(
 ) -> list[int]:
     """Sizes to warm up so every compile range gets compiled.
 
-    Sizes above `max_reachable_tokens` would need a dummy request longer than
-    max_model_len, which overruns the block table in attention.
+    `max_reachable_tokens` is min(max_num_batched_tokens,
+    max_num_seqs * max_model_len); larger batches never occur at runtime.
+    Exceeding max_num_seqs * max_model_len would also need a dummy request
+    longer than max_model_len, which overruns the block table in attention.
     """
     sizes = [
         x for x in warmup_sizes if isinstance(x, int) and x <= max_reachable_tokens
