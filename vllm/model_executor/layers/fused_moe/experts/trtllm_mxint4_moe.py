@@ -33,8 +33,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         num_dispatchers: int | None = None,
     ):
         super().__init__(moe_config, quant_config)
-        if self.activation_config.clamp_limit is not None:
-            raise ValueError("TRT-LLM MxInt4 MoE does not support the SwiGLU clamp")
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition

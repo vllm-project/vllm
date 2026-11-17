@@ -75,7 +75,7 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         if (
             quant_config.gemm1_alpha is not None
             or quant_config.gemm1_beta is not None
-            or self.activation_config.clamp_limit is not None
+            or quant_config.gemm1_clamp_limit is not None
         ):
             raise NotImplementedError(
                 "MoonEPExperts implements plain silu(gate) * up only; SwiGLU "

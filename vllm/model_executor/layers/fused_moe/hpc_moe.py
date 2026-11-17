@@ -38,8 +38,6 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        if self.activation_config.clamp_limit is not None:
-            raise ValueError("HPCExperts does not support the SwiGLU clamp")
 
         assert quant_config.weight_quant_dtype in (torch.float8_e4m3fn,), (
             "Only fp8 quantization is currently supported."
