@@ -39,9 +39,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
+    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
+    ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -265,6 +265,7 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
         } = self.model.file_sources();
 
         RenderConfig {
@@ -273,6 +274,7 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
@@ -485,6 +487,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
 
+    /// Default LoRA adapter per modality, as a JSON object mapping a modality
+    /// to an adapter path or repo id (e.g. `{"audio": "org/speech-lora"}`).
+    /// Each adapter is loaded at startup under its modality's name and serves
+    /// chat requests that name no adapter but carry that modality. Requires
+    /// `--enable-lora`.
+    #[arg(long, value_parser = parse_json::<DefaultMmLoras>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub default_mm_loras: DefaultMmLoras,
+
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -598,6 +609,20 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_tokenizer_info_endpoint: bool,
+
+    /// If set to True, only enable the Tokens In<>Out endpoint.
+    /// This is intended for use in a Disaggregated Everything setup.
+    ///
+    /// Implies `--enable-scale-out` and `--skip-tokenizer-init`. Unlike Python,
+    /// it does not serve the unauthenticated legacy `/abort_requests`; use
+    /// `/inference/v1/abort_requests`.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub tokens_only: bool,
 
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
@@ -1006,7 +1031,8 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
-        } = self.model.file_sources();
+            hf_token,
+        } = self.model_args().file_sources();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -1026,6 +1052,7 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -1044,6 +1071,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1096,7 +1124,8 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
-        } = self.model.file_sources();
+            hf_token,
+        } = self.model_args().file_sources();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -1115,6 +1144,7 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -1133,6 +1163,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1155,6 +1186,15 @@ impl SharedRuntimeArgs {
         }
     }
 
+    /// The model arguments with `--tokens-only` applied, which implies
+    /// `--skip-tokenizer-init` as in Python's `EngineArgs`.
+    fn model_args(&self) -> ModelArgs {
+        ModelArgs {
+            skip_tokenizer_init: self.model.skip_tokenizer_init || self.tokens_only,
+            ..self.model.clone()
+        }
+    }
+
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
@@ -1172,7 +1212,8 @@ impl SharedRuntimeArgs {
             force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
-            enable_scale_out: self.enable_scale_out.unwrap_or(self.server_dev_mode),
+            enable_scale_out: self.tokens_only
+                || self.enable_scale_out.unwrap_or(self.server_dev_mode),
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
@@ -1520,11 +1561,20 @@ impl ServeArgs {
         });
 
         let mut managed_engine = self.managed_engine.clone();
-        managed_engine.python_args.extend(self.runtime.model.python_args());
+        managed_engine.python_args.extend(self.runtime.model_args().python_args());
         if let Some(logging_config) = self.runtime.logging_config_json() {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        // The engine checks the adapters against the model at startup, as it
+        // does under the Python frontend.
+        if !self.runtime.default_mm_loras.is_empty() {
+            let default_mm_loras = serde_json::to_string(&self.runtime.default_mm_loras)
+                .expect("default-mm-loras serialization should not fail");
+            managed_engine
+                .python_args
+                .extend(["--default-mm-loras".to_string(), default_mm_loras]);
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),

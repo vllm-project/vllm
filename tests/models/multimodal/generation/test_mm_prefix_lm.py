@@ -209,9 +209,13 @@ def test_mm_prefix_lm_cache_hit_inside_image(
 def test_mm_prefix_lm_pipeline_parallel(
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Regression: every PP stage must attend bidirectionally over image
     tokens, not only the first one (which owns the encoder cache)."""
+    # The forked test process may inherit CUDA state from test collection,
+    # which makes forked engine and worker processes fail to initialize CUDA.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     prompt = {
         "prompt": PROMPT,
         "multi_modal_data": {"image": image_assets[0].pil_image},

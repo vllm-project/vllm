@@ -657,9 +657,7 @@ def all_reduce_fusion_pass_on_test_model(
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
     model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
-    vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
-    )
+    vllm_config.model_config = ModelConfig(model=model_name, dtype=dtype, seed=42)
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         all_reduce_fusion_pass = (
@@ -846,9 +844,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
     vllm_config.parallel_config.rank = local_rank
 
     model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
-    vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
-    )
+    vllm_config.model_config = ModelConfig(model=model_name, dtype=dtype, seed=42)
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         all_reduce_fusion_pass = RocmAiterAllReduceFusionPass(vllm_config)

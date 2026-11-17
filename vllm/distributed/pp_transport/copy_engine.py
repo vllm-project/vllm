@@ -18,9 +18,14 @@ the CPU group.
 The waits omit CU_STREAM_WAIT_VALUE_FLUSH, which x86 hosts do not support. As
 in NCCL's zero-SM copy-engine path, this relies on NVLink delivering the peer
 copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
+
+The platform's flag ops and peer copy come from `_CudaCopyEngines`, or on ROCm
+(gfx950) from `rocm_sdma.SdmaCopyEngines`, which uses HIP's stream memory ops
+and SDMA engines.
 """
 
 import contextlib
+import ctypes
 from collections import deque
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -28,13 +33,17 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import torch
 
 from vllm.distributed.pp_transport import PPTransport, check_intermediate_tensors
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.distributed.pp_transport.rocm_sdma import SdmaCopyEngines
 
-# Flags at bytes 0 (full) and 8 (empty) of each shared buffer, data from here.
+# Flags at bytes 0 (full) and 8 (empty) of each shared buffer, the copy
+# engines' own words from _ENGINE_OFFSET, data from _DATA_OFFSET.
+_ENGINE_OFFSET = 64
 _DATA_OFFSET = 256
 
 
@@ -89,42 +98,89 @@ def _device_bytes(ptr: int, nbytes: int) -> torch.Tensor:
     return torch.as_tensor(SimpleNamespace(__cuda_array_interface__=cai), device="cuda")
 
 
-def _wait_flag(stream: torch.cuda.Stream, addr: int, at_least: int) -> None:
-    from cuda.bindings import driver as cu
-
-    _check(
-        cu.cuStreamWaitValue64(
-            cu.CUstream(stream.cuda_stream),
-            cu.CUdeviceptr(addr),
-            cu.cuuint64_t(at_least),
-            int(cu.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ),
-        )
-    )
-
-
-def _write_flag(stream: torch.cuda.Stream, addr: int, value: int) -> None:
-    from cuda.bindings import driver as cu
-
-    # Default flags: a system-scope fence orders the stream's earlier writes
-    # (the peer copies) before this one.
-    _check(
-        cu.cuStreamWriteValue64(
-            cu.CUstream(stream.cuda_stream),
-            cu.CUdeviceptr(addr),
-            cu.cuuint64_t(value),
-            0,
-        )
-    )
-
-
 class CopyEngineUnavailable(RuntimeError):
     """Copy engines are not usable. Raised on every rank alike."""
 
 
 def _close_peer(ptr: int) -> None:
-    from cuda.bindings import runtime as cudart
+    # CudaRTLibrary calls HIP's IPC close on ROCm.
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
-    _check(cudart.cudaIpcCloseMemHandle(ptr))
+    CudaRTLibrary().cudaIpcCloseMemHandle(ctypes.c_void_p(ptr))
+
+
+class _CudaCopyEngines:
+    """CUDA's flag ops (stream memory ops) and, for a sender, its peer copy to
+    the next stage (memcpys on copy engines)."""
+
+    @staticmethod
+    def check_device(device: int) -> None:
+        import cuda.bindings.driver as cu
+
+        attr = cu.CUdevice_attribute
+        memops = attr.CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS
+        dev = _check(cu.cuDeviceGet(device))
+        if not _check(cu.cuDeviceGetAttribute(memops, dev)):
+            raise RuntimeError(f"GPU {device} lacks 64-bit stream memory ops")
+
+    @staticmethod
+    def wait_flag(stream: torch.cuda.Stream, addr: int, at_least: int) -> None:
+        from cuda.bindings import driver as cu
+
+        result = cu.cuStreamWaitValue64(
+            cu.CUstream(stream.cuda_stream),
+            cu.CUdeviceptr(addr),
+            cu.cuuint64_t(at_least),
+            int(cu.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ),
+        )
+        _check(result)
+
+    @staticmethod
+    def write_flag(stream: torch.cuda.Stream, addr: int, value: int) -> None:
+        from cuda.bindings import driver as cu
+
+        # Default flags: a system-scope fence orders the stream's earlier writes
+        # (the peer copies) before this one.
+        result = cu.cuStreamWriteValue64(
+            cu.CUstream(stream.cuda_stream),
+            cu.CUdeviceptr(addr),
+            cu.cuuint64_t(value),
+            0,
+        )
+        _check(result)
+
+    def __init__(
+        self,
+        send_buf: int,
+        peer_recv_buf: int,
+        peer_full: int,
+        words: int,
+        peer_pci: tuple[int, int, int],
+    ) -> None:
+        """`words` and `peer_pci` are for SDMA and unused here."""
+        self.send_buf = send_buf
+        self.peer_recv_buf = peer_recv_buf
+        self.peer_full = peer_full
+
+    def copy(
+        self, stream: torch.cuda.Stream, layout: dict, rows: dict, seq: int
+    ) -> None:
+        """Queue on `stream` the copy of each key's first `rows` rows into the
+        peer's receive region, then the write of `full = seq`."""
+        from cuda.bindings import runtime as cudart
+
+        for key, n in rows.items():
+            r = layout[key]
+            if n:
+                result = cudart.cudaMemcpyAsync(
+                    self.peer_recv_buf + r.offset,
+                    self.send_buf + r.offset,
+                    n * r.row_bytes,
+                    cudart.cudaMemcpyKind.cudaMemcpyDefault,
+                    stream.cuda_stream,
+                )
+                _check(result)
+        self.write_flag(stream, self.peer_full, seq)
 
 
 class CopyEngineTransport(PPTransport):
@@ -139,12 +195,19 @@ class CopyEngineTransport(PPTransport):
         on some rank."""
         from vllm import _custom_ops as ops
         from vllm.distributed.parallel_state import in_the_same_node_as
-        from vllm.platforms import current_platform
 
         # The same on every rank, so these raise before any collective.
         parallel_config = vllm_config.parallel_config
-        if not current_platform.is_cuda():
-            raise CopyEngineUnavailable("PP copy engines need CUDA")
+        engines: type[_CudaCopyEngines] | type[SdmaCopyEngines]
+        if current_platform.is_cuda():
+            engines = _CudaCopyEngines
+        elif current_platform.is_rocm():
+            from vllm.distributed.pp_transport import rocm_sdma
+
+            engines = rocm_sdma.SdmaCopyEngines
+        else:
+            raise CopyEngineUnavailable("PP copy engines need CUDA or ROCm")
+        self.engines = engines
         if (
             parallel_config.tensor_parallel_size != 1
             or parallel_config.prefill_context_parallel_size != 1
@@ -183,30 +246,27 @@ class CopyEngineTransport(PPTransport):
             return [o for o, _ in gathered]
 
         def allocate_recv() -> tuple[Any, ...]:
-            import cuda.bindings.driver as cu
-
             layout = _layout(persistent) if persistent is not None else {}
             device = torch.accelerator.current_device_index()
-            attr = cu.CUdevice_attribute
-            memops = attr.CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS
-            dev = _check(cu.cuDeviceGet(device))
-            if not _check(cu.cuDeviceGetAttribute(memops, dev)):
-                raise RuntimeError(f"GPU {device} lacks 64-bit stream memory ops")
+            engines.check_device(device)
             # Zeroed before the handle is shared.
             ptr, handle = ops.allocate_shared_buffer_and_handle(
                 _DATA_OFFSET + _nbytes(layout)
             )
             owned.append(ptr)
             phys = current_platform.visible_device_id_to_physical_device_id(device)
-            return ptr, handle, layout, phys
+            props = torch.cuda.get_device_properties(device)
+            pci = (props.pci_domain_id, props.pci_bus_id, props.pci_device_id)
+            return ptr, handle, layout, phys, pci
 
         ranks = step(allocate_recv)
-        ptr, _, layout, _ = ranks[rank]
+        ptr, _, layout, _, _ = ranks[rank]
 
-        def connect() -> tuple[int | None, int | None, int | None]:
+        def connect() -> tuple[Any, ...]:
             if not current_platform.is_fully_connected([r[3] for r in ranks]):
-                raise RuntimeError("PP GPUs are not all NVLink-connected")
+                raise RuntimeError("PP GPUs are not all directly connected")
             prev_ptr = next_ptr = send_ptr = None
+            copier: _CudaCopyEngines | SdmaCopyEngines | None = None
             if not pp_group.is_first_rank:
                 prev_ptr = ops.open_mem_handle(ranks[rank - 1][1])
                 opened.append(prev_ptr)
@@ -218,9 +278,16 @@ class CopyEngineTransport(PPTransport):
                     _nbytes(ranks[rank + 1][2])
                 )
                 owned.append(send_ptr)
-            return prev_ptr, next_ptr, send_ptr
+                copier = engines(
+                    send_ptr,
+                    next_ptr + _DATA_OFFSET,
+                    next_ptr,
+                    ptr + _ENGINE_OFFSET,
+                    ranks[rank + 1][4],
+                )
+            return prev_ptr, send_ptr, copier
 
-        prev_ptr, next_ptr, send_ptr = step(connect)[rank]
+        prev_ptr, send_ptr, self.copier = step(connect)[rank]
 
         if not pp_group.is_first_rank:
             assert persistent is not None and prev_ptr is not None
@@ -231,7 +298,7 @@ class CopyEngineTransport(PPTransport):
             self.full = ptr
             self.peer_empty = prev_ptr + 8
         if not pp_group.is_last_rank:
-            assert next_ptr is not None and send_ptr is not None
+            assert send_ptr is not None and self.copier is not None
             self.dst = rank + 1
             self.send_layout = ranks[rank + 1][2]
             self.send_specs = {
@@ -239,8 +306,6 @@ class CopyEngineTransport(PPTransport):
             }
             self.send_buf = _device_bytes(send_ptr, _nbytes(self.send_layout))
             self.empty = ptr + 8
-            self.peer_recv_buf = next_ptr + _DATA_OFFSET
-            self.peer_full = next_ptr
             self.stream = torch.cuda.Stream()
             self.seq = 0
             # The send buffer's last peer copy.
@@ -261,16 +326,14 @@ class CopyEngineTransport(PPTransport):
 
         def copy_in() -> None:
             stream = torch.cuda.current_stream()
-            _wait_flag(stream, self.full, meta["seq"])
+            self.engines.wait_flag(stream, self.full, meta["seq"])
             for key, view in src.items():
                 out[key].copy_(view)
-            _write_flag(stream, self.peer_empty, meta["seq"])
+            self.engines.write_flag(stream, self.peer_empty, meta["seq"])
 
         return AsyncIntermediateTensors(out, comm_postprocess=[copy_in])
 
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
-        from cuda.bindings import runtime as cudart
-
         check_intermediate_tensors(tensors, self.send_specs)
         rows = {k: t.shape[0] for k, t in tensors.items()}
         self.seq += 1
@@ -287,22 +350,10 @@ class CopyEngineTransport(PPTransport):
 
         # Side stream: peer copy once the receive region is empty, then publish.
         self.stream.wait_event(packed)
-        _wait_flag(self.stream, self.empty, self.seq - 1)
-        for key, n in rows.items():
-            r = self.send_layout[key]
-            if n:
-                _check(
-                    cudart.cudaMemcpyAsync(
-                        self.peer_recv_buf + r.offset,
-                        self.send_buf.data_ptr() + r.offset,
-                        n * r.row_bytes,
-                        cudart.cudaMemcpyKind.cudaMemcpyDefault,
-                        self.stream.cuda_stream,
-                    )
-                )
+        self.engines.wait_flag(self.stream, self.empty, self.seq - 1)
+        self.copier.copy(self.stream, self.send_layout, rows, self.seq)
         self.peer_done = torch.cuda.Event()
         self.peer_done.record(self.stream)
-        _write_flag(self.stream, self.peer_full, self.seq)
 
         # gloo sends complete only in wait(), which blocks until the peer
         # receives. Step k+1's copy waited for empty >= k, so k was received.

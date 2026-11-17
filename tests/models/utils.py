@@ -431,10 +431,11 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelInfo:
     name: str
     revision: str | None = None
+    trust_remote_code: bool = False
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
@@ -448,7 +449,7 @@ class ModelInfo:
     enable_test: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class EmbedModelInfo(ModelInfo):
     mteb_score: float | None = None
     # Per-model MTEB score tolerance; falls back to MTEB_EMBED_TOL.
@@ -457,7 +458,7 @@ class EmbedModelInfo(ModelInfo):
     matryoshka_dimensions: list[int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
     # Per-model MTEB score tolerance; falls back to MTEB_RERANK_TOL.
@@ -465,7 +466,7 @@ class RerankModelInfo(ModelInfo):
     chat_template_name: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
@@ -485,6 +486,7 @@ def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
+    vllm_extra_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
