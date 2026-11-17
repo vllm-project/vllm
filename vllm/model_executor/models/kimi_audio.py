@@ -424,9 +424,9 @@ class KimiAudioForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config.with_hf_config(
-                    self.config, architectures=["Qwen2ForCausalLM"]
-                ),
+                vllm_config=vllm_config,
+                hf_config=self.config,
+                architectures=["Qwen2ForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
@@ -632,7 +632,7 @@ class KimiAudioForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         if not text:
             return ""
         return text.strip()

@@ -1136,11 +1136,20 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
         gen = torch.Generator(device="cpu")
         gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
         signs = (
-            2.0 * torch.bernoulli(torch.full((d,), 0.5, device="cpu"), generator=gen)
+            2.0
+            * torch.bernoulli(
+                torch.full((d,), 0.5, dtype=torch.float32, device="cpu"),
+                generator=gen,
+            )
             - 1.0
         )
         _RHT_SIGNS_CACHE[key] = signs.to(device)
     return _RHT_SIGNS_CACHE[key]
+
+
+def init_rht_signs(head_size: int, device: torch.device) -> None:
+    """Pre-build the `single_rht` signs so no forward takes the H2D miss."""
+    _get_rht_signs(largest_power_of_2_divisor(head_size), 0, device)
 
 
 def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
