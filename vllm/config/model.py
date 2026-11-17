@@ -503,6 +503,7 @@ class ModelConfig:
             "enforce_eager",
             "return_sampling_mask",
             "logprobs_mode",
+            "ignore_eos_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
             "disable_cascade_attn",
