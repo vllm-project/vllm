@@ -1212,13 +1212,16 @@ def unified_attention(
     _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
     _is_pow2_hs = head_size == head_size_padded
     use_td_hoisted = use_td and current_platform.is_cuda()
-    # Performance choice: keep short CUDA decode Q/O on pointers; K/V TD
-    # remains enabled for query lengths <= MAX_3D_QUERY_LEN.
+    # Performance choice: short decode Q/O on pointers is faster on SM100/SM103
+    # only; K/V TD stays enabled for all query lengths.
     use_td_qo = (
         use_td
         and _is_pow2_nq
         and _is_pow2_hs
-        and (not current_platform.is_cuda() or max_seqlen_q > MAX_3D_QUERY_LEN)
+        and (
+            not current_platform.is_device_capability_family(100)
+            or max_seqlen_q > MAX_3D_QUERY_LEN
+        )
     )
 
     # ``_load_q_td`` / ``_store_output_td`` flatten ``(num_queries_per_kv,

@@ -1177,8 +1177,10 @@ def test_triton_unified_attn_use_td(
 
     - non-pow2 `num_queries_per_kv` via `NUM_HEADS` entry `(5, 1)`.
     - non-pow2 `head_size` via `HEAD_SIZES_USE_TD` entry `96`.
-    - CUDA query lengths at or below `MAX_3D_QUERY_LEN`.
+    - SM100/SM103 query lengths at or below `MAX_3D_QUERY_LEN`.
     """
+    if block_size > 32 and (soft_cap is not None or num_blocks != 2048):
+        pytest.skip("soft cap and the large block table run at block sizes 16/32")
     _run_use_td_case(
         seq_lens=seq_lens,
         num_heads=num_heads,
@@ -1198,7 +1200,7 @@ def test_triton_unified_attn_use_td_speculative_decode(
     query_len: int,
     block_size: int,
 ) -> None:
-    """Exercise K/V TD with pointer Q/O for CUDA speculative decode."""
+    """Exercise K/V TD with pointer Q/O for SM100/SM103 speculative decode."""
     _run_use_td_case(
         seq_lens=[(query_len, 128), (1, 257)],
         num_heads=(4, 4),
