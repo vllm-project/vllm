@@ -156,8 +156,6 @@ variants:
           - "flashinfer"
           - "--moe-backend"
           - "marlin"
-          - "--gpu-memory-utilization"
-          - "0.92"
           - "--max-model-len"
           - "262144"
           - "--max-num-batched-tokens"
@@ -181,8 +179,6 @@ variants:
           - "flashinfer"
           - "--attention-config"
           - '{"use_trtllm_attention":true}'
-          - "--gpu-memory-utilization"
-          - "0.9"
           - "--max-num-seqs"
           - "8"
           - "--max-num-batched-tokens"
@@ -209,8 +205,6 @@ variants:
           - "flashinfer"
           - "--attention-config"
           - '{"use_trtllm_attention":true}'
-          - "--gpu-memory-utilization"
-          - "0.85"
           - "--max-model-len"
           - "65536"
           - "--max-num-seqs"

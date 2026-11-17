@@ -62,9 +62,9 @@ def request_obj():
 def _make_parser(tokenizer, *, enable_thinking=None, tools=None):
     """Build the parser the serving stack resolves for MiniCPM-V.
 
-    Everything is built through ``ParserManager`` so the tests exercise the
-    ``DelegatingParser`` the server actually drives, not the parser engine on
-    its own. Tool calling goes through ``qwen3_coder``: MiniCPM-V emits that
+    Everything is built through `ParserManager` so the tests exercise the
+    `DelegatingParser` the server actually drives, not the parser engine on
+    its own. Tool calling goes through `qwen3_coder`: MiniCPM-V emits that
     XML syntax verbatim and has no tool parser of its own.
     """
     parser_cls = ParserManager.get_parser(
@@ -106,8 +106,8 @@ def test_no_minicpmv_tool_parser_is_registered():
     """MiniCPM-V deliberately registers no tool parser.
 
     The family emits the Qwen3-Coder XML syntax verbatim, so
-    ``--tool-call-parser qwen3_coder`` already covers it. Registering a
-    ``minicpmv`` tool parser would duplicate that name for no parsing gain.
+    `--tool-call-parser qwen3_coder` already covers it. Registering a
+    `minicpmv` tool parser would duplicate that name for no parsing gain.
     """
     with pytest.raises(KeyError):
         ToolParserManager.get_tool_parser("minicpmv")
@@ -244,9 +244,9 @@ class TestNonThinking:
     def test_streaming_tool_calls_are_parsed(self, mock_tokenizer):
         """Regression: tool calls must stream when thinking is explicitly off.
 
-        The reasoning parser used to report ``reasoning_ended=False`` in
+        The reasoning parser used to report `reasoning_ended=False` in
         non-thinking mode, which kept the delegating parser in its reasoning
-        phase and streamed the raw ``<tool_call>`` XML to the client as content.
+        phase and streamed the raw `<tool_call>` XML to the client as content.
         """
         parser = _make_parser(mock_tokenizer, enable_thinking=False, tools=_TOOLS)
         request = ChatCompletionRequest(
@@ -309,7 +309,7 @@ class TestThinking:
 
 
 class TestNewlineRecovery:
-    """The tokenizer writes a newline as the two characters ``\\`` and ``n``."""
+    """The tokenizer writes a newline as the two characters `\\` and `n`."""
 
     def test_recover_newlines(self):
         text = (

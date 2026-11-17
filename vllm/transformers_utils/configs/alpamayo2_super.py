@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Alpamayo 2 Super configuration support.
 
-The released checkpoint (``model_type: alpamayo2_super``) wraps a Qwen3-VL
-model in ``vlm_config`` and stores a trajectory expert beside it. This shim
+The released checkpoint (`model_type: alpamayo2_super`) wraps a Qwen3-VL
+model in `vlm_config` and stores a trajectory expert beside it. This shim
 exposes the Qwen3-VL fields at the top level, so vLLM's Qwen3-VL code can size
 the model, and keeps the wrapper's fields for the trajectory tokens.
 """

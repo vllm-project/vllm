@@ -11,7 +11,6 @@ import numpy as np
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -22,6 +21,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import strip_speculative_padding
+from vllm.v1.token_buffer import TokenIdsView
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -270,7 +270,7 @@ class StructuredOutputManager:
         if structured_req.masked_reasoning_end_ids is None:
             masked: tuple[int, ...] = ()
             reasoner = self._get_reasoner(request)
-            if isinstance(reasoner, ParserEngineReasoningAdapter):
+            if reasoner is not None and reasoner.implicit_reasoning_end_token_ids:
                 grammar = structured_req.grammar
                 assert isinstance(grammar, StructuredOutputGrammar)
                 masked = tuple(
@@ -323,11 +323,8 @@ class StructuredOutputManager:
         if num_spec_tokens <= 0:
             return _NO_SPEC_TOKENS
 
-        # Engine-based parsers also report whether the end token is content.
-        if (
-            isinstance(reasoner, ParserEngineReasoningAdapter)
-            and reasoner.reasoning_end_token_ids
-        ):
+        # Parsers that know their end tokens also report whether one is content.
+        if reasoner.reasoning_end_token_ids:
             end = reasoner.find_reasoning_end(spec_tokens)
             if end is not None:
                 constraint_start = end.offset + 1
@@ -335,20 +332,18 @@ class StructuredOutputManager:
                     return ConstraintBounds(end.offset, constraint_start)
                 return ConstraintBounds(constraint_start, constraint_start)
 
-        # Fallback: the grammar starts after the end token.
-        # TODO: Build a read-only Sequence view over all_token_ids
-        # instead of copying the entire all_token_ids into input_ids.
+        # Fallback: the grammar starts after the end token. A view, not a copy,
+        # of all_token_ids: most parsers don't read it every step.
         if spec_tokens_committed:
             if not spec_tokens or not reasoner.is_reasoning_end_streaming(
                 request.all_token_ids, spec_tokens
             ):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
 
-            input_ids = request.all_token_ids.copy()
+            input_ids = TokenIdsView(request._all_token_ids)
             delta_ids = list(spec_tokens)
         else:
-            input_ids = request.all_token_ids.copy()
-            input_ids.extend(spec_tokens)
+            input_ids = TokenIdsView(request._all_token_ids, spec_tokens)
             if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
             delta_ids = list(spec_tokens)

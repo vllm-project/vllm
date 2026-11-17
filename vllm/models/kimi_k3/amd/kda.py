@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
-
 import torch
 from einops import rearrange
 from torch import nn
@@ -44,7 +42,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import (
     PREFILL_CONV_BLOCK_M,
     KimiK3ROCmKDABackend,
@@ -68,38 +66,8 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
-
-
-class _PaddedKimiGDNMergedColumnParallelLinear(_KimiGDNMergedColumnParallelLinear):
-    """Merged projection with ``padding_size`` zero rows appended per rank."""
-
-    def __init__(self, *args, padding_size: int = 0, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.padding_size = padding_size
-        if padding_size:
-            assert isinstance(self.weight, torch.Tensor)
-            # Exclude padding rows from the load-completion count.
-            set_weight_attrs(
-                self.weight,
-                {"weight_loader_numel": self.weight[:-padding_size].numel()},
-            )
-            self.weight.data[-padding_size:].zero_()
-
-    def weight_loader(self, param, loaded_weight, loaded_shard_id=None) -> None:
-        super().weight_loader(param, loaded_weight, loaded_shard_id)
-        self._zero_padding(param)
-
-    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None) -> None:
-        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        self._zero_padding(param)
-
-    def _zero_padding(self, param: torch.Tensor) -> None:
-        # Online processing materializes the weight after __init__ zeroing.
-        if self.padding_size and param is self.weight:
-            param.data[-self.padding_size :].zero_()
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
@@ -124,9 +92,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # Only the fused path exports the checkpoint snapshots. AITER's
         # chunk_kda cannot, so the gluon backend hands the steps that carry a
         # checkpoint to the fused kernel when the build has it.
@@ -143,13 +109,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(can_checkpoint),
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
-            ),
-        )
+        return KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
 
     def __init__(
         self,
@@ -193,10 +153,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
         self.in_proj_padding = -local_output_size % 16
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
 
-        self.in_proj_qkvgfab = _PaddedKimiGDNMergedColumnParallelLinear(
+        self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
             replicated_shard_id=4,
@@ -238,7 +196,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
             rocm_aiter_ops.is_kda_gluon_decode_available()
         )
-        use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
+        self.aiter_supports_strided_state = False
+        if self.use_aiter_decode:
+            from aiter.ops.triton.attention.kda import fused_recurrent_kda as aiter_kda
+
+            self.aiter_supports_strided_state = bool(
+                getattr(aiter_kda, "supports_unaligned_state_stride", False)
+            )
+        # Without the strided-state flag AITER cannot read the packed DSA
+        # cache's recurrent states; the HIP kernel honours the slot stride.
+        use_hip_decode = (
+            not self.use_aiter_decode or not self.aiter_supports_strided_state
+        ) and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
@@ -345,9 +314,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     @torch.no_grad()
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        if is_weights_pre_processed():
-            return
+    def process_weights_after_loading(self) -> None:
         if self.decode_conv1d_weight is not None:
             self.decode_conv1d_weight.copy_(
                 self.conv1d.weight.view(
@@ -453,8 +420,23 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
 
+        # The packed DSA block row gives state slots a fractional-row pitch.
+        # Older AITER versions address states by whole rows and cannot take
+        # that, so only fuse when the installed kernel declares support.
+        use_aiter_decode = self.use_aiter_decode and (
+            self.aiter_supports_strided_state
+            or recurrent_state.stride(0) % recurrent_state.shape[-1] == 0
+        )
+        if self.use_aiter_decode and not use_aiter_decode:
+            logger.info_once(
+                "KDA recurrent state is strided and AITER lacks "
+                "supports_unaligned_state_stride: fused AITER decode skipped "
+                "(HIP fused decode %s).",
+                "on" if self.decode_norm_weight is not None else "off",
+            )
+
         if (
-            self.use_aiter_decode
+            use_aiter_decode
             and spec_sequence_masks is None
             and m.num_prefills == 0
             and m.num_decodes > 0
@@ -478,11 +460,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
             return
 
-        if (
-            self.use_aiter_decode
-            and spec_sequence_masks is not None
-            and m.num_prefills == 0
-        ):
+        if use_aiter_decode and spec_sequence_masks is not None and m.num_prefills == 0:
             # Spec-only batch (gdn_attn never mixes spec and plain decodes).
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None

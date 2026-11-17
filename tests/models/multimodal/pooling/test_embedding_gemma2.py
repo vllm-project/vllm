@@ -9,11 +9,16 @@ import textwrap
 import pytest
 import torch
 
+from vllm import PoolingParams
+from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.video import EmbeddingGemma2VideoBackend
 
 MODEL = os.environ.get("EG2_MODEL_PATH")
 needs_model = pytest.mark.skipif(not MODEL, reason="EG2_MODEL_PATH not set")
 TEXT_COS, MM_COS = 0.999, 0.999
+
+MODEL = MODEL or "google/embeddinggemma-2"
 
 
 def _cos(a, b):
@@ -89,6 +94,51 @@ def test_text_parity(vllm_runner, st_model, prompt):
     assert sim >= TEXT_COS, (
         f"Text cosine {sim} < {TEXT_COS} for prompt len {len(prompt)}"
     )
+
+
+@needs_model
+def test_matryoshka_parity(vllm_runner, st_model):
+    from vllm import PoolingParams
+
+    prompt = "task: search result | query: what is vllm"
+    dims = [128, 256, 512, 768]
+    with vllm_runner(MODEL, runner="pooling", max_model_len=8192) as vm:
+        outs = vm.embed(
+            [prompt] * len(dims),
+            pooling_params=[PoolingParams(dimensions=d) for d in dims],
+        )
+    for d, out in zip(dims, outs):
+        ref = st_model.encode([prompt], truncate_dim=d, normalize_embeddings=True)
+        assert len(out) == d
+        sim = _cos([out], ref).min().item()
+        assert sim >= TEXT_COS, f"Matryoshka {d}d cosine {sim} < {TEXT_COS}"
+
+
+def test_embeddinggemma2_embedding_size_matches_native_dim():
+    """EG2 projects hidden_size(512) -> embedding_dim(768)."""
+    model_config = ModelConfig(
+        MODEL,
+        runner="pooling",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="bfloat16",
+    )
+
+    emb_dim = getattr(model_config.hf_text_config, "embedding_dim", None)
+    hidden = model_config.get_hidden_size()
+    assert emb_dim == 768
+    assert hidden == 512
+    assert model_config.embedding_size == emb_dim
+    assert model_config.is_matryoshka
+
+    for dim in (128, 256, 512, 768):
+        PoolingParams(task="embed", dimensions=dim).verify(model_config)
+
+    with pytest.raises(VLLMValidationError):
+        PoolingParams(task="embed", dimensions=769).verify(model_config)
+    with pytest.raises(VLLMValidationError):
+        PoolingParams(task="embed", dimensions=0).verify(model_config)
 
 
 @needs_model
@@ -258,10 +308,16 @@ def test_encoder_contract():
         "embed_multimodal",
         "_encoder_chunk",
     ]
+    # EmbeddingGemma2 borrows these without Gemma4's data-parallel dispatch.
+    gemma4_source = {
+        "_process_image_input": "_process_image_input_local",
+        "_process_video_input": "_process_video_input_local",
+    }
 
     for name in borrowed_methods:
         # Check method identity (L-F6 + T-F4)
-        assert getattr(EmbeddingGemma2Model, name) is getattr(G, name)
+        source = gemma4_source.get(name, name)
+        assert getattr(EmbeddingGemma2Model, name) is getattr(G, source)
 
         # AST checks: verify no zero-arg super() calls in borrowed methods
         func = getattr(EmbeddingGemma2Model, name)
@@ -646,6 +702,38 @@ def test_config_capping_and_explicit_limits():
 
     assert cfg_explicit_16k.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
     assert cfg_explicit_16k.model_config.max_model_len == 16384
+
+
+def _update_matryoshka_config(**hf_config_fields):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.config import EmbeddingGemma2ModelConfig
+
+    hf_config = SimpleNamespace(**hf_config_fields)
+    EmbeddingGemma2ModelConfig.verify_and_update_model_config(
+        SimpleNamespace(hf_config=hf_config)
+    )
+    return hf_config
+
+
+def test_sets_matryoshka_dimensions_from_model_card():
+    assert _update_matryoshka_config().matryoshka_dimensions == [128, 256, 512, 768]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"matryoshka_dimensions": [768, 256]},
+        {"matryoshka_dimensions": None},
+        {"is_matryoshka": True},
+        {"is_matryoshka": False},
+    ],
+)
+def test_keeps_declared_matryoshka_config(fields):
+    hf_config = _update_matryoshka_config(**fields)
+    assert getattr(hf_config, "matryoshka_dimensions", None) == fields.get(
+        "matryoshka_dimensions"
+    )
 
 
 def test_sentence_transformer_tokenizer_config_max_seq_length(tmp_path):

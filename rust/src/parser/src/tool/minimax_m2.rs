@@ -11,7 +11,7 @@ use xgrammar_structural_tag::format::Format;
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::output_grammar::{self, OutputGrammarContext, OutputGrammarError};
 use crate::tool::{StructuralTagBuilder, Tool};
 
@@ -88,7 +88,9 @@ impl MinimaxM2ToolParser {
             }
             MinimaxM2Event::Invoke { name, raw_params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders JSON values with Python separators.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {
@@ -175,7 +177,9 @@ impl ToolParser for MinimaxM2ToolParser {
                 output.push_text(&self.buffer);
             }
             MinimaxM2Mode::ToolBlock { .. } => {
-                return Err(parsing_failed!("incomplete MiniMax M2 tool call"));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: "MiniMax M2",
+                });
             }
             MinimaxM2Mode::Done => {}
         }

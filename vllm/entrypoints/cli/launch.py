@@ -68,7 +68,7 @@ class LaunchSubcommand(CLISubcommand):
     """The `launch` subcommand for the vLLM CLI.
 
     Uses nested sub-subcommands so each component can define its own
-    arguments independently (e.g. ``vllm launch render``).
+    arguments independently (e.g. `vllm launch render`).
     """
 
     name = "launch"

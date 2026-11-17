@@ -208,6 +208,7 @@ class RoutingFixture:
             if cast[0].dtype != ids.dtype:
                 cast[0] = fixture.to(ids.dtype)  # Once, at warmup.
             replaced = _fixture_rows(cast[0], ids.shape[0])
+            replaced = torch.where(ids == -1, ids, replaced)
             if "topk_ids" in kwargs:
                 return args, {**kwargs, "topk_ids": replaced}
             return (*args[:index], replaced, *args[index + 1 :]), kwargs

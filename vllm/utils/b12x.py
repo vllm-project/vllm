@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Accessors for the optional ``b12x`` package."""
+"""Accessors for the `b12x` package shipped with flashinfer-python."""
 
 import importlib
 import importlib.util
@@ -15,7 +15,7 @@ import torch
 B12X_BLOCK_CODECS = {"iq2_xs": (256, 74), "iq2_xxs": (256, 66), "q8_0": (32, 34)}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class B12xWarmupUnit:
     name: str
     key: Hashable
@@ -49,7 +49,7 @@ _B12X_SUBMODULES = {
 
 
 def has_b12x() -> bool:
-    """Return whether the B12X package is installed."""
+    """Return whether the b12x package is available."""
     return _HAS_B12X
 
 

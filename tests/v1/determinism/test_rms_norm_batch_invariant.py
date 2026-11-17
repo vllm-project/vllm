@@ -196,9 +196,9 @@ def _assert_rows_bit_identical(small, large, msg):
 def test_rms_norm_batch_invariant_nonresidual_kernel(
     hidden_size: int, dtype: torch.dtype, seed: int
 ):
-    """C++ ``rms_norm`` (no residual) must be batch invariant across the block
-    threshold. Reached in compiled mode with ``ir_op_priority.rms_norm=["vllm_c"]``
-    (default priority is ``native``/inductor codegen when compiling).
+    """C++ `rms_norm` (no residual) must be batch invariant across the block
+    threshold. Reached in compiled mode with `ir_op_priority.rms_norm=["vllm_c"]`
+    (default priority is `native`/inductor codegen when compiling).
     """
     import vllm._custom_ops as ops
 
@@ -230,9 +230,9 @@ def test_rms_norm_static_fp8_quant_batch_invariant(
     hidden_size: int, dtype: torch.dtype, seed: int, add_residual: bool
 ):
     """C++ static per-tensor fp8-quant RMSNorm must be batch invariant across
-    the block threshold. Covers ``rms_norm_static_fp8_quant`` and, with
-    ``add_residual``, ``fused_add_rms_norm_static_fp8_quant`` (the compiled fp8
-    path where ``RMSNormQuantFusionPass`` rewrites norm + quant into them).
+    the block threshold. Covers `rms_norm_static_fp8_quant` and, with
+    `add_residual`, `fused_add_rms_norm_static_fp8_quant` (the compiled fp8
+    path where `RMSNormQuantFusionPass` rewrites norm + quant into them).
     """
     device = torch.device(DEVICE_TYPE)
     torch.manual_seed(seed)
@@ -274,7 +274,7 @@ def test_rms_norm_static_fp8_quant_batch_invariant(
 def test_rms_norm_per_block_quant_batch_invariant(
     hidden_size: int, dtype: torch.dtype, seed: int
 ):
-    """C++ ``rms_norm_per_block_quant`` must be batch invariant across the
+    """C++ `rms_norm_per_block_quant` must be batch invariant across the
     block threshold (compiled fp8 block-quant path; block pinned to 512)."""
     import vllm._custom_ops as ops
 

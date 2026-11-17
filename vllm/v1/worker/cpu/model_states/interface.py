@@ -122,7 +122,7 @@ class ModelState(ABC):
         input_batch: InputBatch,
         req_states: CPURequestState,
     ) -> torch.Tensor | None:
-        """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
+        """Prepare the `inputs_embeds` tensor for the current forward pass."""
         raise NotImplementedError
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
