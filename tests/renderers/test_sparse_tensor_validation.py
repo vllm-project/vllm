@@ -11,6 +11,7 @@ bounded by `VLLM_MAX_EMBED_DECODE_BYTES` instead.
 """
 
 import io
+import zipfile
 
 import numpy as np
 import pybase64 as base64
@@ -532,3 +533,67 @@ class TestEmbeddingDecodeSizeLimit:
         encoded = _encode_tensor(tensor)
 
         assert torch.equal(io_cls().load_base64("", encoded.decode("utf-8")), tensor)
+
+
+def _encode_deflated(tensor: torch.Tensor) -> bytes:
+    """`torch.save` a tensor, then deflate-compress every archive entry."""
+    buffer = io.BytesIO()
+    torch.save(tensor, buffer)
+    source = zipfile.ZipFile(buffer)
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as archive:
+        for info in source.infolist():
+            archive.writestr(
+                info.filename,
+                source.read(info.filename),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+    return base64.b64encode(packed.getvalue())
+
+
+# `torch.save` writes the whole storage of a view. One row of a 3 MiB zeros
+# storage passes every shape check and deflates to a few KiB.
+COMPRESSED_LIMIT_BYTES = 64 * 1024
+
+
+@pytest.fixture
+def compressed_decode_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_MAX_EMBED_DECODE_BYTES", str(COMPRESSED_LIMIT_BYTES))
+
+
+def _view_of_large_storage() -> bytes:
+    encoded = _encode_deflated(torch.zeros(1024, 768)[:1])
+    assert len(encoded) < COMPRESSED_LIMIT_BYTES
+    return encoded
+
+
+class TestCompressedStorageLimit:
+    """`torch.load` inflates compressed storages in full before returning."""
+
+    def test_prompt_embeds_rejects_view_of_large_storage(
+        self, model_config, compressed_decode_limit
+    ):
+        with pytest.raises(VLLMValidationError, match="VLLM_MAX_EMBED_DECODE_BYTES"):
+            safe_load_prompt_embeds(model_config, _view_of_large_storage())
+
+    @pytest.mark.parametrize("io_cls,parameter", EMBEDDING_MEDIA_IO)
+    def test_media_io_rejects_view_of_large_storage(
+        self, io_cls, parameter, compressed_decode_limit
+    ):
+        encoded = _view_of_large_storage().decode("utf-8")
+
+        with pytest.raises(VLLMValidationError, match=parameter):
+            io_cls().load_base64("", encoded)
+
+    def test_deflated_tensor_within_limit_accepted(
+        self, model_config, compressed_decode_limit
+    ):
+        tensor = torch.randn(10, 768)
+
+        loaded = safe_load_prompt_embeds(model_config, _encode_deflated(tensor))
+
+        assert torch.equal(loaded, tensor)
+
+    def test_unreadable_archive_rejected(self, model_config):
+        with pytest.raises(VLLMValidationError, match="prompt_embeds"):
+            safe_load_prompt_embeds(model_config, base64.b64encode(b"PK\x03\x04"))

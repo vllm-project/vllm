@@ -11,7 +11,9 @@ post-load processing has the hazards found on real models:
     registered as a retired parameter (NVFP4 `weight_scale_2`);
 (e) post-load processing that must never run on converted bytes (packing);
 (f) post-load processing grows a weight (padding): a reload writes it into
-    the existing storage to keep its address.
+    the existing storage to keep its address;
+(g) online quantization: the kernel dtype cannot hold the checkpoint tensor,
+    which its loader quantizes as it arrives.
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -23,15 +25,17 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
+from vllm.model_executor.layers.quantization.online.loading import quantize_on_load
 from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
+    record_checkpoint_layout,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -41,6 +45,37 @@ _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init):
+    model = torch.nn.ModuleDict(
+        {
+            "padded": MergedColumnParallelLinear(4, [4, 4], padding_size=3),
+            "plain": MergedColumnParallelLinear(4, [4, 4]),
+        }
+    )
+    record_checkpoint_layout(model)
+    addresses = {name: param.data_ptr() for name, param in model.named_parameters()}
+    with torch.no_grad():
+        for param in model.parameters():
+            param.fill_(1.0)
+
+    begin_direct_reload(model)
+
+    for param in model["plain"].parameters():
+        assert (param == 1).all()
+    for param in model["padded"].parameters():
+        assert not param.any()
+    weight = torch.full((8, 4), 2.0)
+    bias = torch.full((8,), 3.0)
+    set(model["padded"].load_weights([("weight", weight), ("bias", bias)]))
+    torch.testing.assert_close(model["padded"].weight[:8], weight, rtol=0, atol=0)
+    torch.testing.assert_close(model["padded"].bias[:8], bias, rtol=0, atol=0)
+    assert not model["padded"].weight[8:].any()
+    assert not model["padded"].bias[8:].any()
+    assert addresses == {
+        name: param.data_ptr() for name, param in model.named_parameters()
+    }
 
 
 class _Method(QuantizeMethodBase):
@@ -94,6 +129,11 @@ def _pad(layer):  # (f): kernel layout larger than the checkpoint's
     replace_parameter(layer, "weight", torch.nn.functional.pad(layer.weight, (0, 4)))
 
 
+def _quantize_int8(weight):  # (g): bf16 checkpoint tensor, int8 kernel tensor
+    scale = weight.float().abs().amax() / 127
+    return (weight / scale).round().to(torch.int8), scale
+
+
 _SHAPES = {
     "attn.kv_b.weight": ((8, 4), torch.bfloat16),
     "proj.weight": ((4, 6), torch.bfloat16),
@@ -102,6 +142,7 @@ _SHAPES = {
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
+    "online.weight": ((4, 6), torch.bfloat16),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -110,6 +151,7 @@ _PWAL = {
     "nvfp4": _consume_scale_2,
     "engram": _pack,
     "pad": _pad,
+    "online": _transpose,
 }
 
 
@@ -131,8 +173,13 @@ class _ToyModel(torch.nn.Module):
                 if not hasattr(parent, part):
                     parent.add_module(part, _Layer(_PWAL[".".join(path[: i + 1])]))
                 parent = getattr(parent, part)
+            if name.startswith("online."):  # as an int8 checkpoint
+                parent.params_dtype, dtype = dtype, torch.int8
+                scale = torch.nn.Parameter(torch.empty(()), False)
+                parent.register_parameter("weight_scale", scale)
             param = torch.nn.Parameter(torch.empty(shape, dtype=dtype), False)
             parent.register_parameter(local, param)
+        quantize_on_load(self.online, "weight", _quantize_int8, "weight_scale")
 
     def load_weights(self, weights):
         params = dict(self.named_parameters())
@@ -248,6 +295,7 @@ class TestReloadEqualsColdStart:
             ["nvfp4.weight", "nvfp4.global_scale"],
             ["engram.weight"],
             ["pad.weight"],
+            ["online.weight", "online.weight_scale"],
         ],
         ids=[
             "a-parent-derived",
@@ -256,6 +304,7 @@ class TestReloadEqualsColdStart:
             "d-consumed-scale",
             "e-not-idempotent",
             "f-grows",
+            "g-online-quant",
         ],
     )
     def test_new_checkpoint_hazard(self, names):
@@ -511,9 +560,6 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**(fields | overrides))
 
 
-_ONLINE = object.__new__(OnlineQuantizationConfig)
-
-
 @pytest.mark.parametrize(
     "mode,overrides,match",
     [
@@ -557,12 +603,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"quant_config": _ONLINE}, "online quantization"),
-        (
-            "direct",
-            {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
-            "online quantization",
-        ),
         ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
@@ -582,8 +622,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
         "offload-prefetch",
         "offload-uva",
         "torchao",
-        "online-config",
-        "online-composed",
         "lora",
         "draft-lm-head-quant",
         "sharded-rdt",

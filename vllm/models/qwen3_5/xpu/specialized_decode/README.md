@@ -19,12 +19,17 @@ model construction. The initial qualified envelope is deliberately narrow:
 
 | Dimension | Qualified combination |
 | --- | --- |
-| Hardware | Two Arc Pro B70 devices, ID `0xE223`, FP16 and subgroup block-2D capability |
+| Hardware | Two XPU devices supported by the installed fused provider, with FP16 and subgroup block-2D capability |
 | Model | Qwen3.5-family MoE, H=2048, routed/shared I=512, E=256, top-k=8, 40 layers |
 | Parallelism | TP2, PP1, DP1, EP1, context parallel sizes 1; single-host mp, standard TP reduction |
 | Numerics | FP16 activations, online `fp8_per_tensor`, FP8-e4m3 weights, FP32 scales; KV/conv state inferred, recurrent state FP32 |
 | Execution | Model Runner V2 through XPUModelRunner; compilation mode 0; graph NONE or FULL_DECODE_ONLY |
 | Workload | Decode or small prefill/mixed batches, 1 <= B <= T_actual <= T_padded <= 8; configured context limit <=40960 |
+
+Hardware eligibility uses device capabilities and the installed provider's
+`supports` check, without a SKU ID whitelist. Performance and full-model
+validation were measured on two Arc Pro B70 devices; other supported devices
+require separate validation.
 
 Routed experts must use `XPUExpertsFp8`; shared projections must use
 `XPUW8A16FP8LinearKernel`. Static guards also check routing semantics, sharding,

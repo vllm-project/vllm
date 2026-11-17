@@ -21,7 +21,7 @@ def _shallow_copy(param: torch.Tensor) -> torch.Tensor:
     return copy
 
 
-@dataclass
+@dataclass(slots=True)
 class MPLinearLayerConfig:
     full_weight_shape: tuple[int, int]  # [in, out]
     partition_weight_shape: tuple[int, int]

@@ -137,8 +137,6 @@ def validate_deployment(config: VllmConfig) -> None:
     if current_platform.is_xpu():
         device = torch.device("xpu", torch.xpu.current_device())
         props = torch.xpu.get_device_properties(device)
-        if props.device_id != 0xE223:
-            reasons.append("requires the validated Arc Pro B70 SKU (device_id=0xE223)")
         if not (props.has_fp16 and props.has_subgroup_2d_block_io):
             reasons.append("requires FP16 and subgroup block-2D capabilities")
         try:

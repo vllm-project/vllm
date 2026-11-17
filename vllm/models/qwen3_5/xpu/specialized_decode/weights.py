@@ -155,7 +155,7 @@ def get_weights(
 
 @torch.no_grad()
 def prepare_weights(block: "Qwen3_5SparseMoeBlock") -> tuple[torch.Tensor, ...] | str:
-    """Finalize model-owned layouts before binding an executor or capturing graphs."""
+    """Prepare model-owned layouts after quantization and before graph capture."""
     weights = get_weights(block)
     if isinstance(weights, str):
         return weights
