@@ -74,17 +74,35 @@ def test_canonical_topk_matches_reference(dtype, levels, cols, k):
         torch.testing.assert_close(indices.cpu(), expected, rtol=0, atol=0)
 
 
-def test_signed_zero_and_nan_follow_kernel_order():
-    # The kernels rank -0.0 below +0.0 and NaN above +inf (convert_to_uint32_v2).
+def test_signed_zero_and_nan_rank_by_value():
+    # -0.0 ties with +0.0 and NaN ranks above +inf, as in torch.topk.
     logits = torch.tensor(
         [[0.0, -0.0, float("nan"), 1.0, -0.0, 0.0, float("inf")]], dtype=torch.float32
     )
     row_ends = torch.tensor([7], dtype=torch.int32)
-    # Top-4 = NaN, +inf, 1.0, then one +0.0 (the lowest index, 0).
-    out = torch.tensor([[5, 2, 6, 3]], dtype=torch.int32, device=DEVICE)
-    expected = torch.tensor([[0, 2, 3, 6]], dtype=torch.int32)
-    canonicalize_topk_(logits.to(DEVICE), out, row_ends.to(DEVICE))
-    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+    # Top-4 = NaN, +inf, 1.0, then one zero of either sign (the lowest index, 0).
+    for picked in ([5, 2, 6, 3], [1, 2, 6, 3], [3, 4, 2, 6]):
+        out = torch.tensor([picked], dtype=torch.int32, device=DEVICE)
+        canonicalize_topk_(logits.to(DEVICE), out, row_ends.to(DEVICE))
+        torch.testing.assert_close(
+            out.cpu(), torch.tensor([[0, 2, 3, 6]], dtype=torch.int32), rtol=0, atol=0
+        )
+
+
+def test_torch_topk_with_signed_zeros_keeps_the_maximum():
+    # torch.topk treats -0.0 and +0.0 as equal, so its top-k may keep negative
+    # zeros over positive ones; the single positive score must survive.
+    k = 2048
+    logits = torch.cat(
+        [torch.zeros(2048), torch.full((2047,), -0.0), torch.tensor([1.0])]
+    ).unsqueeze(0)
+    row_ends = torch.tensor([logits.shape[1]], dtype=torch.int32)
+    picked = logits.topk(k, dim=-1).indices.to(torch.int32).to(DEVICE)
+    canonicalize_topk_(logits.to(DEVICE), picked, row_ends.to(DEVICE))
+    expected = torch.cat([torch.arange(k - 1), torch.tensor([logits.shape[1] - 1])])
+    torch.testing.assert_close(
+        picked.cpu(), expected.to(torch.int32).unsqueeze(0), rtol=0, atol=0
+    )
 
 
 @pytest.mark.parametrize("backend", ["persistent", "cooperative", "per_row", "torch"])

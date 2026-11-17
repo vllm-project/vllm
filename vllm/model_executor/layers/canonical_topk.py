@@ -8,8 +8,11 @@ and so does the set when several scores tie with the k-th one: the kernels keep
 whichever tied candidates reach the last slots first. `canonicalize_topk_` rewrites
 a top-k result so that it depends only on the scores: every candidate scoring above
 the k-th score, then the lowest-index candidates that tie with it, all in ascending
-index order. Scores are compared with the kernels' own ordered key
-(`convert_to_uint32_v2`), so -0.0/+0.0 and NaN rank exactly as in the selection.
+index order. Scores are compared by value: -0.0 ties with +0.0 and every NaN ranks
+above +inf, as in `torch.topk`. A radix selection, whose key (`convert_to_uint32_v2`)
+puts -0.0 below +0.0, is a valid top-k under this order too, so every backend's
+result maps to the same set; only a negative NaN, last for the radix key and first
+here, can leave a row's set undefined (the writes stay in bounds).
 
 Three kernels, no host synchronization: the k-th key per row, then per-block counts
 of candidates above / tied with it, then each block writes its kept candidates at
@@ -26,14 +29,19 @@ _EMPTY_KEY = 2**33
 
 
 def _ordered_key(scores: torch.Tensor) -> torch.Tensor:
-    """The kernels' ordered FP32 key, as int64 (larger key = larger score)."""
+    """Ordered FP32 key as int64 (larger key = larger score), see `_key`."""
     bits = scores.float().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    bits = torch.where(bits == 0x80000000, 0, bits)
+    bits = torch.where((bits & 0x7FFFFFFF) > 0x7F800000, 0x7FFFFFFF, bits)
     return torch.where(bits >= 2**31, 0xFFFFFFFF - bits, bits + 2**31)
 
 
 @triton.jit
 def _key(x):
+    # Value order: -0.0 is +0.0, and any NaN is the largest NaN (above +inf).
     bits = x.to(tl.float32).to(tl.int32, bitcast=True).to(tl.int64) & 0xFFFFFFFF
+    bits = tl.where(bits == 2147483648, 0, bits)
+    bits = tl.where((bits & 2147483647) > 2139095040, 2147483647, bits)
     return tl.where(bits >= 2147483648, 4294967295 - bits, bits + 2147483648)
 
 
