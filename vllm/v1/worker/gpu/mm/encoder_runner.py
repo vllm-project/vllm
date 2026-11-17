@@ -151,7 +151,7 @@ class EncoderRunner:
             self.encoder_cache.encoder_outputs,
             dummy_encoder_outputs,
             budget.encoder_cache_size,
-            bytes_per_embedding=budget.encoder_cache_bytes_per_embedding,
+            target_bytes=budget.scheduler_config.encoder_cache_bytes,
         )
         logger.info_once(
             "Encoder cache can hold %s tokens of %s embeddings across requests "

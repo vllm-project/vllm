@@ -209,13 +209,6 @@ class SchedulerConfig:
 
     Example: `vllm serve MODEL --encoder-cache-bytes 2G`."""
 
-    encoder_cache_bytes_per_embedding: int | None = None
-    """Bytes of one cached encoder embedding after startup measurement.
-
-    Set only when `encoder_cache_bytes` is resolved. Profiling reserves this
-    many bytes per cache slot so a narrower dummy modality cannot under-reserve
-    the budget. Not a user-facing knob."""
-
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:
 
@@ -367,7 +360,6 @@ class SchedulerConfig:
             "max_num_encoder_input_tokens",
             "encoder_cache_size",
             "encoder_cache_bytes",
-            "encoder_cache_bytes_per_embedding",
             "policy",
             "disable_chunked_mm_input",
             "scheduler_cls",

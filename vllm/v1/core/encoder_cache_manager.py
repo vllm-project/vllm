@@ -403,34 +403,6 @@ def compute_mm_encoder_budget(
     return encoder_compute_budget, encoder_cache_size
 
 
-def resolve_encoder_cache_token_capacity(
-    encoder_cache_bytes: int,
-    bytes_per_embedding: int,
-    max_tokens_per_mm_item: int,
-) -> int:
-    """Convert a byte encoder-cache budget into an embedding-token capacity.
-
-    Uses floor division so the logical payload never exceeds the budget.
-    `max_tokens_per_mm_item` is the largest single item the model can legally
-    emit; a budget that cannot hold it is rejected instead of being raised.
-    """
-    if bytes_per_embedding <= 0:
-        raise ValueError(
-            "Cannot resolve --encoder-cache-bytes without a positive "
-            f"measured encoder-embedding size, got {bytes_per_embedding}."
-        )
-    effective_cache_size = encoder_cache_bytes // bytes_per_embedding
-    if effective_cache_size < 1 or effective_cache_size < max_tokens_per_mm_item:
-        raise ValueError(
-            f"--encoder-cache-bytes {encoder_cache_bytes} is "
-            f"{effective_cache_size} embeddings at {bytes_per_embedding} bytes "
-            "each, which cannot hold the largest multimodal item "
-            f"({max_tokens_per_mm_item} embeddings). Increase the budget or "
-            "tighten --limit-mm-per-prompt / media size limits."
-        )
-    return effective_cache_size
-
-
 # NOTE (NickLucche): Temporary implementation for encoder-decoder models that only
 # use the manager for scheduling purposes. Encoder-decoder models will eventually
 # utilize the cache and this class will fold into EncoderCacheManager, as

@@ -175,20 +175,31 @@ class EngineCore:
             bytes_per_embedding = measure_encoder_output_widths(
                 vllm_config, self.collective_rpc
             )
-            if bytes_per_embedding is not None:
-                from vllm.multimodal.encoder_budget import (
-                    apply_encoder_cache_byte_budget,
+            budget_bytes = vllm_config.scheduler_config.encoder_cache_bytes
+            if budget_bytes is not None:
+                mm_config = vllm_config.model_config.multimodal_config
+                if mm_config is not None and mm_config.skip_mm_profiling:
+                    raise ValueError(
+                        "--encoder-cache-bytes cannot be combined with "
+                        "--skip-mm-profiling."
+                    )
+                if not bytes_per_embedding:
+                    raise RuntimeError(
+                        "--encoder-cache-bytes was set but the encoder output "
+                        "layout was not measured."
+                    )
+                cache_size = budget_bytes // bytes_per_embedding
+                logger.info(
+                    "Encoder cache budget of %d bytes is %d embeddings "
+                    "(%d bytes each).",
+                    budget_bytes,
+                    cache_size,
+                    bytes_per_embedding,
                 )
-
-                cache_size = apply_encoder_cache_byte_budget(
-                    vllm_config, bytes_per_embedding
-                )
-                # Workers were spawned with the unresolved budget. Profiling
-                # reads the same token capacity the scheduler will use.
-                self.collective_rpc(
-                    "update_encoder_cache_budget",
-                    args=(cache_size, bytes_per_embedding),
-                )
+                # Workers already have the byte budget. They need the token
+                # capacity before profiling builds MultiModalBudget.
+                vllm_config.scheduler_config.encoder_cache_size = cache_size
+                self.collective_rpc("update_encoder_cache_budget", args=(cache_size,))
 
             # Setup KV Caches and update CacheConfig after profiling.
             kv_cache_config = self._initialize_kv_caches(vllm_config)

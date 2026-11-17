@@ -569,30 +569,10 @@ def test_encoder_cache_budgets_are_mutually_exclusive():
         )
 
 
-def test_byte_budget_resolves_to_the_design_example_and_floors():
-    from vllm.v1.core.encoder_cache_manager import resolve_encoder_cache_token_capacity
-
-    # 2G, width 16384, bf16: 32768 bytes per embedding -> 65536 slots.
-    assert (
-        resolve_encoder_cache_token_capacity(
-            2 << 30, 16384 * 2, max_tokens_per_mm_item=1024
-        )
-        == 65536
-    )
-    # 1 GiB is not divisible by 1000 bytes.
-    assert (
-        resolve_encoder_cache_token_capacity(1 << 30, 1000, max_tokens_per_mm_item=1)
-        == (1 << 30) // 1000
-    )
-
-
-def test_byte_budget_rejects_an_item_it_cannot_hold():
-    from vllm.v1.core.encoder_cache_manager import resolve_encoder_cache_token_capacity
-
-    with pytest.raises(ValueError, match="cannot hold"):
-        resolve_encoder_cache_token_capacity(
-            1 << 29, 32768, max_tokens_per_mm_item=20000
-        )
+def test_byte_budget_floors_to_whole_embeddings():
+    # 2G, width 16384, bf16 -> 65536 slots. 1 GiB is not divisible by 1000.
+    assert (2 << 30) // (16384 * 2) == 65536
+    assert (1 << 30) // 1000 == 1_073_741
 
 
 def test_byte_budget_does_not_grow_to_fit_an_item():

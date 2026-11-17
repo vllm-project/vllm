@@ -772,26 +772,25 @@ def reserve_encoder_cache_residency(
     encoder_outputs: dict[str, torch.Tensor],
     dummy_outputs: Sequence[torch.Tensor],
     encoder_cache_size: int,
-    bytes_per_embedding: int | None = None,
+    target_bytes: int | None = None,
 ) -> int:
     """Reserve the encoder cache's resident footprint during profiling, in bytes.
 
     The dummy run only materialises one compute batch, so a cache larger than the
     compute budget would be under-reserved and the surplus handed to the KV cache.
 
-    `bytes_per_embedding` is the conservative cost used to resolve a byte
-    budget. When the profiled modality is narrower, the shortfall is padded in
-    bytes so the reservation matches that budget. Already-materialized dummy
-    outputs are subtracted, not allocated again.
+    `target_bytes` is the user byte budget. It is reserved directly, after
+    subtracting dummy outputs that are already materialized. Token capacity is
+    that budget floored to a whole number of embeddings, so the difference is
+    less than one embedding.
     """
     if not dummy_outputs:
         return 0
 
     # `sanity_check_mm_encoder_outputs` guarantees 2-D (tokens, hidden) outputs.
     ref = dummy_outputs[0]
-    measured_bytes = ref.element_size() * ref.shape[1]
-    if bytes_per_embedding is None or bytes_per_embedding == measured_bytes:
-        bytes_per_token = measured_bytes
+    if target_bytes is None:
+        bytes_per_token = ref.element_size() * ref.shape[1]
         shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
         if shortfall > 0:
             encoder_outputs["tmp_residency"] = torch.empty(
@@ -800,7 +799,6 @@ def reserve_encoder_cache_residency(
         return encoder_cache_size * bytes_per_token
 
     materialized = sum(int(out.numel()) * out.element_size() for out in dummy_outputs)
-    target_bytes = encoder_cache_size * bytes_per_embedding
     shortfall_bytes = target_bytes - materialized
     if shortfall_bytes > 0:
         encoder_outputs["tmp_residency"] = torch.empty(

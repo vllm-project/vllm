@@ -106,13 +106,6 @@ def test_byte_budget_uses_the_largest_embedding_and_ignores_empty_ranks():
     assert eow.measure_encoder_output_widths(config, lambda fn: reports) == 16384
 
 
-def test_byte_budget_keeps_the_max_when_ranks_disagree_on_width():
-    config = create_ec_vllm_config(ec_role="ec_consumer")
-    config.scheduler_config.encoder_cache_bytes = 1 << 30
-    reports = [{"image": (8192, 2)}, {"image": (4096, 4)}]
-    assert eow.measure_encoder_output_widths(config, lambda fn: reports) == 16384
-
-
 def test_byte_budget_without_a_local_encoder_is_rejected():
     config = create_ec_vllm_config(ec_role="ec_consumer")
     config.scheduler_config.encoder_cache_bytes = 1 << 30

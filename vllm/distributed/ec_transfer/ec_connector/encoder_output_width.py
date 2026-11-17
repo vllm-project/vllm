@@ -21,32 +21,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def bytes_per_embedding_from_layouts(
-    reports: list[dict[str, tuple[int, int]]],
-) -> int:
-    """Largest embedding payload in bytes across the measured layouts.
-
-    Each report maps a modality to `(width, element_size)`. Different
-    modalities and ranks share one token capacity, so the budget uses the
-    maximum cost. A non-positive size is not a usable layout.
-    """
-    bytes_per_embedding = 0
-    for report in reports:
-        for modality, (width, element_size) in report.items():
-            if width <= 0 or element_size <= 0:
-                raise ValueError(
-                    "Measured encoder output layout for modality "
-                    f"{modality!r} is {width} x {element_size} bytes, which "
-                    "cannot size an encoder cache."
-                )
-            bytes_per_embedding = max(bytes_per_embedding, width * element_size)
-    if bytes_per_embedding <= 0:
-        raise ValueError(
-            "Encoder output measurement did not produce a usable embedding size."
-        )
-    return bytes_per_embedding
-
-
 @torch.inference_mode()
 def _measure_on_worker(worker: Any) -> dict[str, tuple[int, int]]:
     """Encode one dummy item per modality; runs on every worker.
@@ -131,35 +105,27 @@ def measure_encoder_output_widths(
         {modality: width for modality, (width, _) in report.items()}
         for report in reports
     ]
-    if any(widths != width_maps[0] for widths in width_maps):
-        if need_widths:
-            raise ValueError(
-                f"Workers disagree on the encoder output widths: {width_maps}"
-            )
-        logger.warning(
-            "Encoder output widths differ across ranks (%s). The byte budget "
-            "uses the largest measured embedding.",
-            width_maps,
-        )
+    if need_widths and any(widths != width_maps[0] for widths in width_maps):
+        raise ValueError(f"Workers disagree on the encoder output widths: {width_maps}")
     if need_widths:
         assert ec_config is not None
         logger.info("EC producer encoder output widths: %s", width_maps[0])
         ec_config.mm_encoder_output_widths = width_maps[0]
     if not need_bytes:
         return None
-    bytes_per_embedding = bytes_per_embedding_from_layouts(reports)
-    if len({bytes_per_embedding_from_layouts([report]) for report in reports}) > 1:
-        logger.warning(
-            "Encoder embedding sizes differ across measurements (%s). "
-            "Using %d bytes per embedding.",
-            reports,
-            bytes_per_embedding,
+    bytes_per_embedding = max(
+        width * element_size
+        for report in reports
+        for width, element_size in report.values()
+    )
+    if bytes_per_embedding <= 0:
+        raise ValueError(
+            "Encoder output measurement did not produce a usable embedding size."
         )
-    else:
-        logger.info(
-            "Encoder embedding size for the cache budget: %d bytes.",
-            bytes_per_embedding,
-        )
+    logger.info(
+        "Encoder embedding size for the cache budget: %d bytes.",
+        bytes_per_embedding,
+    )
     return bytes_per_embedding
 
 
