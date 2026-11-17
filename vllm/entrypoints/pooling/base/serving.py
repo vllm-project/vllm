@@ -22,6 +22,10 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ...serve.engine.protocol import ErrorResponse
@@ -82,13 +86,15 @@ class PoolingBaseServing(ABC, BaseServing):
     async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        requests = io_processor.get_request_factory_online(ctx)
+        budgets = MediaRequestBudgets()
+        with use_media_request_budgets(budgets):
+            requests = io_processor.get_request_factory_online(ctx)
 
         if len(requests) == 0:
             raise ValueError("You must pass at least one prompt")
 
         ctx.engine_inputs = await asyncio.gather(
-            *[io_processor.render_async(request) for request in requests]
+            *(io_processor.render_async(request, budgets) for request in requests)
         )
 
     @torch.inference_mode()
