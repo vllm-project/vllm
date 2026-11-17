@@ -82,6 +82,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_head_layout,
     get_layer_transfer_geometry,
     get_mamba_state_layout,
+    get_nvfp4_page_split,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
@@ -3943,6 +3944,8 @@ class MoRIIOConnectorWorker:
             merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
                 local, remote, sizes, assume_sorted=False
             ),
+            # A packed NVFP4 page's head slots are not per-head rows.
+            nvfp4_split=get_nvfp4_page_split(self.layer_to_spec.get(layer_name)),
         )
         return self._apply_layer_mr_offsets(
             layer_name, offsets, remote_moriio_meta, remote_engine_id
