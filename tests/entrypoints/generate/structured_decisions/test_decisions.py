@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from vllm.entrypoints.openai.decisions.adapters import (
+    input_state,
     input_text,
     make_answer,
     make_read_question,
@@ -137,13 +138,13 @@ def test_score_levels_with_the_same_label_keep_their_positions():
                         "content": [
                             {
                                 "type": "input_image",
-                                "image_url": "data:image/png;base64,AA==",
+                                "image_url": "file:///etc/passwd",
                             }
                         ],
                     }
                 ]
             },
-            "text input only",
+            "pattern",
         ),
         ({"input": {"text": "x"}}, "Input should"),
         ({"questions": []}, "at least 1"),
@@ -238,3 +239,38 @@ def test_backend_rejects_more_choices_than_single_token_labels():
     ).questions[0]
     with pytest.raises(StructuredDecisionError, match="at most 26 choices"):
         make_read_question(0, question)
+
+
+def test_image_content_preserves_order_without_changing_text_only_input():
+    parts = [
+        {"type": "input_text", "text": "Before"},
+        {"type": "input_image", "image_url": "https://example.com/one.png"},
+        {"type": "input_text", "text": "Between"},
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,AA==",
+            "detail": "low",
+        },
+    ]
+    parsed = request(input=[{"role": "user", "content": parts}])
+    assert input_state(parsed.input) == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Before"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/one.png",
+                        "detail": "auto",
+                    },
+                },
+                {"type": "text", "text": "Between"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AA==", "detail": "low"},
+                },
+            ],
+        }
+    ]
+    assert input_state(request(input="unchanged").input) == "unchanged"
