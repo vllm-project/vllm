@@ -39,8 +39,10 @@ Sync (`update_weights`, one per sync):
     then packs its boxes, with one fused copy, into one byte tensor (pieces
     at `flat_layout`) carved from an arena it registered with NIXL once, so
     Ray only describes it. The consumer receives the bucket into a slice of
-    its own receive arena, registered with NIXL once per plan (one slot of
-    the largest bucket per pull in flight), and copies every piece into its
+    its own receive arena, registered with NIXL once per plan (per pull in
+    flight, one slot of the largest bucket of at most `buffer_bytes`; a
+    larger bucket, one large piece, lands in a buffer Ray allocates), and
+    copies every piece into its
     destinations with one fused copy, and loads the fallbacks. Ray holds a
     target only weakly and silently receives into a buffer of its own when
     the target is gone, so the consumer keeps each slot view alive until its

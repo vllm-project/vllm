@@ -77,7 +77,7 @@ class _Handle:
     def __init__(self, server, sent, target, key):
         # Ray keeps only a weak reference to a target
         self.server, self.sent, self.key = server, sent, key
-        self.target = weakref.ref(target)
+        self.target = weakref.ref(target) if target is not None else None
 
 
 class _Loopback:
@@ -86,6 +86,8 @@ class _Loopback:
     def __init__(self, servers, consumer_id):
         self.servers, self.consumer_id = servers, consumer_id
         self.pulls: list[_Bucket] = []
+        # pulls issued without a target
+        self.untargeted: list[_Bucket] = []
         self.pinned: list[torch.Tensor] = []
 
     def hooks(self) -> _PullHooks:
@@ -103,13 +105,16 @@ class _Loopback:
             server.register_consumer(self.consumer_id, buckets)
 
     def issue(self, bucket, sync_idx, target):
+        self.pulls.append(bucket)
+        server = self.servers[bucket.producer]
+        (sent,) = server.bucket(self.consumer_id, bucket.seq, sync_idx)
+        if target is None:
+            self.untargeted.append(bucket)
+            return _Handle(server, sent, None, server.tracked)
         assert any(
             target.untyped_storage().data_ptr() == t.untyped_storage().data_ptr()
             for t in self.pinned
         ), "the target is not in the pinned arena"
-        self.pulls.append(bucket)
-        server = self.servers[bucket.producer]
-        (sent,) = server.bucket(self.consumer_id, bucket.seq, sync_idx)
         assert sent.dtype == target.dtype and sent.shape == target.shape
         return _Handle(server, sent, target, server.tracked)
 
@@ -118,7 +123,7 @@ class _Loopback:
         its own."""
         out = []
         for h in handles:
-            target = h.target()
+            target = h.target() if h.target is not None else None
             if target is None:
                 target = torch.empty_like(h.sent)
             target.fill_(0xA5)
@@ -295,15 +300,29 @@ def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
         fleet.sync(_checkpoint(_TOY_SHAPES, seed=1), 1)
 
 
+def test_a_piece_over_buffer_bytes_lands_in_rays_buffer(monkeypatch):
+    """A bucket larger than `buffer_bytes` (one large piece) is pulled
+    without a target, so the arena stays `num_buffers * buffer_bytes`, and
+    is copied out of the buffer Ray returns."""
+    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
+    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48, num_buffers=2)
+    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
+    oversize = {id(b) for b in fleet.engine._buckets if b.nbytes > 48}
+    assert oversize and {id(b) for b in fleet.loopback.untargeted} == oversize
+    assert all(len(b.pieces) == 1 for b in fleet.loopback.untargeted)
+    assert fleet.engine._arena.numel() <= 2 * 48
+
+
 def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
-    """One slot of the largest bucket per pull in flight, pinned at the first
-    plan, reused by every sync, and unpinned when the plan is dropped."""
+    """One slot of the largest bucket of at most `buffer_bytes` per pull in
+    flight, pinned at the first plan, reused by every sync, and unpinned when
+    the plan is dropped."""
     model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
     fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48, num_buffers=3)
     for sync_idx in (1, 2):
         fleet.sync(_checkpoint(_TOY_SHAPES, seed=sync_idx), sync_idx)
         (arena,) = fleet.loopback.pinned
-        slot = max(b.nbytes for b in fleet.engine._buckets)
+        slot = max(b.nbytes for b in fleet.engine._buckets if b.nbytes <= 48)
         assert arena.numel() == 3 * slot and arena is fleet.engine._arena
     hooks = fleet.engine._hooks
     fleet.engine.shutdown()

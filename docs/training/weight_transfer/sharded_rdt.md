@@ -21,7 +21,7 @@ Requirements:
 
 At the first `start_weight_update`, each worker builds the load plan (`plan_loads`) for the trainer's metadata, on the tensors [direct reload](../direct_reload.md) has just viewed back to their checkpoint layout. For every checkpoint name, the plan gives the boxes of the tensor this worker needs (`get_boxes`) and the live tensors they are written to (`get_dest`). A name the loaders transform rather than copy is a *fallback*: the worker needs it in full, through `load_weights`. A name another worker owns (another expert, another pipeline stage) needs nothing.
 
-Each box is a *piece*. The worker routes every piece to one trainer rank that owns the name. Every pull lands in a slot of the worker's *receive arena*, a buffer it registers with NIXL once at plan time; the worker then copies each piece into its `get_dest` tensors (the contiguous ones with one fused byte copy per pull) and passes fallbacks to `load_weights`. NIXL never writes into model memory, so the engine registers none of it. The copy lists are built once, at plan time.
+Each box is a *piece*. The worker routes every piece to one trainer rank that owns the name. Every pull lands in a slot of the worker's *receive arena*, a buffer it registers with NIXL once at plan time (a pull larger than `buffer_bytes`, one large piece such as a fallback embedding, lands in a buffer Ray allocates instead); the worker then copies each piece into its `get_dest` tensors (the contiguous ones with one fused byte copy per pull) and passes fallbacks to `load_weights`. NIXL never writes into model memory, so the engine registers none of it. The copy lists are built once, at plan time.
 
 The plan and the receive arena are reused by every later sync. Re-initializing the engine (a new trainer, new metadata) drops both, and the next `start_weight_update` plans again.
 
@@ -70,7 +70,7 @@ VLLM_RELOAD_MODE=direct vllm serve my-model \
 Everything else (the producers, the metadata, the ownership table, `buffer_bytes` and `num_buffers`) arrives from the trainer at the init handshake.
 
 !!! warning "Leave headroom for the receive arena"
-    From the first `start_weight_update` on, each worker holds a receive arena on its GPU: `num_buffers` slots of its largest bucket, at most `buffer_bytes` (or one tensor, if larger), so 2 GiB at the defaults. It does not count against `gpu_memory_utilization`, so leave room for it (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)).
+    From the first `start_weight_update` on, each worker holds a receive arena on its GPU: `num_buffers` slots of at most `buffer_bytes`, so at most 2 GiB at the defaults. A piece larger than `buffer_bytes` is received into a buffer Ray allocates for that pull, which PyTorch's caching allocator may keep reserved. Neither counts against `gpu_memory_utilization`, so leave room for them (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)).
 
 ## Trainer Side
 
