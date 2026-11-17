@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -424,6 +425,14 @@ class SimpleCPUOffloadScheduler:
         )
 
         if hit_length > 0:
+            if envs.VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG:
+                logger.info(
+                    "SimpleCPU external hit: %d tokens after %d local "
+                    "(scheduler-block offset %d)",
+                    hit_length,
+                    num_computed_tokens,
+                    (num_computed_tokens + hit_length) % self.block_size,
+                )
             pin_blocks = [
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
             ]

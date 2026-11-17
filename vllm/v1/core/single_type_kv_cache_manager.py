@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import vllm.envs as envs
 from vllm.distributed.kv_events import MEDIUM_CPU
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -42,6 +43,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
@@ -1036,6 +1040,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 window_blocks.append(blocks)
             else:
                 window_blocks.append(tail)
+                if envs.VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG:
+                    logger.info(
+                        "SWA fine-grained hit: %d tokens (block offset %d, "
+                        "tail by %s, pool %s)",
+                        hit_length,
+                        hit_length % block_size,
+                        "partial entry"
+                        if end % block_size and tail is not full_hits.get(last)
+                        else "block hash",
+                        block_pool.medium if hasattr(block_pool, "medium") else "?",
+                    )
                 num_blocks = cdiv(hit_length, block_size)
                 computed_blocks = tuple(
                     ([null_block] * first + [b[g] for b in window_blocks])[:num_blocks]
