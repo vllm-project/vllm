@@ -37,6 +37,7 @@ from vllm.model_executor.models.transformers import causal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import (
     probe_output_head,
+    stub_base_model,
     to_output_head,
 )
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
@@ -219,10 +220,10 @@ def test_output_head_fallback(
     # Disable multiprocessing so that the patch applies to the engine
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    def probe_output_head(output_head, hidden_size):
-        raise AttributeError("'_OutputEmbeddings' object has no attribute 'weight'")
+    def forward(self, *args, **kwargs):
+        raise AttributeError("'_OpaqueBaseModel' object has no attribute 'weight'")
 
-    monkeypatch.setattr(causal, "probe_output_head", probe_output_head)
+    monkeypatch.setattr(causal._OpaqueBaseModel, "forward", forward)
     with vllm_runner("jhu-clsp/ettin-decoder-17m", **OUTPUT_HEAD_KWARGS) as model_test:
         has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
         assert has_head == [False]
@@ -1086,9 +1087,14 @@ def test_logit_transform_is_detected(model_type, arch, overrides, renames):
 
 
 def test_output_head_calling_base_model_submodule():
-    """OPT calls its base model's decoder directly, which the stub also serves."""
-    model = build_causal_lm("opt", "OPTForCausalLM", "meta", ffn_dim=128)
-    assert (output_head := to_output_head(model, type(model.base_model)))
+    """OPT calls its base model's decoder directly, and finds its input embeddings
+    there, which the stub also serves without building the base model."""
+    overrides = dict(ffn_dim=128, tie_word_embeddings=False)
+    model = build_causal_lm("opt", "OPTForCausalLM", "meta", **overrides)
+    with torch.device("meta"), stub_base_model(model.base_model):
+        model = type(model)._from_config(model.config)
+    assert [name for name, _ in model.named_parameters()] == ["lm_head.weight"]
+    assert (output_head := to_output_head(model))
     assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
 
 

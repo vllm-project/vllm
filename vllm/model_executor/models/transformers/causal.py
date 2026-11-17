@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for causal language models."""
 
+import copy
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,7 +28,6 @@ from torch import nn
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from vllm.compilation.decorators import IGNORE_COMPILE_KEY
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -75,20 +75,42 @@ class _BaseModelOutput(BaseModelOutputWithPast):
 
 
 class _OpaqueBaseModel(nn.Module):
-    """Stands in for the base model, and its children (e.g. OPT's `model.decoder`),
-    returning `inputs_embeds` as its output."""
+    """Stands in for `module`, the base model, and for its submodules (e.g. OPT's
+    `model.decoder`), returning `inputs_embeds` as its output."""
 
-    def __init__(self, children: Iterable[str]):
+    def __init__(self, module: nn.Module):
         super().__init__()
-        self.children_names = frozenset(children)
+        # Not registered, so the head doesn't own the base model's parameters
+        self.__dict__["module"] = module
 
     def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
         return _BaseModelOutput(last_hidden_state=inputs_embeds)
 
     def __getattr__(self, name: str):
-        if name in self.__dict__.get("children_names", ()):
-            return self
+        module = self.__dict__.get("module")
+        if module is not None and name in module._modules:
+            return _OpaqueBaseModel(module._modules[name])
         return super().__getattr__(name)
+
+
+@contextmanager
+def stub_base_model(base_model: nn.Module) -> Iterator[None]:
+    """Make the class of `base_model` build `_OpaqueBaseModel(base_model)` instead,
+    so that a `ForCausalLM` can be built without building its base model again."""
+    cls = type(base_model)
+    original = cls.__dict__.get("__new__")
+
+    def new(c, *args, **kwargs):
+        return _OpaqueBaseModel(base_model) if c is cls else object.__new__(c)
+
+    cls.__new__ = new  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        if original is None:
+            del cls.__new__
+        else:
+            cls.__new__ = original
 
 
 class _OutputEmbeddings:
@@ -136,21 +158,18 @@ class OutputHead:
 
 
 def to_output_head(
-    model: PreTrainedModel, base_model_cls: type[nn.Module]
+    model: PreTrainedModel, base_model_cls: type[nn.Module] = _OpaqueBaseModel
 ) -> OutputHead | None:
     """Turn `model`, a `ForCausalLM`, into its output head in place.
 
     The base model, the submodule of type `base_model_cls`, is replaced with
-    `_OpaqueBaseModel`, and the output embeddings with `_OutputEmbeddings`, so
+    `_OpaqueBaseModel` (unless it already is one), and the output embeddings with
+    `_OutputEmbeddings`, so
     `model(inputs_embeds=h)` applies everything the `ForCausalLM` applies after its
     base model (e.g. a dense -> act -> norm transform, a soft cap, a scale).
 
     Returns `None` (leaving `model` unchanged) if this is not possible.
     """
-    try:
-        model.get_input_embeddings()
-    except NotImplementedError:
-        return None
     embeddings = model.get_output_embeddings()
     vocab_size = model.config.get_text_config().vocab_size
     if not isinstance(embeddings, nn.Linear) or embeddings.out_features != vocab_size:
@@ -164,8 +183,8 @@ def to_output_head(
 
     parent_name, _, child_name = base_model_name.rpartition(".")
     parent = model.get_submodule(parent_name)
-    base_model = getattr(parent, child_name)
-    setattr(parent, child_name, _OpaqueBaseModel(dict(base_model.named_children())))
+    if not isinstance(base_model := getattr(parent, child_name), _OpaqueBaseModel):
+        setattr(parent, child_name, _OpaqueBaseModel(base_model))
     output_embeddings = _OutputEmbeddings()
     params = {id(embeddings.weight): "lm_head.weight"}
     if embeddings.bias is not None:
@@ -199,21 +218,6 @@ def to_output_head(
     )
 
 
-@contextmanager
-def ignore_torch_compile(model: nn.Module) -> Iterator[None]:
-    """Stop new instances of the compiled classes in `model` from being set up for
-    compilation (e.g. counted by `compilation_counter`)."""
-    module_classes = {type(m) for m in model.modules()}
-    classes = {c for c in module_classes if c.__dict__.get(IGNORE_COMPILE_KEY) is False}
-    for cls in classes:
-        setattr(cls, IGNORE_COMPILE_KEY, True)
-    try:
-        yield
-    finally:
-        for cls in classes:
-            setattr(cls, IGNORE_COMPILE_KEY, False)
-
-
 def probe_output_head(
     output_head: OutputHead, hidden_size: int
 ) -> tuple[float, float | None] | None:
@@ -221,14 +225,12 @@ def probe_output_head(
     after its output embeddings, which must still be the identity, or `None` if it
     applies anything else."""
     assert (model := output_head.module) is not None
-    kwargs = output_head.forward_kwargs
-    # Heads with parameters still have them on "meta", so can only be run there
+    # Heads with parameters apply more than a scale or a soft cap
     if next(model.parameters(), None) is not None:
-        model(inputs_embeds=torch.empty(1, 3, hidden_size, device="meta"), **kwargs)
         return None
     hidden_states = 50 * torch.randn(1, 3, hidden_size)
     hidden_states[0, 0, :2] = torch.tensor([1.0, 1e6])
-    logits = model(inputs_embeds=hidden_states, **kwargs).logits
+    logits = model(inputs_embeds=hidden_states, **output_head.forward_kwargs).logits
     # A scale maps 1 to itself and a soft cap maps large logits to itself
     scale, soft_cap = logits[0, 0, :2].tolist()
     if torch.allclose(logits, scale * hidden_states):
@@ -287,17 +289,8 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         super()._create_hf_to_vllm_mapper()
         # Created here so the quantization config also gets the head's renames
         self._output_head = None
-        if not self.pp_group.is_last_rank:
-            return
-        try:
+        if self.pp_group.is_last_rank:
             self._output_head = self._create_output_head()
-        except Exception as e:
-            logger.warning(
-                "Could not run the output head of %s, so `lm_head` and the "
-                "config's logit scaling are assumed: %r",
-                type(self.model).__name__,
-                e,
-            )
         if self._output_head is not None:
             # Before the base model's mappings, which expect the base model's names
             mapper = self._output_head.weights_mapper()
@@ -312,13 +305,28 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 break
         else:
             return None
-        ignore_compile = ignore_torch_compile(self.model)
-        with init_on_device_without_buffers("meta"), ignore_compile:
-            model = model_cls._from_config(self.config, dtype=self.model_config.dtype)
-        output_head = to_output_head(model.eval(), type(self.model))
-        if output_head is None:
-            return None
+        # Tying would look for the input embeddings in the base model, a stub
+        config = copy.deepcopy(self.config)
+        config.tie_word_embeddings = False
+        config.get_text_config().tie_word_embeddings = False
         hidden_size = self.text_config.hidden_size
+        try:
+            with init_on_device_without_buffers("meta"), stub_base_model(self.model):
+                model = model_cls._from_config(config, dtype=self.model_config.dtype)
+            output_head = to_output_head(model.eval())
+            if output_head is None:
+                return None
+            # Fails for heads which need more of the base model than its output
+            hidden_states = torch.empty(1, 3, hidden_size, device="meta")
+            model(inputs_embeds=hidden_states, **output_head.forward_kwargs)
+        except Exception as e:
+            logger.warning(
+                "Could not run the output head of %s, so `lm_head` and the "
+                "config's logit scaling are assumed: %r",
+                model_cls.__name__,
+                e,
+            )
+            return None
         if logit_transform := probe_output_head(output_head, hidden_size):
             output_head.scale, output_head.soft_cap = logit_transform
             output_head.module = None
