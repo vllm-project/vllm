@@ -570,17 +570,26 @@ def test_kimi_k3_indexer_writes_block_table_slots_without_group_slot_mapping(
     assert written.slot_mapping[:6].tolist() == [28, 29, 30, 31, 36, 37]
 
 
-def test_compressed_slot_mapping_warmup_covers_self_addressed_cache():
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_compressed_slot_mapping_warmup_covers_self_addressed_cache(dcp_world_size):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            decode_context_parallel_size=2, cp_kv_cache_interleave_size=1
+            decode_context_parallel_size=dcp_world_size,
+            cp_kv_cache_interleave_size=1,
         ),
     )
+    kernel = CompressedSlotMappingKernel()
 
-    (key,) = CompressedSlotMappingKernel().get_warmup_keys(
-        config, self_addressed_block_size=2304
+    warmup_keys = kernel.get_warmup_keys(config, self_addressed_block_size=2304)
+
+    runtime_key = kernel.dispatch(
+        compress_ratio=1,
+        block_size=2304,
+        dcp_world_size=dcp_world_size,
+        cp_interleave=1,
+        HAS_SLOT_MAPPING=False,
     )
-    assert (key.compress_ratio, key.has_slot_mapping) == (1, False)
+    assert warmup_keys == [runtime_key]
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():

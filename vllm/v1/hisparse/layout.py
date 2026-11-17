@@ -213,7 +213,8 @@ def _spread_page_stride(
 
 def _split_state_group(group: KVCacheGroup, row_bytes: int) -> list[KVCacheGroup]:
     """Split a per-request state group (e.g. Mamba) so its page fits the
-    device row the indexer and a hot layer already need."""
+    device row the indexer and a hot layer already need, the same cap
+    `_get_packed_kv_cache_groups` applies to state buckets."""
     if not issubclass(group.manager_cls, (MambaManager, CircularBufferManager)):
         return [group]
     state_page = max(spec.page_size_bytes for spec in group.kv_cache_specs.values())
