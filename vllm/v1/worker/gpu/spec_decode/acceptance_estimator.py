@@ -28,6 +28,8 @@ def _accumulate_kernel(
     features_stride,
     pred_ptr,
     pred_stride,
+    valid_ptr,
+    valid_stride,
     counts_ptr,
     num_reqs,
     BLOCK_R: tl.constexpr,
@@ -59,10 +61,15 @@ def _accumulate_kernel(
         mask=req_mask,
         other=0.0,
     ).to(tl.float32)
+    valid = tl.load(
+        valid_ptr + req_state_block * valid_stride + step,
+        mask=req_mask,
+        other=False,
+    )
 
     # The accepted tokens and the first rejected draft token (if one exists) are
     # "observed" and given labels.
-    observed = req_mask & (step <= num_accepted) & (step < num_admitted)
+    observed = req_mask & valid & (step <= num_accepted) & (step < num_admitted)
     label = tl.where(step < num_accepted, 1.0, 0.0)
     w = tl.where(observed, pred * (1.0 - pred), 0.0)
     resid = tl.where(observed, label - pred, 0.0)
@@ -161,6 +168,12 @@ def _refit_kernel(
 
 
 @triton.jit
+def _max_with_nan(a, b):
+    # tl.max takes no propagate_nan and drops NaN, which could hide a NaN logit.
+    return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
+
+
+@triton.jit
 def _max_and_excl_sumexp(logits):
     """Block max, and its sumexp with one copy of that max left out.
 
@@ -170,7 +183,7 @@ def _max_and_excl_sumexp(logits):
     is gone as soon as it falls below an fp32 ulp of 1.0 (~6e-8), which a
     confident drafter reaches routinely.
     """
-    block_max = tl.max(logits, axis=0)
+    block_max = tl.reduce(logits, 0, _max_with_nan)
     # Excluding by value zeroes every entry tied for the max, so add back all
     # but one: the others are distinct tokens and belong to the complement.
     is_max = logits == block_max
@@ -247,6 +260,8 @@ def _predict_kernel(
     features_stride,
     pred_ptr,
     pred_stride,
+    valid_ptr,
+    valid_stride,
     conf_ptr,
     conf_stride,
     slope_ptr,
@@ -326,18 +341,26 @@ def _predict_kernel(
     complement_sumexp = tl.sum(
         excl_sumexps * scale + tl.where(blocks == best_block, 0.0, scale), axis=0
     )
+    # With no NaN block max and a finite m*, the complement is finite.
+    valid = (tl.sum((maxes != maxes).to(tl.int32), axis=0) == 0) & (
+        tl.abs(global_max) < float("inf")
+    )
 
     # Shifted by m*, the numerator is e^(m* - m*) = 1, so the feature is just the
     # negated complement log-sum-exponential. A genuinely one-hot row sends it to
     # infinity, so clamp to the min/max log-odds.
-    feature = -tl.log(complement_sumexp)
+    # Invalid rows use a finite fallback and do not contribute to the next fit.
+    feature = -tl.log(tl.where(valid, complement_sumexp, 1.0))
     feature = tl.minimum(tl.maximum(feature, -MAX_LOG_ODDS), MAX_LOG_ODDS)
     tl.store(features_ptr + req_state_idx * features_stride + step, feature)
+    tl.store(valid_ptr + req_state_idx * valid_stride + step, valid)
 
     # Predict the acceptance probability from the feature and current coefficients.
     weight = tl.load(slope_ptr)
     bias = tl.load(intercepts_ptr + step)
     prob = tl.sigmoid(weight * feature + bias)
+    # Zero confidence makes adaptive verification trim invalid drafts.
+    prob = tl.where(valid, prob, 0.0)
     tl.store(pred_ptr + req_state_idx * pred_stride + step, prob)
     tl.store(conf_ptr + batch_idx * conf_stride + step, prob)
 
@@ -399,6 +422,8 @@ class OnlineAcceptanceEstimator:
         self.predictions = torch.zeros(
             max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
         )
+        # Invalid draft distributions must not train the logistic model.
+        self.valid = torch.zeros_like(self.features, dtype=torch.bool)
 
         # Per-round Newton-IRLS statistics, cleared after each refit. For observation
         # i the design row is xᵢ = [fᵢ, eₖ], the IRLS weight is wᵢ = pᵢ(1-pᵢ), and the
@@ -453,6 +478,8 @@ class OnlineAcceptanceEstimator:
             self.features.stride(0),
             self.predictions,
             self.predictions.stride(0),
+            self.valid,
+            self.valid.stride(0),
             self.counts,
             num_reqs,
             BLOCK_R=self._accumulate_block_r,
@@ -527,6 +554,8 @@ class OnlineAcceptanceEstimator:
             self.features.stride(0),
             self.predictions,
             self.predictions.stride(0),
+            self.valid,
+            self.valid.stride(0),
             confidence_probs,
             confidence_probs.stride(0),
             self.slope,

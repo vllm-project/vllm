@@ -135,6 +135,7 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
     torch.testing.assert_close(
         confidence_probs[batch_rows, steps.long()], expected, atol=2e-3, rtol=2e-3
     )
+    assert estimator.valid[idx_mapping.long(), steps.long()].all()
 
 
 def test_predict_skips_cudagraph_padded_rows():
@@ -167,6 +168,8 @@ def test_predict_skips_cudagraph_padded_rows():
     untouched[live] = False
     assert not estimator.predictions[untouched].any()
     assert not confidence_probs[num_reqs:].any()
+    assert estimator.valid[live].all()
+    assert not estimator.valid[untouched].any()
 
 
 # A refit takes one undamped Newton step, so it needs a realistic number of
@@ -181,6 +184,7 @@ def _drive_round(estimator, features, num_accepted, slots):
     estimator.predictions[slots.long()] = torch.sigmoid(
         estimator.slope * features + estimator.intercepts
     )
+    estimator.valid[slots.long()] = True
     estimator.step(
         slots,
         (num_accepted + 1).to(torch.int32),
@@ -379,6 +383,75 @@ def test_feature_resolves_a_tiny_complement_mass(complement_mass: float):
 
 # Three blocks, the last one partial, so the masked tail is covered too.
 MULTI_BLOCK_VOCAB = 2 * VOCAB_BLOCK_SIZE + 1536
+
+
+@pytest.mark.parametrize("vocab_size", [VOCAB_SIZE, MULTI_BLOCK_VOCAB])
+@pytest.mark.parametrize("invalid", ["all_masked", "nan", "inf", "overflow"])
+def test_invalid_logits_use_fallback_and_do_not_train(vocab_size: int, invalid: str):
+    """Invalid rows replace stale predictions without entering the fit."""
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+    healthy = _make_estimator(device)
+    slots = torch.tensor([7, 2], device=device, dtype=torch.int32)
+    draft_step = torch.tensor(0, device=device, dtype=torch.int32)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
+    logits = torch.full((2, vocab_size), float("-inf"), device=device)
+    logits[0, :2] = 0.0
+    logits[1, -1] = 0.0
+    estimator.predict(logits, slots, draft_step, confidence, temperature)
+    assert estimator.features[slots[1].long(), 0].item() == _MAX_LOG_ODDS
+
+    logits[1].fill_(float("-inf"))
+    if invalid != "all_masked":
+        # In the multi-block case, NaN shares its block only with -inf.
+        logits[1, -1] = 0.0
+        logits[1, 0] = {
+            "nan": float("nan"),
+            "inf": float("inf"),
+            "overflow": torch.finfo(torch.float32).max,
+        }[invalid]
+    if invalid == "overflow":
+        temperature[slots[1].long()] = 0.01
+    estimator.predict(logits, slots, draft_step, confidence, temperature)
+
+    assert confidence[1, 0].item() == 0.0
+    assert estimator.predictions[slots[1].long(), 0].item() == 0.0
+    assert estimator.features[slots[1].long(), 0].item() == 0.0
+    assert not estimator.valid[slots[1].long(), 0].item()
+
+    healthy.predict(logits[:1], slots[:1], draft_step, confidence, temperature)
+    num_sampled = torch.ones(2, device=device, dtype=torch.int32)
+    num_rejected = torch.ones_like(num_sampled)
+    estimator.step(slots, num_sampled, num_rejected)
+    healthy.step(slots[:1], num_sampled[:1], num_rejected[:1])
+    torch.testing.assert_close(estimator.info, healthy.info, rtol=0, atol=0)
+    torch.testing.assert_close(estimator.grad, healthy.grad, rtol=0, atol=0)
+    torch.testing.assert_close(estimator.counts, healthy.counts, rtol=0, atol=0)
+    assert estimator.counts[0].item() == 1.0
+
+    logits[1].fill_(float("-inf"))
+    logits[1, :2] = 0.0
+    estimator.predict(logits, slots, draft_step, confidence, temperature)
+    assert estimator.valid[slots.long(), 0].all()
+    estimator.step(slots, num_sampled, num_rejected)
+    assert estimator.counts[0].item() == 3.0
+
+
+@pytest.mark.parametrize("max_block", [0, 1, 2])
+def test_one_hot_logits_remain_valid_across_empty_blocks(max_block: int):
+    """A zero complement is valid even beside empty or partial vocab blocks."""
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+    logits = torch.full((1, MULTI_BLOCK_VOCAB), float("-inf"), device=device)
+    logits[0, max_block * VOCAB_BLOCK_SIZE + 7] = 0.0
+
+    feature = _predict_one_row(estimator, logits, device)
+    assert feature.item() == _MAX_LOG_ODDS
+    assert estimator.valid[0, 0].item()
+    slot = torch.zeros(1, device=device, dtype=torch.int32)
+    estimator.step(slot, torch.full_like(slot, 2), torch.zeros_like(slot))
+    assert estimator.counts[0].item() == 1.0
 
 
 @pytest.mark.parametrize("max_block", [0, 1, 2])
