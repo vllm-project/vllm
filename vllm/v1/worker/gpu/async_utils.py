@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepTimingSample:
     forward_ms: float
     drafter_ms: float
@@ -35,16 +35,16 @@ class StepTimingSample:
     full_cudagraph: bool
 
 
-def _timing_event() -> torch.cuda.Event:
-    return torch.cuda.Event(enable_timing=True)
+def _timing_event() -> torch.Event:
+    return torch.Event(enable_timing=True)
 
 
-@dataclass
+@dataclass(slots=True)
 class StepTimingEvents:
-    forward_start: torch.cuda.Event = field(default_factory=_timing_event)
-    forward_end: torch.cuda.Event = field(default_factory=_timing_event)
-    drafter_start: torch.cuda.Event = field(default_factory=_timing_event)
-    drafter_end: torch.cuda.Event = field(default_factory=_timing_event)
+    forward_start: torch.Event = field(default_factory=_timing_event)
+    forward_end: torch.Event = field(default_factory=_timing_event)
+    drafter_start: torch.Event = field(default_factory=_timing_event)
+    drafter_end: torch.Event = field(default_factory=_timing_event)
 
 
 class StepTimingCollector:
@@ -120,8 +120,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         sampler_output: SamplerOutput,
         num_sampled_tokens: torch.Tensor,
-        main_stream: torch.cuda.Stream,
-        copy_stream: torch.cuda.Stream,
+        main_stream: torch.Stream,
+        copy_stream: torch.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
         num_drafted_tokens_per_req: torch.Tensor | None = None,
@@ -136,8 +136,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.pending_aux_output = pending_aux_output
         self.num_drafted_tokens_per_req = num_drafted_tokens_per_req
         self.num_verified_tokens_per_req = num_verified_tokens_per_req
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
+        # Blocking (sleep) event to avoid busy-polling the accelerator driver lock.
+        self.copy_event = torch.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
         self._has_fault_gpu: torch.Tensor | None = None
         if check_ep_fault:
@@ -252,13 +252,13 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         pooler_output: PoolerOutput,
         finished_mask: list[bool],
-        main_stream: torch.cuda.Stream,
-        copy_stream: torch.cuda.Stream,
+        main_stream: torch.Stream,
+        copy_stream: torch.Stream,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
+        # Blocking (sleep) event to avoid busy-polling the accelerator driver lock.
+        self.copy_event = torch.Event(blocking=True)
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -298,26 +298,26 @@ def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True, copy=True).numpy()
 
 
-def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.Stream:
     """Create a stream for non_blocking D2H copies.
 
     It must only carry copies: compute anything it copies on the producer stream
     first (see `conf_compute_utils.new_external_d2h_stream()`).
     """
     if not current_platform.is_confidential_compute():
-        return torch.cuda.Stream(device)
+        return torch.Stream(device)
     from vllm.v1.conf_compute_utils import new_external_d2h_stream
 
     return new_external_d2h_stream(device)
 
 
 @contextlib.contextmanager
-def stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
-    """Lightweight version of torch.cuda.stream() context manager which
+def stream(to_stream: torch.Stream, from_stream: torch.Stream):
+    """Lightweight accelerator stream context manager which
     avoids current_stream and device lookups.
     """
     try:
-        torch.cuda.set_stream(to_stream)
+        torch.accelerator.set_stream(to_stream)
         yield
     finally:
-        torch.cuda.set_stream(from_stream)
+        torch.accelerator.set_stream(from_stream)

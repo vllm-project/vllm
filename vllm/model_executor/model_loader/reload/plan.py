@@ -53,7 +53,7 @@ __all__ = ["Box", "LoadPlan", "check_plannable", "load_planned", "plan_loads"]
 Dest = tuple[tuple[Box, torch.Tensor], ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Entry:
     name: str
     shape: tuple[int, ...]  # from the metadata
@@ -63,7 +63,7 @@ class Entry:
     reason: str | None = None  # why it is a fallback
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoadPlan:
     entries: dict[str, Entry]  # per declared name, in metadata order
     dests: dict[str, Dest]  # live tensors built at plan_loads; not data
@@ -169,7 +169,8 @@ def load_planned(
 
 def check_plannable(model: torch.nn.Module) -> None:
     """Refuse a configuration no load plan supports: a reload mode other than
-    direct, and EPLB. Reads only configuration, so an engine can call it
+    direct, EPLB, and online quantization (its loaders quantize what they
+    load). Reads only configuration, so an engine can call it
     before `start_reload` changes the model. Direct reload's own refusals
     run in `begin_direct_reload`.
 
@@ -184,6 +185,8 @@ def check_plannable(model: torch.nn.Module) -> None:
         parallel = getattr(moe_config, "moe_parallel_config", None)
         if getattr(parallel, "enable_eplb", False):
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
+        if getattr(module, "quantizes_on_load", False):
+            raise RuntimeError(f"load plan: online quantization ({name})")
 
 
 def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:

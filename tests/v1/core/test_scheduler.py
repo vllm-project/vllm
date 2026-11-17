@@ -25,6 +25,7 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
+    retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
@@ -316,15 +317,20 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+def _aux_output_connector(scheduler: Scheduler) -> AuxOutputSchedulerConnector:
+    manager = scheduler.kv_cache_manager
+    return AuxOutputSchedulerConnector(
+        manager, retained_objects(scheduler.vllm_config, manager.kv_cache_config)[0]
+    )
+
+
 @pytest.mark.parametrize("max_tokens", [1, 2])
 def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
-    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     assert scheduler_output.aux_output_connector_metadata.requests == {
@@ -355,9 +361,7 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
-    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
     (request,) = create_requests(
         num_requests=1, num_tokens=160, max_tokens=20, ignore_eos=True
     )
@@ -446,7 +450,7 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
         scheduler.add_request(first)
         scheduler.schedule()
         scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
-    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager, Mock())
+    connector = _aux_output_connector(scheduler)
     connector.max_cache_hit = Mock(return_value=max_cache_hit)
     scheduler.aux_output_connector = connector
     scheduler.add_request(second)
@@ -456,11 +460,47 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
     assert output.num_scheduled_tokens[second.request_id] == 80 - expected_hit
 
 
+@pytest.mark.parametrize(
+    "loaded_tokens,prompt_start,external_tokens,expected_tokens",
+    [(80, 0, 0, 80), (79, 0, 0, 80), (80, 79, 15, 1)],
+    ids=["returns-prompt", "returns-prompt-mid-block", "returns-from-prompt-end"],
+)
+def test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start(
+    loaded_tokens, prompt_start, external_tokens, expected_tokens
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=loaded_tokens, is_async=True),
+    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+    first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
+    second.sampling_params = second.sampling_params.clone()
+    first.sampling_params.routed_experts_prompt_start = 80
+    second.sampling_params.routed_experts_prompt_start = prompt_start
+    scheduler.add_request(first)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(finished_recving={first.request_id}),
+        ),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == {first.request_id: 1}
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        return_value=(external_tokens, False)
+    )
+    scheduler.add_request(second)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {second.request_id: expected_tokens}
+    assert output.aux_output_connector_metadata.retained_block_hashes is None
+
+
 def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=5)
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
-    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
     first, second, third = create_requests(num_requests=3, num_tokens=64)
     for request in (first, second):
         scheduler.add_request(request)
@@ -2639,9 +2679,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.aux_output_connector = Mock(
-        wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
-    )
+    scheduler.aux_output_connector = Mock(wraps=_aux_output_connector(scheduler))
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -4405,12 +4443,7 @@ def create_scheduler_with_priority(
       {class}`Scheduler` instance with priority scheduling
 
     """
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="float16", seed=42)
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -6888,12 +6921,7 @@ def _create_encoder_decoder_scheduler(
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
 
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -8262,11 +8290,7 @@ def _create_hybrid_mamba_connector_scheduler(
 ) -> Scheduler:
     """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=True,
+        model="facebook/opt-125m", dtype="float16", seed=42, skip_tokenizer_init=True
     )
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -8420,7 +8444,7 @@ def test_hybrid_divergent_hit_fallback_is_capped_at_retained_auxiliary_outputs(
     manager = scheduler.kv_cache_manager
     _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
     manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
-    connector = AuxOutputSchedulerConnector(manager, scheduler.connector)
+    connector = _aux_output_connector(scheduler)
     connector.max_cache_hit = Mock(return_value=max_cache_hit)
     scheduler.aux_output_connector = connector
     [replay] = create_requests(

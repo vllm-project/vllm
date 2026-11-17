@@ -31,14 +31,14 @@ MAX_NUM_REQS = 8
 DEVICE = torch.device(current_platform.device_type)
 
 
-@dataclass
+@dataclass(slots=True)
 class _NewReqData:
     req_id: str
     prompt_embeds: torch.Tensor | None
     prompt_is_token_ids: list[bool] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _Batch:
     num_reqs: int
     num_scheduled_tokens: torch.Tensor  # np-like, only .max() is used

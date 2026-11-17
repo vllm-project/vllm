@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.cpu.model_states.interface import ModelSpecificAttnMetadata
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FastPrefillBatchMetadata:
     """Per-step inputs for the KV-sharing fast prefill path."""
 
@@ -83,7 +83,7 @@ def get_kv_cache_layer_configs(
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if layer_config := attn_module.get_kv_cache_config(vllm_config):
             layer_configs[layer_name] = customize_layer_config(
-                attn_module.get_attn_backend(), layer_config
+                attn_module.get_attn_backend(), layer_config, layer_name
             )
     return layer_configs
 

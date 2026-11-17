@@ -214,6 +214,7 @@ def test_per_token_nvfp4_moe_backends_match_the_experts_that_implement_it():
     implementing = {
         backend
         for backend in NvFp4MoeBackend
+        if backend != NvFp4MoeBackend.NONE  # placeholder, implements no experts
         for cls in backend_to_kernel_cls(backend)
         if "per_token_activation" in inspect.signature(cls.__init__).parameters
     }
@@ -990,7 +991,6 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
             str(model_path),
             dtype=dtype,
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             enforce_eager=True,
             enable_flashinfer_autotune=False,
             max_model_len=64,
@@ -1067,7 +1067,6 @@ def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
         with vllm_runner(
             str(model_path),
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             enforce_eager=True,
             enable_flashinfer_autotune=False,
             max_model_len=32,
@@ -1186,7 +1185,6 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
             str(target),
             speculative_config=speculation,
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             dtype="bfloat16",
             enforce_eager=True,
             enable_flashinfer_autotune=False,
