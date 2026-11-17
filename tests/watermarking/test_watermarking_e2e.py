@@ -80,30 +80,35 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner, enforce):
 def test_greedy_draft_generated_sequence_is_watermarked(
     vllm_runner, monkeypatch, algorithm, detector_cls
 ):
-    """Greedy drafts accepted by the watermarked sample keep the watermark."""
+    """Greedy drafts accepted by the watermarked sample keep the watermark and
+    match non-speculative decoding."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     watermark_config = {"key": 42, "context_width": 4}
     detector = detector_cls(**watermark_config)
-
-    runner = vllm_runner(
-        "Qwen/Qwen3-4B",
+    engine_kwargs = dict(
         watermark_config={**watermark_config, "algorithm": algorithm},
+        seed=0,
+        enforce_eager=True,
+        max_model_len=1024,
+        gpu_memory_utilization=0.4,
+    )
+    request = "Tell me a story about an explorer who discovers a mysterious island."
+    params = SamplingParams(temperature=1.0, max_tokens=256, watermarking=True, seed=0)
+
+    with vllm_runner("Qwen/Qwen3-4B", **engine_kwargs) as runner:
+        reference = runner.llm.generate(request, params)
+
+    with vllm_runner(
+        "Qwen/Qwen3-4B",
         speculative_config={
             "method": "dspark",
             "model": "deepseek-ai/dspark_qwen3_4b_block7",
             "num_speculative_tokens": 7,
             "draft_sample_method": "greedy",
         },
-        seed=0,
-        enforce_eager=True,
-        max_model_len=1024,
-        gpu_memory_utilization=0.4,
         disable_log_stats=False,
-    )
-    request = "Tell me a story about an explorer who discovers a mysterious island."
-    params = SamplingParams(temperature=1.0, max_tokens=256, watermarking=True, seed=0)
-
-    with runner:
+        **engine_kwargs,
+    ) as runner:
         output = runner.llm.generate(request, params)
         metrics = runner.llm.get_metrics()
 
@@ -114,5 +119,7 @@ def test_greedy_draft_generated_sequence_is_watermarked(
     )
     assert num_accepted > 0
 
-    result = detector.detect(list(output[0].outputs[0].token_ids))
+    token_ids = list(output[0].outputs[0].token_ids)
+    assert token_ids == list(reference[0].outputs[0].token_ids)
+    result = detector.detect(token_ids)
     assert result.is_watermarked, result
