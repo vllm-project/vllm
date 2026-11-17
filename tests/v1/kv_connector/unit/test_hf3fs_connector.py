@@ -3,6 +3,7 @@
 """Tests for HF3FS KV Connector high-level components:
 - TestHf3fsMockClient      : file-backed mock client I/O correctness
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+- test_ptrs_to_int64        : pointers >= 2**63 survive the int64 storage
 """
 
 import os
@@ -14,6 +15,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
     HF3FSKVConnectorStats,
+    _ptrs_to_int64,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
@@ -231,3 +233,27 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ---------------------------------------------------------------------------
+# Pointer conversion (addresses >= 2**63, e.g. on XPU)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ptr, expected",
+    [
+        (0, 0),
+        (0x7F00_0000_1000, 0x7F00_0000_1000),
+        (2**63 - 1, 2**63 - 1),
+        (2**63, -(2**63)),
+        (0xFF00_0000_0000_1000, 0xFF00_0000_0000_1000 - 2**64),
+        (2**64 - 1, -1),
+    ],
+)
+def test_ptrs_to_int64(ptr, expected):
+    (converted,) = _ptrs_to_int64([ptr])
+    assert converted == expected
+    # Must fit in an int64 tensor and round-trip to the original bit pattern.
+    t = torch.tensor([converted], dtype=torch.int64)
+    assert t.item() & (2**64 - 1) == ptr

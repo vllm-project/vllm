@@ -70,7 +70,14 @@ def wsynchronized():
 
 
 class Hf3fsClient:
-    def __init__(self, path: str, size: int, bytes_per_page: int, entries: int):
+    def __init__(
+        self,
+        path: str,
+        size: int,
+        bytes_per_page: int,
+        entries: int,
+        device: torch.device | None = None,
+    ):
         """Initialize the HF3FS client with hf3fs_fuse.
 
         Args:
@@ -78,6 +85,8 @@ class Hf3fsClient:
             size: Total size of the storage file in bytes
             bytes_per_page: Size of each page in bytes
             entries: Maximum number of concurrent operations
+            device: Accelerator device the copy stream is created on
+                (defaults to the current device)
 
         """
         if not HF3FS_AVAILABLE:
@@ -155,13 +164,21 @@ class Hf3fsClient:
             self.wlock = threading.RLock()
 
             # shm <-> device copies: native extension on CUDA, generic torch
-            # copies on every other accelerator.
+            # copies on every other accelerator. ROCm intentionally takes the
+            # generic path too: the extension is built against CUDA headers and
+            # has never been built/validated for ROCm
             self._cuda_ops: ModuleType | None = None
             if current_platform.is_cuda():
                 self._cuda_ops = _load_cuda_shm_ops()
-                self.stream = torch.cuda.Stream()
+                self.stream = torch.cuda.Stream(device=device)
             else:
-                self.stream = torch.Stream()
+                self.stream = torch.Stream(device=device)
+            # TEMP(e2e): remove before merge.
+            logger.info(
+                "TEMP(e2e) Hf3fsClient shm copy path=%s stream=%s",
+                "cuda_ext" if self._cuda_ops is not None else "generic",
+                self.stream,
+            )
 
         except Exception:
             self._release_resources()
@@ -283,7 +300,11 @@ class Hf3fsClient:
     def _read_shm(self, tensors: list[torch.Tensor]) -> None:
         """Copy packed pages from the read shm into `tensors`.
 
-        shm -> pinned host buffer -> device (async on `self.stream`).
+        shm -> pinned host buffer -> device. The pinned -> device copies are
+        issued asynchronously on `self.stream`, but the method blocks until
+        they complete. The sync is required: the H2D copies must finish
+        before `rlock` is released and the next `batch_read` reuses
+        `r_pinned`/`shm_r`.
         `self.stream` does not wait on other streams: the caller must ensure
         no pending device work still touches `tensors`.
         """
@@ -312,7 +333,10 @@ class Hf3fsClient:
     def _write_shm(self, tensors: list[torch.Tensor], event: torch.Event) -> None:
         """Pack `tensors` into the write shm once `event` has completed.
 
-        device -> pinned host buffer (async on `self.stream`) -> shm.
+        device -> pinned host buffer -> shm. The device -> pinned copies are
+        issued asynchronously on `self.stream`, but the method blocks until
+        they complete. The sync is required: the D2H copies must finish
+        before `w_pinned` is packed into shm.
         """
         if self._cuda_ops is not None:
             with torch.cuda.stream(self.stream):

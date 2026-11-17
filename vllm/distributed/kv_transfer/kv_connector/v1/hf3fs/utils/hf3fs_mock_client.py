@@ -12,7 +12,14 @@ HF3FS_AVAILABLE = True
 class Hf3fsClient:
     """Mock HF3FS client using file backend for debugging and testing."""
 
-    def __init__(self, path: str, size: int, bytes_per_page: int, entries: int):
+    def __init__(
+        self,
+        path: str,
+        size: int,
+        bytes_per_page: int,
+        entries: int,
+        device: torch.device | None = None,
+    ):
         self._size = size
         self._bytes_per_page = bytes_per_page
         self._entries = entries
