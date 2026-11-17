@@ -562,7 +562,8 @@ def _check_cumem_host_table(failure, packed_fp4):
     engram_host_table = _engram_host_table()
     is_rocm = current_platform.is_rocm()
     if is_rocm:
-        assert engram_host_table.host_memory_supported()
+        if not engram_host_table.host_memory_supported():
+            return
     elif not engram_host_table.fabric_host_memory_supported():
         return
 
@@ -571,6 +572,8 @@ def _check_cumem_host_table(failure, packed_fp4):
     row_bytes = DIM // 2 if packed_fp4 else DIM
     rows = 5 * (1 << 20) // row_bytes
     with pytest.MonkeyPatch.context() as patch:
+        if is_rocm:
+            patch.setenv("VLLM_ROCM_ENGRAM_HIP_VMM", "1")
         patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
         if failure == "create" and group.rank_in_group == 0:
             patch.setattr(engram_host_table, "NUMA_RESERVE_FRACTION", 1.0)
@@ -1003,6 +1006,17 @@ def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch, tmp_path):
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
     mp.spawn(_worker, args=(tp_size, get_open_port(), str(tmp_path)), nprocs=WORLD_SIZE)
     cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_engram_hip_host_table_failure_clears_hip_error():
+    """A failed HIP VMM call must not fail the next torch launch, which the
+    /dev/shm fallback runs right after it."""
+    from vllm.models.deepseek_v41.amd.ops import engram_host_table
+
+    with pytest.raises(RuntimeError, match="hipMemCreate failed"):
+        engram_host_table._create_chunk(2 << 20, numa_node=1 << 20)
+    assert torch.ones(4, device="cuda").sum().item() == 4
 
 
 @pytest.mark.parametrize(

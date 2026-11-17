@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram host tables in HIP VMM host memory, shared across DP ranks by dmabuf FD.
 
-The ROCm counterpart of `nvidia/ops/engram_host_table.py`. HIP cannot export
-host allocations as FABRIC handles, so rank 0 sends POSIX FDs to its peers over
-a unix socket. GPUs map these allocations with large pages, unlike the 4K pages
-of a /dev/shm mapping on hosts without shmem THP, so random row lookups miss
-the TLB less.
+The ROCm counterpart of `nvidia/ops/engram_fabric_table.py`, enabled by
+VLLM_ROCM_ENGRAM_HIP_VMM. HIP cannot export host allocations as FABRIC handles,
+so rank 0 sends POSIX FDs to its peers over a unix socket. Placing a table this
+way is faster than filling /dev/shm.
 """
 
 import ctypes
@@ -23,6 +22,7 @@ from typing import NamedTuple
 import psutil
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators.shm_broadcast import SHM_PATH
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
@@ -37,11 +37,10 @@ logger = init_logger(__name__)
 CHUNK_BYTES = 2 << 30
 # Fraction of host memory left to other allocations.
 NUMA_RESERVE_FRACTION = 0.05
-# hipMemGetAllocationGranularity's recommended size for host allocations.
-PAGE_BYTES = 2 << 20
 SOCKET_TIMEOUT_S = 120.0
 
 _PINNED = 1
+_GRANULARITY_RECOMMENDED = 1
 _POSIX_FD = 1
 _LOCATION_DEVICE = 1
 _LOCATION_HOST_NUMA = 3
@@ -91,17 +90,28 @@ def _hip():
         "hipMemMap": [ptr, size, size, ptr, flags],
         "hipMemUnmap": [ptr, size],
         "hipMemSetAccess": [ptr, size, ptr, size],
+        "hipMemGetAllocationGranularity": [ctypes.POINTER(size), ptr, ctypes.c_int],
     }
     for name, argtypes in signatures.items():
         getattr(hip, name).argtypes = argtypes
         getattr(hip, name).restype = ctypes.c_int
     hip.hipGetErrorName.argtypes = [ctypes.c_int]
     hip.hipGetErrorName.restype = ctypes.c_char_p
+    hip.hipGetLastError.argtypes = []
+    hip.hipGetLastError.restype = ctypes.c_int
     return hip
 
 
-def _call(name: str, *args) -> None:
+def _try_call(name: str, *args) -> int:
+    """Calls a HIP function and returns its error, clearing it: a failed hipMem*
+    call otherwise fails the next torch launch on this thread."""
     if error := getattr(_hip(), name)(*args):
+        _hip().hipGetLastError()
+    return error
+
+
+def _call(name: str, *args) -> None:
+    if error := _try_call(name, *args):
         raise RuntimeError(f"{name} failed: {_hip().hipGetErrorName(error).decode()}")
 
 
@@ -119,12 +129,30 @@ def _gpu_numa_node() -> int:
     return nodes[torch.accelerator.current_device_index()]
 
 
-def _create_chunk(length: int, numa_node: int) -> ctypes.c_void_p:
-    prop = _AllocationProp(
+def _host_allocation_prop(numa_node: int) -> _AllocationProp:
+    return _AllocationProp(
         type=_PINNED,
         requestedHandleTypes=_POSIX_FD,
         location=_Location(_LOCATION_HOST_NUMA, numa_node),
     )
+
+
+@functools.cache
+def _page_bytes() -> int:
+    """The recommended host allocation granularity, which sets the GPU page size."""
+    granularity = ctypes.c_size_t()
+    prop = _host_allocation_prop(_gpu_numa_node())
+    _call(
+        "hipMemGetAllocationGranularity",
+        ctypes.byref(granularity),
+        ctypes.byref(prop),
+        _GRANULARITY_RECOMMENDED,
+    )
+    return granularity.value
+
+
+def _create_chunk(length: int, numa_node: int) -> ctypes.c_void_p:
+    prop = _host_allocation_prop(numa_node)
     handle = ctypes.c_void_p()
     _call("hipMemCreate", ctypes.byref(handle), length, ctypes.byref(prop), 0)
     return handle
@@ -138,7 +166,7 @@ def _export_fd(handle: ctypes.c_void_p) -> int:
 
 def _release(handles: list) -> None:
     for handle in handles:
-        _hip().hipMemRelease(handle)
+        _try_call("hipMemRelease", handle)
 
 
 def _close(fds: list[int]) -> None:
@@ -150,15 +178,16 @@ def _close(fds: list[int]) -> None:
 def host_memory_supported() -> bool:
     """Whether HIP host allocations export POSIX FDs that the CPU can map."""
     try:
-        handle = _create_chunk(PAGE_BYTES, _gpu_numa_node())
+        page_bytes = _page_bytes()
+        handle = _create_chunk(page_bytes, _gpu_numa_node())
         try:
             fd = _export_fd(handle)
             try:
-                mmap.mmap(fd, PAGE_BYTES).close()
+                mmap.mmap(fd, page_bytes).close()
             finally:
                 os.close(fd)
         finally:
-            _hip().hipMemRelease(handle)
+            _try_call("hipMemRelease", handle)
     except Exception as exc:
         logger.info_once(
             "HIP VMM host memory is unavailable (%s); Engram DP replicas share "
@@ -188,7 +217,7 @@ def _check_reserve(numa_node: int, created: int, padded_bytes: int) -> None:
 def _create_table(num_bytes: int) -> tuple[list, list[int], int]:
     """Allocate a table and export one FD per chunk."""
     numa_node = _gpu_numa_node()
-    padded_bytes = round_up(num_bytes, PAGE_BYTES)
+    padded_bytes = round_up(num_bytes, _page_bytes())
     handles: list = []
     fds: list[int] = []
     try:
@@ -228,8 +257,8 @@ def _unmap(
     mapped: list[tuple[int, int]],
 ) -> None:
     for offset, length in mapped:
-        _hip().hipMemUnmap(gpu_address + offset, length)
-    _hip().hipMemAddressFree(gpu_address, size)
+        _try_call("hipMemUnmap", gpu_address + offset, length)
+    _try_call("hipMemAddressFree", gpu_address, size)
     if host_address is not None:
         libc = ctypes.CDLL(None)
         libc.munmap(ctypes.c_void_p(host_address), ctypes.c_size_t(size))
@@ -273,7 +302,9 @@ def _map_table(
                 )
                 handles.append(handle)
         address = ctypes.c_void_p()
-        _call("hipMemAddressReserve", ctypes.byref(address), size, PAGE_BYTES, None, 0)
+        _call(
+            "hipMemAddressReserve", ctypes.byref(address), size, _page_bytes(), None, 0
+        )
         gpu_address = address.value
         assert gpu_address is not None
         for (offset, length), handle in zip(ranges, handles):
@@ -338,7 +369,12 @@ def share_host_table(
     handles: list = []
     fds: list[int] = []
     table = error = server = directory = None
-    if group.rank_in_group == 0 and host_memory_supported():
+    # Rank 0 decides, so every rank agrees whatever its own environment.
+    if (
+        group.rank_in_group == 0
+        and envs.VLLM_ROCM_ENGRAM_HIP_VMM
+        and host_memory_supported()
+    ):
         try:
             handles, fds, padded_bytes = _create_table(num_bytes)
             # The /dev/shm fallback needs SHM_PATH shared too, so both reach
@@ -379,7 +415,7 @@ def share_host_table(
     if error and group.rank_in_group == 0:
         logger.warning(
             "Engram host table cannot use HIP VMM host memory (%s); falling back "
-            "to /dev/shm, whose small GPU pages make lookups slower.",
+            "to /dev/shm.",
             error,
         )
     return None

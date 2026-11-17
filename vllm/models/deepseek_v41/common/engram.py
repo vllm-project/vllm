@@ -837,7 +837,7 @@ def _allow_any_numa_node(address: int, num_bytes: int) -> None:
 
 class DPSharedEngramStorage:
     """Host weights shared by a node-local DP group with one writer: host-NUMA
-    cuMem where FABRIC handles work, HIP VMM host memory on ROCm, else a
+    cuMem where FABRIC handles work, opt-in HIP VMM host memory on ROCm, else a
     registered /dev/shm mapping."""
 
     def __init__(
