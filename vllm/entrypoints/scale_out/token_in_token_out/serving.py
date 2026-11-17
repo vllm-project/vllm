@@ -8,7 +8,8 @@ import math
 import time
 from collections.abc import AsyncGenerator, Callable
 from collections.abc import Sequence as GenericSequence
-from typing import Any
+from dataclasses import replace
+from typing import Any, cast
 
 import msgspec
 from fastapi import Request
@@ -37,20 +38,24 @@ from vllm.entrypoints.openai.chat_completion.stream_processor import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     PromptTokenUsageInfo,
     UsageInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError, VLLMValidationError
-from vllm.inputs import EngineInput, TokensPrompt, mm_input
+from vllm.exceptions import (
+    GenerationError,
+    PromptUpdateMismatchError,
+    VLLMValidationError,
+)
+from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
-    PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
@@ -64,6 +69,7 @@ from vllm.utils.serial_utils import numpy2base64
 from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
+    rebuild_mm_placeholders,
 )
 from .protocol import (
     GenerateDerenderChoice,
@@ -256,6 +262,15 @@ class ServingTokens(GenerateBaseServing):
                 "because detokenization is disabled. Check stop strings on "
                 "the coordinator, or use stop_token_ids."
             )
+        if sampling_params.bad_words and not self.has_tokenizer:
+            # bad_words are tokenized in the input processor, which skips
+            # them without a tokenizer, so they would silently never apply.
+            return self.create_error_response(
+                "sampling_params.bad_words requires a tokenizer, but this "
+                "server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Send the request to a server that "
+                "loads a tokenizer, or remove bad_words."
+            )
         if request.output_mode != "tokens" and not self.has_tokenizer:
             # The no-op detokenizer returns "", so without this check the
             # request would succeed with empty text.
@@ -308,7 +323,14 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(e)
 
         engine_input: EngineInput
+        features = request.features
         if request.content_parts:
+            # Items in features are already expanded; render every token
+            # after the last of them, so new placeholders must lie there.
+            feature_ranges = features.mm_placeholders.values() if features else ()
+            start = max(
+                (p.offset + p.length for rs in feature_ranges for p in rs), default=0
+            )
             tracker = AsyncMultiModalItemTracker(self.model_config)
             mm_parser = tracker.create_parser()
             for part in request.content_parts:
@@ -322,24 +344,26 @@ class ServingTokens(GenerateBaseServing):
                 elif ptype == "video_url":
                     mm_parser.parse_video(url, uuid)
             mm_data, mm_uuids = await tracker.resolve_items()
-            prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
             if request.cache_salt is not None:
                 prompt["cache_salt"] = request.cache_salt
             if mm_data:
                 prompt["multi_modal_data"] = mm_data
             if mm_uuids:
                 prompt["multi_modal_uuids"] = mm_uuids
-            (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
-                [prompt]
-            )
-        elif features := request.features:
-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
-                for modality, ranges in features.mm_placeholders.items()
-            }
+            try:
+                (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                    [prompt]
+                )
+            except PromptUpdateMismatchError as e:
+                if not features:
+                    raise
+                raise VLLMValidationError(
+                    f"{e}; content_parts placeholders must come after the last "
+                    f"features range, which ends at offset {start}"
+                ) from e
+        if features:
+            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
 
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
@@ -347,14 +371,26 @@ class ServingTokens(GenerateBaseServing):
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
 
+            token_ids = request.token_ids
+            mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}
+            if request.content_parts:
+                rendered = cast(MultiModalInput, engine_input)
+                token_ids = token_ids[:start] + rendered["prompt_token_ids"]
+                for m, ps in rendered.get("mm_placeholders", {}).items():
+                    mm_placeholders.setdefault(m, []).extend(
+                        replace(p, offset=p.offset + start) for p in ps
+                    )
+                    mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
+                    mm_hashes.setdefault(m, []).extend(rendered["mm_hashes"][m])
+
             engine_input = mm_input(
-                prompt_token_ids=request.token_ids,
+                prompt_token_ids=token_ids,
                 mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=features.mm_hashes,
+                mm_hashes=mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )
-        else:
+        elif not request.content_parts:
             (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
                 prompt_input=request.token_ids,
@@ -425,7 +461,7 @@ class ServingTokens(GenerateBaseServing):
             request_id,
             lora_request=lora_request,
             trace_headers=trace_headers,
-            priority=request.priority,
+            priority=self._get_priority(request, raw_request),
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
             reasoning_ended=request.reasoning_ended,
@@ -542,6 +578,7 @@ class ServingTokens(GenerateBaseServing):
             num_generated_tokens += len(output.token_ids)
 
         derender_choices: list[GenerateDerenderChoice] = []
+        completion_tokens_details: CompletionTokenUsageInfo | None = None
         if derender_mode:
             history_tool_call_cnt = (
                 request.parse_context.history_tool_call_cnt
@@ -549,7 +586,10 @@ class ServingTokens(GenerateBaseServing):
                 else 0
             )
             try:
-                parsed = await self.online_derenderer.derender_text_choices(
+                (
+                    parsed,
+                    completion_tokens_details,
+                ) = await self.online_derenderer.derender_text_choices(
                     final_res.outputs,
                     derender_request,
                     history_tool_call_cnt,
@@ -582,6 +622,7 @@ class ServingTokens(GenerateBaseServing):
             created_time,
             num_generated_tokens,
             request_metadata,
+            completion_tokens_details,
         )
         response: (
             GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
@@ -625,6 +666,7 @@ class ServingTokens(GenerateBaseServing):
         created_time: int,
         num_generated_tokens: int,
         request_metadata: RequestResponseMetadata,
+        completion_tokens_details: CompletionTokenUsageInfo | None = None,
     ) -> dict[str, Any]:
         """Build the fields shared by every non-streaming response level."""
         assert final_res.prompt_token_ids is not None
@@ -636,6 +678,7 @@ class ServingTokens(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=completion_tokens_details,
         )
         if (
             self.enable_prompt_tokens_details
@@ -689,6 +732,12 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
+        output_token_ids: list[list[int]] | None = (
+            [[] for _ in range(sampling_params.n)]
+            if processors is not None
+            and self.online_derenderer.include_reasoning_tokens_details
+            else None
+        )
         last_res: RequestOutput | None = None
         derender_mode = request.output_mode == "derender"
         assert derender_mode == (processors is not None)
@@ -744,6 +793,8 @@ class ServingTokens(GenerateBaseServing):
                         if finish_reason_sent[i]:
                             continue
                         processor = processors[i]
+                        if output_token_ids is not None:
+                            output_token_ids[i].extend(delta_token_ids)
                         delta, finish_reason = processor.step(
                             output.text,
                             as_list(delta_token_ids),
@@ -845,6 +896,13 @@ class ServingTokens(GenerateBaseServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=num_prompt_tokens + total_completion_tokens,
+                completion_tokens_details=(
+                    self.online_derenderer.stream_completion_tokens_details(
+                        processors, output_token_ids
+                    )
+                    if processors is not None and output_token_ids is not None
+                    else None
+                ),
             )
 
             if self.enable_prompt_tokens_details and num_cached_tokens is not None:

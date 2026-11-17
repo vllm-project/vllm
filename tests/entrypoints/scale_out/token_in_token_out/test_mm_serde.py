@@ -16,6 +16,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
+    rebuild_mm_placeholders,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -32,6 +33,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldElem,
     MultiModalFlatField,
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     MultiModalSharedField,
     PlaceholderRange,
 )
@@ -422,3 +424,26 @@ def test_metadata_can_replace_or_extend_full_mm_data():
     merged = merge_mm_kwargs_items(full_item, metadata_item)
     assert merged is not None
     assert set(merged) == {"pixel_values", "image_grid_thw"}
+
+
+@pytest.mark.parametrize(
+    "is_embed", [None, torch.tensor([True, False, True, True])], ids=["dense", "sparse"]
+)
+def test_placeholder_roundtrip(is_embed):
+    """Placeholders must survive render -> JSON -> generate unchanged."""
+    placeholders = {"image": [PlaceholderRange(1, 4, is_embed=is_embed)]}
+    engine_input = mm_input(
+        prompt_token_ids=[1, 2, 3, 4, 5],
+        mm_kwargs=MultiModalKwargsItems({}),
+        mm_hashes={"image": ["hash-0"]},
+        mm_placeholders=placeholders,
+    )
+    features = extract_mm_features(engine_input)
+    assert features is not None
+    wire = MultiModalFeatures.model_validate_json(features.model_dump_json())
+    assert rebuild_mm_placeholders(wire.mm_placeholders) == placeholders
+
+
+def test_placeholder_rejects_mismatched_is_embed():
+    with pytest.raises(ValidationError, match="is_embed"):
+        PlaceholderRangeInfo(offset=0, length=4, is_embed=[True])
