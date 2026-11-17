@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -72,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheLayerConfig,
+    KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
@@ -2589,7 +2591,11 @@ def _replace_group(
 
 
 def _make_hybrid_kv_cache_config(
-    block_size: int, num_blocks: int, spec_types: list[str]
+    block_size: int,
+    num_blocks: int,
+    spec_types: list[str],
+    block_sizes: list[int] | None = None,
+    eagle_groups: bool = False,
 ) -> KVCacheConfig:
     """Create a KVCacheConfig with the specified spec types.
 
@@ -2601,40 +2607,58 @@ def _make_hybrid_kv_cache_config(
             - "sliding_window": sliding window with window=2*block_size
             - "sliding_window_large": sliding window with window=4*block_size
             - "mamba": MambaSpec in prefix-caching ("align") mode
+        block_sizes: Optional per-group physical block sizes (same length as
+            spec_types). Sliding-window sizes scale with each group's own
+            block size. Defaults to `block_size` for every group.
+        eagle_groups: Mark every group as an eagle (draft) group, which is what
+            the coordinator's all-groups fallback used to do. Set it in tests
+            that assert the drop rather than relying on that fallback.
 
     """
-    spec_map = {
-        "full": lambda: AttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-        ),
-        "sliding_window": lambda: _swa_layer(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-            sliding_window=2 * block_size,
-        ),
-        "sliding_window_large": lambda: _swa_layer(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-            sliding_window=4 * block_size,
-        ),
-        "mamba": lambda: _mamba_layer(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
-            mamba_cache_mode="align",
-        ),
-    }
+    if block_sizes is None:
+        block_sizes = [block_size] * len(spec_types)
+    assert len(block_sizes) == len(spec_types)
+
+    def make_layer(
+        spec_type: str, group_block_size: int
+    ) -> KVCacheLayerConfig | KVCacheSpec:
+        if spec_type == "full":
+            return AttentionSpec(
+                block_size=group_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            )
+        if spec_type == "sliding_window":
+            return _swa_layer(
+                block_size=group_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=2 * group_block_size,
+            )
+        if spec_type == "sliding_window_large":
+            return _swa_layer(
+                block_size=group_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=4 * group_block_size,
+            )
+        if spec_type == "mamba":
+            return _mamba_layer(
+                block_size=group_block_size,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            )
+        raise ValueError(f"Unknown spec type: {spec_type}")
 
     kv_cache_groups = [
-        new_kv_cache_group([f"layer{i}"], spec_map[spec_type]())
-        for i, spec_type in enumerate(spec_types)
+        new_kv_cache_group(
+            [f"layer{i}"], make_layer(spec_type, bs), is_eagle_group=eagle_groups
+        )
+        for i, (spec_type, bs) in enumerate(zip(spec_types, block_sizes))
     ]
 
     return KVCacheConfig(
@@ -2770,11 +2794,45 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     manager.free(req1)
 
 
-# Test cases with eagle enabled: Only test a single simple case for now.
-# - 2 groups: 1 full + 1 other
+def _allocate_in_chunks(
+    manager: KVCacheManager,
+    req: Request,
+    chunks: tuple[int, ...],
+    num_groups: int,
+) -> None:
+    """Allocate `req` in the given chunk sizes, one scheduler step each."""
+    for num_new_tokens in chunks:
+        blocks = manager.allocate_slots(req, num_new_tokens, 0, None)
+        assert blocks is not None
+        assert len(blocks.get_block_ids()) == num_groups
+        req.num_computed_tokens += num_new_tokens
+        manager.new_step_starts()
+
+
+# Test cases with eagle enabled. Regression coverage for
+# https://github.com/vllm-project/vllm/issues/51771.
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
     pytest.param(["full", "sliding_window"], 3, id="2g-full+sw"),
+    # 3 groups: 1 full + 2 others
+    pytest.param(
+        ["full", "sliding_window", "sliding_window_large"], 3, id="3g-full+sw+sw_large"
+    ),
+    # 4 groups: interleaved fulls
+    pytest.param(
+        ["full", "sliding_window", "full", "sliding_window_large"],
+        3,
+        id="4g-interleaved-full+sw+sw_large",
+    ),
+    # Shapes below carry a mamba group: their 48-token expectation depends on
+    # the mamba read-side drop semantics, so keep the mamba rows adjacent and
+    # update them together.
+    pytest.param(["full", "mamba", "full", "mamba"], 3, id="4g-interleaved-full+mamba"),
+    pytest.param(
+        ["sliding_window", "mamba", "sliding_window_large", "mamba"],
+        3,
+        id="4g-sw+mamba+sw_large+mamba",
+    ),
 ]
 
 
@@ -2782,15 +2840,19 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
 def test_prefill_hybrid_model_combinations_eagle(
     spec_types: list[str], expect_hit_length: int
 ):
-    """Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
-    More complex hybrid models with EAGLE are not yet supported (see issue #32802).
+    """Test prefix caching with hybrid models (>= 2 attention groups) and EAGLE.
+
+    With 4 full blocks cached, the EAGLE last-block drop must shorten the
+    reconciled hit to 3 blocks for every group.
     """
     block_size = 16
     num_groups = len(spec_types)
     # Allocate enough blocks for all groups
     num_blocks = 10 * num_groups
 
-    kv_cache_config = _make_hybrid_kv_cache_config(block_size, num_blocks, spec_types)
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, spec_types, eagle_groups=True
+    )
     manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=8192,
@@ -2799,12 +2861,21 @@ def test_prefill_hybrid_model_combinations_eagle(
         use_eagle=True,
     )
 
+    if len(set(spec_types)) < len(spec_types):
+        # Repeated spec kinds merge into one coordinated group each, so this
+        # shape exercises group merging rather than one group per physical
+        # entry. Full attention is ordered first.
+        coordinated = manager.coordinator.attention_groups
+        assert len(coordinated) == len(set(spec_types))
+        if "full" in spec_types:
+            assert issubclass(coordinated[0].manager_cls, FullAttentionManager)
+
     hash_fn = sha256
 
-    # Complete 3 blocks (48 tokens)
+    # Complete 4 blocks (64 tokens)
     num_full_blocks = 4
     common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
-    unique_token_ids = [4] * 7
+    unique_token_ids = [3] * 7
     all_token_ids = common_token_ids + unique_token_ids
 
     # First request: no cache hit initially
@@ -2815,12 +2886,19 @@ def test_prefill_hybrid_model_combinations_eagle(
     assert not computed_blocks.blocks[0]  # No cache hit initially
     assert num_computed_tokens == 0
 
-    blocks = manager.allocate_slots(
-        req0, len(all_token_ids), num_computed_tokens, computed_blocks
+    # Three chunks ending at 32, 48 and 71. The last boundary is the EAGLE
+    # replay boundary, where the mamba-align scheduler stops so that
+    # MambaManager exports reusable state. Stopping once more at 32 gives the
+    # mamba cases two checkpoints to choose from: a drop that removes exactly
+    # the newest one lands on the older boundary (32 tokens) instead of
+    # falling back to the same no-hit value a drop of many would produce.
+    chunk_sizes = (2 * block_size, block_size)
+    _allocate_in_chunks(
+        manager,
+        req0,
+        (*chunk_sizes, len(all_token_ids) - sum(chunk_sizes)),
+        num_groups,
     )
-    assert blocks is not None
-    # Should have blocks for all groups
-    assert len(blocks.get_block_ids()) == num_groups
 
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
@@ -2838,6 +2916,235 @@ def test_prefill_hybrid_model_combinations_eagle(
     blocks = manager.allocate_slots(
         req1,
         len(all_token_ids) - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_prefill_hybrid_model_eagle_mixed_block_sizes():
+    """Test EAGLE prefix caching with a DeepSeek-V4-Flash-like hybrid shape.
+
+    One full-attention group plus three sliding-window-family groups with
+    distinct block sizes, so the scheduler block size (lcm = 16) differs from
+    each sliding-window group's own block size and the alignment paths in
+    `SlidingWindowManager` actually execute. Hashes run at the finest block
+    size (4 tokens). See https://github.com/vllm-project/vllm/issues/51771.
+    """
+    hash_block_size = 4
+    spec_types = [
+        "full",
+        "sliding_window",
+        "sliding_window_large",
+        "sliding_window_large",
+    ]
+    block_sizes = [16, 8, 4, 8]
+    num_groups = len(spec_types)
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        16, 128, spec_types, block_sizes=block_sizes, eagle_groups=True
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=True,
+    )
+
+    hash_fn = sha256
+
+    # 4 full 16-token blocks (64 tokens = 16 hash blocks) + 7 tail tokens
+    num_full_blocks = 4
+    common_token_ids = [
+        i
+        for i in range(num_full_blocks * (16 // hash_block_size))
+        for _ in range(hash_block_size)
+    ]
+    all_token_ids = common_token_ids + [4] * 7
+
+    # First request: no cache hit initially
+    req0 = make_request("0", all_token_ids, hash_block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+
+    assert len(req0.block_hashes) == len(all_token_ids) // hash_block_size
+    assert not computed_blocks.blocks[0]  # No cache hit initially
+    assert num_computed_tokens == 0
+
+    # Two chunks; the first ends at the 48-token EAGLE replay boundary (the
+    # value `replay_boundaries` yields for this prompt). Written out rather
+    # than derived, as in the table test above.
+    _allocate_in_chunks(manager, req0, (48, len(all_token_ids) - 48), num_groups)
+
+    # Second request: same 64-token prefix, different tail
+    req1 = make_request("1", common_token_ids + [6] * 5, hash_block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+
+    # The EAGLE last-block drop of the full-attention group binds the
+    # reconciled hit at 4 - 1 = 3 full blocks = 48 tokens.
+    assert num_computed_tokens == 48
+    assert len(computed_blocks.blocks) == num_groups
+    # Every group's hit lands on the same aligned boundary in its own
+    # block granularity.
+    for block_per_group, group in zip(
+        computed_blocks.blocks, kv_cache_config.kv_cache_groups
+    ):
+        group_block_size = group.block_size
+        assert len(block_per_group) * group_block_size == 48
+
+    # Allocate and verify blocks for second request
+    blocks = manager.allocate_slots(
+        req1,
+        len(common_token_ids) + 5 - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_prefill_hybrid_model_eagle_mamba_fine_grained():
+    """Test EAGLE prefix caching through the mamba fine-grained alignment path.
+
+    One full-attention group, one mamba group and one sliding-window group with
+    block sizes [16, 16, 8] and an 8-token hash unit. The mamba block size being
+    above the hash unit enables partial hash hits, so the coordinator aligns at
+    the hash unit instead of the scheduler block size and the mamba group takes
+    the fine-grained branch of `MambaManager.find_longest_cache_hit`. See
+    https://github.com/vllm-project/vllm/issues/51771.
+    """
+    hash_block_size = 8
+    spec_types = ["full", "mamba", "sliding_window"]
+    block_sizes = [16, 16, 8]
+    num_groups = len(spec_types)
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        16, 128, spec_types, block_sizes=block_sizes, eagle_groups=True
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=True,
+    )
+    # A mamba block size above the hash unit is what enables partial hash
+    # hits. Guard the precondition so this test cannot silently stop covering
+    # the fine-grained path if that rule changes.
+    assert manager.coordinator.enable_partial_hash_hits
+
+    hash_fn = sha256
+
+    # 4 full 16-token blocks (64 tokens = 8 hash blocks) + 7 tail tokens
+    num_full_blocks = 4
+    common_token_ids = [
+        i
+        for i in range(num_full_blocks * (16 // hash_block_size))
+        for _ in range(hash_block_size)
+    ]
+    all_token_ids = common_token_ids + [4] * 7
+
+    # First request: no cache hit initially
+    req0 = make_request("0", all_token_ids, hash_block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+
+    assert len(req0.block_hashes) == len(all_token_ids) // hash_block_size
+    assert not computed_blocks.blocks[0]  # No cache hit initially
+    assert num_computed_tokens == 0
+
+    # Three chunks ending at 32, 48 and 71, as in the table test above: the
+    # mamba group keeps a checkpoint at both 32 and 48 so that dropping the
+    # newest one is distinguishable from hitting nothing.
+    _allocate_in_chunks(manager, req0, (32, 16, len(all_token_ids) - 48), num_groups)
+
+    # Second request: same 64-token prefix, different tail
+    req1 = make_request("1", common_token_ids + [6] * 5, hash_block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 48
+    assert len(computed_blocks.blocks) == num_groups
+    for block_per_group, group in zip(
+        computed_blocks.blocks, kv_cache_config.kv_cache_groups
+    ):
+        group_block_size = group.block_size
+        assert len(block_per_group) * group_block_size == 48
+
+    # Allocate and verify blocks for second request
+    blocks = manager.allocate_slots(
+        req1,
+        len(common_token_ids) + 5 - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_prefill_hybrid_model_eagle_mamba_checkpoint_below_aligned_end():
+    """Test EAGLE prefix caching when the only reusable mamba state sits below
+    the aligned end of the cached prefix.
+
+    Allocating the first request in two chunks (32, then the remaining 39) never
+    exports state at the aligned end, so the mamba group's single checkpoint is
+    at 32 tokens. A second request sharing the 64-token prefix can therefore only
+    be served from that older boundary, and the reconciled hit is 32 rather than
+    the 48 the other EAGLE cases expect. See
+    https://github.com/vllm-project/vllm/issues/51771.
+    """
+    block_size = 16
+    spec_types = ["full", "mamba"]
+    num_groups = len(spec_types)
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, 128, spec_types, eagle_groups=True
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    hash_fn = sha256
+
+    num_full_blocks = 4
+    common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
+    all_token_ids = common_token_ids + [4] * 7
+
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    # 2 * block_size, then the rest: the mamba group ends up with a checkpoint
+    # at 32 and none at 48 or 64.
+    chunk_sizes = (2 * block_size, len(all_token_ids) - 2 * block_size)
+    _allocate_in_chunks(manager, req0, chunk_sizes, num_groups)
+
+    req1 = make_request("1", common_token_ids + [6] * 5, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 2 * block_size
+    assert len(computed_blocks.blocks) == num_groups
+    for block_per_group, group in zip(
+        computed_blocks.blocks, kv_cache_config.kv_cache_groups
+    ):
+        group_block_size = group.block_size
+        assert len(block_per_group) * group_block_size == 2 * block_size
+
+    blocks = manager.allocate_slots(
+        req1,
+        len(common_token_ids) + 5 - num_computed_tokens,
         num_computed_tokens,
         computed_blocks,
     )
