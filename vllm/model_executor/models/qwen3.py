@@ -289,6 +289,7 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        last_layer_token_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -301,6 +302,10 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
+        # Attention has already written KV for every prompt token.
+        if last_layer_token_indices is not None:
+            hidden_states = hidden_states.index_select(0, last_layer_token_indices)
+            residual = residual.index_select(0, last_layer_token_indices)
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -389,6 +394,7 @@ class Qwen3Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        last_layer_token_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -410,7 +416,12 @@ class Qwen3Model(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            if last_layer_token_indices is not None and idx == self.end_layer - 1:
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, last_layer_token_indices
+                )
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -425,6 +436,15 @@ class Qwen3Model(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if last_layer_token_indices is not None:
+            # Keep the runner's token-indexed output contract. Only sampled rows
+            # are consumed on the guarded path; all other rows are unused.
+            output = hidden_states.new_zeros(
+                (positions.shape[-1], hidden_states.shape[-1])
+            )
+            hidden_states = output.index_copy_(
+                0, last_layer_token_indices, hidden_states
+            )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -486,6 +506,8 @@ class Qwen3ForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
+    supports_last_layer_ffn_pruning = True
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -495,9 +517,14 @@ class Qwen3ForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        last_layer_token_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            last_layer_token_indices,
         )
         return hidden_states
 
