@@ -106,57 +106,11 @@ pub(super) fn render_request_with_media_order(
 
     // Track prior assistant tool-call ids for tool-result reordering / naming.
     let mut tool_call_id_index: HashMap<String, (usize, String)> = HashMap::new();
+    // Tool names of the latest assistant message in call order, and how many
+    // tool results followed it, for naming results whose id does not match.
+    let mut preceding_tool_names: Vec<String> = Vec::new();
+    let mut tool_index = 0usize;
     let mut pending_tool_run: Vec<(usize, ChatMessage)> = Vec::new();
-
-    let flush_tool_run = |out: &mut K3TokenWriter<'_>,
-                          run: &mut Vec<(usize, ChatMessage)>,
-                          id_index: &HashMap<String, (usize, String)>|
-     -> Result<()> {
-        if run.is_empty() {
-            return Ok(());
-        }
-
-        let mut resolved = Vec::with_capacity(run.len());
-        let mut unresolved = false;
-        for (offset, message) in run.drain(..) {
-            let ChatMessage::ToolResponse {
-                content,
-                tool_call_id,
-            } = message
-            else {
-                unreachable!("pending tool run only holds tool responses");
-            };
-            match id_index.get(&tool_call_id) {
-                Some(&(position, ref name)) => {
-                    resolved.push((position, offset, content, Some(name.clone())));
-                }
-                None => {
-                    unresolved = true;
-                    resolved.push((usize::MAX, offset, content, None));
-                }
-            }
-        }
-
-        if unresolved {
-            // Preserve original order when the run cannot be fully matched.
-            resolved.sort_by_key(|item| item.1);
-        } else {
-            resolved.sort_by_key(|item| (item.0, item.1));
-        }
-
-        for (position, message_index, content, name) in resolved {
-            let tool_name = name.as_deref().ok_or_else(|| {
-                Error::ChatTemplate(
-                    "Kimi K3 tool messages need a resolvable tool name: \
-                         carry a matching tool_call_id against a preceding \
-                         assistant tool_call"
-                        .to_string(),
-                )
-            })?;
-            write_tool_message(out, tool_name, position, message_index, &content)?;
-        }
-        Ok(())
-    };
 
     for (message_index, message) in request.messages.iter().enumerate() {
         match message {
@@ -165,7 +119,13 @@ pub(super) fn render_request_with_media_order(
                 continue;
             }
             _ => {
-                flush_tool_run(&mut out, &mut pending_tool_run, &tool_call_id_index)?;
+                flush_tool_run(
+                    &mut out,
+                    &mut pending_tool_run,
+                    &tool_call_id_index,
+                    &preceding_tool_names,
+                    &mut tool_index,
+                )?;
             }
         }
 
@@ -190,10 +150,12 @@ pub(super) fn render_request_with_media_order(
             }
             ChatMessage::Assistant { content } => {
                 tool_call_id_index.clear();
-                let mut call_position = 0usize;
+                preceding_tool_names.clear();
+                tool_index = 0;
                 for block in content {
                     if let AssistantContentBlock::ToolCall(call) = block {
-                        call_position += 1;
+                        preceding_tool_names.push(call.name.clone());
+                        let call_position = preceding_tool_names.len();
                         if !call.id.is_empty() {
                             tool_call_id_index
                                 .entry(call.id.clone())
@@ -210,7 +172,13 @@ pub(super) fn render_request_with_media_order(
             }
         }
     }
-    flush_tool_run(&mut out, &mut pending_tool_run, &tool_call_id_index)?;
+    flush_tool_run(
+        &mut out,
+        &mut pending_tool_run,
+        &tool_call_id_index,
+        &preceding_tool_names,
+        &mut tool_index,
+    )?;
 
     match request.tool_choice() {
         ChatToolChoice::Required => {
@@ -242,6 +210,72 @@ pub(super) fn render_request_with_media_order(
     }
 
     Ok(out.finish())
+}
+
+/// Render one run of consecutive tool messages against the latest assistant
+/// message's tool calls.
+///
+/// A run whose `tool_call_id`s all match is reordered into call order. Any
+/// other run keeps its message order, and each message resolves its tool name
+/// from the call its id matches, else the name sent with it, else the call at
+/// its position among the tool messages since that assistant message.
+fn flush_tool_run(
+    out: &mut K3TokenWriter<'_>,
+    run: &mut Vec<(usize, ChatMessage)>,
+    id_index: &HashMap<String, (usize, String)>,
+    preceding_tool_names: &[String],
+    tool_index: &mut usize,
+) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+
+    let all_id_matched = run.iter().all(|(_, message)| {
+        matches!(
+            message,
+            ChatMessage::ToolResponse { tool_call_id, .. } if id_index.contains_key(tool_call_id)
+        )
+    });
+
+    let mut resolved = Vec::with_capacity(run.len());
+    for (message_index, message) in run.drain(..) {
+        let ChatMessage::ToolResponse {
+            content,
+            tool_call_id,
+            name,
+        } = message
+        else {
+            unreachable!("pending tool run only holds tool responses");
+        };
+        *tool_index += 1;
+        let current_pos = *tool_index;
+        let (position, tool_name) =
+            if let Some((matched_pos, matched_name)) = id_index.get(&tool_call_id) {
+                (*matched_pos, matched_name.clone())
+            } else if let Some(explicit_name) = name.filter(|name| !name.is_empty()) {
+                (current_pos, explicit_name)
+            } else if let Some(positional_name) = preceding_tool_names.get(current_pos - 1) {
+                (current_pos, positional_name.clone())
+            } else {
+                return Err(Error::InvalidToolMessage(
+                    "Kimi K3 tool messages need a resolvable tool name: \
+                     carry a matching tool_call_id, an explicit `name`, or \
+                     match a preceding assistant tool_call by order."
+                        .to_string(),
+                ));
+            };
+        resolved.push((position, message_index, content, tool_name));
+    }
+
+    // Preserve original order when the run cannot be fully matched.
+    if all_id_matched {
+        resolved.sort_by_key(|item| (item.0, item.1));
+    }
+
+    for (position, message_index, content, tool_name) in resolved {
+        write_tool_message(out, &tool_name, position, message_index, &content)?;
+    }
+    Ok(())
 }
 
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
@@ -563,10 +597,7 @@ fn normalize_tool_arguments(arguments: &str) -> Result<(Map<String, Value>, Opti
     }
     match serde_json::from_str::<Value>(trimmed) {
         Ok(Value::Object(map)) => Ok((map, None)),
-        Ok(_) => Err(Error::ChatTemplate(
-            "Kimi K3 tool call arguments must be a JSON object".to_string(),
-        )),
-        Err(_) => Ok((Map::new(), Some(arguments.to_string()))),
+        Ok(_) | Err(_) => Ok((Map::new(), Some(arguments.to_string()))),
     }
 }
 
