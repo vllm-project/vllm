@@ -79,6 +79,7 @@ from vllm.renderers.online_renderer import (
     _extract_allowed_tools_from_mcp_requests,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.metrics.stats import RequestStateStats
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -1143,6 +1144,74 @@ class TestInitializeToolSessions:
             pass
 
         assert max_tokens_per_turn == [10, 10]
+
+    @pytest.mark.asyncio
+    async def test_harmony_tool_call_cut_by_max_output_tokens_is_not_run(
+        self, serving_responses_instance
+    ):
+        """A built-in tool call cut off by max_output_tokens must not run the
+        tool or start another turn; the response is incomplete."""
+        tokenizer = get_tokenizer("openai/gpt-oss-20b")
+        cut_call = (
+            "<|channel|>analysis to=python code<|message|>"
+            "import shutil\nshutil.rmtree('out')\n"
+        )
+        final = "<|channel|>final<|message|>Done.<|return|>"
+        turns = iter([(cut_call, "length"), (final, "stop")])
+
+        async def generate(*args, **kwargs):
+            text, finish_reason = next(turns)
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+            output = _make_request_output(text, token_ids, finish_reason=finish_reason)
+            output.finished = True
+            yield output
+
+        session = MagicMock()
+        session.call_tool = AsyncMock(
+            return_value=SimpleNamespace(content=[SimpleNamespace(text="ok")])
+        )
+
+        @asynccontextmanager
+        async def new_session(*_args):
+            yield session
+
+        serving = serving_responses_instance
+        serving.use_harmony = True
+        serving.engine_client.generate.side_effect = generate
+        serving.tool_server.new_session.side_effect = new_session
+        serving.online_renderer.render_responses_harmony_messages = MagicMock(
+            return_value=tokens_input([1, 2, 3])
+        )
+        request = ResponsesRequest(
+            input="hi",
+            max_output_tokens=10,
+            store=False,
+            tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
+        )
+        context = HarmonyContext(
+            [], ["python"], frozenset(), HarmonyParser(tokenizer), request
+        )
+        sampling_params = SamplingParams(max_tokens=10)
+
+        response = await serving.responses_full_generator(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=serving._generate_with_builtin_tools(
+                request_id="req",
+                engine_input=tokens_input([1]),
+                sampling_params=sampling_params,
+                context=context,
+            ),
+            context=context,
+            model_name="test-model",
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+
+        session.call_tool.assert_not_awaited()
+        assert serving.engine_client.generate.call_count == 1
+        assert response.status == "incomplete"
+        assert response.incomplete_details.reason == "max_output_tokens"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("max_tool_calls", [0, 2])
