@@ -450,6 +450,51 @@ def test_layer_guards_follow_the_weight_finalize(tiny_model) -> None:
 
 
 @requires_gfx950
+@pytest.mark.parametrize(
+    "cdna, default_gemm",
+    [(3, True), (4, True), (5, False)],
+    ids=["cdna3", "cdna4", "cdna5"],
+)
+def test_pooler_gemm_dispatch_follows_the_cdna_version(
+    tiny_model, monkeypatch, cdna, default_gemm
+) -> None:
+    """Fails if the pooler or unpooler leaves the default unquantized GEMM
+    dispatch on CDNA3 and CDNA4, or leaves PyTorch linear on CDNA5. (CDNA2 is
+    not covered: the MXFP4 experts need CDNA4 kernels and refuse to build.)"""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.models.muse_spark.amd.model import (
+        MuseSparkMoE,
+        MuseSparkTorchLinearMethod,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    vllm_config = tiny_model.vllm_config
+    monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: cdna)
+    # The layer registers itself by prefix; keep the shared model's copy clean.
+    monkeypatch.setattr(vllm_config.compilation_config, "static_forward_context", {})
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda", 0),
+    ):
+        moe = MuseSparkMoE(vllm_config, layer_idx=1, prefix="model.layers.1.mlp")
+
+    expected = UnquantizedLinearMethod if default_gemm else MuseSparkTorchLinearMethod
+    assert type(moe.pooler.quant_method) is expected
+    assert type(moe.unpooler.quant_method) is expected
+
+
+@requires_gfx950
+def test_pooler_uses_the_default_gemm_dispatch_on_the_tiny_model(tiny_model) -> None:
+    """The model as built on this GPU (CDNA4) keeps no PyTorch-linear pin."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    moe = tiny_model.layers[1].feed_forward
+    assert type(moe.pooler.quant_method) is UnquantizedLinearMethod
+    assert type(moe.unpooler.quant_method) is UnquantizedLinearMethod
+
+
+@requires_gfx950
 def test_weight_views_alias_the_rank_slices(tiny_model) -> None:
     """The launches read vLLM's parameters in place; only the norm
     multipliers are copies. Rank 1 of 2 reads the second row half."""
