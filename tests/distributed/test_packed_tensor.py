@@ -10,6 +10,8 @@ import pytest
 import torch
 
 from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_NUM_BUFFERS,
+    chunk_layout,
     packed_ipc_consumer,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
@@ -134,7 +136,18 @@ def roundtrip(params: list[tuple[str, torch.Tensor]], buffer_size_bytes: int):
         return fill_pending_at_load[0]
 
     consume(sleep=False)
-    assert consume(sleep=True), "the fill finished before the first load"
+    # The host waits for a slot's previous chunk before reusing it, so the
+    # first load can only be queued before the fill ends when the first
+    # tensor is complete within the first `num_buffers` chunks.
+    layout = chunk_layout(((t.shape, t.dtype) for _, t in params), buffer_size_bytes)
+    first_load = next(
+        k
+        for k, (_, pieces) in enumerate(layout)
+        if any(p.end == params[p.position][1].nbytes for p in pieces)
+    )
+    fill_pending = consume(sleep=True)
+    if first_load < DEFAULT_PACKED_NUM_BUFFERS:
+        assert fill_pending, "the fill finished before the first load"
 
 
 # --- Integration Tests: Producer-Consumer Roundtrip ---
@@ -264,8 +277,8 @@ class TestPackedBroadcastDeferredConsumer:
             group=group,
             src=0,
             post_unpack_func=post_unpack_func,
-            # Smaller than one tensor, so each tensor gets its own pack.
-            buffer_size_bytes=numel * 4 - 1,
+            # Exactly one tensor, so each tensor gets its own pack.
+            buffer_size_bytes=numel * 4,
             num_buffers=2,
         )
         torch.accelerator.synchronize()
@@ -321,8 +334,8 @@ class TestPackedBroadcastDeferredConsumer:
             group=group,
             src=0,
             post_unpack_func=post_unpack_func,
-            # Smaller than one tensor, so each tensor gets its own pack.
-            buffer_size_bytes=numel * 4 - 1,
+            # Exactly one tensor, so each tensor gets its own pack.
+            buffer_size_bytes=numel * 4,
             num_buffers=num_buffers,
         )
         torch.accelerator.synchronize()
@@ -803,15 +816,17 @@ class TestChunkedRoundtrip:
         """A tensor split across chunks on two slots: the callback that gets
         it (second slot) runs after the first slot's copies, even when those
         are slow."""
-        big = torch.randn(8, 64, device="cuda")  # 2048 B: chunks of 1000, 1000, 48
+        big = torch.randn(8, 64, device="cuda")  # 2048 B: chunks of 1024, 1024
         producer_group = MockCommunicationGroup()
         packed_nccl_broadcast_producer(
             iterator=iter([("big", big)]),
             group=producer_group,
             src=0,
             post_iter_func=lambda x: x[1],
-            buffer_size_bytes=1000,
+            buffer_size_bytes=1024,
         )
+        # two chunks, so the tensor completes on the second slot
+        assert len(producer_group.broadcasted_tensors) == 2
         group = MockConsumerCommunicationGroup(producer_group.broadcasted_tensors)
         got: list[torch.Tensor] = []
         first_slot = pt._get_streams(torch.accelerator.current_device_index(), 2)[0]
@@ -830,7 +845,7 @@ class TestChunkedRoundtrip:
                 group=group,
                 src=0,
                 post_unpack_func=lambda items: got.extend(t.clone() for _, t in items),
-                buffer_size_bytes=1000,
+                buffer_size_bytes=1024,
             )
         torch.accelerator.synchronize()
         assert slept and len(got) == 1 and torch.equal(got[0], big)
