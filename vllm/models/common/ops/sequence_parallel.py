@@ -137,11 +137,11 @@ def is_sp_active(parallel_config: "ParallelConfig") -> bool:
 
     True only if SP is enabled, there's a live batch to check (a forward
     context with a batch descriptor), and its token count is at least
-    ``sequence_parallel_min_tokens``.
+    `sequence_parallel_min_tokens`.
 
     Args:
-        parallel_config: Pass the ``vllm_config`` a model's ``__init__``
-            receives, cached on ``self`` -- not ``get_current_vllm_config()``,
+        parallel_config: Pass the `vllm_config` a model's `__init__`
+            receives, cached on `self` -- not `get_current_vllm_config()`,
             which isn't set during a real forward call in the worker process.
 
     """
@@ -167,24 +167,24 @@ def mark_sp_region(
 
     Args:
         entry_after: Row-parallel layer whose output enters the region --
-            it's reduce-scattered down to a local shard. ``None`` for the
-            first region, whose input embeddings the model ``sp_shard``s.
+            it's reduce-scattered down to a local shard. `None` for the
+            first region, whose input embeddings the model `sp_shard`s.
         exit_before: Column-parallel layer whose input exits the region --
             it's all-gathered back to full tokens before its own GEMM.
-            ``None`` for the last region, whose shard is gathered by the
+            `None` for the last region, whose shard is gathered by the
             model after the final norm.
         parallel_config: The parallelism configuration.
 
     Everything in between (typically a residual add + norm) runs on the
-    local shard. Only each layer's ``forward`` is wrapped; no other
-    behavior (bias, ``gather_output``, ``return_bias``, ...) changes.
+    local shard. Only each layer's `forward` is wrapped; no other
+    behavior (bias, `gather_output`, `return_bias`, ...) changes.
 
     While SP is active, the wrapper runs a comm+GEMM kernel: a fused
-    (symmetric-memory) one if ``enable_async_tp``
+    (symmetric-memory) one if `enable_async_tp`
     is set and the layer's quant method has one, otherwise an unfused one
     built on plain collectives.
 
-    No-op when ``enable_sequence_parallel`` is off.
+    No-op when `enable_sequence_parallel` is off.
 
     """
     if not parallel_config.enable_sequence_parallel:

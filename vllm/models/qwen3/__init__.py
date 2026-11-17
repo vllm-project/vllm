@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3 (dense) model — vendor-specific entry point.
 
-Dispatches to ``nvidia/`` based on the current platform, otherwise falls
+Dispatches to `nvidia/` based on the current platform, otherwise falls
 back to the upstream model in vllm.model_executor.models.
 """
 

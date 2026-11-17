@@ -39,7 +39,7 @@ def _init_base_fused_kernel(
 def init_fused_comm_kernel(
     linear: ColumnParallelLinear | RowParallelLinear,
 ) -> LinearCommKernel | None:
-    """Return a fused (symmetric-memory) comm+GEMM kernel, or ``None``."""
+    """Return a fused (symmetric-memory) comm+GEMM kernel, or `None`."""
     kernel = _init_base_fused_kernel(linear)
     if kernel is not None:
         return kernel

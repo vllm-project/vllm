@@ -14,8 +14,8 @@ from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_sc
 
 
 class LinearCommKernel(ABC):
-    """Comm+GEMM for a linear layer at an SP region boundary. ``apply``
-    replaces the layer's ``forward`` while SP is active."""
+    """Comm+GEMM for a linear layer at an SP region boundary. `apply`
+    replaces the layer's `forward` while SP is active."""
 
     def __init__(self, layer: LinearBase) -> None:
         self.layer = layer
@@ -33,7 +33,7 @@ class LinearCommKernel(ABC):
     @staticmethod
     @contextmanager
     def _replace(source: MethodType, target: Callable):
-        """Swap the bound method ``source`` for ``target`` for one call."""
+        """Swap the bound method `source` for `target` for one call."""
         owner, name = source.__self__, source.__name__
         setattr(owner, name, target)
         try:
@@ -42,9 +42,9 @@ class LinearCommKernel(ABC):
             setattr(owner, name, source)
 
     def column_parallel_forward(self, x: torch.Tensor) -> Any:
-        """``ColumnParallelLinear.forward``, called through the pre-patch
-        bound method captured in ``__init__`` so it still goes through
-        ``apply``'s swapped-out quant method GEMM."""
+        """`ColumnParallelLinear.forward`, called through the pre-patch
+        bound method captured in `__init__` so it still goes through
+        `apply`'s swapped-out quant method GEMM."""
         return self.layer_forward(x)
 
     def row_parallel_forward(
@@ -52,8 +52,8 @@ class LinearCommKernel(ABC):
         x: torch.Tensor,
         reduce_scatter: bool = False,
     ) -> Any:
-        """``RowParallelLinear.forward`` with the all-reduce replaced by
-        ``reduce_scatter``, or by nothing if the GEMM already scatters its
+        """`RowParallelLinear.forward` with the all-reduce replaced by
+        `reduce_scatter`, or by nothing if the GEMM already scatters its
         output. Each rank then adds the bias to its own token shard."""
         layer = self.layer
         assert layer.input_is_parallel
@@ -69,29 +69,29 @@ class LinearCommKernel(ABC):
 
 
 class FusedCommGemmKernel(LinearCommKernel):
-    """A ``LinearCommKernel`` that works by swapping out the quant
+    """A `LinearCommKernel` that works by swapping out the quant
     method's GEMM for one call, fusing a symmetric-memory collective into it.
 
-    Subclasses implement ``source_gemm_method`` (the bound GEMM method to
-    replace) and ``target_gemm_method`` (the fused comm+GEMM replacement,
+    Subclasses implement `source_gemm_method` (the bound GEMM method to
+    replace) and `target_gemm_method` (the fused comm+GEMM replacement,
     with the same signature as the source method).
     """
 
     @abstractmethod
     def source_gemm_method(self) -> MethodType:
         """The quant method's GEMM method this kernel fuses a collective
-        into, e.g. ``self._fp8_kernel.apply_scaled_mm``."""
+        into, e.g. `self._fp8_kernel.apply_scaled_mm`."""
         raise NotImplementedError
 
     @abstractmethod
     def target_gemm_method(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-        """Fused comm+GEMM replacement for ``source_gemm_method``, with the
+        """Fused comm+GEMM replacement for `source_gemm_method`, with the
         same signature."""
         raise NotImplementedError
 
 
 class FusedAllGatherGemmKernel(FusedCommGemmKernel):
-    """Symmetric-memory AllGather + GEMM for the ``ColumnParallelLinear``
+    """Symmetric-memory AllGather + GEMM for the `ColumnParallelLinear`
     exiting an SP region."""
 
     def apply(self, x: torch.Tensor) -> Any:
@@ -100,8 +100,8 @@ class FusedAllGatherGemmKernel(FusedCommGemmKernel):
 
 
 class FusedGemmReduceScatterKernel(FusedCommGemmKernel):
-    """Symmetric-memory GEMM + ReduceScatter for the ``RowParallelLinear``
-    entering an SP region. ``target_gemm_method`` already scatters its
+    """Symmetric-memory GEMM + ReduceScatter for the `RowParallelLinear`
+    entering an SP region. `target_gemm_method` already scatters its
     output, so no further reduce-scatter is applied."""
 
     def apply(self, x: torch.Tensor) -> Any:
@@ -110,12 +110,12 @@ class FusedGemmReduceScatterKernel(FusedCommGemmKernel):
 
 
 class UnfusedAllGatherGemm(LinearCommKernel):
-    """All-gather the input shard, then the layer's plain ``forward``.
+    """All-gather the input shard, then the layer's plain `forward`.
 
-    ``all_gather_input`` controls whether ``apply`` all-gathers ``x`` itself
-    before calling ``forward``. Subclasses that instead gather some
-    derivative of ``x`` (e.g. a quantized activation) from within a swapped
-    GEMM method should pass ``all_gather_input=False``.
+    `all_gather_input` controls whether `apply` all-gathers `x` itself
+    before calling `forward`. Subclasses that instead gather some
+    derivative of `x` (e.g. a quantized activation) from within a swapped
+    GEMM method should pass `all_gather_input=False`.
     """
 
     def __init__(self, layer: LinearBase, all_gather_input: bool = True) -> None:

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared infrastructure for e2e correctness tests of model-level sequence
-parallelism (``--enable-sequence-parallel``) and its fused comm+GEMM kernels
-(``--enable-async-tp``) against a plain TP baseline.
+parallelism (`--enable-sequence-parallel`) and its fused comm+GEMM kernels
+(`--enable-async-tp`) against a plain TP baseline.
 
-Each model's own ``test_sequence_parallel.py`` (e.g.
-``tests/models/qwen3/test_sequence_parallel.py``) defines its model list and
-calls ``run_tp_sp_generation_test`` from a parametrized test.
+Each model's own `test_sequence_parallel.py` (e.g.
+`tests/models/qwen3/test_sequence_parallel.py`) defines its model list and
+calls `run_tp_sp_generation_test` from a parametrized test.
 """
 
 from dataclasses import dataclass
@@ -170,9 +170,9 @@ def run_tp_sp_generation_test(
     settings: SPTestSettings,
     num_gpus_available: int,
 ) -> None:
-    """Compare ``--enable-sequence-parallel``/``--enable-async-tp`` text
+    """Compare `--enable-sequence-parallel`/`--enable-async-tp` text
     generation against a plain TP baseline for every parallel setup in
-    ``settings``."""
+    `settings`."""
     comparisons = []
     for _, parallel_setup, runner, test_options in settings.iter_params(model_id):
         comparison = build_sp_args(

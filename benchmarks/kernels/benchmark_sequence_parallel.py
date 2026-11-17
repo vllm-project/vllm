@@ -1,36 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the SP/AsyncTP comm+GEMM kernels in
-``vllm.model_executor.kernels.sequence_parallel`` against each other and
+`vllm.model_executor.kernels.sequence_parallel` against each other and
 against doing the GEMM and the collective separately.
 
 Two region-boundary directions are benchmarked, matching the two linear
-kinds ``mark_sp_region`` wraps:
+kinds `mark_sp_region` wraps:
 
-- ``qkv``/``gate_up`` (``--proj``): a ``ColumnParallelLinear`` *entering* an
+- `qkv`/`gate_up` (`--proj`): a `ColumnParallelLinear` *entering* an
   SP region -- all-gather the token-sharded input, then GEMM.
-- ``o``/``down``: a ``RowParallelLinear`` *exiting* an SP region -- GEMM,
+- `o`/`down`: a `RowParallelLinear` *exiting* an SP region -- GEMM,
   then reduce-scatter the output back to a token shard.
 
 For each, five candidates are timed:
 
-- ``gemm``: the GEMM alone, on the same (already-gathered) input the fused/
+- `gemm`: the GEMM alone, on the same (already-gathered) input the fused/
   unfused paths feed it -- the compute floor.
-- ``collective``: the all-gather/reduce-scatter alone, on the same message
+- `collective`: the all-gather/reduce-scatter alone, on the same message
   size -- the comm floor.
-- ``unfused``: what ``--enable-sequence-parallel`` runs without
-  ``--enable-async-tp`` -- a plain collective, then (or after) the layer's
+- `unfused`: what `--enable-sequence-parallel` runs without
+  `--enable-async-tp` -- a plain collective, then (or after) the layer's
   own GEMM.
-- ``fused``: what ``--enable-async-tp`` swaps in instead -- a
+- `fused`: what `--enable-async-tp` swaps in instead -- a
   symmetric-memory kernel that overlaps the collective with the GEMM,
-  chosen by ``init_fused_comm_kernel`` exactly as in serving.
-- ``baseline``: plain TP with neither SP nor AsyncTP enabled. For
-  ``qkv``/``gate_up`` this is identical to ``gemm`` (the input is already
+  chosen by `init_fused_comm_kernel` exactly as in serving.
+- `baseline`: plain TP with neither SP nor AsyncTP enabled. For
+  `qkv`/`gate_up` this is identical to `gemm` (the input is already
   full/replicated, so there is no collective at this boundary at all). For
-  ``o``/``down`` this is the GEMM followed by a full
-  ``tensor_model_parallel_all_reduce`` of the ``[M, N]`` partial sums --
-  what ``RowParallelLinear(reduce_results=True)`` actually runs -- not the
-  smaller reduce-scatter ``collective``/``unfused``/``fused`` use.
+  `o`/`down` this is the GEMM followed by a full
+  `tensor_model_parallel_all_reduce` of the `[M, N]` partial sums --
+  what `RowParallelLinear(reduce_results=True)` actually runs -- not the
+  smaller reduce-scatter `collective`/`unfused`/`fused` use.
 
 Run a TP2 sweep over the Qwen3-32B projections with:
 
@@ -38,7 +38,7 @@ Run a TP2 sweep over the Qwen3-32B projections with:
         benchmarks/kernels/benchmark_sequence_parallel.py --proj qkv
 
 Runs on NVIDIA and AMD (ROCm) unchanged -- both expose CUDA-graph capture
-through ``torch.cuda``.
+through `torch.cuda`.
 """
 
 import argparse
@@ -142,8 +142,8 @@ def make_linear(
     world_size: int,
     device: torch.device,
 ) -> ColumnParallelLinear | RowParallelLinear:
-    """Build the unquantized (BF16) ``LinearBase`` the real model would wire
-    ``mark_sp_region`` around for ``proj``."""
+    """Build the unquantized (BF16) `LinearBase` the real model would wire
+    `mark_sp_region` around for `proj`."""
     with torch.device(device):
         if proj in _AG_PROJECTIONS:
             linear = ColumnParallelLinear(
@@ -177,13 +177,13 @@ def make_linear(
 def pick_fused_kernel(
     linear: ColumnParallelLinear | RowParallelLinear,
 ) -> LinearCommKernel | None:
-    """The kernel ``--enable-async-tp`` would swap in."""
+    """The kernel `--enable-async-tp` would swap in."""
     return init_fused_comm_kernel(linear)
 
 
 @contextmanager
 def accelerator_graph_apis():
-    """On NVIDIA/AMD, ``torch.cuda`` already *is* the graph/stream/event API
+    """On NVIDIA/AMD, `torch.cuda` already *is* the graph/stream/event API
     (ROCm's build hipifies it in place)."""
     if not current_platform.is_xpu():
         yield
@@ -480,11 +480,11 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
 def make_device_barrier(tp_group) -> Callable[[], None]:
     """A cheap device-side rendezvous to order each timed replay after every
     rank reaches it, without including the rendezvous itself in the timed
-    interval (it runs before ``start.record()``).
+    interval (it runs before `start.record()`).
 
-    Prefers the direct pynccl/RCCL call bypassing ``torch.distributed``
+    Prefers the direct pynccl/RCCL call bypassing `torch.distributed`
     dispatch overhead, same as vLLM uses internally (NVIDIA/AMD); falls
-    back to a plain ``dist.all_reduce`` for backends without one.
+    back to a plain `dist.all_reduce` for backends without one.
     """
     device = torch.accelerator.current_device_index()
     sync_input = torch.zeros(1, device=device)
