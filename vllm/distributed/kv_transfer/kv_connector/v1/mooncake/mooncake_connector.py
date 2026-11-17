@@ -689,7 +689,6 @@ class MooncakeXferMetadata(
     remote_pp_rank: int = 0
     remote_pcp_rank: int = 0
     remote_pcp_size: int = 1
-    pcp_cache_mode: str = "replicated"
     cache_specs: dict[str, str] = msgspec.field(default_factory=dict)
     logical_block_size: int = 0
     kernel_block_size: int = 0
@@ -1117,11 +1116,7 @@ class MooncakeLayerwiseRequestHandler:
         worker = self._worker
         if meta.protocol_version != 1:
             raise ValueError("Mooncake peers require the same layerwise protocol")
-        if (
-            meta.remote_pcp_size < 1
-            or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size
-            or meta.pcp_cache_mode != "replicated"
-        ):
+        if meta.remote_pcp_size < 1 or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size:
             raise ValueError("Layerwise PCP requires complete cache replicas")
         if (
             meta.logical_block_size != worker.logical_block_size
