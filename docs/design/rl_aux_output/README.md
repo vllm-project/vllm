@@ -45,10 +45,9 @@ The stack lands on the `rl/aux-output` branch:
 | --- | --- | --- |
 | 1 | Per-segment cache salts (generic) | `cache_salt_segments: list[(start, salt)]` on `EngineCoreRequest` and `Request`; `Request.add_cache_salt_segment`. A hash block's extra keys include the segments overlapping it, with starts relative to the block. Requests without segments hash as before. |
 | 2 | Session objects | `aux_session` and `aux_version_segments`; the session salt; salts at admission, at weight updates and when a waiting request is scheduled; full and tail objects; per-stage objects under pipeline parallelism; `aux_output_keys` and `aux_version_segments` in the response; the Mooncake object store, `read_aux_rows` and `aux_session_pattern`; writes drained at every pause; startup checks. |
-| 3 | Indexer on the DeepSeek V4 CPU backend | Rejects indexer top-k capture there: that attention path does not capture selections. |
-| 4 | Hidden states | `enable_return_hidden_states`: field `hidden_states` of session objects. |
-| 5 | Top-k logprobs | `return_topk_logprobs = k`: fields `topk_token_ids` and `topk_logprobs` of session objects, computed only for session rows, in bounded chunks. |
-| 6 | Objects without routed experts | `object_key_prefix` with any enabled output, so dense models can deliver hidden states and top-k logprobs. |
+| 3 | Hidden states | `enable_return_hidden_states`: field `hidden_states` of session objects. |
+| 4 | Top-k logprobs | `return_topk_logprobs = k`: fields `topk_token_ids` and `topk_logprobs` of session objects, computed only for session rows, in bounded chunks. |
+| 5 | Objects without routed experts | `object_key_prefix` with any enabled output, so dense models can deliver hidden states and top-k logprobs. |
 
 Fixes from review sit on top of each layer as their own commits. One KV connector change belongs to layer 2: the offloading connector derives its offload keys again from the first chunk whose block hash changed.
 

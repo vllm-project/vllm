@@ -71,8 +71,7 @@ manual. Shutdown releases captured graphs before unbinding Indexer capture.
 
 DeepSeek V4 replay forces backbone scoring even for short contexts so the common
 capture entry always sees freshly scored TopK. ROCm DeepSeek V4 `--monokernel`
-and the DeepSeek V4 CPU attention bypass that entry and are rejected with
-`--enable-return-indexer-topk`.
+bypasses that entry and is rejected with `--enable-return-indexer-topk`.
 
 Indexer storage is `4 * num_indexer_sources * index_topk` bytes/token. The
 record adds the byte widths of all enabled artifacts, including routed experts.
