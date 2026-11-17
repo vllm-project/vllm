@@ -1599,7 +1599,11 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    if current_platform.is_rocm() and not torch.cuda.is_initialized():
+    if (
+        current_platform.is_rocm()
+        and not torch.cuda.is_initialized()
+        and envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn"
+    ):
         # HIP memory queries initialize HIP, which forces vLLM to spawn instead
         # of fork its engine processes; poll from a forked child instead.
         with ProcessPoolExecutor(max_workers=1, mp_context=get_context("fork")) as pool:
