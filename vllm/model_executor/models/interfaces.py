@@ -134,7 +134,7 @@ class StreamingDiarizedTranscriptParser:
     ) -> None:
         self.model_cls = model_cls
         self.model_config = model_config
-        self._text = ""
+        self._text_parts: list[str] = []
 
     def process_delta(
         self, text_delta: str, finished: bool
@@ -145,12 +145,13 @@ class StreamingDiarizedTranscriptParser:
             ValueError: If the output is not a valid diarized transcript.
 
         """
-        self._text += text_delta
+        if text_delta:
+            self._text_parts.append(text_delta)
         if not finished:
             return
-        segments = self.model_cls.parse_diarized_transcript(
-            self._text, self.model_config
-        )
+        text = "".join(self._text_parts)
+        self._text_parts.clear()
+        segments = self.model_cls.parse_diarized_transcript(text, self.model_config)
         if not segments:
             raise ValueError("Model output did not contain a valid diarized transcript")
         yield from segments
