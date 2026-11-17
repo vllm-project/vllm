@@ -4,13 +4,15 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
   date_added: 2026-08-27
-  date_updated: 2026-11-05
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
   performance_headline: "320B MoE with 18B active parameters and 1M-token context"
   hardware:
     h100: verified
+    # FP8 DEP4 and DEP8, text only, with DeepGEMM Mega MoE (vLLM #66812).
+    h200: verified
     b200: verified
     gb200: verified
     # FP8 TP4 with MTP, stock and latency_specialized decode, validated 2026-10
@@ -145,6 +147,24 @@ hardware_notes:
       `--additional-config '{"decode_backend":"latency_specialized"}'`. See the guide's
       GB300 section for the requirements.
 
+presets:
+  # The BF16 checkpoint has no SM90 Mega MoE kernel, hence FP8 only. Text only:
+  # DP ranks with image/video enabled fail the encoder profiling run on H200
+  # (illegal memory access in FlashAttention), with any MoE backend.
+  h200_dep_mega_moe:
+    label: "Mega MoE"
+    hardware: h200
+    strategy: single_node_dep
+    variants: [default]
+    default: true
+    description: "Routed and shared FP8 experts in DeepGEMM Mega MoE. Needs TP1 (DP + EP). Text only."
+    source: { label: "vLLM #66812", href: "https://github.com/vllm-project/vllm/pull/66812" }
+    args:
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--limit-mm-per-prompt"
+      - '{"image":0,"video":0}'
+
 strategy_overrides:
   pd_cluster:
     # KDA conv-state / KV-cache layouts must match on both pools for NIXL
@@ -260,6 +280,35 @@ guide: |
   `additional_config.policy` overrides its per-token-count entry; for example
   `{"decode_backend":"latency_specialized","policy":{"boundary":""}}` runs the fused all-reduce +
   mHC boundary stock.
+
+  ### FP8 Mega MoE on H200 (DP + EP)
+
+  `--moe-backend deep_gemm_mega_moe` runs the FP8 checkpoint's routed and shared experts in
+  one DeepGEMM Mega MoE kernel on H200 ([vLLM #66812](https://github.com/vllm-project/vllm/pull/66812)),
+  using the checkpoint's 128x128 block scales as they are. It needs data + expert parallelism
+  with TP1; on H200 the builder's **Data + Expert Parallel** strategy adds it through the
+  **Mega MoE** preset. The BF16 checkpoint has no Hopper Mega MoE kernel. On 8×H200 it served
+  22-44% more output tokens/s than the default MoE backend on random 1K/1K and 8K/256 prompts
+  at concurrency 1 to 256.
+
+  The command is text only. With image and video inputs enabled, DP ranks on H200 currently
+  fail the encoder profiling run at startup with an illegal memory access, with any MoE
+  backend. On 4 GPUs (`--data-parallel-size 4`), also pass `--max-num-seqs 948`: the default
+  of 1024 exceeds the KDA state blocks each rank has.
+
+  ```bash
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --limit-mm-per-prompt '{"image":0,"video":0}' \
+    --disable-flashinfer-autotune \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --served-model-name zai-org/GLM-5.3-Flash
+  ```
 
   ### Prefill/Decode disaggregation (single node, TP4 + TP4)
 
