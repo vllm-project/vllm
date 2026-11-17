@@ -143,6 +143,11 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
         for name, p in model.named_parameters(remove_duplicate=False)
         if hasattr(p, "_ckpt")
     )
+    # every module's parameters by name before post-load processing (stand-ins
+    # included), which `begin` restores for the rerun
+    model._ckpt_param_objects = {
+        module: dict(module._parameters) for module in model.modules()
+    }
 
 
 def _check_params_kept(model: torch.nn.Module) -> None:
@@ -202,6 +207,31 @@ def _checkpoint_views(
     return views
 
 
+def _undo_parameter_renames(model: torch.nn.Module) -> None:
+    """Undo `move_parameter` and `retire_parameter`, so the rerun of post-load
+    processing sees the parameters as cold start did: each under its names
+    from before processing (a stand-in's included) and live. Names processing
+    registered for a checkpoint tensor are dropped, and retired flags and
+    runtime names are cleared, also on tensors processing created."""
+    recorded = model._ckpt_param_objects
+    for module in model.modules():
+        before = recorded.get(module, {})
+        for name, p in list(module._parameters.items()):
+            if p is None or (hasattr(p, "_ckpt") and not _owned(model, p)):
+                continue
+            p.__dict__.pop("retired", None)
+            p.__dict__.pop("runtime_name", None)
+            if name not in before and _owned(model, p):
+                del module._parameters[name]
+        for name, p in before.items():
+            if (
+                module._parameters.get(name) is not p
+                and p is not None
+                and (p.is_meta or _owned(model, p))
+            ):
+                module._parameters[name] = p
+
+
 @torch.no_grad()
 def begin_direct_reload(model: torch.nn.Module) -> None:
     """Make every tensor writable by its checkpoint weight loader.
@@ -224,6 +254,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+    _undo_parameter_renames(model)
     # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
     for module, name in model._ckpt_padding_fill:
         t = module._parameters.get(name)
