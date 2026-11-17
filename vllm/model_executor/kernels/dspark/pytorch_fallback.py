@@ -3,7 +3,7 @@
 """PyTorch reference implementation for DSpark confidence head.
 
 Matches exactly the semantics of the current vLLM DSparkConfidenceHead:
-``sigmoid(cat([hidden, markov_embed]) @ W / temp)`` computed in fp32 with
+`sigmoid(cat([hidden, markov_embed]) @ W / temp)` computed in fp32 with
 fp32 weights. Used as a ground truth in unit tests and as the unfused
 fallback when the TileLang kernel is unavailable.
 """

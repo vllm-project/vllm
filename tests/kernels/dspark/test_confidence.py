@@ -89,7 +89,7 @@ def test_fused_vs_pytorch_fallback(n, H, r):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_strided_hidden_input():
     """TileLang T.Tensor assumes contiguous layout. The speculator's
-    ``head_hidden[sample_indices]`` produces a contiguous result in practice
+    `head_hidden[sample_indices]` produces a contiguous result in practice
     (gather over dim-0 writes a fresh contiguous buffer), so the contract
     is: last-dim stride must be 1. We verify here that a contiguous tensor
     produced from a strided view runs correctly.
@@ -167,7 +167,7 @@ def test_dispatch_rejects_huge_batch():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_temperature_scaling():
-    """temp parameter must actually shift the sigmoid."""
+    """Temp parameter must actually shift the sigmoid."""
     if not is_dspark_fused_available():
         pytest.skip("TileLang fused path unavailable")
     n, H, r = 32, 1024, 8

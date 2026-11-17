@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TileLang dispatch layer for the DSpark confidence head kernel.
 
-Implements :class:`VllmJitKernel` so vLLM's startup warmup can pre-compile
+Implements `VllmJitKernel` so vLLM's startup warmup can pre-compile
 every (n_embed, markov_rank) shape the model will hit, and registers the
-custom op via :func:`direct_register_custom_op` so CUDA-Graph capture and
-``torch.compile`` pass through transparently.
+custom op via `direct_register_custom_op` so CUDA-Graph capture and
+`torch.compile` pass through transparently.
 """
 
 from __future__ import annotations

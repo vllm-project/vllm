@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Raw TileLang kernel for DSpark confidence head.
 
-Computes ``sigmoid((x0 ; x1) @ W / temp)`` in a single kernel launch,
-where ``(x0 ; x1)`` is the logical concatenation of ``x0`` (hidden) and
-``x1`` (markov_embed) along the feature dim.
+Computes `sigmoid((x0 ; x1) @ W / temp)` in a single kernel launch,
+where `(x0 ; x1)` is the logical concatenation of `x0` (hidden) and
+`x1` (markov_embed) along the feature dim.
 
 Unlike the DeepInfer reference implementation (`dflash.py:12-72`), weights
-are FP32 (not BF16), matching vLLM's ``ReplicatedLinear(params_dtype=float32)``
+are FP32 (not BF16), matching vLLM's `ReplicatedLinear(params_dtype=float32)`
 for the confidence head in
-``vllm/model_executor/models/qwen3_dspark.py:112-137``.
+`vllm/model_executor/models/qwen3_dspark.py:112-137`.
 
-Layout follows ``vllm/model_executor/kernels/mhc/tilelang_kernels.py``:
-"implicit signature" style (top-level ``T.Kernel`` + variable annotations).
+Layout follows `vllm/model_executor/kernels/mhc/tilelang_kernels.py`:
+"implicit signature" style (top-level `T.Kernel` + variable annotations).
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def confidence_head_fused_tilelang(
 ) -> None:
     """Fused confidence head kernel.
 
-    ``n_embed`` and ``markov_rank`` are static specialization parameters.
+    `n_embed` and `markov_rank` are static specialization parameters.
     Tensor parameters are redeclared in the body (implicit-signature style).
     """
     n = T.dynamic("n")

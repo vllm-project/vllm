@@ -3,9 +3,9 @@
 """DSpark confidence-head fused kernel.
 
 Public API:
-  - ``dspark_confidence_fused``: dispatch entry point; runs TileLang kernel
+  - `dspark_confidence_fused`: dispatch entry point; runs TileLang kernel
     when the input shapes/dtypes/platform allow, else PyTorch fallback.
-  - ``dspark_confidence_torch``: pure-PyTorch reference (used for testing
+  - `dspark_confidence_torch`: pure-PyTorch reference (used for testing
     and as the fallback path).
 """
 
@@ -51,13 +51,13 @@ def dspark_confidence_fused(
 ) -> torch.Tensor | None:
     """Compute sigmoid((hidden ; markov_embed) @ weight / temp) with fused kernel.
 
-    Returns ``None`` when the fused kernel isn't applicable (CPU tensors,
-    wrong dtypes, batch outside ``[min_fused_batch, max_fused_batch]``,
+    Returns `None` when the fused kernel isn't applicable (CPU tensors,
+    wrong dtypes, batch outside `[min_fused_batch, max_fused_batch]`,
     non-V4-Flash shape, wrong strides, etc.) so the caller can fall back
     to the PyTorch reference path.
 
     Gating policy:
-      - Platform: SM90+ CUDA only (checked by ``is_dspark_fused_available``).
+      - Platform: SM90+ CUDA only (checked by `is_dspark_fused_available`).
       - Shape: only DeepSeek-V4-Flash (H=7168, r=32) has been validated
         end-to-end. Smaller DSpark variants (e.g. Qwen3-4B-DSpark at
         H=2560, r=256) show parity on consumer GPUs and a regression on
@@ -68,7 +68,7 @@ def dspark_confidence_fused(
       - Batch ceiling: >2048 rows is a sanity limit to guard the kernel's
         accumulator layout.
 
-    Returns: ``(n,) fp32`` post-sigmoid probabilities, or ``None``.
+    Returns: `(n,) fp32` post-sigmoid probabilities, or `None`.
     """
     n = hidden.shape[0]
     # vLLM's ReplicatedLinear stores weight as (output_size=1, input_size=H+r).
