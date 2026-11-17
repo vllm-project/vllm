@@ -62,8 +62,7 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     )
     logger.info("Warmed up Qwen4Exp QSA decode kernels: %s.", profiles)
 
-    # Compile the gvr_2 top-k engines the QSA top-k dispatch selects by
-    # default on SM100, so neither CUDA-graph capture nor serving compiles.
+    # Pre-compile gvr_2 so neither CUDA-graph capture nor serving compiles it.
     block_topk = indexer.token_topk // indexer.compress_ratio
     decode_width = (
         block_table_for(indexer.compressed_key_cache.prefix).shape[1] * k_cache.shape[1]
@@ -73,8 +72,7 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         indexer.compress_ratio,
         decode_width,
     )
-    # The prefill width is always float4-aligned; warmup_gvr2_topk skips a
-    # decode width the dispatch would not route to gvr_2.
+    # prefill_width is float4-aligned, so this only checks platform and k.
     if use_gvr2_topk(indexer.topk_backend, block_topk, prefill_width):
         warmup_gvr2_topk(
             indexer.topk_backend,

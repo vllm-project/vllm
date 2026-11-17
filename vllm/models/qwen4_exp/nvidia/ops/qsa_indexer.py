@@ -478,24 +478,19 @@ def expand_qsa_block_indices(
 def qsa_prefill_logits_width(
     max_seq_len: int, compress_ratio: int, max_columns: int
 ) -> int:
-    """Prefill logits width: no row scores beyond cdiv(max_seq_len,
-    compress_ratio) compressed columns. Rounded up to 64 to keep the row
-    stride cooperative_topk- and gvr_2-compatible."""
+    """Compressed columns any prefill row can score, rounded up to 64 for
+    the top-k kernels' row alignment."""
     width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
     return min(max(64, width), max_columns)
 
 
-# kernel_config.sparse_indexer_topk_backend values QSA implements. "auto"
-# takes gvr_2 wherever it can rank the logits; the explicit values force
-# their kernel and raise when it cannot run.
+# sparse_indexer_topk_backend values QSA supports; "auto" prefers gvr_2.
 QSA_TOPK_BACKENDS = ("auto", "flashinfer_gvr2", "cooperative", "persistent")
 
 
 def use_gvr2_topk(topk_backend: str, block_topk: int, width: int) -> bool:
-    """Whether _topk ranks logits of this width with gvr_2. Both QSA
-    producers emit contiguous fp32 logits and 16B-aligned row slices of a
-    contiguous int32 block_indices, so only k and the width (float4 rows)
-    can rule it out."""
+    """Whether _topk uses gvr_2. QSA logits are contiguous fp32, so only k
+    and the width can rule it out."""
     if topk_backend not in ("auto", "flashinfer_gvr2"):
         return False
     supported = (
@@ -506,10 +501,9 @@ def use_gvr2_topk(topk_backend: str, block_topk: int, width: int) -> bool:
     )
     if topk_backend == "flashinfer_gvr2" and not supported:
         raise RuntimeError(
-            "sparse_indexer_topk_backend='flashinfer_gvr2' was requested, but "
-            "QSA's gvr_2 top-k needs the SM100 device family, FlashInfer's "
-            "gvr_2 backend, k in (512, 1024, 2048) and a logits width that is "
-            f"a multiple of 4; got k={block_topk}, width={width}"
+            "sparse_indexer_topk_backend='flashinfer_gvr2' needs SM100, "
+            "FlashInfer gvr_2, k in (512, 1024, 2048) and a width divisible "
+            f"by 4; got k={block_topk}, width={width}"
         )
     return supported
 
@@ -522,15 +516,9 @@ def warmup_gvr2_topk(
     prefill_width: int,
     max_prefill_tokens: int,
 ) -> None:
-    """Pre-compile gvr_2 for every geometry serving can produce, and size
-    the prefill kernel's zero row_starts buffer.
-
-    Compile keys (flashinfer gvr2_topk_host; re-check on pin bumps): decode
-    kernel per (k, exact width, num_tokens band, stride); prefill kernel per
-    (k, pow2 width bucket), so prefill_width covers all narrower widths.
-    A missed geometry compiles once, eagerly - never during graph capture,
-    whose pre-capture eager pass runs each captured shape first.
-    """
+    """Pre-compile gvr_2 for every serving geometry and size the zero
+    row_starts buffer. Decode compiles per exact width, prefill per pow2
+    width bucket, so prefill_width covers every narrower chunk."""
     global _gvr2_prefill_zero_starts
     from flashinfer.topk_varlen.kernels.gvr2_topk_host import (
         warmup_prefill,
@@ -551,9 +539,8 @@ def warmup_gvr2_topk(
         warmup_prefill(top_k=block_topk, max_cols=prefill_width)
 
 
-# All-zero, read-only row_starts for the prefill kernel: its window contract
-# needs a per-token start column, and every QSA window starts at 0. Warmup
-# sizes it to the largest prefill chunk, so serving only slices it.
+# Zero row_starts for the prefill kernel (QSA windows start at column 0).
+# Sized by warmup; serving only slices it.
 _gvr2_prefill_zero_starts: torch.Tensor | None = None
 
 
@@ -566,13 +553,12 @@ def _gvr2_topk(
 ) -> None:
     from flashinfer.topk_varlen.kernels.gvr2_topk_host import run_varlen
 
-    # Every token is its own request (next_n=1) with its visible-block count
-    # as the kv length; both are already in compressed-block units, so
-    # compress_ratio stays 1. max_seq_len=logits width avoids host syncs.
+    # One request per token (next_n=1); visible blocks are already in
+    # compressed units. max_seq_len=width avoids a host sync.
     row_starts = None
     if prefill:
-        # The prefill kernel compiles per pow2 width bucket; chunk widths
-        # vary per batch, and the decode kernel compiles per exact width.
+        # The windowed kernel compiles per pow2 width bucket, not per exact
+        # width, which suits varying chunk widths.
         global _gvr2_prefill_zero_starts
         num_tokens = logits.shape[0]
         if (
@@ -607,8 +593,7 @@ def _topk(
     topk_backend: str,
     prefill: bool,
 ) -> None:
-    # gvr_2 (self-sampling GVR V2) for tensors it can rank; otherwise the
-    # cooperative/persistent chain, as in the DeepSeek indexer.
+    # gvr_2 where it can run, else the cooperative/persistent chain.
     block_topk = token_topk // compress_ratio
     if use_gvr2_topk(topk_backend, block_topk, logits.shape[1]):
         _gvr2_topk(logits, visible_blocks, block_topk, block_indices, prefill)
@@ -620,13 +605,12 @@ def _topk(
         and not current_platform.is_device_capability_family(110)
         and not current_platform.is_device_capability_family(120)
     )
-    # As in the DeepSeek indexer, an explicit cooperative/persistent backend
-    # selects the decode kernel; prefill keeps the chain.
+    # Explicit cooperative/persistent pick the decode kernel; prefill keeps
+    # the chain, as in the DeepSeek indexer.
     if topk_backend == "cooperative" and not prefill and not cooperative_supported:
         raise RuntimeError(
-            "sparse_indexer_topk_backend='cooperative' was requested, but "
-            f"cooperative_topk cannot rank {logits.shape[0]} decode rows "
-            "(at most 64, on SM90+ excluding SM110/SM120)"
+            "sparse_indexer_topk_backend='cooperative' supports at most 64 "
+            f"decode rows on SM90+ (not SM110/SM120); got {logits.shape[0]}"
         )
     use_cooperative_topk = cooperative_supported and (
         prefill or topk_backend != "persistent"
@@ -670,8 +654,7 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
-        topk_backend: kernel_config.sparse_indexer_topk_backend, one of
-            QSA_TOPK_BACKENDS.
+        topk_backend: One of QSA_TOPK_BACKENDS.
 
     """
     assert token_topk % compress_ratio == 0
@@ -750,8 +733,7 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
-        topk_backend: kernel_config.sparse_indexer_topk_backend, one of
-            QSA_TOPK_BACKENDS.
+        topk_backend: One of QSA_TOPK_BACKENDS.
 
     """
     assert token_topk % compress_ratio == 0

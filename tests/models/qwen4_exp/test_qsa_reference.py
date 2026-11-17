@@ -856,9 +856,8 @@ def test_qsa_prefill_selection_correctness(
     # oversized page table, so the clipped logits width comes from
     # max_seq_len, not page geometry. seq_len_slack > 0 simulates the
     # spec-decode case where the bound is an over-estimate. force_chunk
-    # drives the logits budget to one row per chunk. On SM100 every case
-    # takes the gvr_2 top-k; large-chunk-wide also exercises the prefill
-    # kernel's streaming engine and its workspace slab.
+    # drives the logits budget to one row per chunk. large-chunk-wide
+    # covers gvr_2's streaming prefill engine on SM100.
     if force_chunk:
         monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "0")
     torch.manual_seed(2)
