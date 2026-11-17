@@ -1388,6 +1388,25 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         _cleanup_file(region.mmap_path)
 
 
+def test_cleanup_keeps_kv_memoryview_valid(iid):
+    """A borrowed KV memoryview remains usable after region cleanup."""
+    region = _make_region(iid)
+    view = region.create_kv_memoryview()
+    try:
+        view[0, 0] = 17
+        region.cleanup()
+
+        assert region.mmap_obj is not None and not region.mmap_obj.closed
+        assert view[0, 0] == 17
+        view[0, 0] = 29
+        assert region.mmap_obj[0:1] == b"\x1d"
+    finally:
+        view.release()
+        if region.mmap_obj is not None and not region.mmap_obj.closed:
+            region.mmap_obj.close()
+        _cleanup_file(region.mmap_path)
+
+
 def test_backing_file_unlinked_after_barrier(iid):
     """The file must exist until the barrier releases (late joiners need the
     name) and be gone right after, so no exit path can leak it."""

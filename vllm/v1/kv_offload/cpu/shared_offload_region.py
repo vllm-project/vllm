@@ -278,6 +278,11 @@ class SharedOffloadRegion:
                 return
             self._initialize_buffer(rank, cpu_page_size)
         except Exception:
+            self._views.clear()
+            self._base = None
+            if self._mmap_view is not None:
+                self._mmap_view.release()
+                self._mmap_view = None
             self.abort_startup_cleanup()
             raise
 
@@ -481,7 +486,6 @@ class SharedOffloadRegion:
             self._views.clear()
         self._base = None
         if self._mmap_view is not None:
-            self._mmap_view.release()
             self._mmap_view = None
         if self.mmap_obj:
             retained = False
