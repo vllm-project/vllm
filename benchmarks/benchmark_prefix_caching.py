@@ -55,7 +55,7 @@ def test_prefix(llm=None, sampling_params=None, prompts=None):
     print(f"cost time {end_time - start_time}")
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Request:
     prompt: str
     prompt_len: int

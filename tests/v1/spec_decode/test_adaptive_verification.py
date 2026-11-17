@@ -224,6 +224,7 @@ def test_manager_checks_target_varlen_cudagraph_bound(
             layer_names=[layer_name],
             backend=backend,
             kv_cache_spec=None,
+            metadata_builders=[builder],
             get_metadata_builder=lambda _index: builder,
         )
 
