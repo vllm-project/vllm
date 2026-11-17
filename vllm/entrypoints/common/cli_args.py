@@ -22,6 +22,7 @@ from vllm.entrypoints.launchers.utils.constants import (
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.warmup import load_warmup_config
 from vllm.logger import init_logger
 from vllm.renderers import ReasoningEffort
 from vllm.renderers.chat_utils import (
@@ -647,3 +648,6 @@ def validate_api_server_args(args: argparse.Namespace):
             f"invalid reasoning parser: {reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
+
+    if args.warmup_config is not None:
+        args.warmup_config = load_warmup_config(args.warmup_config)
