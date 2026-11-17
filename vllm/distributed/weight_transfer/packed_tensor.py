@@ -38,7 +38,7 @@ def wire_segments(
 
     A tensor over the buffer (e.g. one layer's expert stack) is split along
     dim 0 into segments that fit it, so no side needs a buffer of its size and
-    a chunk stays under twice the buffer. A tensor whose single row exceeds
+    a chunk holds at most twice the buffer. A tensor whose single row exceeds
     the buffer travels whole.
     """
     nbytes = math.prod(shape) * dtype.itemsize

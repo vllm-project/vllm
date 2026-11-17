@@ -793,9 +793,9 @@ class TestChunkLayout:
         assert rows(0) == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
         assert rows(1) == [(0, 10), (10, 15)]
         assert rows(2) == [None]
-        # no piece is larger than the buffer, so no chunk reaches twice it
+        # no piece is larger than the buffer, so no chunk exceeds twice it
         assert all(p.nbytes <= limit for chunk in layout.chunks for p in chunk)
-        assert max(layout.sizes) < 2 * limit
+        assert max(layout.sizes) <= 2 * limit
         off = pt.chunk_layout([(big.shape, big.dtype)], limit)
         assert [p.rows for chunk in off.chunks for p in chunk] == [None]
 
@@ -884,8 +884,8 @@ class TestSegmentedRoundtrip:
         tensors.insert(3, torch.randint(0, 9, (5,), dtype=torch.uint8).cuda())
         tensors.append(torch.randn(30, 6, device="cuda", dtype=torch.float64))
         group = self._roundtrip(tensors, limit=512, segments=segments)
-        if segments:  # every chunk stays under twice the buffer
-            assert max(t.numel() for t in group.broadcasted_tensors) < 2 * 512
+        if segments:  # no chunk exceeds twice the buffer
+            assert max(t.numel() for t in group.broadcasted_tensors) <= 2 * 512
 
     def test_split_tensor_is_joined_without_a_second_copy(self):
         """The consumer writes segments into one tensor of the full size:
