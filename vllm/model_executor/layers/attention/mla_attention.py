@@ -236,6 +236,7 @@ from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
     in_piecewise_cudagraph,
+    is_forward_context_available,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -332,6 +333,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
+
+
+# ForwardContext.additional_kwargs key: layer name -> _DeferredRoPEKVCache.
+_DEFERRED_ROPE_KV_CACHE_KEY = "mla_deferred_rope_kv_cache"
 
 
 @dataclass(slots=True)
@@ -835,9 +840,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
             )
         )
-        # Set by fused_rope_unified_mla_kv_cache_update when forward_impl's fused
-        # decode query kernel also does its RoPE and KV-cache write this step.
-        self._deferred_rope_kv_cache: _DeferredRoPEKVCache | None = None
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
@@ -1131,8 +1133,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output.fill_(0)
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
-        deferred_rope_kv_cache = self._deferred_rope_kv_cache
-        self._deferred_rope_kv_cache = None
+        deferred_rope_kv_cache = (
+            get_forward_context()
+            .additional_kwargs.get(_DEFERRED_ROPE_KV_CACHE_KEY, {})
+            .get(self.layer_name)
+            if self.is_aiter_fused_rope_kv_cache_decode_query_enabled
+            and is_forward_context_available()
+            else None
+        )
 
         num_actual_toks = attn_metadata.num_actual_tokens
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
@@ -1170,9 +1178,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
-        assert deferred_rope_kv_cache is None or num_mha_tokens == 0, (
-            "a deferred RoPE + KV-cache write needs a pure decode batch"
-        )
+        assert deferred_rope_kv_cache is None or (
+            num_mha_tokens == 0 and mqa_q_prepared is None and q_dcp_replicated is None
+        ), "a deferred RoPE + KV-cache write needs a pure decode step"
 
         mha_use_quant_output = (
             quant_key is not None
@@ -1779,7 +1787,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.impl.decode_query_padded_num_heads(attn_metadata) is not None  # type: ignore[attr-defined]
         ):
             return False
-        self._deferred_rope_kv_cache = _DeferredRoPEKVCache(
+        deferred = forward_context.additional_kwargs.setdefault(
+            _DEFERRED_ROPE_KV_CACHE_KEY, {}
+        )
+        deferred[self.layer_name] = _DeferredRoPEKVCache(
             positions, cos_sin_cache, is_neox, slot_mapping, k_scale
         )
         return True
