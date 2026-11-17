@@ -16,6 +16,21 @@ scheduling is not supported yet; this restriction applies to the whole engine.
 The output APIs are implemented by the Python frontend; the Rust frontend does
 not expose these request or response fields.
 
+### Scheduling cost
+
+Enabling hidden-state capture requires synchronous scheduling for the whole
+engine, including requests that do not ask for hidden states and tokens outside
+the capture window. A window avoids unnecessary copies; it does not restore
+asynchronous scheduling outside that window.
+
+Compare deployment throughput against an engine with capture disabled and its
+normal asynchronous scheduling enabled. Separately compare no capture, full
+capture and window capture within the same synchronous engine. The latter
+comparison measures the incremental capture cost and window savings, rather
+than the total cost relative to the normal deployment.
+
+### Request example
+
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
     --enable-return-hidden-states --no-async-scheduling
@@ -54,7 +69,7 @@ in the terminal completion; intermediate deltas contain no hidden states. Stop
 strings and speculative acceptance trim the rows to the retained token range.
 Preemption recomputes history without returning previously sampled rows again.
 
-Requests cannot use penalties or `logit_bias`. Truncation and token masks require
+Generated-row requests cannot use penalties or `logit_bias`. Truncation and token masks require
 an explicit positive `top_k <= 256`; untruncated requests may use `top_k=0`.
 The single-completion raw payload limit is
 `aux_output_config.max_hidden_capture_bytes` (default 256 MiB). Admission uses
@@ -161,9 +176,22 @@ the combined prompt/auxiliary producer must be rerun for this implementation.
 Prompt-only capture returns the raw model rows independently of sampling
 penalties, logit bias or truncation. The generated-row sampling restrictions
 apply when `aux_outputs` includes `hidden_states`, including requests for both
-outputs. A missing required row fails its request; synchronous Python consumers
+outputs.
+
+## Error delivery
+
+A missing required row fails its request; synchronous Python consumers
 receive `finish_reason="error"` and a structured `RequestOutput.error`. Other
 requests in the batch continue.
 The failed completion returns neither hidden tensor nor hidden-position metadata.
 For `n > 1`, other completions continue; `FINAL_ONLY` retains the first structured
 error until the parent result is delivered.
+
+`RequestOutput.error` is an optional keyword-only Python output field, defaulting
+to `None`. It uses the existing `RequestError` type, as pooling outputs already
+do. Synchronous `LLM` / `LLMEngine` consumers can inspect its `code`, `message`
+and `retryable` fields; missing hidden rows use `code="hidden_states_unavailable"`.
+This allows the failed completion to be reported without raising out of the
+whole output batch. `AsyncLLM` delivers a `GenerationError` through the affected
+request's own queue instead. This Python error field does not add a new HTTP
+response field.

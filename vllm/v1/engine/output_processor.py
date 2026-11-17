@@ -34,6 +34,7 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.hidden_states import HiddenStatesAccumulator
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -242,15 +243,7 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
-        self.hidden_states_chunks: list[torch.Tensor] | None = None
-        self.hidden_states_start: int | None = None
-        self.hidden_states_end: int | None = None
-        self.hidden_states_empty: torch.Tensor | None = None
-        self.prompt_hidden_chunks: list[torch.Tensor] | None = None
-        self.prompt_hidden_start = 0
-        self.prompt_hidden_end = 0
-        self.prompt_hidden_cursor = 0
-        self.prompt_hidden_versions: list[WeightVersionSpan] = []
+        self.hidden_states: HiddenStatesAccumulator | None = None
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
@@ -363,32 +356,9 @@ class RequestState:
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
             state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
-        if (
-            sampling_params is not None
-            and sampling_params.aux_outputs
-            and "hidden_states" in sampling_params.aux_outputs
-        ):
-            state.hidden_states_chunks = []
-            state.hidden_states_start = max(
-                sampling_params.hidden_states_start,
-                state.prompt_len - 1,
-            )
-            state.hidden_states_end = sampling_params.hidden_states_end
-        if (
-            sampling_params is not None
-            and sampling_params.aux_outputs
-            and "prompt_hidden_states" in sampling_params.aux_outputs
-        ):
-            state.prompt_hidden_chunks = []
-            state.prompt_hidden_start = sampling_params.hidden_states_start
-            state.prompt_hidden_end = max(
-                state.prompt_hidden_start,
-                min(
-                    sampling_params.hidden_states_end or state.prompt_len - 1,
-                    state.prompt_len - 1,
-                ),
-            )
-            state.prompt_hidden_cursor = state.prompt_hidden_start
+        state.hidden_states = HiddenStatesAccumulator.for_request(
+            sampling_params, state.prompt_len
+        )
         return state
 
     def make_request_output(
@@ -559,61 +529,11 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
-        hidden_states = None
-        if (
-            finished
-            and finish_reason != FinishReason.ERROR
-            and self.hidden_states_chunks is not None
-        ):
-            assert self.hidden_states_start is not None
-            end = self.prompt_len - 1 + self.detokenizer.num_output_tokens()
-            if self.hidden_states_end is not None:
-                end = min(end, self.hidden_states_end)
-            expected = max(0, end - self.hidden_states_start)
-            chunks = self.hidden_states_chunks
-            hidden_states = (
-                torch.cat(chunks)
-                if len(chunks) > 1
-                else chunks[0]
-                if chunks
-                else self.hidden_states_empty
-            )
-            if (
-                hidden_states is None or len(hidden_states) != expected
-            ) and finish_reason not in (FinishReason.ABORT, FinishReason.ERROR):
-                raise GenerationError("Requested hidden-state rows were not delivered")
-
-        prompt_hidden_states = None
-        if (
-            finished
-            and finish_reason != FinishReason.ERROR
-            and self.prompt_hidden_chunks is not None
-        ):
-            chunks = self.prompt_hidden_chunks
-            prompt_hidden_states = (
-                torch.cat(chunks)
-                if len(chunks) > 1
-                else chunks[0]
-                if chunks
-                else self.hidden_states_empty
-            )
-            expected = self.prompt_hidden_end - self.prompt_hidden_start
-            if (
-                prompt_hidden_states is None or len(prompt_hidden_states) != expected
-            ) and finish_reason not in (FinishReason.ABORT, FinishReason.ERROR):
-                raise GenerationError(
-                    "Requested prompt hidden-state rows were not delivered"
-                )
-
-        return CompletionOutput(
+        output = CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
-            hidden_states=hidden_states,
-            hidden_states_start=(
-                self.hidden_states_start if hidden_states is not None else None
-            ),
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -621,37 +541,12 @@ class RequestState:
             stop_reason=stop_reason if finished else None,
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
             weight_versions=self._weight_version_spans() if finished else None,
-            prompt_hidden_states=prompt_hidden_states,
-            prompt_hidden_states_start=(
-                self.prompt_hidden_start if prompt_hidden_states is not None else None
-            ),
-            prompt_hidden_states_weight_versions=(
-                self.prompt_hidden_versions
-                if prompt_hidden_states is not None
-                else None
-            ),
         )
-
-    def add_prompt_hidden_rows(
-        self, start: int, rows: torch.Tensor, weight_version: str | None
-    ) -> None:
-        assert self.prompt_hidden_chunks is not None
-        # Replayed prefill rows do not replace the first computation.
-        offset = max(0, self.prompt_hidden_cursor - start)
-        rows = rows[offset:]
-        if not len(rows):
-            return
-        self.prompt_hidden_chunks.append(rows)
-        self.prompt_hidden_cursor = start + offset + len(rows)
-        if weight_version is not None:
-            begin = start + offset - self.prompt_hidden_start
-            spans = self.prompt_hidden_versions
-            if spans and spans[-1].version == weight_version and spans[-1].end == begin:
-                spans[-1].end += len(rows)
-            else:
-                spans.append(
-                    WeightVersionSpan(weight_version, begin, begin + len(rows))
-                )
+        if finish_reason is not None and self.hidden_states is not None:
+            self.hidden_states.finalize(
+                output, self.detokenizer.num_output_tokens(), finish_reason
+            )
+        return output
 
     def track_weight_version(self, weight_version: str) -> None:
         """Start a span when the weight version changes."""
@@ -819,11 +714,8 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
-        if (
-            req_state.hidden_states_chunks is not None
-            or req_state.prompt_hidden_chunks is not None
-        ):
-            req_state.hidden_states_empty = self.hidden_states_empty
+        if req_state.hidden_states is not None:
+            req_state.hidden_states.empty = self.hidden_states_empty
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
@@ -912,7 +804,8 @@ class OutputProcessor:
 
             if engine_core_output.prompt_hidden_states is not None:
                 start, rows = engine_core_output.prompt_hidden_states
-                req_state.add_prompt_hidden_rows(start, rows, weight_version)
+                assert req_state.hidden_states is not None
+                req_state.hidden_states.add_prompt(start, rows, weight_version)
                 if (
                     not engine_core_output.new_token_ids
                     and not engine_core_output.finished
@@ -931,10 +824,8 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
             if engine_core_output.hidden_states is not None:
-                rows = engine_core_output.hidden_states
-                assert req_state.hidden_states_chunks is not None
-                if len(rows):
-                    req_state.hidden_states_chunks.append(rows)
+                assert req_state.hidden_states is not None
+                req_state.hidden_states.add_generated(engine_core_output.hidden_states)
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
@@ -1087,15 +978,8 @@ class OutputProcessor:
             output.new_sampling_mask = output.new_sampling_mask.slice_request(
                 0, num_kept
             )
-        if req_state.hidden_states_chunks is not None:
-            assert req_state.hidden_states_start is not None
-            end = req_state.prompt_len - 1 + req_state.detokenizer.num_output_tokens()
-            if req_state.hidden_states_end is not None:
-                end = min(end, req_state.hidden_states_end)
-            keep = max(0, end - req_state.hidden_states_start)
-            for index, rows in enumerate(req_state.hidden_states_chunks):
-                req_state.hidden_states_chunks[index] = rows[:keep]
-                keep = max(0, keep - len(rows))
+        if req_state.hidden_states is not None:
+            req_state.hidden_states.trim(req_state.detokenizer.num_output_tokens())
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
 
