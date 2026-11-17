@@ -2449,6 +2449,28 @@ def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
         ParallelConfig(data_parallel_rpc_port=port)
 
 
+def test_data_parallel_rank_rejects_out_of_range_direct_construction():
+    # Direct construction with data_parallel_size <= 1 takes the
+    # env-var fallback branch in __post_init__; an explicit
+    # out-of-range rank must fail fast there instead of being
+    # silently overwritten by VLLM_DP_RANK (see vllm issue #67720).
+    with pytest.raises(ValidationError, match="must be in the range"):
+        ParallelConfig(
+            data_parallel_size=1,
+            data_parallel_size_local=1,
+            data_parallel_rank=4,
+        )
+
+
+def test_data_parallel_rank_zero_direct_construction_is_accepted():
+    config = ParallelConfig(
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_rank=0,
+    )
+    assert config.data_parallel_rank == 0
+
+
 def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     parallel_config = ParallelConfig(
         tensor_parallel_size=8,

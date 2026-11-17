@@ -1238,6 +1238,12 @@ class ParallelConfig:
                     f" must be in the range [0, {self.data_parallel_size})"
                 )
         else:
+            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
+                raise ValueError(
+                    f"data_parallel_rank ({self.data_parallel_rank})"
+                    f" must be in the range [0, {self.data_parallel_size})"
+                )
+
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
             self.data_parallel_rank = envs.VLLM_DP_RANK

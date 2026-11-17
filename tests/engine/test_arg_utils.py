@@ -20,6 +20,7 @@ from vllm.config import (
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
+    _validate_data_parallel_start_rank,
     contains_type,
     get_kwargs,
     get_type,
@@ -684,6 +685,125 @@ def test_attention_backend_rejects_torch_sdpa(from_cli):
         match="only supported for multi-modal encoder attention",
     ):
         engine_args.create_engine_config()
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "data_parallel_size_local", "start_rank"),
+    [
+        # A partial group inside the DP group is the documented multi-node
+        # launch: ranks 2..3 of a 4-way DP group on the second node.
+        (4, 2, 2),
+        (8, 4, 4),
+        # start rank 0 is always fine, including for the whole group.
+        (8, 1, 0),
+        (8, 8, 0),
+    ],
+)
+def test_validate_data_parallel_start_rank_accepts(
+    data_parallel_size, data_parallel_size_local, start_rank
+):
+    _validate_data_parallel_start_rank(
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=data_parallel_size_local,
+        data_parallel_start_rank=start_rank,
+    )
+
+
+def test_validate_data_parallel_start_rank_is_noop_without_rank():
+    _validate_data_parallel_start_rank(
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_start_rank=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "data_parallel_size_local", "start_rank", "message"),
+    [
+        # `-dp 1 -dpl 1 -dpr 4`: only rank 0 exists.
+        (1, 1, 4, "out of range"),
+        (1, 1, 1, "out of range"),
+        # Negative ranks are never valid.
+        (4, 1, -1, "out of range"),
+        # rank == data_parallel_size is already outside the group.
+        (4, 1, 4, "out of range"),
+        # 3 + 2 - 1 = 4, so this launch would own ranks 3 and 4.
+        (4, 2, 3, "selects data-parallel ranks 3..4"),
+        # `--data-parallel-size-local` omitted: the group is fully local, so
+        # an explicit non-zero start rank cannot be honored. This is the
+        # `vllm serve m -dp 8 -dpr 4` case.
+        (8, 8, 4, "selects data-parallel ranks 4..11"),
+    ],
+)
+def test_validate_data_parallel_start_rank_rejects(
+    data_parallel_size, data_parallel_size_local, start_rank, message
+):
+    with pytest.raises(ValueError, match=message):
+        _validate_data_parallel_start_rank(
+            data_parallel_size=data_parallel_size,
+            data_parallel_size_local=data_parallel_size_local,
+            data_parallel_start_rank=start_rank,
+        )
+
+
+def test_cli_start_rank_without_size_local_is_rejected():
+    """`vllm serve m --data-parallel-size 8 --data-parallel-start-rank 4`
+    used to start as rank 0 without any warning."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=8,
+        data_parallel_start_rank=4,
+    )
+    with pytest.raises(ValueError, match="selects data-parallel ranks"):
+        engine_args.create_engine_config()
+
+
+def test_cli_start_rank_out_of_range_is_rejected():
+    """`-dp 1 -dpl 1 -dpr 4 --headless`: one DP rank exists, so rank 4 cannot
+    be honored. Before this check, the value was replaced by `VLLM_DP_RANK`
+    (default 0) inside `ParallelConfig.__post_init__`."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_start_rank=4,
+    )
+    with pytest.raises(ValueError, match="out of range"):
+        engine_args.create_engine_config(headless=True)
+
+
+def test_cli_start_rank_in_external_lb_mode_is_rejected():
+    """External load balancing reads `--data-parallel-rank` only; combining
+    it with `--data-parallel-start-rank` used to be accepted silently with
+    the latter ignored.
+
+    `data_parallel_size=1` keeps this test clear of the "non-MoE models do
+    not support external data parallel mode" check, which runs first for
+    `data_parallel_size > 1`.
+    """
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=1,
+        data_parallel_external_lb=True,
+        data_parallel_rank=0,
+        data_parallel_start_rank=0,
+    )
+    with pytest.raises(ValueError, match="does not apply to external"):
+        engine_args.create_engine_config()
+
+
+def test_cli_documented_multinode_launch_still_works():
+    """The launch documented in docs/serving/data_parallel_deployment.md:46-48
+    must keep working: node 1 owns ranks 2..3 of a 4-way DP group."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_start_rank=2,
+    )
+    parallel_config = engine_args.create_engine_config(headless=True).parallel_config
+    assert parallel_config.data_parallel_rank == 2
+    assert parallel_config.data_parallel_size_local == 2
 
 
 def test_multi_node_world_size_includes_pcp():
