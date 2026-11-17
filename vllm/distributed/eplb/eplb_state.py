@@ -800,7 +800,8 @@ class EplbState:
             - `balancedness`: The ratio of average load to maximum load.
 
         """
-        self._publish_placement_exports()
+        if self._pending_placement_exports:
+            self._publish_placement_exports()
         ep_group = get_ep_group().device_group
         if is_dummy:
             # Do not record load metrics for dummy steps
