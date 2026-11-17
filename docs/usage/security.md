@@ -164,6 +164,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/chat/completions/derender` - Derender chat completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/completions` - Text completions
 - `/v1/completions/render` - Render completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
+- `/v1/completions/hash` - Prefix-cache hashes (requires a running decoder-only engine with prefix caching and scale-out endpoints enabled)
 - `/v1/completions/derender` - Derender completion requests (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription

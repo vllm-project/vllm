@@ -930,6 +930,8 @@ def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
     num_hash_lookahead_tokens: int = 0,
+    *,
+    none_hash: BlockHash | None = None,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -938,6 +940,8 @@ def get_request_block_hasher(
     full prefix, so each hash uniquely fingerprints the prefix ending at its
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see `BlockHashListWithBlockSize`).
+    `none_hash` lets a frontend use its engine's first parent hash without
+    changing the process-global seed.
 
     With `num_hash_lookahead_tokens` (L) > 0, each hash also covers the L
     tokens after its block, which the drafter's KV at the block's last position
@@ -966,7 +970,7 @@ def get_request_block_hasher(
                 )
 
         prev_block_hash_value = (
-            request.block_hashes[-1] if request.block_hashes else None
+            request.block_hashes[-1] if request.block_hashes else none_hash
         )
         new_block_hashes: list[BlockHash] = []
         while True:

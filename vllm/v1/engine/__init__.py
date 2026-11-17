@@ -104,6 +104,8 @@ class PrefixHashConfig:
     # Tokens after each block that its hash also covers (as extra keys), so a
     # block is hashed only once they exist.
     num_lookahead_tokens: int = 0
+    # Effective group geometry for consumers of engine-native hashes.
+    kv_cache_groups: list[dict[str, int | str | None]] | None = None
 
 
 @dataclass(slots=True)
