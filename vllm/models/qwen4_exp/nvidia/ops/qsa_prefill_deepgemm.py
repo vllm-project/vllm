@@ -107,7 +107,8 @@ def plan_prefill_chunks(
         logits_bytes = max_bytes - keys * _HEAD_DIM
         step = max(_Q_TILE, logits_bytes // row_bytes // _Q_TILE * _Q_TILE)
         # Even chunks: a short tail chunk underfills the GPU.
-        step = round_up(cdiv(rows, max(1, cdiv(rows, step))), _Q_TILE)
+        # max: a group with no query rows (an empty padded request) gets no chunks.
+        step = max(_Q_TILE, round_up(cdiv(rows, max(1, cdiv(rows, step))), _Q_TILE))
         for row in range(0, rows, step):
             chunks.append((start, end, row, min(row + step, rows)))
         start = end
@@ -203,11 +204,12 @@ def reserve_deepgemm_prefill(
     max_model_len: int,
     compress_ratio: int,
     max_tokens: int,
-) -> None:
+) -> int:
     """Allocate the unit scales and weights during memory profiling.
 
-    The caller touches the budget; this also touches the one case past it, a
-    request whose keys and one Q tile of its logits exceed the budget.
+    Returns the prefill scratch peak past the budget: one max-length request's
+    keys and one Q tile of its logits, which the caller touches together with
+    the other scratch alive at the same time.
     """
     global _constants
     max_request_keys = cdiv(max_model_len, compress_ratio)
@@ -226,11 +228,7 @@ def reserve_deepgemm_prefill(
             (max_tokens, _NUM_HEADS), dtype=torch.float32, device=device
         )
         _constants = scales, weights
-    _ = torch.empty(
-        _scratch_bytes(_Q_TILE, max_request_keys, max_request_keys),
-        dtype=torch.uint8,
-        device=device,
-    )
+    return _scratch_bytes(_Q_TILE, max_request_keys, max_request_keys)
 
 
 def _get_constants(rows: int, keys: int) -> tuple[torch.Tensor, torch.Tensor]:

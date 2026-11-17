@@ -879,6 +879,8 @@ def test_qsa_deepgemm_prefill_plan() -> None:
     ]
     # Below one Q tile of logits, chunks still take one tile.
     assert plan_prefill_chunks([40], [1000], 0) == [(0, 1, 0, 32), (0, 1, 32, 40)]
+    # An empty padded request gets no chunk.
+    assert plan_prefill_chunks([3, 0], [1280, 0], 0) == [(0, 1, 0, 3)]
 
 
 @requires_qsa_kernels
@@ -934,6 +936,11 @@ def test_qsa_prefill_selection_correctness(
         reserve_deepgemm_prefill,
     )
 
+    if dtype == torch.float8_e4m3fn and current_platform.is_device_capability_family(
+        100
+    ):
+        # Fail rather than silently test the Triton fallback on SM100.
+        assert can_use_deepgemm_prefill(q, cache)
     deepgemm_prefill = None
     if can_use_deepgemm_prefill(q, cache):
         # The constants persist across cases; reserve the largest any case uses.

@@ -546,11 +546,14 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                     self.indexer.index_n_heads,
                     self.indexer.index_head_dim,
                 ):
-                    reserve_deepgemm_prefill(
-                        output.device,
-                        cfg.model_config.max_model_len,
-                        self.indexer.compress_ratio,
-                        cfg.scheduler_config.max_num_batched_tokens,
+                    logits_bytes = max(
+                        logits_bytes,
+                        reserve_deepgemm_prefill(
+                            output.device,
+                            cfg.model_config.max_model_len,
+                            self.indexer.compress_ratio,
+                            cfg.scheduler_config.max_num_batched_tokens,
+                        ),
                     )
             _ = torch.empty(
                 logits_bytes + _TOPK_WORKSPACE_BYTES,
