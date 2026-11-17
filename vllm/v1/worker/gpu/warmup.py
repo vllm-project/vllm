@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+import gc
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any
 
 import numpy as np
@@ -138,6 +139,28 @@ def _run_step(
     torch.accelerator.synchronize()
 
 
+@contextmanager
+def _fixed_draft_counts(model_runner: GPUModelRunner) -> Iterator[None]:
+    """Verify fixed draft counts: adaptive costs are calibrated during
+    capture, after the warmups."""
+    adaptive_verification = model_runner.adaptive_verification
+    model_runner.adaptive_verification = None
+    rejection_sampler = model_runner.rejection_sampler
+    adaptive_sampling = (
+        rejection_sampler is not None and rejection_sampler.enable_adaptive_verification
+    )
+    if adaptive_sampling:
+        assert rejection_sampler is not None
+        rejection_sampler.enable_adaptive_verification = False
+    try:
+        yield
+    finally:
+        model_runner.adaptive_verification = adaptive_verification
+        if adaptive_sampling:
+            assert rejection_sampler is not None
+            rejection_sampler.enable_adaptive_verification = True
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -162,12 +185,18 @@ def run_mixed_prefill_decode_warmup(
         return False
 
     max_prefill_len = model_runner.max_model_len - 1
+    # The decode request verifies a full set of drafts, as in serving: some
+    # backends allocate their largest decode workspace only to verify.
+    num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
+    decode_query_len = model_runner.decode_query_len if num_spec_steps else 1
     if with_decode and prefill_only_fallback:
         # The decode request takes a slot a further prefill could fill.
-        with_decode = cdiv(num_tokens - 1, max_prefill_len) < model_runner.max_num_reqs
+        with_decode = (
+            cdiv(num_tokens - decode_query_len, max_prefill_len)
+            < model_runner.max_num_reqs
+        )
     num_decode_reqs = int(with_decode)
-    # A decode request schedules one token.
-    decode_scheduled_tokens = num_decode_reqs
+    decode_scheduled_tokens = num_decode_reqs * decode_query_len
     num_prefill_reqs = min(
         cdiv(num_tokens - decode_scheduled_tokens, max_prefill_len),
         model_runner.max_num_reqs - num_decode_reqs,
@@ -297,6 +326,10 @@ def run_mixed_prefill_decode_warmup(
     mixed_output.num_scheduled_tokens = dict.fromkeys(
         decode_req_ids, decode_scheduled_tokens
     )
+    if num_spec_steps:
+        mixed_output.scheduled_spec_decode_tokens = {
+            req_id: [0] * num_spec_steps for req_id in decode_req_ids
+        }
     for req_id, prefill_len, block_counts in zip(
         prefill_req_ids, prefill_lens, prefill_block_counts
     ):
@@ -321,13 +354,19 @@ def run_mixed_prefill_decode_warmup(
     cleanup_output.finished_req_ids = {*decode_req_ids, *prefill_req_ids}
 
     context = mixed_step_context or nullcontext()
+    fixed_drafts = (
+        _fixed_draft_counts(model_runner) if num_spec_steps else nullcontext()
+    )
     model_runner.kv_connector.set_disabled(True)
     try:
-        if with_decode:
-            _run_step(worker_execute_model, worker_sample_tokens, decode_prefill_output)
-        with context:
-            _run_step(worker_execute_model, worker_sample_tokens, mixed_output)
-        _run_step(worker_execute_model, None, cleanup_output)
+        with fixed_drafts:
+            if with_decode:
+                _run_step(
+                    worker_execute_model, worker_sample_tokens, decode_prefill_output
+                )
+            with context:
+                _run_step(worker_execute_model, worker_sample_tokens, mixed_output)
+            _run_step(worker_execute_model, None, cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
@@ -407,6 +446,36 @@ def run_context_prefill_warmup(
     return True
 
 
+@contextmanager
+def _measure_sizing_step(model_runner: GPUModelRunner) -> Iterator[None]:
+    """Record how far a sizing step grows torch's reservation from an emptied
+    cache, as serving starts once the cache is sized. Unlike the allocated
+    peak, this includes fragmentation, e.g. a large per-layer workspace that
+    no longer fits the segments freed around it. Allocations the step keeps
+    are not counted."""
+    kv_cache = model_runner.extensible_kv_cache
+    if kv_cache is None:
+        yield
+        return
+    device = model_runner.device
+    kv_cache.record_transient_peak()
+    gc.collect()
+    torch.accelerator.empty_cache()
+    torch.accelerator.reset_peak_memory_stats(device)
+    stats = torch.accelerator.memory_stats(device)
+    reserved_before = stats.get("reserved_bytes.all.current", 0)
+    allocated_before = stats.get("allocated_bytes.all.current", 0)
+    yield
+    stats = kv_cache.record_transient_peak()
+    left_allocated = max(
+        stats.get("allocated_bytes.all.current", 0) - allocated_before, 0
+    )
+    kv_cache.torch_reserve_growth_bytes = max(
+        kv_cache.torch_reserve_growth_bytes,
+        stats.get("reserved_bytes.all.peak", 0) - reserved_before - left_allocated,
+    )
+
+
 @torch.inference_mode()
 def run_kv_cache_sizing_warmup(
     model_runner: GPUModelRunner,
@@ -440,6 +509,7 @@ def run_kv_cache_sizing_warmup(
             max_prompt_len,
             prompt_logprobs=prompt_logprobs,
             prefill_only_fallback=True,
+            mixed_step_context=_measure_sizing_step(model_runner),
         )
         prompt_logprobs = None
     run_mixed_prefill_decode_warmup(
@@ -449,6 +519,7 @@ def run_kv_cache_sizing_warmup(
         max_num_tokens,
         prompt_logprobs=prompt_logprobs,
         prefill_only_fallback=True,
+        mixed_step_context=_measure_sizing_step(model_runner),
     )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (
@@ -462,9 +533,10 @@ def run_kv_cache_sizing_warmup(
                 model_runner.vllm_config
             )
         )
-        run_context_prefill_warmup(
-            model_runner, worker_execute_model, worker_sample_tokens, workspace_size
-        )
+        with _measure_sizing_step(model_runner):
+            run_context_prefill_warmup(
+                model_runner, worker_execute_model, worker_sample_tokens, workspace_size
+            )
 
 
 @torch.inference_mode()
@@ -478,18 +550,7 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
-    # Adaptive costs are calibrated during capture, after this warmup. Exercise
-    # fixed draft counts here, then restore the manager for capture and serving.
-    adaptive_verification = model_runner.adaptive_verification
-    model_runner.adaptive_verification = None
-    rejection_sampler = model_runner.rejection_sampler
-    adaptive_sampling = (
-        rejection_sampler is not None and rejection_sampler.enable_adaptive_verification
-    )
-    if adaptive_sampling:
-        assert rejection_sampler is not None
-        rejection_sampler.enable_adaptive_verification = False
-    try:
+    with _fixed_draft_counts(model_runner):
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
         # All PP ranks must run the same forwards to match sends and receives.
         if model_runner.speculative_config is not None:
@@ -498,11 +559,7 @@ def warmup_kernels(
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )
-    finally:
-        model_runner.adaptive_verification = adaptive_verification
-        if adaptive_sampling:
-            assert rejection_sampler is not None
-            rejection_sampler.enable_adaptive_verification = True
+    adaptive_verification = model_runner.adaptive_verification
     if adaptive_verification is not None:
         adaptive_verification.warmup_budget_kernel()
     acceptance_estimator = getattr(

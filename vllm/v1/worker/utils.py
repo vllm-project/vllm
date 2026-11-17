@@ -258,7 +258,7 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
@@ -294,7 +294,7 @@ class AttentionGroup:
             # A backend in a packed KV cache group may need smaller blocks than
             # the group is split into.
             kernel_block_size = select_common_block_size(
-                kernel_block_size, [self.backend], [spec]
+                kernel_block_size, [self.backend], [spec], [self.layer_names]
             )
             if kernel_block_size != spec.block_size:
                 self.kernel_block_size = kernel_block_size
@@ -459,6 +459,14 @@ class AttentionGroup:
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
+def groups_with_metadata_builders(
+    groups: Iterable[AttentionGroup],
+) -> list[AttentionGroup]:
+    """The groups that build attention metadata: groups made only of
+    init_attn_backend's no_attn_metadata_layer_names have no builders."""
+    return [group for group in groups if group.metadata_builders]
+
+
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
@@ -476,12 +484,12 @@ def map_kv_caches_to_kernel_blocks(
 
 
 def customize_attention_spec(
-    backend: type[AttentionBackend], spec: AttentionSpec
+    backend: type[AttentionBackend], spec: AttentionSpec, layer_name: str
 ) -> AttentionSpec:
     """The backend's spec. Blocks larger than every kernel block size a backend
     takes are split into kernel blocks, which packed blocks must keep whole."""
     spec = backend.customize_spec(spec)
-    sizes = backend.get_supported_kernel_block_sizes(spec)
+    sizes = backend.get_supported_kernel_block_sizes_for_layers(spec, [layer_name])
     fixed_sizes = [s for s in sizes if isinstance(s, int)]
     if spec.block_stride_alignment is None and sizes and fixed_sizes == sizes:
         spec = replace(spec, block_stride_alignment=MultipleOf(max(fixed_sizes)))
@@ -489,29 +497,28 @@ def customize_attention_spec(
 
 
 def customize_layer_config(
-    backend: type[AttentionBackend], layer_config: KVCacheLayerConfig
+    backend: type[AttentionBackend], layer_config: KVCacheLayerConfig, layer_name: str
 ) -> KVCacheLayerConfig:
     """Apply `customize_attention_spec` to an attention layer's spec."""
     if not isinstance(layer_config.spec, AttentionSpec):
         return layer_config
     return replace(
-        layer_config, spec=customize_attention_spec(backend, layer_config.spec)
+        layer_config,
+        spec=customize_attention_spec(backend, layer_config.spec, layer_name),
     )
 
 
 def _block_size_is_supported(
-    backends: list[type[AttentionBackend]],
-    block_size: int,
-    specs: Sequence[KVCacheSpec | None],
+    supported_sizes: Sequence[list[int | MultipleOf]], block_size: int
 ) -> bool:
     """Check if the block size is supported by all backends.
 
     An exact `int` declaration must match exactly; a `MultipleOf`
     declaration accepts any multiple of its base.
     """
-    for backend, spec in zip(backends, specs, strict=True):
+    for sizes in supported_sizes:
         is_supported = False
-        for supported_size in backend.get_supported_kernel_block_sizes(spec):
+        for supported_size in sizes:
             if isinstance(supported_size, int):
                 if block_size == supported_size:
                     is_supported = True
@@ -529,6 +536,7 @@ def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
     kv_cache_specs: Sequence[KVCacheSpec | None] | None = None,
+    layer_names: Sequence[list[str]] | None = None,
 ) -> int:
     """Select a block size that is supported by all backends and is a factor of
     kv_manager_block_size.
@@ -540,6 +548,7 @@ def select_common_block_size(
         kv_manager_block_size: Block size of KV cache.
         backends: List of attention backend classes.
         kv_cache_specs: Per-backend cache specs for spec-specific constraints.
+        layer_names: Per-backend layer names for layer-specific constraints.
 
     Returns:
         The selected block size.
@@ -549,26 +558,36 @@ def select_common_block_size(
 
     """
     specs = kv_cache_specs or [None] * len(backends)
-    if _block_size_is_supported(backends, kv_manager_block_size, specs):
+    if layer_names is None:
+        supported_sizes = [
+            b.get_supported_kernel_block_sizes(s)
+            for b, s in zip(backends, specs, strict=True)
+        ]
+    else:
+        supported_sizes = [
+            b.get_supported_kernel_block_sizes_for_layers(s, names)
+            for b, s, names in zip(backends, specs, layer_names, strict=True)
+        ]
+    if _block_size_is_supported(supported_sizes, kv_manager_block_size):
         return kv_manager_block_size
 
     # MultipleOf constraints also accept the manager size if they accept a divisor.
     # Any remaining candidate must therefore be an explicit size from a backend.
     candidates = {
         size
-        for backend, spec in zip(backends, specs, strict=True)
-        for size in backend.get_supported_kernel_block_sizes(spec)
+        for sizes in supported_sizes
+        for size in sizes
         if isinstance(size, int) and kv_manager_block_size % size == 0
     }
 
     for size in sorted(candidates, reverse=True):
-        if _block_size_is_supported(backends, size, specs):
+        if _block_size_is_supported(supported_sizes, size):
             return size
     raise ValueError(
         f"No common block size for {kv_manager_block_size} ("
         + "; ".join(
-            f"{b.get_name()}: {b.get_supported_kernel_block_sizes(s)}"
-            for b, s in zip(backends, specs, strict=True)
+            f"{b.get_name()}: {sizes}"
+            for b, sizes in zip(backends, supported_sizes, strict=True)
         )
         + ")."
     )
@@ -694,6 +713,7 @@ def prepare_kernel_block_sizes(
             kv_manager_block_size = kv_cache_group.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
             group_specs = [g.kv_cache_spec for g in attn_groups[kv_cache_gid]]
+            group_layer_names = [g.layer_names for g in attn_groups[kv_cache_gid]]
             # Block-outermost packing puts other layers' pages between the
             # blocks, so they are never split group-wide.
             selected_kernel_size = (
@@ -704,7 +724,10 @@ def prepare_kernel_block_sizes(
                     if not set(t.layers).isdisjoint(kv_cache_group.layer_names)
                 )
                 else select_common_block_size(
-                    kv_manager_block_size, group_backends, group_specs
+                    kv_manager_block_size,
+                    group_backends,
+                    group_specs,
+                    group_layer_names,
                 )
             )
             kernel_block_sizes.append(selected_kernel_size)
@@ -743,6 +766,30 @@ def sanity_check_mm_encoder_outputs(
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
     )
+
+
+def reserve_encoder_cache_residency(
+    encoder_outputs: dict[str, torch.Tensor],
+    dummy_outputs: Sequence[torch.Tensor],
+    encoder_cache_size: int,
+) -> int:
+    """Reserve the encoder cache's resident footprint during profiling, in bytes.
+
+    The dummy run only materialises one compute batch, so a cache larger than the
+    compute budget would be under-reserved and the surplus handed to the KV cache.
+    """
+    if not dummy_outputs:
+        return 0
+
+    # `sanity_check_mm_encoder_outputs` guarantees 2-D (tokens, hidden) outputs.
+    ref = dummy_outputs[0]
+    bytes_per_token = ref.element_size() * ref.shape[1]
+    shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
+    if shortfall > 0:
+        encoder_outputs["tmp_residency"] = torch.empty(
+            (shortfall, ref.shape[1]), dtype=ref.dtype, device=ref.device
+        )
+    return encoder_cache_size * bytes_per_token
 
 
 def request_memory(
@@ -939,6 +986,41 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
 
 
+def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:
+    """Split copies between the `[2, num_copies]` source and destination
+    `block_ids` of `blocks` into contiguous runs.
+
+    Returns:
+        An int64 array of shape `[3, num_runs]` holding source addresses,
+        destination addresses and sizes in bytes.
+
+    """
+    shape, strides = list(blocks.shape[1:]), list(blocks.stride()[1:])
+    run_len = 1
+    while shape and (shape[-1] == 1 or strides[-1] == run_len):
+        run_len *= shape.pop()
+        strides.pop()
+    offsets = np.zeros(1, dtype=np.int64)
+    for size, stride in zip(shape, strides):
+        offsets = (offsets[:, None] + np.arange(size) * stride).ravel()
+    elements = (block_ids[:, :, None] * blocks.stride(0) + offsets).reshape(2, -1)
+    addresses = blocks.data_ptr() + elements * blocks.element_size()
+    sizes = np.full((1, addresses.shape[1]), run_len * blocks.element_size())
+    return np.concatenate([addresses, sizes])
+
+
+@triton.jit(do_not_specialize=["num_runs"])
+def _copy_runs_kernel(runs_ptr, num_runs, WORD: tl.constexpr, BLOCK: tl.constexpr):
+    # runs_ptr holds `[3, num_runs]` source addresses, destination addresses
+    # and sizes in words; program (i, j) copies the j-th BLOCK of run i.
+    run = tl.program_id(0)
+    offsets = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < tl.load(runs_ptr + 2 * num_runs + run)
+    src = tl.load(runs_ptr + run).to(tl.pointer_type(WORD))
+    dst = tl.load(runs_ptr + num_runs + run).to(tl.pointer_type(WORD))
+    tl.store(dst + offsets, tl.load(src + offsets, mask=mask), mask=mask)
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
@@ -948,7 +1030,7 @@ def copy_kv_cache_blocks_inplace(
         return
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices: torch.Tensor | None = None
+    block_views: list[torch.Tensor] = []
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
@@ -968,11 +1050,6 @@ def copy_kv_cache_blocks_inplace(
         if key in seen:
             continue
         seen.add(key)
-
-        if indices is None:
-            indices = async_tensor_h2d(indices_np, device=cache.device)
-        assert cache.device == indices.device
-        src, dst = indices.unbind(dim=1)
 
         kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
         assert remainder == 0, (
@@ -995,6 +1072,35 @@ def copy_kv_cache_blocks_inplace(
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        block_views.append(blocks)
+
+    if not block_views:
+        return
+    device = block_views[0].device
+    block_ids = indices_np.T
+    # Copy GPU blocks directly in one kernel: gathering the sources into a
+    # temporary can take GiBs. The kernel copies runs concurrently, which is
+    # safe because copy-on-write destinations are freshly allocated blocks.
+    if device.type == "cuda":
+        assert not np.intersect1d(*block_ids).size, "Chained block copies"
+        runs = np.concatenate(
+            [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
+        )
+        # Copy in the widest word that divides every address and size.
+        bits = int(np.bitwise_or.reduce(runs, axis=None))
+        word_bytes = min(8, bits & -bits)
+        runs[2] //= word_bytes
+        block = 4096
+        _copy_runs_kernel[(runs.shape[1], triton.cdiv(int(runs[2].max()), block))](
+            async_tensor_h2d(runs, device=device),
+            runs.shape[1],
+            WORD={8: tl.int64, 4: tl.int32, 2: tl.int16, 1: tl.int8}[word_bytes],
+            BLOCK=block,
+        )
+        return
+
+    src, dst = async_tensor_h2d(indices_np, device=device).unbind(dim=1)
+    for blocks in block_views:
         blocks[dst] = blocks[src]
 
 
@@ -1018,7 +1124,7 @@ def get_uniform_decode_token_count(
     return None
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 

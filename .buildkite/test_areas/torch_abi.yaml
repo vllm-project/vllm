@@ -15,9 +15,9 @@ steps:
   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
   mirror:
     amd:
-      label: ":amd: (MI300) Torch Stable ABI Audit"
+      label: ":amd: (MI300 DPX) Torch Stable ABI Audit"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 10
       depends_on:
       - image-build-amd

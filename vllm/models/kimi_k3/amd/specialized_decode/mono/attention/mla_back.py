@@ -105,7 +105,7 @@ REGIONS = ("cmb",)
 _SOURCES = source_digest(".")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MlaPostBuild:
     tokens: int  # S
     qlen: int  # tokens a request (1 + speculative)

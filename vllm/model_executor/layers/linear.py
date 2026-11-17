@@ -5,6 +5,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import partial
 from typing import Any, Literal
 
 import torch
@@ -25,6 +26,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -32,7 +34,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     cuda_unquantized_gemm,
-    default_unquantized_gemm,
     dispatch_unquantized_gemm,
     maybe_pad_weight_avoid_cache_aliasing,
     maybe_use_skinny_gemm,
@@ -248,6 +249,23 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 
+def apply_flattened(
+    fn: Callable[[Any], torch.Tensor], x: torch.Tensor | QuantizedActivation
+) -> torch.Tensor:
+    """Call `fn` on `x` flattened to 2D, if that can be done without a copy.
+
+    Linear methods and kernels may assume 2D activations, but callers such as
+    the Transformers modeling backend pass `[batch, seq, hidden]` activations.
+    """
+    if isinstance(x, QuantizedActivation):
+        if len(x.orig_shape) <= 2:
+            return fn(x)
+        return fn(x.flatten()).view(*x.orig_shape[:-1], -1)
+    if x.ndim <= 2 or not x.is_contiguous():
+        return fn(x)
+    return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
+
+
 class LinearBase(PluggableLayer):
     """Base linear layer.
 
@@ -423,7 +441,7 @@ class ReplicatedLinear(LinearBase):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        output = self.quant_method.apply(self, x, bias)
+        output = apply_flattened(partial(self.quant_method.apply, self, bias=bias), x)
 
         if not self.return_bias:
             return output
@@ -626,7 +644,8 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        apply = partial(self.quant_method.apply, self, bias=bias)
+        output_parallel = apply_flattened(apply, input_)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1888,13 +1907,17 @@ class RowParallelLinear(LinearBase):
         self.update_param_tp_status()
 
         self._set_fp16_partials(self._fp16_partials_mode())
+        # Built with reduce_results=False under `deferred_fp16_partial_sums`:
+        # the caller all-reduces and unscales the FP16 partial sums.
+        self._fp16_partials_deferred = not reduce_results
 
     def _set_fp16_partials(self, mode: Literal["gemm", "kernel"] | None) -> None:
         """Partial sums for VLLM_TP_FP16_PARTIAL_SUMS: "gemm" (FP16 GEMM output
-        in `forward`), "kernel" (the quantized kernel reads partial_sum_dtype
-        and partial_sum_scale) or None (BF16)."""
+        in `forward`), "kernel" (the quantized kernel reads partial_sum_dtype,
+        set by `forward` for its own call only, and partial_sum_scale) or None
+        (BF16)."""
         self._fp16_partials = mode
-        self.partial_sum_dtype = torch.float16 if mode == "kernel" else None
+        self.partial_sum_dtype = None
         shift = envs.VLLM_TP_FP16_PARTIAL_SUMS_SHIFT if mode else 0
         self.partial_sum_scale = 2.0**-shift
         self._partial_sum_unscale = 2.0**shift
@@ -1959,17 +1982,25 @@ class RowParallelLinear(LinearBase):
                 input_parallel, self.weight, bias_, self.partial_sum_scale
             )
         else:
-            output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+            apply = partial(self.quant_method.apply, self, bias=bias_)
+            if self._fp16_partials == "kernel":
+                # FP16 output for this call only: code that calls
+                # quant_method.apply on this layer itself gets BF16.
+                self.partial_sum_dtype = torch.float16
+                output_parallel = apply_flattened(apply, input_parallel)
+                self.partial_sum_dtype = None
+            else:
+                output_parallel = apply_flattened(apply, input_parallel)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
             if self._fp16_partials is not None:
                 # Round to BF16 once, after the sum.
-                output = torch.mul(
-                    output,
-                    self._partial_sum_unscale_fp32,
-                    out=torch.empty_like(output, dtype=self.params_dtype),
-                )
+                output = self._unscale_fp16_partials(output)
+        elif self._fp16_partials is not None and not self._fp16_partials_deferred:
+            # reduce_results was turned off after __init__, for good or for
+            # one call: the caller reduces, so it gets BF16 partial sums.
+            output = self._unscale_fp16_partials(output_parallel)
         else:
             output = output_parallel
 
@@ -1977,6 +2008,13 @@ class RowParallelLinear(LinearBase):
             return output
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def _unscale_fp16_partials(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mul(
+            x,
+            self._partial_sum_unscale_fp32,
+            out=torch.empty_like(x, dtype=self.params_dtype),
+        )
 
     def _fp16_partials_mode(self) -> Literal["gemm", "kernel"] | None:
         if not (
@@ -2004,7 +2042,7 @@ class RowParallelLinear(LinearBase):
         mode: Literal["gemm", "kernel"] | None = None
         if type(self.quant_method) is UnquantizedLinearMethod:
             gemm = self.quant_method._gemm_impl
-            if gemm in (default_unquantized_gemm, cuda_unquantized_gemm):
+            if gemm is cuda_unquantized_gemm:
                 mode = "gemm"
             impl = getattr(gemm, "__name__", type(gemm).__name__)
         else:
@@ -2047,9 +2085,9 @@ class RowParallelLinear(LinearBase):
         return mode
 
     def disable_fp16_partial_sums(self, reason: str) -> None:
-        """Go back to BF16 partial sums. For wrappers that call
-        `quant_method.apply` on this layer and all-reduce the result
-        themselves, bypassing the unscale in `forward`."""
+        """Go back to BF16 partial sums and drop the prescaled copies. For
+        wrappers that run `quant_method.apply` on this layer instead of
+        `forward` (which gets BF16 from it anyway)."""
         if self._fp16_partials is None:
             return
         logger.warning_once(

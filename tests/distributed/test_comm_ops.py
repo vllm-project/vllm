@@ -495,30 +495,22 @@ def test_flashinfer_standalone_workspace_size(
 
 
 @pytest.mark.parametrize(
-    ("node_count", "is_blackwell", "hisparse", "expected"),
+    ("node_count", "is_blackwell", "expected"),
     [
-        (1, False, False, ("mnnvl", True)),
-        (1, True, False, ("mnnvl", True)),
-        (2, False, False, (None, False)),
-        (2, True, False, ("mnnvl", False)),
-        (1, True, True, ("trtllm", False)),
-        (2, True, True, (None, False)),
+        (1, False, ("mnnvl", True)),
+        (1, True, ("mnnvl", True)),
+        (2, False, (None, False)),
+        (2, True, ("mnnvl", False)),
     ],
 )
 def test_flashinfer_auto_backend_uses_group_topology(
     monkeypatch: pytest.MonkeyPatch,
     node_count: int,
     is_blackwell: bool,
-    hisparse: bool,
     expected: tuple[str | None, bool],
 ) -> None:
     monkeypatch.setattr(
         flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
-    )
-    config = Mock()
-    config.attention_config.hisparse_config = Mock() if hisparse else None
-    monkeypatch.setattr(
-        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: config
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
     monkeypatch.setattr(
@@ -593,6 +585,24 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
 
     assert communicator.all_gatherv(torch.empty(1)) is output
+
+
+def test_reduce_scatter_falls_back_when_pynccl_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.pynccl_comm = Mock(disabled=True)
+    fallback = Mock(return_value=torch.empty(2))
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.base_device_communicator."
+        "DeviceCommunicatorBase.reduce_scatter",
+        fallback,
+    )
+
+    inp = torch.empty(4)
+    assert communicator.reduce_scatter(inp, 0) is fallback.return_value
+    fallback.assert_called_once_with(inp, 0)
 
 
 @pytest.mark.parametrize(
@@ -821,6 +831,8 @@ def fp16_partial_sums_row_parallel_test_worker(
     - unquantized: bit-exact BF16 rounding of the FP16 sum of FP16 partials;
     - block FP8 ("kernel" mode, Fp8 and compressed-tensors): matches BF16
       partial sums up to rounding;
+    - reduce_results turned off after __init__: unscaled BF16 partial sums;
+    - quant_method.apply called outside forward: BF16;
     - deferred all-reduce (built in deferred_fp16_partial_sums()): the
       caller's all-reduce + unscale matches the in-layer output bit for bit;
     - LoRA: falls back to BF16 partial sums.
@@ -878,6 +890,11 @@ def fp16_partial_sums_row_parallel_test_worker(
     expected = (parts[0] + parts[1]).bfloat16() * layer._partial_sum_unscale
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
     assert errors["1"] < errors["0"], errors
+    # Models that reduce themselves turn reduce_results off after __init__.
+    layer.reduce_results = False
+    out, _ = layer(x[:, shard])
+    expected = part.bfloat16() * layer._partial_sum_unscale
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
     # deferred all-reduce: the caller all-reduces and unscales, bit for bit
     # the in-layer output; only layers built in deferred_fp16_partial_sums()
@@ -950,13 +967,22 @@ def fp16_partial_sums_row_parallel_test_worker(
             assert outs[flag].dtype == torch.bfloat16
         diff = float(((outs["1"].double() - outs["0"].double()).abs() / rms).mean())
         assert diff < 1e-2, (scale_name, diff)
-        assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.float16
+        # Outside forward, quant_method.apply writes BF16.
+        assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.bfloat16
         # A weight reload refills the prescaled block scales in place.
         ptr = layer.partial_sum_block_scale.data_ptr()
         store_partial_sum_prescaled(
             layer, "partial_sum_block_scale", getattr(layer, scale_name)
         )
         assert layer.partial_sum_block_scale.data_ptr() == ptr
+        layer.reduce_results = False
+        out, _ = layer(x[:, shard])
+        bias = layer.bias if rank == 0 else None
+        layer.partial_sum_dtype = torch.float16  # as forward does
+        part = layer.quant_method.apply(layer, x[:, shard], bias)
+        layer.partial_sum_dtype = None
+        expected = part.bfloat16() * layer._partial_sum_unscale
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
     # LoRA all-reduces quant_method.apply itself: back to BF16 partial sums
     with set_current_vllm_config(vllm_config):
