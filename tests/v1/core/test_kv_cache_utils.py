@@ -2238,3 +2238,78 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+class _FakeMambaSpec:
+    """Minimal Mamba-shaped spec for capacity-validation tests."""
+
+    def __init__(self, page_size_bytes: int = 1_622_016, blocks_per_req: int = 3):
+        self.page_size_bytes = page_size_bytes
+        self._bytes = page_size_bytes * blocks_per_req
+
+    def max_memory_usage_bytes(self, vllm_config) -> int:
+        return self._bytes
+
+
+def _capacity_validation_setup(num_blocks: int, max_num_seqs: int):
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        model_config=SimpleNamespace(max_model_len=262144),
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_groups=[
+            SimpleNamespace(
+                host_resident=False,
+                kv_cache_spec=_FakeMambaSpec(),
+            ),
+            SimpleNamespace(
+                host_resident=False,
+                kv_cache_spec=SimpleNamespace(
+                    page_size_bytes=16,
+                    max_memory_usage_bytes=lambda cfg: 2656,
+                ),
+            ),
+        ],
+    )
+    return vllm_config, kv_cache_config
+
+
+def test_mamba_block_capacity_raises_when_max_num_seqs_exceeds_blocks():
+    vllm_config, kv_cache_config = _capacity_validation_setup(
+        num_blocks=227, max_num_seqs=256
+    )
+    with pytest.raises(ValueError, match="max_num_seqs \\(256\\).*227.*--max-num-seqs 227"):
+        kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
+
+
+def test_mamba_block_capacity_passes_when_blocks_sufficient():
+    vllm_config, kv_cache_config = _capacity_validation_setup(
+        num_blocks=512, max_num_seqs=256
+    )
+    kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
+
+
+def test_mamba_block_capacity_ignores_non_mamba_and_host_groups():
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=256),
+        model_config=SimpleNamespace(max_model_len=4096),
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_groups=[
+            SimpleNamespace(
+                host_resident=False,
+                kv_cache_spec=SimpleNamespace(
+                    page_size_bytes=16,
+                    max_memory_usage_bytes=lambda cfg: 2656,
+                ),
+            ),
+            SimpleNamespace(
+                host_resident=True,
+                kv_cache_spec=_FakeMambaSpec(),
+            ),
+        ],
+    )
+    # No device-resident mamba groups -> no validation error despite tiny pool.
+    kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
