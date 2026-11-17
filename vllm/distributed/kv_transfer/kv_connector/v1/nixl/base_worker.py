@@ -164,6 +164,11 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
+    # Default UCX `num_threads` (kv_connector_extra_config can override it).
+    _DEFAULT_NUM_THREADS: int = 4
+    # Whether the NIXL agent is created with NIXL_THREAD_SYNC_RW locking.
+    _SYNCHRONIZE_AGENT: bool = False
+
     # Only NixlPushConnector supports PP with HMA or packed KV caches.
     _supports_pp_hma = False
 
@@ -787,12 +792,11 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 0 if self._TRANSFER_MODE == "push" else 4
+            "num_threads", self._DEFAULT_NUM_THREADS
         )
-        # Push calls the agent from the writer, engine and handshake threads.
         sync_params = (
             {"sync_mode": nixl_thread_sync_t.NIXL_THREAD_SYNC_RW}
-            if self._TRANSFER_MODE == "push" and nixl_thread_sync_t is not None
+            if self._SYNCHRONIZE_AGENT and nixl_thread_sync_t is not None
             else {}
         )
         if nixl_agent_config is None:
@@ -4021,14 +4025,20 @@ class NixlBaseConnectorWorker:
         # of remote engines is registered all at once (adding a background cleanup
         # thread wouldnt help either).
         # If that scenario is plausible, we can follow up with an LRU eviction policy.
-        # Push does not track its WRITEs per peer, so a peer is never idle here.
-        if self._engine_ttl <= 0 or self._TRANSFER_MODE == "push":
+        if self._engine_ttl <= 0:
             return
 
         now = time.perf_counter()
+        stale = [
+            eid
+            for eid, last_active in list(self._engine_last_active.items())
+            if now - last_active > self._engine_ttl
+        ]
+        if not stale:
+            return
         busy = self._engines_with_inflight_transfers()
-        for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl and eid not in busy:
+        for eid in stale:
+            if eid not in busy:
                 self._cleanup_remote_engine(eid)
 
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
@@ -4040,7 +4050,8 @@ class NixlBaseConnectorWorker:
         """
         return {
             meta.remote.engine_id
-            for req_id in self._recving_transfers
+            # Snapshot: push evicts from its writer thread too.
+            for req_id in list(self._recving_transfers)
             if (meta := self._recving_metadata.get(req_id)) is not None
             and meta.remote is not None
         }

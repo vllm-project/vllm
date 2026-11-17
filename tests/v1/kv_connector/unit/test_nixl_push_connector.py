@@ -398,8 +398,9 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
-        w._released_pushes = {}
         w._submitting_pushes = set()
+        w._push_dst_engines = {}
+        w._next_held_lease_check = 0.0
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -819,20 +820,26 @@ def test_active_push_refreshes_engine_last_active():
     assert w.writes == ["req"]
 
 
-def test_push_does_not_evict_silent_engine():
-    """Push does not track its WRITEs per peer, so TTL eviction could remove a
-    D engine whose WRITEs are still in flight: a push keeps a silent engine."""
+@pytest.mark.parametrize("inflight", [False, True])
+def test_stale_engine_evicted_on_push(inflight):
+    """A push drives `_ensure_handshake` -> `_evict_stale_engines`, so a D
+    engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
+    across D scale up/down (S1) -- unless WRITEs to it are still in flight."""
     w = _eviction_worker(engine_ttl=30.0)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
+    if inflight:
+        w._sending_transfers["req-old"] = [7]
+        w._push_dst_engines["req-old"] = "D-old"
     # The engine being pushed to is already connected.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
 
     _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
 
     assert w.writes == ["req"]
-    assert "D-old" in w._remote_agents
-    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+    assert ("D-old" in w._remote_agents) is inflight
+    assert ("D-old" in w._engine_last_active) is inflight
+    assert w.nixl_wrapper.remove_remote_agent.call_count == (not inflight)
 
 
 def test_cleanup_remote_engine_pops_under_handshake_lock():
@@ -1145,16 +1152,11 @@ class TestPushWriterNotifs:
         assert during == [set()]
         assert w.get_transfer_results().finished_sending == {request_id}
 
-    @pytest.mark.parametrize("released", ["lease_gone", "evicted"])
-    def test_released_request_is_not_pushed(self, released):
+    def test_released_request_is_not_pushed(self):
         """A registration arriving after the request's blocks were released
         must not WRITE from them."""
         w = self._pollable_worker()
         request_id = "req-late"
-        if released == "evicted":
-            w._reqs_to_send[request_id] = time.perf_counter() + 60
-            w._reqs_to_process.add(request_id)
-            w._released_pushes[request_id] = None
         w._start_push_kv = MagicMock()
 
         NixlPushConnectorWorker._do_start_push_kv(
@@ -1163,6 +1165,25 @@ class TestPushWriterNotifs:
 
         w._start_push_kv.assert_not_called()
         assert not w._submitting_pushes
+        assert not w._push_dst_engines
+
+    def test_push_dst_engine_tracked_until_writes_finish(self):
+        """TTL eviction keeps a D engine while WRITEs to it are in flight."""
+        w = self._pollable_worker()
+        request_id = "req-dst"
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+        w.expected_consumer_notifications_by_req = {}
+        w._start_push_kv = lambda rid, *_: w._sending_transfers[rid].append(101)
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+        assert w._engines_with_inflight_transfers() == {"decode-engine"}
+
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert w._engines_with_inflight_transfers() == set()
 
 
 # ----------------------------------------------------------------- #
