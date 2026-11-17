@@ -7,7 +7,7 @@
 //! `vllm/distributed/device_communicators/shm_object_storage.py`. The reader
 //! half lives in the Python engine's worker processes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
@@ -65,9 +65,9 @@ pub struct SingleWriterShmObjectStorage {
     id_index: HashMap<u32, String>,
     /// Writer flag to track in-use status: monotonic_id -> count
     writer_flag: HashMap<u32, u64>,
-    /// Items touch() keeps from being freed until they are looked up
-    /// or release_touches() is called
-    touched: HashSet<u32>,
+    /// Outstanding `touch` count per monotonic id; a touched item is not
+    /// freed until every touch is released with `untouch`.
+    touched: HashMap<u32, usize>,
 }
 
 impl SingleWriterShmObjectStorage {
@@ -90,7 +90,7 @@ impl SingleWriterShmObjectStorage {
             key_index: HashMap::new(),
             id_index: HashMap::new(),
             writer_flag: HashMap::new(),
-            touched: HashSet::new(),
+            touched: HashMap::new(),
         })
     }
 
@@ -118,19 +118,12 @@ impl SingleWriterShmObjectStorage {
         self.key_index.len()
     }
 
-    /// Get the cached object by key if it exists, bumping its writer flag and
-    /// releasing its touch protection.
+    /// Get the cached object by key if it exists, bumping its writer flag.
     pub fn get_cached(&mut self, key: &str) -> Option<(usize, u32)> {
         let entry = self.key_index.get(key)?;
         let (address, monotonic_id) = (entry.address, entry.monotonic_id);
         self.increment_writer_flag(monotonic_id);
-        self.touched.remove(&monotonic_id);
         Some((address, monotonic_id))
-    }
-
-    /// Stop protecting touched items that were not looked up.
-    pub fn release_touches(&mut self) {
-        self.touched.clear();
     }
 
     /// Number of items currently protected by `touch`, for tests.
@@ -157,15 +150,27 @@ impl SingleWriterShmObjectStorage {
         mac.finalize().into_bytes().into()
     }
 
-    /// Touch an existing cached item.
+    /// Protect a cached item from eviction until a matching `untouch`.
     ///
-    /// Protect the item from eviction until `get_cached` or
-    /// `release_touches`.
-    pub fn touch(&mut self, key: &str) {
-        let Some(entry) = self.key_index.get(key) else {
-            return;
-        };
-        self.touched.insert(entry.monotonic_id);
+    /// Touches nest, so concurrent requests can each protect the same item.
+    /// Returns the item's monotonic id to pass to `untouch`, or `None` if
+    /// `key` is not cached.
+    pub fn touch(&mut self, key: &str) -> Option<u32> {
+        let id = self.key_index.get(key)?.monotonic_id;
+        *self.touched.entry(id).or_insert(0) += 1;
+        Some(id)
+    }
+
+    /// Release one `touch` of the item with monotonic id `id`.
+    ///
+    /// A no-op if the item is not touched, e.g. after `clear`.
+    pub fn untouch(&mut self, id: u32) {
+        if let Some(count) = self.touched.get_mut(&id) {
+            *count -= 1;
+            if *count == 0 {
+                self.touched.remove(&id);
+            }
+        }
     }
 
     /// Store a key-value pair in the object storage.
@@ -252,9 +257,8 @@ impl SingleWriterShmObjectStorage {
         let n_readers = u64::from(*n_readers);
         let freed_ids = ring_buffer.free_buf(
             |id, reader_count| {
-                // Items touch() keeps from being freed until they are looked
-                // up or release_touches() is called.
-                if touched.contains(&id) {
+                // Touched items stay until every touch is released.
+                if touched.contains_key(&id) {
                     return false;
                 }
                 // An item is freeable iff
@@ -320,31 +324,15 @@ mod tests {
         assert_eq!(storage.writer_flag[&id], 2);
         assert_eq!(storage.get_cached("hash-b"), None);
 
-        // Touch protects from eviction without bumping the writer flag;
-        // get_cached releases the protection again.
-        storage.touch("hash-a");
-        storage.touch("hash-b"); // no-op for unknown keys
+        // Touch does not bump the writer flag, and ignores unknown keys.
+        assert_eq!(storage.touch("hash-a"), Some(id));
+        assert_eq!(storage.touch("hash-b"), None);
         assert_eq!(storage.writer_flag[&id], 2);
-        assert!(storage.touched.contains(&id));
-        storage.get_cached("hash-a");
-        assert_eq!(storage.writer_flag[&id], 3);
-        assert!(!storage.touched.contains(&id));
 
         // The payload starts with a zeroed reader-count flag.
         assert_eq!(storage.ring_buffer.reader_count(address), 0);
         let (_, size) = storage.ring_buffer.chunk_header(address);
         assert_eq!(size, MD_SIZE + FLAG_BYTES + 100);
-    }
-
-    #[test]
-    fn release_touches_drops_protection() {
-        let mut storage = create_storage(4096, 1024);
-        let (_, id) = storage.put("hash-a", &body(10)).unwrap();
-
-        storage.touch("hash-a");
-        assert!(storage.touched.contains(&id));
-        storage.release_touches();
-        assert!(storage.touched.is_empty());
     }
 
     #[test]
@@ -418,36 +406,32 @@ mod tests {
     }
 
     #[test]
-    fn touch_blocks_eviction_until_get_cached_or_release() {
+    fn touch_blocks_eviction_until_every_touch_is_released() {
         let mut storage = create_storage(320, 256);
-        let (address_a, _) = storage.put("hash-a", &body(108)).unwrap();
-        let (address_b, _) = storage.put("hash-b", &body(108)).unwrap();
+        let (address_a, id_a) = storage.put("hash-a", &body(108)).unwrap();
+        storage.put("hash-b", &body(108)).unwrap();
 
-        // Fully read, but touched: eviction is still blocked.
-        storage.set_reader_count(address_a, 1);
+        // Two concurrent requests touch hash-a, and one looks it up. The
+        // lookup is read as well, so only the touches block eviction.
         storage.touch("hash-a");
+        storage.touch("hash-a");
+        storage.get_cached("hash-a");
+        storage.set_reader_count(address_a, 2);
         assert_eq!(
             storage.put("hash-c", &body(108)),
             Err(PutFailure::BufferFull)
         );
 
-        // Looking the item up releases the touch; with the writer-flag bump
-        // matched by a second read, eviction proceeds.
-        storage.get_cached("hash-a");
-        storage.set_reader_count(address_a, 2);
-        storage.put("hash-c", &body(108)).unwrap();
-        assert!(!storage.is_cached("hash-a"));
-
-        // Same for release_touches.
-        storage.set_reader_count(address_b, 1);
-        storage.touch("hash-b");
+        // One request finishing keeps the other's protection.
+        storage.untouch(id_a);
         assert_eq!(
-            storage.put("hash-d", &body(108)),
+            storage.put("hash-c", &body(108)),
             Err(PutFailure::BufferFull)
         );
-        storage.release_touches();
-        storage.put("hash-d", &body(108)).unwrap();
-        assert!(!storage.is_cached("hash-b"));
+
+        storage.untouch(id_a);
+        storage.put("hash-c", &body(108)).unwrap();
+        assert!(!storage.is_cached("hash-a"));
     }
 
     #[test]
@@ -481,6 +465,8 @@ mod tests {
         assert_eq!(storage.cached_len(), 0);
         assert!(storage.writer_flag.is_empty());
         assert!(storage.id_index.is_empty());
-        assert!(!storage.touched.contains(&id));
+        assert!(storage.touched.is_empty());
+        // Releasing a touch taken before the clear is a no-op.
+        storage.untouch(id);
     }
 }
