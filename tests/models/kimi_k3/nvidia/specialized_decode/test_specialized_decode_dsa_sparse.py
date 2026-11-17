@@ -295,9 +295,10 @@ def test_sparse_layout_policy():
     assert sparse_layout(8, 80, (5, DCP16)) == (1, True)  # 80 % 32: one tile
 
 
-def _pushed_mailboxes(counts, tiles, bulk, seed):
-    """The DCP16 pushing decode of `counts` rows with `tiles` / `bulk`: every
-    owner's partial and LSE mailbox and the q mailbox after it."""
+def _pushed_mailboxes(counts, tiles, bulk, seed, px=False):
+    """The DCP16 pushing decode of `counts` rows with `tiles` / `bulk` (`px`:
+    SparseDcpDecodePx instead): every owner's partial and LSE mailbox and the q
+    mailbox after it."""
     from types import SimpleNamespace
 
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.attn_sparse import (
@@ -320,7 +321,7 @@ def _pushed_mailboxes(counts, tiles, bulk, seed):
     )
     push = (owners, dcp)
     kernel = compile_sparse(
-        batch, HEADS, PADDED, WIDTH, CAP, 0, push=push, tiles=tiles, bulk=bulk
+        batch, HEADS, PADDED, WIDTH, CAP, 0, push=push, tiles=tiles, bulk=bulk, px=px
     )
     out = torch.zeros(batch, PADDED, LATENT, dtype=torch.bfloat16, device="cuda")
     out_lse = torch.zeros(batch, PADDED, device="cuda")
@@ -344,6 +345,20 @@ def test_sparse_layouts_match_one_tile(tiles, bulk, batch, counts):
     seed = 3 + batch
     want = _pushed_mailboxes(LAYOUT_COUNTS[counts][:batch], 1, False, seed)
     got = _pushed_mailboxes(LAYOUT_COUNTS[counts][:batch], tiles, bulk, seed)
+    for tensor, ref in zip(got, want):
+        assert torch.equal(tensor.view(torch.uint8), ref.view(torch.uint8))
+
+
+@pytest.mark.parametrize("counts", list(LAYOUT_COUNTS))
+@pytest.mark.parametrize("batch", [7, 8])
+def test_sparse_px_matches_partials_exchange(batch, counts):
+    """SparseDcpDecodePx exchanges each split's P before PV instead of the FP32
+    partials after it: the pushed rows, LSEs and the q mailbox re-arm match the
+    two-tile bulk decode byte for byte (DCP16 shapes)."""
+    seed = 3 + batch
+    rows = LAYOUT_COUNTS[counts][:batch]
+    want = _pushed_mailboxes(rows, 2, True, seed)
+    got = _pushed_mailboxes(rows, 2, True, seed, px=True)
     for tensor, ref in zip(got, want):
         assert torch.equal(tensor.view(torch.uint8), ref.view(torch.uint8))
 
