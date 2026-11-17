@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Qwen3Model's sequence-parallel (+ async-TP) support:
 
-- Unit tests for the ``mark_sp_region`` boundaries set up in ``__init__``
-  and the shard/gather done around ``forward``.
-- ``test_tp_sp_generation``: e2e correctness of ``--enable-sequence-parallel``
-  / ``--enable-async-tp`` generation against a plain TP baseline, in bf16, via
-  ``tests.correctness_e2e.sequence_parallel_test_utils``.
+- Unit tests for the `mark_sp_region` boundaries set up in `__init__`
+  and the shard/gather done around `forward`.
+- `test_tp_sp_generation`: e2e correctness of `--enable-sequence-parallel`
+  / `--enable-async-tp` generation against a plain TP baseline, in bf16, via
+  `tests.correctness_e2e.sequence_parallel_test_utils`.
 """
 
 from types import SimpleNamespace
@@ -27,7 +27,7 @@ from vllm.models.qwen3.nvidia import model as qwen3_model
 
 class _StubLayer:
     """Stand-in decoder layer exposing just the four linears
-    ``Qwen3Model.__init__`` wires SP regions around."""
+    `Qwen3Model.__init__` wires SP regions around."""
 
     def __init__(self) -> None:
         self.self_attn = SimpleNamespace(qkv_proj=object(), o_proj=object())
@@ -41,9 +41,9 @@ def _make_model(
     num_layers: int = 2,
     pp_world_size: int = 1,
 ) -> tuple[qwen3_model.Qwen3Model, list[_StubLayer]]:
-    """Build a ``Qwen3Model`` with ``Qwen2Model.__init__`` stubbed out to
-    just install ``layers``/``start_layer``/``end_layer``, so the real SP
-    wiring in ``Qwen3Model.__init__`` runs against stand-in layers instead
+    """Build a `Qwen3Model` with `Qwen2Model.__init__` stubbed out to
+    just install `layers`/`start_layer`/`end_layer`, so the real SP
+    wiring in `Qwen3Model.__init__` runs against stand-in layers instead
     of a full model."""
     layers = [_StubLayer() for _ in range(num_layers)]
 
@@ -68,7 +68,7 @@ def _make_model(
 def test_wires_mark_sp_region_per_layer_boundary(monkeypatch: pytest.MonkeyPatch):
     """Each layer has two SP regions -- [prev down_proj -> qkv_proj] and
     [o_proj -> gate_up_proj] -- and the final region ends at the gathered
-    norm (``exit_before=None``), not at another layer's input."""
+    norm (`exit_before=None`), not at another layer's input."""
     calls: list[tuple[object, object]] = []
     monkeypatch.setattr(
         qwen3_model,
