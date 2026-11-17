@@ -809,7 +809,10 @@ class MPClient(EngineCoreClient):
                     )
                 identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
-                self._apply_ready_response(payload)
+                response = self._apply_ready_response(payload)
+                self._prefix_hash_configs[int.from_bytes(identity, "little")] = (
+                    response.prefix_hash_config if response is not None else None
+                )
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -886,7 +889,7 @@ class MPClient(EngineCoreClient):
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
-    def _apply_ready_response(self, payload: bytes) -> None:
+    def _apply_ready_response(self, payload: bytes) -> EngineCoreReadyResponse | None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
         config changes (e.g. auto-fitted max_model_len) back to the frontend."""
         vllm_config = self.vllm_config
@@ -903,10 +906,7 @@ class MPClient(EngineCoreClient):
             next(iter(sizes)) if len(sizes) == 1 else None
         )
         if response is None:
-            return
-        self._prefix_hash_configs[response.data_parallel_rank] = (
-            response.prefix_hash_config
-        )
+            return None
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -966,6 +966,7 @@ class MPClient(EngineCoreClient):
                     setattr(self, attribute, address)
                 else:
                     assert address == existing_address
+        return response
 
     def get_prefix_hash_config(self) -> PrefixHashConfig | None:
         self.ensure_alive()
@@ -2091,7 +2092,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 )
             identity, payload = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
-            self._apply_ready_response(payload)
+            response = self._apply_ready_response(payload)
+            self._prefix_hash_configs[int.from_bytes(identity, "little")] = (
+                response.prefix_hash_config if response is not None else None
+            )
 
     def _make_reconfig_request(
         self,
