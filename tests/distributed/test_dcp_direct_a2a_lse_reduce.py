@@ -141,6 +141,14 @@ class _FakeProcessGroup:
 
 
 class TestDirectDCPGating:
+    @pytest.fixture(autouse=True)
+    def supported_topology(self, monkeypatch):
+        monkeypatch.setattr(
+            cp_common,
+            "get_symmetric_memory_topology",
+            lambda _group: cp_common.SymmetricMemoryTopology.INTRA_NODE,
+        )
+
     def test_env_disabled_returns_none(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
         dcp.get_direct_dcp_a2a_workspace.cache_clear()
