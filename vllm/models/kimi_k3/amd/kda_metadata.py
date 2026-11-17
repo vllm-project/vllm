@@ -26,7 +26,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
@@ -185,12 +185,15 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         # The shared builder keys checkpoint rows on every request; the ROCm
         # prefill path indexes them by prefill_query_start_loc, so rebuild with
         # those rows.
-        return replace(
-            attn_metadata,
-            checkpoint=self._build_checkpoint_metadata(
-                common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
-            ),
+        checkpoint = self._build_checkpoint_metadata(
+            common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
         )
+        rows = None
+        if checkpoint is not None:
+            # Once per step: FlashKDA skips negative rows, vLLM marks none as NULL.
+            idx = checkpoint.state_indices
+            rows = torch.where(idx != NULL_BLOCK_ID, idx, -1)
+        return replace(attn_metadata, checkpoint=checkpoint, checkpoint_rows=rows)
 
     def _build_checkpoint_metadata(
         self,
