@@ -498,6 +498,23 @@ class HFConfigParser(ConfigParserBase):
                 else:
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
+        text_config = getattr(config, "text_config", config)
+        if getattr(text_config, "model_type", None) in (
+            "minimax_m3_vl_text",
+            "minimax_m3_mtp",
+        ) and not hasattr(text_config, "sparse_attention_config"):
+            sparse_cfg = config_dict.get("text_config", {}).get(
+                "sparse_attention_config"
+            ) or config_dict.get("sparse_attention_config")
+            if sparse_cfg is None:
+                sparse_cfg = {
+                    "sparse_num_index_heads": getattr(text_config, "index_n_heads", 4),
+                    "sparse_index_dim": getattr(text_config, "index_head_dim", 128),
+                    "sparse_block_size": getattr(text_config, "index_block_size", 128),
+                    "sparse_topk_blocks": getattr(text_config, "index_topk_blocks", 16),
+                    "sparse_local_block": getattr(text_config, "index_local_blocks", 1),
+                }
+            text_config.sparse_attention_config = sparse_cfg
         return config_dict, config
 
 
