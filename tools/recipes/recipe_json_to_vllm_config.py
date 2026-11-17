@@ -155,7 +155,7 @@ def parse_args() -> argparse.Namespace:
         "--detect-hardware",
         action="store_true",
         help=(
-            "Detect effective CPU/NUMA/memory resources and allow the selected "
+            "Detect CPU/NUMA or Intel XPU resources and allow the selected "
             "recipe-hardware policy to override recipe runtime arguments."
         ),
     )
@@ -956,9 +956,24 @@ def main() -> int:
             )
 
             if args.detect_hardware:
-                from hardware_detection import detect_hardware
+                if recipe_hardware == "xeon6":
+                    from hardware_detection import detect_hardware
 
-                hardware = detect_hardware()
+                    hardware = detect_hardware()
+                elif recipe_hardware == "arc_pro_b70":
+                    from xpu_hardware_detection import detect_xpu_hardware
+
+                    hardware = detect_xpu_hardware()
+                else:
+                    raise ValueError(f"No detector registered for {recipe_hardware!r}")
+
+            if recipe_hardware == "arc_pro_b70" and (
+                args.generate_full_sweep or args.generate_parallel_layout_sweep
+            ):
+                raise ValueError(
+                    "NUMA-based parallel-layout/full sweeps are Xeon-only; "
+                    "use an XPU-aware sweep implementation for B70"
+                )
 
             tuning = finetune_runtime_config(
                 config,

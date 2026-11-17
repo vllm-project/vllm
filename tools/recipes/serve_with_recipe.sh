@@ -26,7 +26,16 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     esac
 done
 
-if [[ "${hardware,,}" == "xeon6" ]]; then
+has_detect_hardware=false
+for arg in "${args[@]}"; do
+    if [[ "$arg" == "--detect-hardware" ]]; then
+        has_detect_hardware=true
+        break
+    fi
+done
+
+if [[ "$has_detect_hardware" == false && \
+      ( "${hardware,,}" == "xeon6" || "${hardware,,}" == "arc_pro_b70" ) ]]; then
     args+=(--detect-hardware)
 fi
 
