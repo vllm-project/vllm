@@ -350,7 +350,8 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
     return nullptr;
   }
 
-  Py_RETURN_NONE;
+  Py_INCREF(Py_None);
+  return Py_None;
 }
 
 static PyMethodDef fs_io_C_methods[] = {

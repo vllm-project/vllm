@@ -607,7 +607,8 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
   g_python_malloc_callback = malloc_callback;
   g_python_free_callback = free_callback;
 
-  Py_RETURN_NONE;
+  Py_INCREF(Py_None);
+  return Py_None;
 }
 
 static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
@@ -728,7 +729,8 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  Py_RETURN_NONE;
+  Py_INCREF(Py_None);
+  return Py_None;
 }
 
 static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
@@ -796,7 +798,8 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  Py_RETURN_NONE;
+  Py_INCREF(Py_None);
+  return Py_None;
 }
 
 static PyMethodDef module_methods[] = {
