@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -20,6 +20,7 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
+from vllm.exceptions import PromptUpdateMismatchError
 from vllm.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -88,7 +89,7 @@ class _GetTextMatchIndex(Protocol):
     ) -> int | None: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptIndex:
     """Resolves to an index in the prompt."""
 
@@ -171,7 +172,7 @@ instead of a function if it does not depend on the input.
 """
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdateDetails:
     """Details about the token sequence that is part of the update."""
 
@@ -238,12 +239,12 @@ instead of a function if it does not depend on the input.
 """
 
 
-class UpdateMode(str, Enum):
+class UpdateMode(StrEnum):
     INSERT = "insert"
     REPLACE = "replace"
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdate(ABC):
     """Defines how to update a prompt with placeholder tokens.
 
@@ -305,7 +306,7 @@ class PromptUpdate(ABC):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptInsertion(PromptUpdate):
     """Defines how to insert placeholder tokens into a prompt.
 
@@ -373,7 +374,7 @@ class PromptInsertion(PromptUpdate):
         return UpdateMode.INSERT
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptReplacement(PromptUpdate):
     """Defines how to replace portions of an input prompt with placeholder tokens.
 
@@ -454,7 +455,7 @@ class PromptTargetMatch(NamedTuple):
     end_idx: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedPromptUpdate:
     """A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
     lazy attributes resolved.
@@ -575,7 +576,7 @@ def replace_token_matches(
     return flatten_2d_lists(out_seqs)
 
 
-@dataclass
+@dataclass(slots=True)
 class PlaceholderFeaturesInfo:
     modality: str
     item_idx: int
@@ -1272,7 +1273,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        mm_inputs: Mapping[str, object],
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
@@ -1692,10 +1693,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
         for modality, update_idxs in match_result.items():
             for item_idx, update_idx in enumerate(update_idxs):
-                assert update_idx is not None, (
-                    "Failed to apply prompt replacement for "
-                    f"mm_items[{modality!r}][{item_idx}]"
-                )
+                if update_idx is None:
+                    raise PromptUpdateMismatchError(
+                        "Failed to apply prompt replacement for "
+                        f"mm_items[{modality!r}][{item_idx}]"
+                    )
 
                 matched_updates[modality].append(
                     [mm_prompt_updates[modality][item_idx][update_idx]]

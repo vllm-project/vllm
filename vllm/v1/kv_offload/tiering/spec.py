@@ -67,7 +67,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _shared_region_barrier
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -332,6 +335,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
+        if self.async_init:
+            logger.warning(
+                "async_init is not supported with TieringOffloadingSpec yet; "
+                "setting the CPU tier up now"
+            )
+            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
@@ -420,6 +429,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         else None
                     ),
                     unlink_owner=True,
+                    num_segments=REGION_SEGMENTS,
+                    populate=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
@@ -490,6 +501,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
+            if secondary_tiers and not (
+                self.config.replicated_layout
+                or (
+                    self.config.canonical_layout
+                    and self.config.parallel.is_parallelism_agnostic
+                )
+            ):
+                logger.warning(
+                    "Secondary-tier KV is only valid for engines with the same "
+                    "parallel configuration; sharing it across TP sizes needs "
+                    "canonical_layout=true in kv_connector_extra_config, "
+                    "parallelism-agnostic KV cache layers, and no PP, DCP or PCP."
+                )
 
         return self._manager
 
@@ -550,6 +574,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             _reject_workers_across_nodes()
         rank = 0 if self.replicated_layout else self.worker_rank
         worker_mmap: SharedOffloadRegion | None = None
+        world_size = self.config.parallel.world_size
         try:
             worker_mmap = SharedOffloadRegion(
                 engine_id=self._engine_id,
@@ -562,6 +587,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # scheduler mapping phase performs the final unlink.
                 barrier=_shared_region_barrier,
                 unlink_owner=False,
+                num_segments=REGION_SEGMENTS,
+                populate_shard=(
+                    (self.worker_rank, world_size) if self.replicated_layout else None
+                ),
             )
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)

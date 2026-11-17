@@ -3,9 +3,9 @@
 
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
-"""K4 ``mono_post``: one MiniMax-M3 sparse MoE layer, attention through FFN reduce.
+"""K4 `mono_post`: one MiniMax-M3 sparse MoE layer, attention through FFN reduce.
 
-One launch per layer and rank, ``BLOCKS`` CTAs x ``THREADS`` threads, for a step of
+One launch per layer and rank, `BLOCKS` CTAs x `THREADS` threads, for a step of
 S = 1..MAX_TOKENS tokens (each token's stage tasks side by side); for one token::
 
     index : K1, fused in, scored every index-K block (the Triton decode scorer's
@@ -29,11 +29,11 @@ S = 1..MAX_TOKENS tokens (each token's stage tasks side by side); for one token:
             under the up/gate GEMV: route-weighted down GEMV -> push bf16
             partial rows -> rank-ordered sum -> ar_out = bf16(sum)
 
-From ``WIDE_FROM`` tokens the MoE groups its work by expert (``wide_moe``): the
+From `WIDE_FROM` tokens the MoE groups its work by expert (`wide_moe`): the
 router tasks publish xn as MXFP8, each up / gate task pair runs one distinct
 expert's 32 rows for every token routed to it (a8w4 MFMA, a B column per token)
 and publishes MXFP8 mid rows, and a down task sums over the step's (expert,
-token) mids. From ``AG_RS_FROM`` tokens both all-reduces are a reduce-scatter to
+token) mids. From `AG_RS_FROM` tokens both all-reduces are a reduce-scatter to
 the row group's owner rank, which sums in rank order and all-gathers the result.
 
 The next layer's K1 takes (ar_out, h_mid) exactly as the original path's fused
@@ -198,8 +198,8 @@ assert MAX_TOKENS <= SPARSE_BLOCK
 
 
 def scale_index(row, col, cols):
-    """Byte of e8m0 scale (row, col) in aiter's ``shuffle_scale`` layout:
-    ``view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)``."""
+    """Byte of e8m0 scale (row, col) in aiter's `shuffle_scale` layout:
+    `view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)`."""
     r32, a, b = row // 32, (row // 16) % 2, row % 16
     c8, d, e = col // 8, (col // 4) % 2, col % 4
     return ((((r32 * (cols // 8) + c8) * 4 + e) * 16 + b) * 2 + d) * 2 + a
@@ -220,14 +220,14 @@ def build_post_attn_kernel(
     heads: IndexHeads = ONE_INDEX_HEAD,
     shared_fp8: bool = False,
 ):
-    """``@flyc.jit`` launcher of K4 for one rank of an ``npes``-way TP group and a
-    decode step of ``tokens`` (<= MAX_TOKENS) rows, ``q_len`` consecutive rows a
+    """`@flyc.jit` launcher of K4 for one rank of an `npes`-way TP group and a
+    decode step of `tokens` (<= MAX_TOKENS) rows, `q_len` consecutive rows a
     request (a speculative verify's), with contexts up to MAX_CONTEXT.
-    ``fuse_k1``: the layer's K1 runs first in the same launch (``K1_ARGS``,
-    ``positions``, ``slot_mapping``, ``res``; 0 otherwise), for a fused projection
-    of index q ``heads`` (``IndexHeads``). ``shared_fp8``: the expert tables hold
+    `fuse_k1`: the layer's K1 runs first in the same launch (`K1_ARGS`,
+    `positions`, `slot_mapping`, `res`; 0 otherwise), for a fused projection
+    of index q `heads` (`IndexHeads`). `shared_fp8`: the expert tables hold
     the routed experts only and the shared expert is MXFP8, its tables behind
-    the ``sh_args`` pointer table (``SH_ARGS``; 0 otherwise), its GEMVs fp8 x fp8
+    the `sh_args` pointer table (`SH_ARGS`; 0 otherwise), its GEMVs fp8 x fp8
     MFMAs."""
     assert 1 <= tokens <= MAX_TOKENS
     N_E = N_ROUTED if shared_fp8 else N_ROUTED + 1  # experts in w13 .. s2
@@ -388,8 +388,8 @@ def build_post_attn_kernel(
             )
 
         def route_key(v, e):
-            """Signed-orderable i32 of score ``v`` with its low 7 bits replaced by
-            127 - expert ``e``: a pick is one integer max, a tie goes to the lower
+            """Signed-orderable i32 of score `v` with its low 7 bits replaced by
+            127 - expert `e`: a pick is one integer max, a tie goes to the lower
             expert."""
             b = v.bitcast(fx.Int32)
             b = (b < 0).select(b ^ fx.Int32(0x7FFFFFFF), b)
@@ -416,9 +416,9 @@ def build_post_attn_kernel(
             return (bid + (G - BASE[name])) % G
 
         def stamp(k):
-            """``timeline``: s_memrealtime (100 MHz) of this CTA passing point k, kept
+            """`timeline`: s_memrealtime (100 MHz) of this CTA passing point k, kept
             in LDS until the kernel ends -- a global store per stamp would put its
-            write latency on every later ``s_waitcnt vmcnt(0)``."""
+            write latency on every later `s_waitcnt vmcnt(0)`."""
             # The compile-time and traced conditions cannot share one ``and``.
             if const_expr(timeline):  # noqa: SIM102
                 if tid == 0:
@@ -454,8 +454,8 @@ def build_post_attn_kernel(
 
         def push_rows(region, row0, n_rows, only=None):
             """This task's bf16 partial rows (misc: token k's n_rows from k n_rows) to
-            the peers' ``region``, a pair a lane, wave w -> peer w (itself too);
-            ``only``: to that peer alone."""
+            the peers' `region`, a pair a lane, wave w -> peer w (itself too);
+            `only`: to that peer alone."""
             half = n_rows // 2
             to = (wave < W) if only is None else (wave == only)
             for c in range_constexpr((half * tokens + 63) // 64):
@@ -532,7 +532,7 @@ def build_post_attn_kernel(
         scored = [nb > TOPK_BLOCKS for nb in n_blks]
 
         def bt_row(k):
-            """Token k's block-table row (rows are ``bt_width`` apart)."""
+            """Token k's block-table row (rows are `bt_width` apart)."""
             return block_table + fx.Int64(k) * fx.Int64(bt_width) * 4
 
         def pick(vals, k):
@@ -556,7 +556,7 @@ def build_post_attn_kernel(
         def rank_blocks(k, iscore, n_blk, r_bt, scored_k):
             """Up to THREADS blocks: thread b keys block b, and a block's rank
             counts the blocks that beat it. -> this thread's (key, block, rank,
-            live, the tail block's key, page). ``scored_k``: the scores are read
+            live, the tail block's key, page). `scored_k`: the scores are read
             (else the blocks rank by id)."""
             b = tid
             live = b < n_blk
@@ -695,7 +695,7 @@ def build_post_attn_kernel(
         def place(key, bb, rank, live, kt, n_blk, seq_len, active):
             """The ranked blocks' slots, as the Triton selector emits them: full
             blocks by rank, the tail block (the one holding the current token)
-            last. -> (selected, slot, sparse context length); ``active``: this
+            last. -> (selected, slot, sparse context length); `active`: this
             CTA places (a uniform flag)."""
             n_sel = fx.min(n_blk, TOPK_BLOCKS)
             tail = n_blk - 1
@@ -726,7 +726,7 @@ def build_post_attn_kernel(
             to 1e30 and the local ones to 1e29, full blocks in that order and the
             tail block (the one holding the current token) last. A block's slot
             follows from its rank, the count of blocks that beat it. k: token.
-            For a long request ``stage_select_long`` left blk: a one-block
+            For a long request `stage_select_long` left blk: a one-block
             stand-in is ranked, placing nothing."""
             iscore = mb("iscore") + fx.Int64(k) * (MAX_INDEX_BLOCKS * 8)
             short = ~pick(long_rows, k)
@@ -764,7 +764,7 @@ def build_post_attn_kernel(
             split stage. Its share of the blocks (a thread keys CAND_BATCH) -> each
             wave's TOPK_BLOCKS best -> the CTA's, to a candidate mailbox; then the
             N_SPLIT shares' candidates (the context's TOPK_BLOCKS best are among
-            them) are ranked and placed -> blk as ``select_blocks`` leaves it, and
+            them) are ranked and placed -> blk as `select_blocks` leaves it, and
             (part 0) the sparse table. The share: an eighth of the blocks, to this
             rank's sel_long; with every index head (indexer context parallelism)
             head part // 2's scores of half part % 2 of this rank's blocks, to the
@@ -878,7 +878,7 @@ def build_post_attn_kernel(
 
         def stage_select_long():
             """The split tasks of a long request's token select before the
-            split stage (``select_long``), each leaving its blk for its split task
+            split stage (`select_long`), each leaving its blk for its split task
             (a CTA runs at most one). Out of the split stage and cold: inline
             there, this code slowed the split for every context (64k: +1 us)."""
             ts = start("split")
@@ -1432,11 +1432,11 @@ def build_post_attn_kernel(
 
         def route_top4(k, k0, sc0, k1, sc1, sig, wave_mask=None):
             """route[8k : 8k+4] / rwt[..] := token k's sigmoid top-k gating from the
-            router tasks' routing keys ``k0`` / ``k1`` (experts ``lane`` / ``lane +
-            64``, sigmoid + bias, see route_key) and unbiased sigmoids (wave k % WAVES
-            computes it, looking the sigmoids up in LDS at ``sig``): a pick is one
+            router tasks' routing keys `k0` / `k1` (experts `lane` / `lane +
+            64`, sigmoid + bias, see route_key) and unbiased sigmoids (wave k % WAVES
+            computes it, looking the sigmoids up in LDS at `sig`): a pick is one
             wave max; the weights are the picks' sigmoids renormalized and scaled by
-            route_scale. Slot 4 is the fused shared expert. ``wave_mask``: this
+            route_scale. Slot 4 is the fused shared expert. `wave_mask`: this
             wave's expert -> token mask, the picks' bit k set (the picks are
             distinct, and the wave's tokens run in program order). The caller
             syncs."""
@@ -1478,7 +1478,7 @@ def build_post_attn_kernel(
         MIDSC_LDS = MID8_LDS + tokens * MID8_WORDS
 
         def mx8_scale(vals, offsets):
-            """E8M0 byte (>= 1) of the 32-block the lanes xor-``offsets`` apart share,
+            """E8M0 byte (>= 1) of the 32-block the lanes xor-`offsets` apart share,
             aiter's MXFP8 RoundUp rule ceil_pow2(amax / 448), and its reciprocal."""
             amax = fx.max(vals[0], -vals[0])
             for v in vals[1:]:
@@ -1494,7 +1494,7 @@ def build_post_attn_kernel(
             return fx.max(fx.min(v * inv, fx.Float32(FP8_MAX)), fx.Float32(-FP8_MAX))
 
         def lds_b8(chunk_word):
-            """This lane's B operand of the 128-k chunk at LDS word ``chunk_word``:
+            """This lane's B operand of the 128-k chunk at LDS word `chunk_word`:
             fp8 k 16 g .. + 16 then 64 + 16 g .. + 16 (g = lane // 16), the
             f8f6f4 MFMA's B layout (harness/mfma_f4f8_probe.py)."""
             h = [
@@ -1515,8 +1515,8 @@ def build_post_attn_kernel(
 
         def mfma_f4f8(w4, sa, b8, sb, c, sa_byte=None):
             """16x16x128 scaled MFMA: A = this lane's 32 fp4 (row l % 16, k block
-            l / 16) with E8M0 ``sa``, B = its 32 fp8 with E8M0 ``sb``. ``sa_byte``:
-            ``sa`` is a scale dword, the MFMA takes that byte of it."""
+            l / 16) with E8M0 `sa`, B = its 32 fp8 with E8M0 `sb`. `sa_byte`:
+            `sa` is a scale dword, the MFMA takes that byte of it."""
             if const_expr(sa_byte is None):
                 sa, sa_byte = sa & 0xFF, 0
             return fx.Vector(
@@ -1526,8 +1526,8 @@ def build_post_attn_kernel(
             )
 
         def mfma_f8f8(w8, sa, b8, sb, c, sa_byte=None):
-            """``mfma_f4f8`` with an fp8 A: this lane's 32 fp8 of row l % 16 in the B
-            operand's k order (``f8_tile_load``); the scales are placed alike."""
+            """`mfma_f4f8` with an fp8 A: this lane's 32 fp8 of row l % 16 in the B
+            operand's k order (`f8_tile_load`); the scales are placed alike."""
             if const_expr(sa_byte is None):
                 sa, sa_byte = sa & 0xFF, 0
             return fx.Vector(
@@ -1537,7 +1537,7 @@ def build_post_attn_kernel(
             )
 
         def f8_tile_load(r_w, tile, slot):
-            """Lane ``slot``'s 32 fp8 of 16 x 128 tile ``tile`` (weights.mxfp8_a_tiles)
+            """Lane `slot`'s 32 fp8 of 16 x 128 tile `tile` (weights.mxfp8_a_tiles)
             as the f8f6f4 MFMA's 8-dword A operand."""
             word = (tile * F8_TILE + slot * 32) // 4
             h = [
@@ -1549,8 +1549,8 @@ def build_post_attn_kernel(
             )
 
         def sh_ptr(i):
-            """The MXFP8 shared expert's table ``SH_ARGS[i]``, read at use from the
-            ``sh_args`` pointer table (as K1's are): as four more kernel arguments
+            """The MXFP8 shared expert's table `SH_ARGS[i]`, read at use from the
+            `sh_args` pointer table (as K1's are): as four more kernel arguments
             they widened the kernarg pointer tuple, which ROCm LLVM's partial-
             register rewrite spilled incompletely (a fault at S = 2)."""
             v = fx.Vector(
@@ -1559,9 +1559,9 @@ def build_post_attn_kernel(
             return (fx.Int64(uniform(v[1])) << 32) | fx.Int64(fx.Uint32(uniform(v[0])))
 
         def w_tile(r_w, rg, kc, slot, k, fp8):
-            """Lane ``slot``'s A operand of row group rg, 128-k chunk kc of a table
+            """Lane `slot`'s A operand of row group rg, 128-k chunk kc of a table
             of k columns: fp4 (two 16 x 64 tiles of 512 B, shuffle_weight(16, 16))
-            or MXFP8 (``f8_tile_load``)."""
+            or MXFP8 (`f8_tile_load`)."""
             if const_expr(fp8):
                 return f8_tile_load(r_w, rg * (k // 128) + kc, slot)
             return fx.Vector(
@@ -1585,7 +1585,7 @@ def build_post_attn_kernel(
             rw0 = tid * (RE // 2)
 
             def ld_bf16x12(r, word, cm=0):
-                """12 bf16 from ``word`` (a 16 B then an 8 B load)."""
+                """12 bf16 from `word` (a 16 B then an 8 B load)."""
                 a8 = fx.Vector(
                     bo.buffer_load(r, word, vec_width=4, dtype=T.i32, cache_modifier=cm)
                 ).bitcast(fx.BFloat16)
@@ -2135,10 +2135,10 @@ def build_post_attn_kernel(
         UG_KS = tuple(range(UG_CPW))
 
         def wug_load(t, has, scales=True, fp8=False, ks=UG_KS):
-            """Up / gate weights (this wave's 128-k chunks ``ks``; and ``scales``:
+            """Up / gate weights (this wave's 128-k chunks `ks`; and `scales`:
             the scale dwords, which hold the pair's both halves) of task t =
             (distinct expert t / UG_PER_SLOT, row group t % UG_PER_SLOT); without
-            the task, reads go through zero-sized buffers. ``fp8``: the MXFP8
+            the task, reads go through zero-sized buffers. `fp8`: the MXFP8
             shared expert's task (weights.mxfp8_a_tiles; the scales -- every
             chunk's -- in the routed tables' order)."""
             u = t // UG_PER_SLOT
@@ -2187,11 +2187,11 @@ def build_post_attn_kernel(
             return wts, scs
 
         def wug_acc(wts, scs, half, cg_, cu_, ks=UG_KS, fp8=False):
-            """A task's up / gate MFMAs over its 128-k chunks ``ks`` of this wave
+            """A task's up / gate MFMAs over its 128-k chunks `ks` of this wave
             (wts[gu][j]: chunk ks[j]) for every token (B column l % 16 = token
-            l % 16), into (cg_, cu_). ``half``: the task's 16-row half of its
-            32-row scale block (compile time); ``fp8``: an MXFP8 task
-            (``wug_load(fp8=True)``)."""
+            l % 16), into (cg_, cu_). `half`: the task's 16-row half of its
+            32-row scale block (compile time); `fp8`: an MXFP8 task
+            (`wug_load(fp8=True)`)."""
             mfma_ = mfma_f8f8 if fp8 else mfma_f4f8
             col = fx.min(l16, tokens - 1)
             sbs = [
@@ -2208,13 +2208,13 @@ def build_post_attn_kernel(
             return cg_, cu_
 
         def wug_y(wts, scs, half):
-            """A task's up / gate GEMV (``wug_acc``) -> swiglu: thread (row r,
+            """A task's up / gate GEMV (`wug_acc`) -> swiglu: thread (row r,
             token k)'s mid value."""
             zero = fx.Vector.filled(4, 0.0, fx.Float32)
             return wug_swiglu(*wug_acc(wts, scs, half, zero, zero))
 
         def wug_swiglu(cg_, cu_):
-            """The waves' up / gate partials -> swiglu (``wug_y``)."""
+            """The waves' up / gate partials -> swiglu (`wug_y`)."""
             fx.ptr_store(cg_, red + (wave * 64 + lane) * 4)
             fx.ptr_store(cu_, fpool + (W_UPP + (wave * 64 + lane) * 4))
             gpu.barrier()
@@ -2757,7 +2757,7 @@ def build_post_attn_kernel(
                     stamp(11)
 
         def moe_down(t, has_dn, dn_units, sh_units):
-            """Every token's route-weighted down GEMV of row group ``t`` -> push bf16
+            """Every token's route-weighted down GEMV of row group `t` -> push bf16
             partial rows -> rank-ordered sum -> ar_out."""
 
             def stage_mids(k):

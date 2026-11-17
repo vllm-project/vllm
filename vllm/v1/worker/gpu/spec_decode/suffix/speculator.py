@@ -7,7 +7,7 @@ Extends the n-gram speculator with the two parts of SuffixDecoding
 
 * Variable-length matching: drafts continue the occurrence whose preceding
   tokens match the longest suffix of the request's history (up to
-  ``suffix_decoding_max_tree_depth``), instead of a fixed n-gram window.
+  `suffix_decoding_max_tree_depth`), instead of a fixed n-gram window.
 * Cross-request memory: responses of finished requests are appended to a
   device-resident token corpus. A hash index keyed on the last 2 and last 4
   tokens gives candidate positions, and each candidate is extended to the
@@ -15,7 +15,7 @@ Extends the n-gram speculator with the two parts of SuffixDecoding
   matching.
 
 The propose path never synchronizes with the host. Ingestion reads token
-history and lengths directly from ``RequestState`` and processes finished
+history and lengths directly from `RequestState` and processes finished
 requests in sorted id order; index updates are order-independent, so every
 TP rank holds an identical corpus without any collective.
 """
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.worker.gpu.dp_utils import DPSyncState
     from vllm.v1.worker.gpu.states import RequestState
 
@@ -600,7 +601,7 @@ class SuffixSpeculator(BaseSpeculator):
         # still belongs to the previous request.
         self.new_slots: list[int] = []
 
-    def add_request(self, req_index: int) -> None:
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.enable_adaptive_verification:
             self.new_slots.append(req_index)
 

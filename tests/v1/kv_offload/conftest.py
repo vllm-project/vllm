@@ -35,6 +35,7 @@ def make_offloading_config(
     is_parallelism_agnostic: bool = False,
     per_rank_engine: bool = False,
     replicated_layout: bool = False,
+    canonical_layout: bool = False,
     extra_config: dict[str, Any] | None = None,
 ) -> OffloadingConfig:
     normalized_extra_config = dict(extra_config or {})
@@ -73,4 +74,5 @@ def make_offloading_config(
             per_rank_engine=per_rank_engine,
         ),
         replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
     )
