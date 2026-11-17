@@ -13,6 +13,7 @@ from vllm.distributed.device_communicators import (
     flashinfer_pcie_ipc_all_reduce as pcie_ipc,
 )
 from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -175,6 +176,9 @@ class _PcieIpcProfilingWorker(Worker):
         return comm.initialized and comm.workspace is self.profiled_pcie_workspace
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FlashInfer PCIe IPC requires CUDA"
+)
 @pytest.mark.parametrize("extensible", [False, True])
 @multi_gpu_test(num_gpus=2)
 def test_workspace_is_profiled_before_kv_cache_sizing(
