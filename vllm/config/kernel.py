@@ -381,7 +381,9 @@ class KernelConfig:
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
     - "auto": The pre-existing chain (cooperative -> persistent -> per_row)
-      on CUDA and per_row on ROCm; the other backends are opt-in
+      on CUDA and per_row on ROCm; the other backends are opt-in. Qwen4Exp
+      QSA instead takes flashinfer_gvr2 wherever it applies (SM100 family),
+      and supports only auto, flashinfer_gvr2, cooperative and persistent
     - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
     - "cooperative": Use vLLM's cooperative_topk kernel
     - "persistent": Use vLLM's persistent_topk kernel (CUDA and ROCm)

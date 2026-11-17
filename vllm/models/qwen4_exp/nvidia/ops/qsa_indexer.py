@@ -485,20 +485,37 @@ def qsa_prefill_logits_width(
     return min(max(64, width), max_columns)
 
 
-def use_gvr2_topk(block_topk: int, width: int) -> bool:
+# kernel_config.sparse_indexer_topk_backend values QSA implements. "auto"
+# takes gvr_2 wherever it can rank the logits; the explicit values force
+# their kernel and raise when it cannot run.
+QSA_TOPK_BACKENDS = ("auto", "flashinfer_gvr2", "cooperative", "persistent")
+
+
+def use_gvr2_topk(topk_backend: str, block_topk: int, width: int) -> bool:
     """Whether _topk ranks logits of this width with gvr_2. Both QSA
     producers emit contiguous fp32 logits and 16B-aligned row slices of a
     contiguous int32 block_indices, so only k and the width (float4 rows)
     can rule it out."""
-    return (
+    if topk_backend not in ("auto", "flashinfer_gvr2"):
+        return False
+    supported = (
         current_platform.is_device_capability_family(100)
         and block_topk in (512, 1024, 2048)
         and width % 4 == 0
         and has_flashinfer_topk_varlen_gvr2()
     )
+    if topk_backend == "flashinfer_gvr2" and not supported:
+        raise RuntimeError(
+            "sparse_indexer_topk_backend='flashinfer_gvr2' was requested, but "
+            "QSA's gvr_2 top-k needs the SM100 device family, FlashInfer's "
+            "gvr_2 backend, k in (512, 1024, 2048) and a logits width that is "
+            f"a multiple of 4; got k={block_topk}, width={width}"
+        )
+    return supported
 
 
 def warmup_gvr2_topk(
+    topk_backend: str,
     block_topk: int,
     decode_width: int,
     max_decode_rows: int,
@@ -520,14 +537,14 @@ def warmup_gvr2_topk(
         warmup_varlen,
     )
 
-    if use_gvr2_topk(block_topk, decode_width):
+    if use_gvr2_topk(topk_backend, block_topk, decode_width):
         warmup_varlen(
             top_k=block_topk,
             max_seq_len=decode_width,
             num_rows_list=range(1, max_decode_rows + 1),
             row_stride=decode_width,
         )
-    if use_gvr2_topk(block_topk, prefill_width):
+    if use_gvr2_topk(topk_backend, block_topk, prefill_width):
         _gvr2_prefill_zero_starts = torch.zeros(
             max_prefill_tokens, dtype=torch.int32, device="cuda"
         )
@@ -587,20 +604,32 @@ def _topk(
     compress_ratio: int,
     block_indices: torch.Tensor,
     topk_workspace: torch.Tensor,
-    prefill: bool = False,
+    topk_backend: str,
+    prefill: bool,
 ) -> None:
     # gvr_2 (self-sampling GVR V2) for tensors it can rank; otherwise the
     # cooperative/persistent chain, as in the DeepSeek indexer.
     block_topk = token_topk // compress_ratio
-    if use_gvr2_topk(block_topk, logits.shape[1]):
+    if use_gvr2_topk(topk_backend, block_topk, logits.shape[1]):
         _gvr2_topk(logits, visible_blocks, block_topk, block_indices, prefill)
         return
-    use_cooperative_topk = (
+    cooperative_supported = (
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
         and current_platform.has_device_capability(90)
         and not current_platform.is_device_capability_family(110)
         and not current_platform.is_device_capability_family(120)
+    )
+    # As in the DeepSeek indexer, an explicit cooperative/persistent backend
+    # selects the decode kernel; prefill keeps the chain.
+    if topk_backend == "cooperative" and not prefill and not cooperative_supported:
+        raise RuntimeError(
+            "sparse_indexer_topk_backend='cooperative' was requested, but "
+            f"cooperative_topk cannot rank {logits.shape[0]} decode rows "
+            "(at most 64, on SM90+ excluding SM110/SM120)"
+        )
+    use_cooperative_topk = cooperative_supported and (
+        prefill or topk_backend != "persistent"
     )
     topk_op = (
         torch.ops._C.cooperative_topk
@@ -626,6 +655,7 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    topk_backend: str = "auto",
 ) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
@@ -640,6 +670,8 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
+        topk_backend: kernel_config.sparse_indexer_topk_backend, one of
+            QSA_TOPK_BACKENDS.
 
     """
     assert token_topk % compress_ratio == 0
@@ -685,6 +717,8 @@ def qsa_select_paged_decode(
         compress_ratio,
         block_indices,
         torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
+        topk_backend,
+        prefill=False,
     )
 
 
@@ -699,6 +733,7 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    topk_backend: str = "auto",
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -715,6 +750,8 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
+        topk_backend: kernel_config.sparse_indexer_topk_backend, one of
+            QSA_TOPK_BACKENDS.
 
     """
     assert token_topk % compress_ratio == 0
@@ -759,6 +796,7 @@ def qsa_select_paged_prefill(
             compress_ratio,
             block_indices[query_slice],
             topk_workspace,
+            topk_backend,
             prefill=True,
         )
 

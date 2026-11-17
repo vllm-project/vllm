@@ -75,8 +75,9 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     )
     # The prefill width is always float4-aligned; warmup_gvr2_topk skips a
     # decode width the dispatch would not route to gvr_2.
-    if use_gvr2_topk(block_topk, prefill_width):
+    if use_gvr2_topk(indexer.topk_backend, block_topk, prefill_width):
         warmup_gvr2_topk(
+            indexer.topk_backend,
             block_topk,
             decode_width=decode_width,
             max_decode_rows=runner.max_num_reqs * runner.decode_query_len,
