@@ -76,6 +76,20 @@ vllm serve <MODEL> \
   }'
 ```
 
+#### Extensible KV cache
+
+The extensible KV cache (`--enable-extensible-kv-cache`) maps the KV cache with the driver's virtual memory API. Within a host, UCX can only reach that memory over NVLink through a CUDA fabric handle, which takes an IMEX channel; without one it falls back to TCP. So with NIXL on device memory and no channel, vLLM leaves the extensible KV cache off.
+
+To use both within a host, make a channel available to every prefill and decode process, for example:
+
+```bash
+major=$(awk '$2 == "nvidia-caps-imex-channels" {print $1}' /proc/devices)
+mkdir -p /dev/nvidia-caps-imex-channels
+mknod /dev/nvidia-caps-imex-channels/channel0 c "$major" 0
+```
+
+Check the transport with `UCX_PROTO_INFO=y`: KV reads should show `cuda_ipc`, not `tcp`. Transfers across hosts use RDMA and need no channel: pass `--enable-extensible-kv-cache` to keep the feature on.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
@@ -217,6 +231,8 @@ sequenceDiagram
 5. D reads the new KV blocks from P, generates the response, and returns updated `kv_transfer_params` which the proxy caches for the next turn.
 
 ### Configuration
+
+Bidirectional transfer requires `PP=1` on both P and D. A pipeline-parallel producer cannot receive KV from D on later turns, even with `kv_role="kv_producer"`. Keep `bidirectional_kv_xfer` disabled when P uses PP.
 
 Enable bidirectional KV transfer by setting `bidirectional_kv_xfer` in `kv_connector_extra_config` on **both** P and D instances:
 
@@ -395,6 +411,11 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 - **kv_producer**: For prefiller instances that generate KV caches
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
 - **kv_both** (deprecated): Previously used as a catch-all when the role was not predetermined. This value is now deprecated for NixlConnector and will be removed in a future release.
+
+With `pipeline_parallel_size > 1`, both NIXL connectors require
+`kv_role="kv_producer"` and reject `kv_consumer` and `kv_both`.
+See the [pipeline-parallel support restrictions](nixl_connector_compatibility.md#pipeline-parallelism)
+before selecting the cache layout and transfer mode.
 
 !!! warning
     `kv_role="kv_both"` is deprecated for NixlConnector. Please set `kv_role="kv_producer"` for prefill instances and `kv_role="kv_consumer"` for decode instances. See [#33702](https://github.com/vllm-project/vllm/issues/33702) for details.

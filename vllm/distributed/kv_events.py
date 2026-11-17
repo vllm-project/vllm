@@ -329,33 +329,23 @@ class ZmqEventPublisher(EventPublisher):
 
     Spawns a separate thread to handle publishing from a queue.
 
-    Parameters
-    ----------
-    endpoint:
-        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
-        connect.
-    replay_endpoint:
-        Optional ROUTER address for replay requests. When given, subscribers can
-        request missed batches by sending the starting sequence number as an
-        8-byte big-endian integer.
-    snapshot_endpoint:
-        Optional ROUTER address serving snapshots of the live KV cache state.
-        When enabled, live and replay batches are `IdentifiedKVEventBatch`, and
-        idle publishers emit empty batches. See
-        `vllm.distributed.kv_events_snapshot`.
-    snapshot_max_blocks:
-        Most block records the snapshot recorder retains, and separately most
-        live block references across all tiers.
-    snapshot_max_response_bytes:
-        Most encoded bytes in one snapshot reply.
-    buffer_steps:
-        Number of past batches to keep for replay.
-    hwm:
-        ZeroMQ high-water-mark for PUB socket.
-    max_queue_size:
-        Maximum number of events to buffer in memory.
-    topic:
-        Topic to publish events to.
+    Args:
+        endpoint: PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
+            connect.
+        replay_endpoint: Optional ROUTER address for replay requests. When given,
+            subscribers can request missed batches by sending the starting sequence
+            number as an 8-byte big-endian integer.
+        snapshot_endpoint: Optional ROUTER address serving snapshots of the live
+            KV cache state. When enabled, live and replay batches are
+            `IdentifiedKVEventBatch`, and idle publishers emit empty batches. See
+            `vllm.distributed.kv_events_snapshot`.
+        snapshot_max_blocks: Most block records the snapshot recorder retains, and
+            separately most live block references across all tiers.
+        snapshot_max_response_bytes: Most encoded bytes in one snapshot reply.
+        buffer_steps: Number of past batches to keep for replay.
+        hwm: ZeroMQ high-water-mark for PUB socket.
+        max_queue_size: Maximum number of events to buffer in memory.
+        topic: Topic to publish events to.
 
     """
 

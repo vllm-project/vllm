@@ -241,8 +241,8 @@ class GuidanceGrammar(StructuredOutputGrammar):
             (index for index, token in enumerate(tokens) if token == eos_token),
             None,
         )
-        if eos_index is not None and eos_index != len(tokens) - 1:
-            return False
+        if eos_index is not None:
+            tokens = tokens[: eos_index + 1]
 
         if self.terminated:
             return True

@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression tests for ``PoolsideV1ToolParser``.
+"""Regression tests for `PoolsideV1ToolParser`.
 
 Covers two bugs:
 
-1. ``adjust_request`` did not skip the forced ``structured_outputs`` JSON
-   for ``required``/named tool choice. These models emit XML tool calls
-   (``<tool_call>...<arg_value>...</arg_value></tool_call>``) per the chat
+1. `adjust_request` did not skip the forced `structured_outputs` JSON
+   for `required`/named tool choice. These models emit XML tool calls
+   (`<tool_call>...<arg_value>...</arg_value></tool_call>`) per the chat
    template, so guided JSON decoding conflicts with the format: the call
-   leaks as content with empty ``tool_calls``. ``adjust_request`` now skips
-   the constraint for both ChatCompletion (``ChatCompletionNamedToolChoice``)
-   and Responses (``ToolChoiceFunction``) named choices.
+   leaks as content with empty `tool_calls`. `adjust_request` now skips
+   the constraint for both ChatCompletion (`ChatCompletionNamedToolChoice`)
+   and Responses (`ToolChoiceFunction`) named choices.
 
-2. ``extract_tool_calls`` stripped string-typed argument values, corrupting
+2. `extract_tool_calls` stripped string-typed argument values, corrupting
    content whose whitespace is significant (e.g. code/file bodies losing
    leading indent and trailing newline). String values are now kept verbatim;
    only non-string types are stripped/deserialized.
@@ -33,7 +33,7 @@ from vllm.tool_parsers.poolside_v1_tool_parser import PoolsideV1ToolParser
 
 
 def _write_file_tool() -> dict[str, Any]:
-    """Tool with string (``content``), integer and nullable string args."""
+    """Tool with string (`content`), integer and nullable string args."""
     return {
         "type": "function",
         "function": {
@@ -98,7 +98,7 @@ def _build_responses_request(
 
 
 class _StubTokenizer:
-    """Minimal tokenizer stub to satisfy ``PoolsideV1ToolParser.__init__``."""
+    """Minimal tokenizer stub to satisfy `PoolsideV1ToolParser.__init__`."""
 
     def get_vocab(self) -> dict[str, int]:
         return {"<tool_call>": 151_657, "</tool_call>": 151_658}

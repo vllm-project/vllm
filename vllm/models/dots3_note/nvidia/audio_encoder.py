@@ -3,8 +3,8 @@
 # ruff: noqa: E501
 """Dots-path speech encoder for inference only (single GPU).
 
-Ported from cybertron_alm ``dots_audio_encoder/modeling_whisper.py``.
-Upstream ``WhisperEncoder`` is exposed as :class:`DotsSpeechEncoder`.
+Ported from cybertron_alm `dots_audio_encoder/modeling_whisper.py`.
+Upstream `WhisperEncoder` is exposed as `DotsSpeechEncoder`.
 """
 
 import math

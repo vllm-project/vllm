@@ -3,15 +3,15 @@
 """Device helpers of the DSpark drafter kernels: memory, bounded waits, the MXFP8
 GEMV and the row norms.
 
-Every function is traced inside a ``@flyc.kernel`` body; the ones with control
-flow over traced values are ``@traced`` (FlyDSL rewrites only the kernel body's
+Every function is traced inside a `@flyc.kernel` body; the ones with control
+flow over traced values are `@traced` (FlyDSL rewrites only the kernel body's
 own AST). Conventions:
 
-- a global ``base`` is a wave-uniform Int64 address (a buffer resource); offsets
+- a global `base` is a wave-uniform Int64 address (a buffer resource); offsets
   are per lane, in elements;
 - tagged pairs are 8 bytes: (value word, tag word);
-- data other CTAs read after a flag is stored device-coherent (``CM_DEV``) and
-  published by ``publish``.
+- data other CTAs read after a flag is stored device-coherent (`CM_DEV`) and
+  published by `publish`.
 """
 
 import flydsl.expr as fx
@@ -57,7 +57,7 @@ def exp(x):
 
 
 def opaque(v, loop_var):
-    """``v`` through a side-effecting asm that also reads ``loop_var``.
+    """`v` through a side-effecting asm that also reads `loop_var`.
 
     Per-lane values derived from it are not loop-invariant for LLVM: hoisted out of
     the layer loop they would stay live across it and spill.
@@ -83,24 +83,24 @@ def _ld(rs, idx, n, cm, dtype):
 
 
 def ld(base, idx, n=1, cm=0, dtype=None):
-    """Load ``n`` elements (i32 unless ``dtype``) at element ``idx`` of ``base``."""
+    """Load `n` elements (i32 unless `dtype`) at element `idx` of `base`."""
     return _ld(rsrc(base), idx, n, cm, dtype)
 
 
 def ldn(base, nbytes, idx, n=1, cm=0, dtype=None):
-    """``ld`` through a resource of ``nbytes``: elements past it read 0 without a
+    """`ld` through a resource of `nbytes`: elements past it read 0 without a
     memory access."""
     return _ld(rsrc(base, nbytes), idx, n, cm, dtype)
 
 
 def ld8(base, idx):
-    """Byte ``idx`` of ``base``, zero-extended."""
+    """Byte `idx` of `base`, zero-extended."""
     b = bo.buffer_load(rsrc(base), idx, vec_width=1, dtype=T.i8)
     return I32(fx.Uint8(b).to(fx.Uint32))
 
 
 def st(base, idx, v, cm=0):
-    """Store ``v`` (a Numeric or a Vector) at element ``idx`` of ``base``."""
+    """Store `v` (a Numeric or a Vector) at element `idx` of `base`."""
     bo.buffer_store(v, rsrc(base), idx, cache_modifier=cm)
 
 
@@ -131,12 +131,12 @@ def bf_hi(w):
 
 
 def bf16r(x):
-    """``x`` rounded to bf16 (RNE), as f32."""
+    """`x` rounded to bf16 (RNE), as f32."""
     return F32(F32(x).to(fx.BFloat16))
 
 
 def bf16_bits(x):
-    """bf16 bits of ``x`` (RNE) in the low half of an Int32."""
+    """bf16 bits of `x` (RNE) in the low half of an Int32."""
     v = fx.Vector.from_elements([F32(x), F32(0.0)], fx.Float32)
     return v.to(fx.BFloat16).bitcast(fx.Int32)[0] & 0xFFFF
 
@@ -161,9 +161,9 @@ def fence_acquire():
 # ---------------------------------------------------------------- bounded waits
 @traced
 def _spin(load_all, pending, dl, health):
-    """Re-issue ``load_all`` until ``pending`` clears.
+    """Re-issue `load_all` until `pending` clears.
 
-    Every CHECK_EVERY rounds the clock is checked against ``dl`` and the health
+    Every CHECK_EVERY rounds the clock is checked against `dl` and the health
     word read. Returns (values, failed): failed is 1 when the wait timed out, 2 when
     it gave up on a failure reported elsewhere.
     """
@@ -194,8 +194,8 @@ def fail(health, fl, rank, site):
 
 
 def poll_pairs(base, idx, n, tag, dl, health, cm=CM_DEV):
-    """Wait for the ``n`` pairs (1, 2, 4 or 8) from pair ``idx`` of ``base`` to carry
-    ``tag``. Returns ([n value words], failed)."""
+    """Wait for the `n` pairs (1, 2, 4 or 8) from pair `idx` of `base` to carry
+    `tag`. Returns ([n value words], failed)."""
     tag = I32(tag)
 
     def load_all():
@@ -217,7 +217,7 @@ def poll_pairs(base, idx, n, tag, dl, health, cm=CM_DEV):
 
 
 def poll_rows(bases, idx, n, tag, dl, health, cm=CM_SYS):
-    """``poll_pairs`` of every base in ``bases`` in one batch (one round trip a
+    """`poll_pairs` of every base in `bases` in one batch (one round trip a
     round). Returns ([[n value words] a base], failed)."""
     tag = I32(tag)
 
@@ -242,7 +242,7 @@ def poll_rows(bases, idx, n, tag, dl, health, cm=CM_SYS):
 
 
 def wait_flags(base, n, tag, tid, dl, health, rank, site):
-    """Wait for flags 0..n-1 of ``base`` (n <= 512), then a CTA barrier."""
+    """Wait for flags 0..n-1 of `base` (n <= 512), then a CTA barrier."""
     _, fl = poll_pairs(base, fx.min(tid, fx.max(I32(n) - 1, 0)), 1, tag, dl, health)
     fail(health, fl, rank, site)
     gpu.barrier()
@@ -251,7 +251,7 @@ def wait_flags(base, n, tag, tid, dl, health, rank, site):
 
 @traced
 def publish(base, i, tag, tid):
-    """Drain the CTA's stores, then set flag ``i`` of ``base`` to ``tag``.
+    """Drain the CTA's stores, then set flag `i` of `base` to `tag`.
 
     The drain is an explicit vmcnt(0): on gfx950 a workgroup-scope release fence
     emits no wait for global stores, and the flag must not overtake another wave's
@@ -272,7 +272,7 @@ def publish(base, i, tag, tid):
 # [16][K / 32]) use the same loader. The waves' partials are summed in order 0..7
 # through LDS.
 def w_chunk(w, s, row, K, wave, g4, c):
-    """MFMA operand (8 words) and scale of row ``row``, chunk ``c`` of ``wave``."""
+    """MFMA operand (8 words) and scale of row `row`, chunk `c` of `wave`."""
     kw = K // 8
     byte = row * K + wave * kw + 128 * c + 16 * g4
     a = ld(w, byte // 4, 4)
@@ -304,13 +304,13 @@ def mma_chain(ws, xs, nc):
 
 
 def red_store(red, t, acc, wave, g4, l16):
-    """Wave ``wave``'s partial of tile ``t`` -> red[8 t + wave][row][token]."""
+    """Wave `wave`'s partial of tile `t` -> `red[8 t + wave][row][token]`."""
     for e in range_constexpr(4):
         fx.ptr_store(acc[e], red + ((t * 8 + wave) * 256 + (g4 * 4 + e) * 16 + l16))
 
 
 def red_sum(red, t, row, tok):
-    """Tile ``t``'s (row, token) summed over waves 0..7, in order."""
+    """Tile `t`'s (row, token) summed over waves 0..7, in order."""
     s = fx.ptr_load(red + (t * 2048 + row * 16 + tok))
     for w in range_constexpr(1, 8):
         s = s + fx.ptr_load(red + (t * 2048 + w * 256 + row * 16 + tok))
@@ -318,7 +318,7 @@ def red_sum(red, t, row, tok):
 
 
 def mx_scale(am):
-    """VLLM's MXFP8 block scale of amax ``am``: (e8m0 exponent as f32, 1 / scale)."""
+    """VLLM's MXFP8 block scale of amax `am`: (e8m0 exponent as f32, 1 / scale)."""
     am = fx.max(am, F32(layout.TINY))
     sb = fmath.ceil(fmath.log2(am / layout.FP8_MAX)) + 127.0
     sb = fx.min(fx.max(sb, F32(0.0)), F32(254.0))
@@ -326,7 +326,7 @@ def mx_scale(am):
 
 
 def xq_chunk(x, row, K, wave, g4, l16, c):
-    """bf16 row ``row`` of x [16][K], chunk ``c`` of ``wave``, quantized to MXFP8 in
+    """bf16 row `row` of `x[16][K]`, chunk `c` of `wave`, quantized to MXFP8 in
     the operand layout. A 32-k block is units 2b and 2b + 1, held by lanes 16
     apart. Returns (operand: 8 words, scale of block g)."""
     kw = K // 8
@@ -371,7 +371,7 @@ def norm_w(w, tid):
 
 
 def row_x(x_in, t, tid):
-    """A thread's 16 values of row ``t`` of bf16 x_in [rows][6144]."""
+    """A thread's 16 values of row `t` of bf16 `x_in[rows][6144]`."""
     v0 = ld(x_in, t * 3072 + fx.min(tid, 383) * 8, 4)
     v1 = ld(x_in, t * 3072 + fx.min(tid, 383) * 8 + 4, 4)
     out = []
@@ -381,8 +381,8 @@ def row_x(x_in, t, tid):
 
 
 def row_sum4(sym, Y, t, tid, tag, dl, health, rank, site):
-    """A thread's 16 values of row ``t``: bf16 of the 4 source ranks' bf16 partials
-    summed in rank order, polled from the symmetric buffer at ``Y``."""
+    """A thread's 16 values of row `t`: bf16 of the 4 source ranks' bf16 partials
+    summed in rank order, polled from the symmetric buffer at `Y`."""
     bases = [sym + I64(Y + src * layout.RANK_STRIDE) for src in range(4)]
     idx = t * layout.ROW_PAIRS + fx.min(tid, 383) * 8
     got, fl = poll_rows(bases, idx, 8, tag, dl, health)
@@ -400,8 +400,8 @@ def row_sum4(sym, Y, t, tid, tag, dl, health, rank, site):
 
 @traced
 def norm_row(v, res, w, add, red, tid, lane, wave):
-    """Gemma RMSNorm of a row: s = v (+ the residual in LDS ``res``) becomes the
-    residual; returns bf16(s rstd (1 + w)), 16 values a thread. ``red``: 8 LDS
+    """Gemma RMSNorm of a row: s = v (+ the residual in LDS `res`) becomes the
+    residual; returns bf16(s rstd (1 + w)), 16 values a thread. `red`: 8 LDS
     floats."""
     act = tid < 384
     ri = fx.min(tid, 383) * 8
@@ -437,7 +437,8 @@ def norm_row(v, res, w, add, red, tid, lane, wave):
 
 @traced
 def quant_store(o, t, x8, xs8, tid):
-    """MXFP8 of a thread's 16 values -> e4m3 x8[t][16 tid ..], e8m0 xs8[t][tid / 2]."""
+    """MXFP8 of a thread's 16 values -> e4m3 `x8[t][16 tid ..]`, e8m0
+    `xs8[t][tid / 2]`."""
     am = fmath.absf(o[0])
     for e in range_constexpr(1, 16):
         am = fx.max(am, fmath.absf(o[e]))

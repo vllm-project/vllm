@@ -98,6 +98,7 @@ def _speculator(temp: float, seed: int):
     s.acceptance_estimator = None
     s.draft_watermarker = None
     s._d2t_scatter_index = None
+    s._fuse_markov_bias = False
     s._draft_scatter_buf = None
     s.use_fp64_gumbel = False
     s.draft_logits = DraftLogitsCache(

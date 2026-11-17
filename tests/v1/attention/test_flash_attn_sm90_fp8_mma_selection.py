@@ -37,8 +37,8 @@ def _device(capability, *, head_size, kv_cache_dtype, fa_version=None, dcp=1):
     platform.is_rocm.return_value = False
     platform.is_cuda.return_value = True
     platform.get_device_capability.return_value = capability
-    platform.is_device_capability_family.side_effect = (
-        lambda family, device_id=0: capability.to_int() // 10 == family // 10
+    platform.is_device_capability_family.side_effect = lambda family, device_id=0: (
+        capability.to_int() // 10 == family // 10
     )
     config = MagicMock()
     config.attention_config.flash_attn_version = fa_version
