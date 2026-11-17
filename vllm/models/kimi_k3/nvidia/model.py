@@ -99,6 +99,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.kimi_k3.common.dsa_cache import packed_dsa_block_size
+from vllm.models.kimi_k3.nvidia.dense_draft import aux_reads_attn_res
 from vllm.models.kimi_k3.nvidia.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.nvidia.gqa_draft import GQADraftKVCacheGrouping
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
@@ -968,17 +969,6 @@ _DSA_RENAME_PARAMS_MAPPING = [
 ]
 
 
-def _draft_reads_attn_res(vllm_config: VllmConfig) -> bool:
-    """Whether the draft was trained on the AttnRes stream of its target layers
-    (`dflash_config.aux_hidden_stream="attn_res"`) rather than the prefix sum."""
-    spec_config = vllm_config.speculative_config
-    draft_model_config = getattr(spec_config, "draft_model_config", None)
-    if draft_model_config is None:
-        return False
-    dflash_config = getattr(draft_model_config.hf_config, "dflash_config", None) or {}
-    return dflash_config.get("aux_hidden_stream") == "attn_res"
-
-
 class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -997,9 +987,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.config = config
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
-        self._aux_attn_res_stream = (
-            envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM or _draft_reads_attn_res(vllm_config)
-        )
+        self._aux_attn_res_stream = aux_reads_attn_res(vllm_config)
         parallel_config = vllm_config.parallel_config
         use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         self.use_sequence_parallel = (

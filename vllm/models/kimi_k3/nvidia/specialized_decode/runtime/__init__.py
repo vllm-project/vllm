@@ -104,6 +104,7 @@ def unsupported(vllm_config) -> str | None:
 
     from vllm import envs
     from vllm.config import CompilationMode, CUDAGraphMode
+    from vllm.models.kimi_k3.nvidia.dense_draft import aux_reads_attn_res
     from vllm.platforms import current_platform
 
     parallel, spec = vllm_config.parallel_config, vllm_config.speculative_config
@@ -202,7 +203,7 @@ def unsupported(vllm_config) -> str | None:
             "more than 7 speculative tokens",
         ),
         (
-            spec is not None and envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM,
+            spec is not None and aux_reads_attn_res(vllm_config),
             "the AttnRes aux stream",
         ),
         # The MLA cores read a per-tensor FP8 cache.

@@ -8,7 +8,8 @@ decode with FLASHINFER_MLA, or ROCM_AITER_MLA on ROCm (`configure_dense_draft`).
 
 from typing import Any
 
-from vllm.config import SpeculativeConfig
+from vllm import envs
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -49,3 +50,17 @@ def configure_dense_draft(spec_config: SpeculativeConfig, text_config: Any) -> N
         backend, kv_cache_dtype = AttentionBackendEnum.FLASH_ATTN, "auto"
     spec_config.attention_backend = spec_config.attention_backend or backend
     spec_config.kv_cache_dtype = spec_config.kv_cache_dtype or kv_cache_dtype
+
+
+def aux_reads_attn_res(vllm_config: VllmConfig) -> bool:
+    """Whether the draft reads the AttnRes stream of its target layers rather
+    than the prefix sum: `dflash_config.aux_hidden_stream="attn_res"` in the
+    draft config, or VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=1."""
+    if envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM:
+        return True
+    spec_config = vllm_config.speculative_config
+    draft_model_config = getattr(spec_config, "draft_model_config", None)
+    if draft_model_config is None:
+        return False
+    dflash_config = getattr(draft_model_config.hf_config, "dflash_config", None) or {}
+    return dflash_config.get("aux_hidden_stream") == "attn_res"
