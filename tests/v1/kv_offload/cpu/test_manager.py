@@ -370,42 +370,32 @@ def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
         manager_module, "time", SimpleNamespace(monotonic=lambda: clock)
     )
     manager = make_cpu_manager(num_chunks=1)
-    owner = make_req_context("owner")
-    other = make_req_context("other")
 
     def store(key: int, success: bool = True) -> None:
         keys = to_keys([key])
-        assert manager.prepare_store(keys, owner, trigger=StoreTrigger.ON_COMPUTE)
+        assert manager.prepare_store(
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         manager.complete_store(
-            keys, owner, trigger=StoreTrigger.ON_COMPUTE, success=success
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE, success=success
         )
 
-    def reload(key: int) -> None:
-        manager.prepare_load(to_keys([key]), owner)
-        manager.complete_load(to_keys([key]), owner)
-
-    # Never accessed: idle time is measured from readiness.
+    # Chunk 1 is never accessed: idle time is measured from its store.
     clock = 10.0
     store(1)
     clock = 30.0
     store(2)
-
-    # A reload by the storing request is a read, and counts once per request.
+    # Chunk 2 is loaded.
     clock = 40.0
-    reload(2)
-    clock = 45.0
-    reload(2)
+    reuse_keys(manager, to_keys([2]))
     clock = 100.0
     store(3)
-
-    # Offering a cached chunk refreshes the access time, but is not a read.
+    # Offering the cached chunk 3 is an access, but not a read.
     clock = 110.0
-    manager.prepare_store(to_keys([3]), other, trigger=StoreTrigger.ON_COMPUTE)
-    # A failed write evicts chunk 3 but is not itself an eviction.
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    # Neither a failed store nor a cache reset is an eviction.
     clock = 150.0
     store(4, success=False)
-
-    # A cache reset is not an eviction.
     store(5)
     manager.reset_cache()
 
@@ -420,10 +410,6 @@ def test_cpu_manager_reports_chunk_eviction_metrics(monkeypatch):
     assert reduced[f"{lifetime}_sum"] == 20 + 70 + 50
     assert reduced[f"{evictions}:('false',)"] == 2
     assert reduced[f"{evictions}:('true',)"] == 1
-
-    second_stats = manager.get_stats()
-    assert second_stats is not None
-    assert f"{idle}_count" not in second_stats.reduce()
 
 
 def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):

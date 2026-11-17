@@ -351,8 +351,7 @@ class TestTieringOffloadingManager:
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
 
-    def test_only_external_reads_mark_primary_chunks_reused(self, manager_setup):
-        """A read serving a remote request is a demand access; a cascade is not."""
+    def test_only_remote_reads_mark_primary_chunks_reused(self, manager_setup):
         keys = to_keys([1, 2])
         self._start_request()
         self.primary_tier.prepare_write(keys, _CTX)

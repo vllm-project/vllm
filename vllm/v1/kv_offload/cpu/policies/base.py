@@ -30,10 +30,8 @@ class ChunkStatus(ctypes.Structure):
         A value of -1 indicates the chunk is not yet ready to be read.
     chunk_id - index of the physical CPU buffer slot.
     ready_time - monotonic time at which the chunk became readable.
-    last_access_time - monotonic time of the last demand access, or
-        ready_time if there was none.
-    reused - whether the chunk was read by a load or a peer since it
-        became readable.
+    last_access_time - monotonic time of the last request access.
+    reused - whether a load or a remote read used the chunk.
     """
 
     _fields_ = [

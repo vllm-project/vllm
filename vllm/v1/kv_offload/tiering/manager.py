@@ -170,21 +170,14 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self._complete_store(keys, req_context, success)
 
     def prepare_read(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
-        *,
-        external: bool = False,
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         """Pin chunks for a CPU-to-secondary transfer.
 
         Cascade reads are implementation details of tiering, not additional
         request accesses, so they must not alter request-scoped recency.
-        An external read serves a remote request, which is a demand access.
         """
-        return self._prepare_load(
-            keys, req_context, record_access=False, demand_access=external
-        )
+        return self._prepare_load(keys, req_context, record_access=False)
 
     def defer_write_release(self, keys: Collection[OffloadKey]) -> list[int]:
         """Fail pending writes like `complete_write(False)`, deferring the release.
@@ -273,9 +266,10 @@ class _SecondaryTierFacingParent(ParentManager):
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> TransferJob:
-        return self._m.create_store_job(
-            keys, req_context, self._origin_idx, external=True
-        )
+        job = self._m.create_store_job(keys, req_context, self._origin_idx)
+        # Unlike a cascade, serving a remote request reads the chunks.
+        self._m.primary_tier.record_reads(keys)
+        return job
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         return self._m.on_request_finished(
@@ -1118,8 +1112,6 @@ class TieringOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         tier_idx: int = 0,
-        *,
-        external: bool = False,
     ) -> TransferJob:
         """Pin chunks in the primary tier and create a tracked store job.
 
@@ -1130,9 +1122,7 @@ class TieringOffloadingManager(OffloadingManager):
         The caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
         """
-        primary_chunks_spec = self.primary_tier.prepare_read(
-            keys, req_context, external=external
-        )
+        primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
         job_metadata = TransferJob(

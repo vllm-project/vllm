@@ -28,24 +28,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 
 logger = init_logger(__name__)
 
-# Seconds, from one second to one day.
-_CHUNK_AGE_BUCKETS = (
-    1,
-    5,
-    15,
-    30,
-    60,
-    120,
-    300,
-    600,
-    1200,
-    1800,
-    3600,
-    7200,
-    14400,
-    28800,
-    86400,
-)
+# Seconds, up to one day.
+_CHUNK_AGE_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400)
 
 
 def _all_workers_barrier() -> None:
@@ -105,26 +89,24 @@ class CPUOffloadingSpec(OffloadingSpec):
             CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT: (
                 OffloadingHistogramMetadata(
                     documentation=(
-                        "Histogram of the time from the last demand access of "
-                        "a CPU chunk to its capacity eviction, measured from "
-                        "the time the chunk became readable if it was never "
-                        "accessed."
+                        "Histogram of the time from the last request access of "
+                        "a CPU chunk, or from its store if never accessed, to "
+                        "its eviction."
                     ),
                     buckets=_CHUNK_AGE_BUCKETS,
                 )
             ),
             CPUOffloadingMetrics.CPU_CHUNK_LIFETIME: OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of the time from a CPU chunk becoming readable "
-                    "to its capacity eviction."
+                    "Histogram of the time from the store of a CPU chunk to "
+                    "its eviction."
                 ),
                 buckets=_CHUNK_AGE_BUCKETS,
             ),
             CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS: OffloadingCounterMetadata(
                 documentation=(
-                    "Number of CPU chunks evicted to reclaim capacity. reused "
-                    "tells whether the chunk was read by a load or a peer "
-                    "while it was cached."
+                    "Number of CPU chunks evicted to reclaim capacity, split "
+                    "by whether a load or a remote read used the chunk."
                 ),
                 labelnames=("reused",),
             ),
