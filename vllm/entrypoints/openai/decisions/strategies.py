@@ -10,15 +10,19 @@ import hashlib
 import json
 import math
 import random
+import sys
 import time
+import unicodedata
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import cached_property, partial
+from functools import cached_property, lru_cache, partial
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
+import regex as re
 from PIL import Image
+from pydantic import JsonValue
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -44,6 +48,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.math_utils import round_up
 
 from .question_types import (
@@ -1444,7 +1449,146 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class GLiNER2DecideStrategy(ReadStrategy):
+    task: ClassVar[SupportedTask] = "classify"
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _word_pattern() -> re.Pattern[str]:
+        marks = "".join(
+            chr(code)
+            for code in range(sys.maxunicode + 1)
+            if unicodedata.category(chr(code)).startswith("M")
+        )
+        word = rf"[\w{marks}\u200c\u200d]"
+        return re.compile(
+            rf"https?://[^\s]+|www\.[^\s]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{{2,}}"
+            rf"|@[a-z0-9_]+|{word}+(?:[-_]{word}+)*|\S",
+            re.IGNORECASE,
+        )
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        tokenizer = context.online_renderer.renderer.get_tokenizer()
+        if not isinstance(tokenizer, HfTokenizer):
+            raise ValueError("GLiNER2.5 Decide requires a Hugging Face tokenizer")
+        self.tokenizer = tokenizer
+        self.words = self._word_pattern()
+
+    def _encode_questions(
+        self,
+        state: str,
+        questions: list[Question],
+        instructions: str | None,
+    ) -> tuple[list[int], list[list[int]]]:
+        """Build the schema/text prompt and locate each label token."""
+        tokens: list[str] = []
+        label_positions: list[list[int]] = []
+        for question in questions:
+            if tokens:
+                tokens.append("[SEP_STRUCT]")
+            prompt = "\n".join(
+                part for part in (instructions, question.instructions) if part
+            )
+            header = f"{question.id}: {prompt}" if prompt else question.id
+            descriptions = {
+                option.name: option.description
+                for option in question.options
+                if option.description is not None
+            }
+            if descriptions:
+                for option in question.options:
+                    if option.name in descriptions:
+                        header += (
+                            f" [DESCRIPTION] {option.name}: {descriptions[option.name]}"
+                        )
+            tokens.extend(["(", "[P]", header, "("])
+            positions = []
+            for option in question.options:
+                tokens.append("[L]")
+                positions.append(len(tokens) - 1)
+                tokens.append(option.name)
+            tokens.extend([")", ")"])
+            label_positions.append(positions)
+        tokens.append("[SEP_TEXT]")
+        text = state if state.endswith((".", "!", "?")) else state + "."
+        tokens.extend(token.lower() for token in self.words.findall(text))
+
+        encoded = self.tokenizer(tokens, add_special_tokens=False)["input_ids"]
+        ids: list[int] = []
+        offsets = []
+        for piece_ids in encoded:
+            offsets.append(len(ids))
+            ids.extend(piece_ids)
+        return ids, [[offsets[p] for p in positions] for positions in label_positions]
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(max_questions=64, max_options=26)
+
+    def num_requests(self, questions: list[Question], joint: bool = False) -> int:
+        return 1
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: Mapping[str, JsonValue] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        if media or chat_template_kwargs or cache_salt is not None:
+            raise StructuredDecisionError(
+                "GLiNER2.5 Decide accepts text only, without chat options "
+                "or cache salts"
+            )
+        ids, positions = self._encode_questions(state, questions, instructions)
+        if len(ids) > self.context.engine_client.model_config.max_model_len:
+            raise StructuredDecisionError(
+                "GLiNER2.5 Decide input exceeds max_model_len"
+            )
+        result = None
+        async for output in self.context.engine_client.encode(
+            tokens_input(ids),
+            PoolingParams(
+                task="classify",
+                use_activation=False,
+                extra_kwargs={
+                    "label_positions": [pos for group in positions for pos in group]
+                },
+            ),
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        ):
+            result = output
+        if result is None or result.error is not None or result.outputs.data is None:
+            raise RuntimeError("GLiNER2.5 Decide returned no classification logits")
+        logits = result.outputs.data
+        reads = []
+        start = 0
+        for index, group in enumerate(positions):
+            end = start + len(group)
+            reads.append(
+                QuestionRead(
+                    probs=label_softmax(logits[start:end]),
+                    label_mass=1.0,
+                    argmax_is_label=True,
+                    input_tokens=len(ids) if index == 0 else 0,
+                )
+            )
+            start = end
+        return reads
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
+    "Gliner2ForSchemaExtraction": GLiNER2DecideStrategy,
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "D3ForSequenceClassification": D3Strategy,

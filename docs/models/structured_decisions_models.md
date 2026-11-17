@@ -8,11 +8,12 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
-|---------------------------|---------------------|------------------|-------------------|-------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+| Architecture                 | ReadStrategy            | Task             | Head               | Example HF Models          |
+|------------------------------|-------------------------|------------------|--------------------|----------------------------|
+| `ClefFlashForJointSchema`    | `ClefFlashStrategy`     | `token_classify` | `JointSchemaHead`  | `Cloudflare/clef-flash`    |
+| `Gemma4ForCausalLM`          | `NextTokenStrategy`     | `generate`       | N/A                | `google/gemma-4-E2B-it`    |
+| `Gliner2ForSchemaExtraction` | `GLiNER2DecideStrategy` | `classify`       | MLP (`classifier`) | `fastino/GLiNER2.5-Decide` |
+| `Qwen3ForCausalLM`           | `NextTokenStrategy`     | `generate`       | N/A                | `Qwen/Qwen3-0.6B`, etc.    |
 
 ### Multimodal Models
 
@@ -370,6 +371,26 @@ vllm serve vllm-sr/d3
   once and shared by every question of the request.
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
+
+### GLiNER2.5 Decide
+
+[GLiNER2.5 Decide](https://huggingface.co/fastino/GLiNER2.5-Decide) uses a
+bidirectional DeBERTa encoder and a classification head to score all questions
+in one forward pass. vLLM serves the English checkpoint as a pooling model.
+
+```bash
+vllm serve fastino/GLiNER2.5-Decide
+```
+
+Send requests to `/v1/systemone` or `/v1/decisions` using `state` and
+`questions`, as in the examples above. `choice`, `noul` and `score` questions
+are supported.
+
+- Questions and their options precede the state in the prompt. `instructions`
+  are included; JSON states are written as JSON text.
+- Each request performs one pooling read. `usage.input_tokens` counts the
+  prompt once, `output_tokens` is 0, and `label_mass` is 1.
+- Prefix caching and chunked prefill are off for this bidirectional model.
 
 ### Liquid d1
 

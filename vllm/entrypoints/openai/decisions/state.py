@@ -10,7 +10,12 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.tasks import SupportedTask
 
 from .serving import OpenAIServingDecisions
-from .strategies import ReadContext, ReadStrategy, select_read_strategy
+from .strategies import (
+    GLiNER2DecideStrategy,
+    ReadContext,
+    ReadStrategy,
+    select_read_strategy,
+)
 
 
 def init_decisions_state(
@@ -37,7 +42,7 @@ def init_decisions_state(
     except ValueError:
         return None
 
-    if strategy.task == "generate":
+    if strategy.task == "generate" or isinstance(strategy, GLiNER2DecideStrategy):
         state.openai_serving_decisions = OpenAIServingDecisions(
             state.openai_serving_models,
             strategy,

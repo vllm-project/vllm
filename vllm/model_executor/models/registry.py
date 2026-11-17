@@ -319,6 +319,7 @@ _TOKEN_CLASSIFICATION_MODELS = {
 
 _SEQUENCE_CLASSIFICATION_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "Gliner2ForSchemaExtraction": ("gliner2", "Gliner2ForSchemaExtraction"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
