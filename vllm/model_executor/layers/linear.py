@@ -245,23 +245,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 
-def apply_linear_method(
-    quant_method: QuantizeMethodBase,
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Apply `quant_method` to `x`, flattening any leading dims to 2D first.
-
-    Linear methods and kernels may assume 2D activations, but callers such as
-    the Transformers modeling backend pass `[batch, seq, hidden]` activations.
-    """
-    if not isinstance(x, torch.Tensor) or x.dim() <= 2:
-        return quant_method.apply(layer, x, bias)
-    output = quant_method.apply(layer, x.flatten(0, -2), bias)
-    return output.unflatten(0, x.shape[:-1])
-
-
 class LinearBase(PluggableLayer):
     """Base linear layer.
 
@@ -437,7 +420,12 @@ class ReplicatedLinear(LinearBase):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        output = apply_linear_method(self.quant_method, self, x, bias)
+        lead_shape = None
+        if isinstance(x, torch.Tensor) and x.dim() > 2:
+            lead_shape, x = x.shape[:-1], x.flatten(0, -2)
+        output = self.quant_method.apply(self, x, bias)
+        if lead_shape is not None:
+            output = output.unflatten(0, lead_shape)
 
         if not self.return_bias:
             return output
@@ -640,7 +628,12 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        output_parallel = apply_linear_method(self.quant_method, self, input_, bias)
+        lead_shape = None
+        if isinstance(input_, torch.Tensor) and input_.dim() > 2:
+            lead_shape, input_ = input_.shape[:-1], input_.flatten(0, -2)
+        output_parallel = self.quant_method.apply(self, input_, bias)
+        if lead_shape is not None:
+            output_parallel = output_parallel.unflatten(0, lead_shape)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1877,6 +1870,9 @@ class RowParallelLinear(LinearBase):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        lead_shape = None
+        if isinstance(input_, torch.Tensor) and input_.dim() > 2:
+            lead_shape, input_ = input_.shape[:-1], input_.flatten(0, -2)
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1889,9 +1885,9 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = apply_linear_method(
-            self.quant_method, self, input_parallel, bias_
-        )
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        if lead_shape is not None:
+            output_parallel = output_parallel.unflatten(0, lead_shape)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)

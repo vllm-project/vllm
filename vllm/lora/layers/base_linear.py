@@ -20,7 +20,6 @@ from vllm.model_executor.layers.linear import (
     QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
-    apply_linear_method,
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -209,7 +208,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        output = apply_linear_method(self._get_quant_method(), self.base_layer, x, bias)
+        quant_method = self._get_quant_method()
+        output = quant_method.apply(self.base_layer, x.flatten(0, -2), bias)
+        output = output.unflatten(0, x.shape[:-1])
         return self._apply_lora_to_output(x, output)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -255,9 +256,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            return apply_linear_method(
-                self._get_quant_method(), self.base_layer, x, bias
-            )
+            quant_method = self._get_quant_method()
+            output = quant_method.apply(self.base_layer, x.flatten(0, -2), bias)
+            return output.unflatten(0, x.shape[:-1])
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without

@@ -14,7 +14,6 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    apply_linear_method,
 )
 from vllm.platforms import current_platform
 
@@ -34,10 +33,9 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         == len(layer.output_slices)
     )
 
-    output = apply_linear_method(layer._get_quant_method(), layer.base_layer, x, bias)
-
+    out_orig_shape = (*x.shape[:-1], -1)
     x = x.view(-1, x.shape[-1])
-    output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+    output = layer._get_quant_method().apply(layer.base_layer, x, bias)
 
     # Since communication is needed, the buffer is directly initialized as a
     # tensor rather than a tuple of tensor.

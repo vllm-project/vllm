@@ -12,7 +12,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
-from vllm.model_executor.layers.linear import RowParallelLinear, apply_linear_method
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
 from .base_linear import BaseLinearLayerWithLoRA
@@ -116,10 +116,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         return lora_b
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        output = apply_linear_method(self._get_quant_method(), self.base_layer, x, bias)
-
+        out_orig_shape = (*x.shape[:-1], -1)
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+        output = self._get_quant_method().apply(self.base_layer, x, bias)
         buffer = torch.zeros(
             (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
             dtype=torch.float32,
