@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 
+from vllm.entrypoints.pooling.scoring import serving as scoring_serving
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.pooling.types import PoolingEngineInput, PoolingServeContext
 from vllm.exceptions import GenerationError
@@ -246,4 +247,77 @@ async def test_repeated_cancellation_releases_requests_and_queries(
         # Always unblock cleanup, including when an assertion or timeout fails.
         release.set()
         handler.cancel()
+        await asyncio.gather(handler, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+async def test_late_interaction_cleanup_wait_is_bounded(
+    repeat_cancellation: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """A stalled cleanup has one deadline, even if cancellation keeps arriving."""
+    monkeypatch.setattr(
+        scoring_serving,
+        "_LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    loop = asyncio.get_running_loop()
+    cleanup = loop.create_future()
+    handler = asyncio.create_task(
+        ServingScores._await_late_interaction_cleanup(cleanup)
+    )
+    stop_cancelling = False
+
+    def cancel_again():
+        if not stop_cancelling and not handler.done():
+            handler.cancel()
+            loop.call_soon(cancel_again)
+
+    if repeat_cancellation:
+        loop.call_soon(cancel_again)
+
+    try:
+        done, _ = await asyncio.wait({handler}, timeout=1)
+        assert handler in done, "Cleanup wait exceeded its deadline"
+        expected_error = asyncio.CancelledError if repeat_cancellation else TimeoutError
+        with pytest.raises(expected_error):
+            handler.result()
+        assert cleanup.cancelled()
+    finally:
+        # The old helper swallows cancellation, so release it before joining.
+        stop_cancelling = True
+        if not cleanup.done():
+            cleanup.set_result(None)
+        await asyncio.gather(handler, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_late_interaction_cleanup_preserves_cancellation_after_request_error():
+    """Cancellation during cleanup must replace the pending request error."""
+    loop = asyncio.get_running_loop()
+    cleanup = loop.create_future()
+    cleanup_entered = asyncio.Event()
+
+    async def fail_then_clean_up():
+        try:
+            raise ValueError("request failed")
+        except ValueError:
+            cleanup_entered.set()
+            await ServingScores._await_late_interaction_cleanup(cleanup)
+            raise
+
+    handler = asyncio.create_task(fail_then_clean_up())
+    try:
+        await cleanup_entered.wait()
+        handler.cancel()
+        loop.call_soon(cleanup.set_result, None)
+        done, _ = await asyncio.wait({handler}, timeout=1)
+        assert handler in done, "Handler did not finish after cleanup"
+        with pytest.raises(asyncio.CancelledError):
+            handler.result()
+        assert cleanup.result() is None
+    finally:
+        if not cleanup.done():
+            cleanup.set_result(None)
         await asyncio.gather(handler, return_exceptions=True)

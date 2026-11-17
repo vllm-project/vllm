@@ -3,7 +3,6 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
-from contextlib import suppress
 from typing import Any
 
 from fastapi.responses import JSONResponse, Response
@@ -36,6 +35,8 @@ from .protocol import (
 from .types import ScoreInput
 
 logger = init_logger(__name__)
+
+_LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 
 class ServingScores(PoolingServing):
@@ -217,11 +218,27 @@ class ServingScores(PoolingServing):
 
     @staticmethod
     async def _await_late_interaction_cleanup(task: asyncio.Future[Any]) -> None:
-        """Finish cleanup even if the handler is cancelled again."""
-        while not task.done():
-            with suppress(asyncio.CancelledError):
-                await asyncio.shield(task)
-        task.result()
+        """Bound cleanup waiting and defer cancellation until it finishes."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            while not task.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    task.cancel()
+                    task.add_done_callback(
+                        lambda done: None if done.cancelled() else done.exception()
+                    )
+                    raise TimeoutError("Timed out waiting for late-interaction cleanup")
+                try:
+                    await asyncio.wait({task}, timeout=remaining)
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+            task.result()
+        finally:
+            if cancellation is not None:
+                raise cancellation
 
     async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
         query_keys = ctx.late_interaction_query_keys
@@ -231,13 +248,16 @@ class ServingScores(PoolingServing):
         doc_keys = ctx.late_interaction_doc_keys or []
 
         try:
+            # Stop documents before removing the query tensors they reference.
             # Also abort requests cancelled before add_request returned a collector.
             await self.engine_client.abort([*query_keys, *doc_keys])
         finally:
-            await self.engine_client.collective_rpc(
-                "release_late_interaction_query_cache",
-                args=(query_keys,),
-            )
+            # Bound release even when a timed-out abort enters this finally block.
+            async with asyncio.timeout(_LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS):
+                await self.engine_client.collective_rpc(
+                    "release_late_interaction_query_cache",
+                    args=(query_keys,),
+                )
 
     async def _collect_late_interaction_batch(self, ctx: ScoringServeContext):
         generators = await self._prepare_generators(ctx)
@@ -260,9 +280,12 @@ class ServingScores(PoolingServing):
             # Stop and join every producer before aborting and releasing keys.
             for task in tasks:
                 task.cancel()
-            await self._await_late_interaction_cleanup(
-                asyncio.gather(batch_future, *tasks, return_exceptions=True)
-            )
+            try:
+                await self._await_late_interaction_cleanup(
+                    asyncio.gather(batch_future, *tasks, return_exceptions=True)
+                )
+            except Exception:
+                logger.exception("Failed to stop late-interaction producers.")
             raise
         ctx.final_res_batch = results
 
