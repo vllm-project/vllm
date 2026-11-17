@@ -108,10 +108,17 @@ class HYV4MoEFused(nn.Module):
         router_scaling_factor = getattr(config, "router_scaling_factor", 1.0)
         vllm_config = get_current_vllm_config()
         eplb_config = vllm_config.parallel_config.eplb_config
+        # Set by the target model's decoder layers (HYV4Model); the MTP draft
+        # leaves it False because it is not registered with EPLB.
         self.enable_eplb = enable_eplb
 
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = eplb_config.num_redundant_experts
+        # Redundant experts exist only where EPLB manages the layer; the MTP
+        # draft (enable_eplb False) must stay at the logical expert count or the
+        # fused MoE factory asserts "Redundant experts are only supported with EPLB".
+        self.n_redundant_experts = (
+            eplb_config.num_redundant_experts if self.enable_eplb else 0
+        )
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts

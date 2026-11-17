@@ -115,6 +115,7 @@ class SharedExperts(torch.nn.Module):
         return (
             parallel_config.enable_eplb
             and parallel_config.all2all_backend not in _EPLB_OVERLAP_SAFE_BACKENDS
+            and not envs.EVENMOE_EPLB_SHARED_EXPERTS_OVERLAP
         ) or parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
