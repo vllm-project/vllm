@@ -83,6 +83,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "nemotron_h_mtp",
     "nemotron3_5_transcribe_mtp",
+    "nemotron_shortcut_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -1039,6 +1040,41 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
+            )
+
+        from vllm.transformers_utils.configs.nemotron_shortcut import (
+            NemotronShortcutConfig,
+            NemotronShortcutTextConfig,
+        )
+
+        if (
+            hf_config.model_type == NemotronShortcutConfig.model_type
+            and getattr(hf_config.get_text_config(), "num_nextn_predict_layers", 0) > 0
+        ):
+            # The MTP head reads the language model's fields; the quant config
+            # lives only at the top level of the VL checkpoint.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.get_text_config()
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if (
+            hf_config.model_type == NemotronShortcutTextConfig.model_type
+            and getattr(hf_config, "num_nextn_predict_layers", 0) > 0
+        ):
+            hf_config.model_type = "nemotron_shortcut_mtp"
+        if hf_config.model_type == "nemotron_shortcut_mtp":
+            # With mtp_use_repeated_layer one physical block serves every draft
+            # step, so the drafter sees a single module and any draft length.
+            n_predict = (
+                1
+                if getattr(hf_config, "mtp_use_repeated_layer", False)
+                else getattr(hf_config, "num_nextn_predict_layers", 1)
+            )
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronShortcutMTPModel"]}
             )
 
         if hf_config.architectures[0] in (

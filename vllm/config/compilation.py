@@ -940,6 +940,8 @@ class CompilationConfig:
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
+        "vllm::nemotron_shortcut_gdp",
+        "vllm::nemotron_shortcut_sdsa_indexer",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",

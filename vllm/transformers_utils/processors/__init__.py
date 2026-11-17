@@ -35,6 +35,8 @@ __all__ = [
     "MistralCommonPixtralProcessor",
     "MistralCommonVoxtralProcessor",
     "NanoNemotronVLProcessor",
+    "NemotronShortcutImageProcessor",
+    "NemotronShortcutProcessor",
     "NemotronVLProcessor",
     "LlamaNemotronVLEmbedProcessor",
     "NVLMProcessor",
@@ -70,6 +72,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
     "Moondream3Processor": "vllm.transformers_utils.processors.moondream3",
     "NanoNemotronVLProcessor": "vllm.transformers_utils.processors.nano_nemotron_vl",
+    "NemotronShortcutImageProcessor": (
+        "vllm.transformers_utils.processors.nemotron_shortcut"
+    ),
+    "NemotronShortcutProcessor": "vllm.transformers_utils.processors.nemotron_shortcut",
     "NemotronVLProcessor": "vllm.transformers_utils.processors.nemotron_vl",
     "LlamaNemotronVLEmbedProcessor": "vllm.transformers_utils.processors.nemotron_vl",
     "NVLMProcessor": "vllm.transformers_utils.processors.nvlm_d",

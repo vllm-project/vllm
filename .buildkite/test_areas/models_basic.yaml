@@ -539,6 +539,22 @@ steps:
       commands:
       - pytest -v -s models/qwen3_5/ kernels/mamba/test_gdn_output_projection.py
 
+- label: ":nvidia: (B200) Nemotron Shortcut"
+  key: nemotron-shortcut-unit-tests-b200
+  automatic_shard: true
+  timeout_in_minutes: 60
+  device: b200-k8s
+  # test_sdsa_engine.py runs TP2. The SDSA and GDP tests skip themselves
+  # while vLLM's FlashInfer lacks their kernels.
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/nemotron_shortcut/
+  - vllm/transformers_utils/configs/nemotron_shortcut.py
+  - vllm/transformers_utils/processors/nemotron_shortcut.py
+  - tests/models/nemotron_shortcut/
+  commands:
+  - pytest -v -s models/nemotron_shortcut/
+
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
   depends_on:
