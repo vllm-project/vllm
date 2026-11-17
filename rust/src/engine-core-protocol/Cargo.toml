@@ -16,6 +16,7 @@ bytes.workspace = true
 easy-ext.workspace = true
 enum-as-inner.workspace = true
 half.workspace = true
+indexmap.workspace = true
 itertools.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true

@@ -433,9 +433,11 @@ pub mod kv_connector {
         pub umbp: Option<UmbpStats>,
         #[serde(rename = "SimpleCPUOffloadConnector")]
         pub simple_cpu_offload: Option<SimpleCpuOffloadStats>,
-        /// Child connector payloads without a Rust telemetry implementation.
+        /// Child connector payloads without a Rust telemetry implementation,
+        /// in Python's dict order. Any unknown connector's flat payload lands
+        /// here too, since this variant accepts any map.
         #[serde(flatten)]
-        pub other: BTreeMap<String, OpaqueValue>,
+        pub other: indexmap::IndexMap<String, OpaqueValue>,
     }
 
     /// Connector-specific scheduler telemetry.
@@ -456,7 +458,8 @@ pub mod kv_connector {
         Umbp(UmbpStats),
         SimpleCpuOffload(SimpleCpuOffloadStats),
         Multi(Box<MultiConnectorStats>),
-        Other(BTreeMap<String, OpaqueValue>),
+        /// Insertion-ordered, so the payload keeps Python's dict key order.
+        Other(indexmap::IndexMap<String, OpaqueValue>),
     }
 }
 
@@ -614,5 +617,22 @@ mod tests {
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
         let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
+    }
+
+    #[test]
+    fn unknown_connector_stats_keep_python_key_order() {
+        // Python sends a connector's `to_dict()` in its dict order; a payload
+        // with no typed variant must round-trip without reordering keys.
+        let payload = serde_json::json!({
+            "types": {"vllm:kv_offload_store_bytes": "counter"},
+            "data": {"vllm:kv_offload_store_bytes": [[[], 1024]]},
+            "info": null
+        });
+        let stats: KvConnectorStats =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap();
+        let encoded: serde_json::Value =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&stats).unwrap()).unwrap();
+        let keys: Vec<&str> = encoded.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["types", "data", "info"]);
     }
 }

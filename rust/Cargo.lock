@@ -5866,6 +5866,7 @@ dependencies = [
  "enum-as-inner",
  "expect-test",
  "half",
+ "indexmap 2.13.0",
  "itertools 0.14.0",
  "rmp-serde",
  "rmpv",
