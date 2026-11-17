@@ -221,13 +221,8 @@ class Base(
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
-        self._restore_stage_input_enabled = False
+        self._stage_input: torch.Tensor | None = None
         if not self.pp_group.is_first_rank and (layers := self._decoder_layers):
-            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-            hidden_size = self.text_config.hidden_size
-            buffer = torch.zeros(1, max_tokens, hidden_size)
-            # CUDA graphs replay their capture-time input addresses
-            self.register_buffer("pp_hidden_states", buffer, persistent=False)
             layers[self.start_layer].register_forward_pre_hook(
                 self._restore_stage_input, with_kwargs=True
             )
@@ -911,12 +906,10 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
-        buffer = getattr(self, "pp_hidden_states", None)
-        if buffer is not None and inputs_embeds is not None:
-            # Only set here, so modules which call the layers directly (i.e. MTP)
-            # skip the hook
-            self._restore_stage_input_enabled = True
-            buffer[:, : inputs_embeds.shape[1]].copy_(inputs_embeds)
+        if not self.pp_group.is_first_rank:
+            # Unset after the forward, so modules which call the layers directly
+            # (i.e. MTP) skip the hook
+            self._stage_input = inputs_embeds
         self._aux_hidden_states.clear()
         outputs = self.model(
             input_ids=input_ids,
@@ -926,6 +919,7 @@ class Base(
             return_dict=False,
             **kwargs,
         )
+        self._stage_input = None
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
@@ -981,10 +975,8 @@ class Base(
         Later ranks still run the decoder before its layers, for masks and rotary
         embeddings, but anything it does to the hidden states (scaling, learned
         positions, ...) was already done on the first rank."""
-        if not self._restore_stage_input_enabled:
+        if (received := self._stage_input) is None:
             return None
-        hidden_states = args[0] if args else kwargs["hidden_states"]
-        received = self.pp_hidden_states[:, : hidden_states.shape[1]]
         if args:
             return (received, *args[1:]), kwargs
         return args, kwargs | {"hidden_states": received}
