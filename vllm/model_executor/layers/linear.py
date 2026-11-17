@@ -421,10 +421,10 @@ class ReplicatedLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         if is_tensor := isinstance(x, torch.Tensor):
-            lead_shape, x = x.shape[:-1], x.reshape(-1, x.shape[-1])
+            lead_shape, x = x.shape[:-1], x.view(-1, x.shape[-1])
         output = self.quant_method.apply(self, x, bias)
         if is_tensor:
-            output = output.reshape(*lead_shape, -1)
+            output = output.view(*lead_shape, -1)
 
         if not self.return_bias:
             return output
@@ -628,10 +628,10 @@ class ColumnParallelLinear(LinearBase):
 
         # Matrix multiply.
         if is_tensor := isinstance(input_, torch.Tensor):
-            lead_shape, input_ = input_.shape[:-1], input_.reshape(-1, input_.shape[-1])
+            lead_shape, input_ = input_.shape[:-1], input_.view(-1, input_.shape[-1])
         output_parallel = self.quant_method.apply(self, input_, bias)
         if is_tensor:
-            output_parallel = output_parallel.reshape(*lead_shape, -1)
+            output_parallel = output_parallel.view(*lead_shape, -1)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1869,7 +1869,7 @@ class RowParallelLinear(LinearBase):
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if is_tensor := isinstance(input_, torch.Tensor):
-            lead_shape, input_ = input_.shape[:-1], input_.reshape(-1, input_.shape[-1])
+            lead_shape, input_ = input_.shape[:-1], input_.view(-1, input_.shape[-1])
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1884,7 +1884,7 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
         if is_tensor:
-            output_parallel = output_parallel.reshape(*lead_shape, -1)
+            output_parallel = output_parallel.view(*lead_shape, -1)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
