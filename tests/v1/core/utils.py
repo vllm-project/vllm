@@ -117,7 +117,6 @@ def create_scheduler(
     """
     model_config = ModelConfig(
         model=model,
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
