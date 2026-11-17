@@ -231,7 +231,7 @@ internal constant (no env vars).
 | Flag (`ParallelConfig` field) | Default | Meaning |
 | --- | --- | --- |
 | `--enable-shm-tensor-arena` / `--disable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
-| `--shm-tensor-arena-slots` (`shm_tensor_arena_slots`) | 8 | Slots in the arena. A message with large tensors holds a slot while a reader still holds one of its tensors, so more image requests in flight than slots send the rest down the out-of-band path. |
+| `--shm-tensor-arena-slots` (`shm_tensor_arena_slots`) | 8 | Slots in the arena. Each large tensor (at least 8 MiB, such as one image's `pixel_values`) takes one slot until every worker has dropped it, so more such tensors in flight than slots send the rest down the out-of-band path. |
 | `--shm-tensor-arena-slot-mb` (`shm_tensor_arena_slot_mb`) | 256 | Slot size in MiB (at least 8). A tensor larger than a slot takes the out-of-band path. The arena reserves, and on CUDA-alike platforms pins, slots × slot size of host memory. |
 
 Tensors larger than a slot, or smaller than the **8 MiB** divert threshold (an

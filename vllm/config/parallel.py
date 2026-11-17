@@ -384,11 +384,10 @@ class ParallelConfig:
     slots in `/dev/shm`."""
     shm_tensor_arena_slots: int = Field(default=8, ge=1)
     """Number of slots in the shared-memory tensor arena
-    (`enable_shm_tensor_arena`). Each engine→worker message that carries large
-    CPU tensors takes one slot, which stays in use while a reader still holds one
-    of its tensors (a multimodal request keeps its `pixel_values` until it
-    finishes). With more image requests in flight than slots, the rest take the
-    copying fallback path. The arena reserves slots x
+    (`enable_shm_tensor_arena`). Each large CPU tensor (at least 8 MiB, such as
+    the `pixel_values` of one image) takes one slot, which stays in use until
+    every worker has dropped the tensor. With more such tensors in flight than
+    slots, the rest take the copying fallback path. The arena reserves slots x
     `shm_tensor_arena_slot_mb` of `/dev/shm`, and on CUDA-alike platforms the
     readers page-lock all of it (`cudaHostRegister`), so that much host memory
     is resident and pinned per node. Only used with
