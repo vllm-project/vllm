@@ -30,7 +30,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import BeamSearchParams, RequestOutputKind
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.async_utils import merge_async_iterators
@@ -380,6 +380,8 @@ async def _run_vllm_async_requests(
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
                 detokenize=not disable_detokenize,
+                # One final output per request that holds all n samples.
+                output_kind=RequestOutputKind.FINAL_ONLY,
             )
         )
         prompts.append(prompt)

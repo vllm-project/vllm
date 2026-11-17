@@ -540,8 +540,9 @@ def test_get_requests_custom_audio_output_len(
 
 
 @pytest.mark.benchmark
+@pytest.mark.parametrize("max_num_seqs", [1, 8])
 @pytest.mark.parametrize("async_engine", [False, True])
-def test_bench_throughput_counts_all_sequences(tmp_path, async_engine):
+def test_bench_throughput_counts_all_sequences(tmp_path, async_engine, max_num_seqs):
     """Token totals include every generated sequence and exclude warmups."""
     output_json = tmp_path / "throughput.json"
     command = [
@@ -570,7 +571,7 @@ def test_bench_throughput_counts_all_sequences(tmp_path, async_engine):
         "--max-model-len",
         "128",
         "--max-num-seqs",
-        "8",
+        str(max_num_seqs),
         "--output-json",
         str(output_json),
     ]
