@@ -21,14 +21,14 @@ import struct
 import tempfile
 import time
 from dataclasses import dataclass, fields
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import CacheConfig, KernelConfig, ModelConfig
+from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -39,6 +39,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
+from vllm.utils.network_utils import split_host_port
 
 SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
@@ -47,8 +48,12 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
-# Bound for one JSON message on the remote warmup-cache control plane.
-# Warmup cache tables are small JSON documents.
+# Bound for one JSON message on the remote D2D control plane. A remote peer
+# is authenticated before any payload is decoded, so that plane must not be
+# pickle: recv_msg would deserialize attacker-controlled bytes before the
+# token is ever compared. JSON carries everything a cross-host seed needs:
+# warmup cache tables, the flat cache-key dataclass, storage manifests, and
+# an RDMA seed (a session string plus integer regions).
 MAX_JSON_MSG_SIZE = 1 << 26
 
 
@@ -91,6 +96,23 @@ def check_ipc_platform_support() -> None:
         "weight sharing; only CUDA and ROCm are supported. Use the default "
         "--load-format for this platform."
     )
+
+
+def check_weight_cache_loader_support(
+    vllm_config: VllmConfig, model_config: ModelConfig, *, is_draft: bool
+) -> None:
+    """Reject deployments a weight cache loader cannot serve (platform, EPLB, role)."""
+    check_ipc_platform_support()
+    if vllm_config.parallel_config.enable_eplb:
+        raise ValueError("The weight cache loader does not support EPLB.")
+    spec = vllm_config.speculative_config
+    inferred = spec is not None and model_config is spec.draft_model_config
+    if inferred != is_draft:
+        raise CacheConfigMismatchError(
+            f"Weight cache role mismatch: loading "
+            f"{'draft' if inferred else 'target'} model but the loader was "
+            f"configured for the {'draft' if is_draft else 'target'} group"
+        )
 
 
 # The daemon transfers post processed weights directly
@@ -371,6 +393,9 @@ class WeightCacheKey:
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
         kernel_config = kernel_config or KernelConfig()
+        linear_backend_per_quant = tuple(
+            sorted((kernel_config.linear_backend_per_quant or {}).items())
+        )
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -398,9 +423,7 @@ class WeightCacheKey:
             expert_placement_strategy=expert_placement_strategy,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
-            linear_backend_per_quant=tuple(
-                sorted((kernel_config.linear_backend_per_quant or {}).items())
-            ),
+            linear_backend_per_quant=linear_backend_per_quant,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -411,6 +434,10 @@ class WeightCacheKey:
         ]
 
 
+TensorKind = Literal["param", "buffer"]
+"""Whether a cached tensor is a model parameter or a buffer."""
+
+
 @dataclass(slots=True)
 class TensorEntry:
     """A single cached tensor.
@@ -419,13 +446,12 @@ class TensorEntry:
     (CUDA IPC handles); non-CUDA tensors are shipped by value.
     """
 
-    kind: str
-    """Either "param" or "buffer"."""
+    kind: TensorKind
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
 
     @classmethod
-    def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
+    def from_tensor(cls, tensor: torch.Tensor, kind: TensorKind) -> "TensorEntry":
         tensor = tensor.detach()
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
@@ -453,6 +479,13 @@ class WeightCacheState(NamedTuple):
     """Duplicate (tied) weight names aliased to their canonical entry."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
+
+
+def parse_seed_address(address: str) -> str | tuple[str, int]:
+    """Split a seed address into a Unix socket path or a `(host, port)`."""
+    if "/" in address or ":" not in address:
+        return os.path.expanduser(address)
+    return split_host_port(address)
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:

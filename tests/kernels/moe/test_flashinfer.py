@@ -645,6 +645,7 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
 
 
 def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
+    from vllm.model_executor.model_loader.utils import _register_processed_tensors
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheState,
@@ -658,7 +659,10 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
         )
         loader = object.__new__(IpcModelLoader)
         loader.mode = mode
-        loader._apply_entries(layer, WeightCacheState(entries, {}, {}), device_index)
+        tensors, kinds = loader._apply_entries(
+            WeightCacheState(entries, {}, {}), device_index
+        )
+        _register_processed_tensors(layer, tensors, kinds, {})
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
 
         # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.

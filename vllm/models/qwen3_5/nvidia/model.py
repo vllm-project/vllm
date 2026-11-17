@@ -129,8 +129,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.utils.flashinfer import has_flashinfer
 
+from ..common.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
-from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_norm_quant import (
     FP8_DTYPE,
     gemma_add_rms_norm,
@@ -303,9 +303,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.layer_idx = extract_layer_index(prefix)
         is_moe_layer = config.model_type == "qwen3_5_moe_text"
         self.use_attn_reduce_scatter_for_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
         )
         # Defer row-parallel all-reduces to the following norm
         # (deepseek_v32 pattern); exclude PP and SP.
@@ -603,7 +601,8 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
+            if residual is not None:
+                residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -620,6 +619,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                packed = torch.cat([hidden_states, residual], dim=-1)
+                packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
+                hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )

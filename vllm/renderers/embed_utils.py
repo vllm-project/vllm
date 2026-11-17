@@ -10,6 +10,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.utils.async_utils import make_async
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
+    check_torch_archive_size,
     safe_to_dense,
 )
 
@@ -51,6 +52,7 @@ def safe_load_prompt_embeds(
     # Decoded outside the try below so that a body which is not base64 keeps
     # raising binascii.Error, which is a ValueError and already answered 400.
     payload: Final = pybase64.b64decode(embed, validate=True)
+    check_torch_archive_size(payload, parameter="prompt_embeds")
 
     with check_sparse_tensor_invariants_threadsafe():
         try:
