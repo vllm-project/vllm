@@ -47,7 +47,7 @@ from ..types import (
     RequestGenerator,
     ScoringRenderParams,
 )
-from ..utils import reserve_tokens
+from ..utils import merge_chat_template_kwargs, reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .types import ScoreData, ScoreInput, ScoringData
 from .utils import (
@@ -119,27 +119,6 @@ class ScoringIOProcessor(PoolingIOProcessor):
 
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
-
-    def _merge_chat_template_kwargs(
-        self,
-        chat_template_kwargs: dict[str, Any] | None,
-        add_generation_prompt: bool | None,
-        continue_final_message: bool | None,
-    ) -> dict[str, Any]:
-        merged = dict(chat_template_kwargs or {})
-
-        if add_generation_prompt:
-            merged.setdefault("add_generation_prompt", True)
-        if continue_final_message:
-            merged.setdefault("continue_final_message", True)
-
-        if merged.get("add_generation_prompt") and merged.get("continue_final_message"):
-            raise VLLMValidationError(
-                "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
-            )
-
-        return merged
 
     def _validate_token_limit(self, value: int, name: str) -> None:
         if value < 0:
@@ -573,7 +552,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        chat_template_kwargs = self._merge_chat_template_kwargs(
+        chat_template_kwargs = merge_chat_template_kwargs(
             ctx.prompt_extras.get("chat_template_kwargs")
             if ctx.prompt_extras
             else None,
@@ -641,7 +620,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 prompt_extras_dict[key] = extra_kwargs[key]
         prompt_extras: dict[str, Any] | None = prompt_extras_dict or None
 
-        merged_chat_template_kwargs = self._merge_chat_template_kwargs(
+        merged_chat_template_kwargs = merge_chat_template_kwargs(
             merge_kwargs(
                 extra_kwargs.get("chat_template_kwargs"),
                 ctx.chat_template_kwargs,
@@ -1078,14 +1057,14 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         docs = self.ensure_str(scoring_data.data_2)
 
         extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
-        merged_chat_template_kwargs = merge_kwargs(
-            extra_kwargs.get("chat_template_kwargs"),
-            ctx.chat_template_kwargs,
+        merged_chat_template_kwargs = merge_chat_template_kwargs(
+            merge_kwargs(
+                extra_kwargs.get("chat_template_kwargs"),
+                ctx.chat_template_kwargs,
+            ),
+            ctx.add_generation_prompt,
+            ctx.continue_final_message,
         )
-        if ctx.add_generation_prompt:
-            merged_chat_template_kwargs["add_generation_prompt"] = True
-        if ctx.continue_final_message:
-            merged_chat_template_kwargs["continue_final_message"] = True
         instruction = (
             merged_chat_template_kwargs.get("instruction")
             if merged_chat_template_kwargs

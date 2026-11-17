@@ -22,7 +22,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils.types import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -56,6 +56,7 @@ from .pooling.protocol import (
 from .scoring.protocol import ScoringRequest, ScoringResponse
 from .scoring.types import ScoreData, ScoringData
 from .token_embed.protocol import TokenEmbeddingRequest, TokenEmbeddingResponse
+from .utils import merge_chat_template_kwargs
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest
@@ -198,12 +199,10 @@ class OfflineInputsContext:
                 if self.chat_template_content_format != "auto"
                 else default_template_content_format
             ),
-            chat_template_kwargs=merge_kwargs(
+            chat_template_kwargs=merge_chat_template_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                ),
+                self.add_generation_prompt,
+                self.continue_final_message,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )

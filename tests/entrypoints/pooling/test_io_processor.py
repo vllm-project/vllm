@@ -335,6 +335,91 @@ class TestBuildChatParams:
 
         assert params.chat_template_content_format == "string"
 
+    def test_explicit_kwargs_win_over_top_level_flag(self):
+        """An explicit value in `chat_template_kwargs` wins over the top-level flag."""
+        ctx = OfflineInputsContext(
+            pooling_task="embed",
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            chat_template_kwargs={"add_generation_prompt": False},
+            add_generation_prompt=True,
+        )
+
+        params = ctx.build_chat_params(
+            default_template="engine_jinja",
+            default_template_content_format="string",
+        )
+
+        assert params.chat_template_kwargs["add_generation_prompt"] is False
+
+    def test_top_level_true_fills_missing_kwarg(self):
+        """A top-level `True` only fills in the missing key, leaving other
+        kwargs untouched."""
+        ctx = OfflineInputsContext(
+            pooling_task="embed",
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            chat_template_kwargs={"existing": 1},
+            add_generation_prompt=True,
+        )
+
+        params = ctx.build_chat_params(
+            default_template="engine_jinja",
+            default_template_content_format="string",
+        )
+
+        assert params.chat_template_kwargs == {
+            "existing": 1,
+            "add_generation_prompt": True,
+        }
+
+    def test_default_false_does_not_override_explicit_true(self):
+        """When the top-level flag keeps its default `False`, it must not
+        override a `True` supplied in kwargs.
+
+        This is the exact trigger from the bug report: an offline call passes
+        only `chat_template_kwargs={"add_generation_prompt": True}` and leaves
+        the top-level flag unset.
+        """
+        ctx = OfflineInputsContext(
+            pooling_task="embed",
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            chat_template_kwargs={"add_generation_prompt": True},
+        )
+
+        params = ctx.build_chat_params(
+            default_template="engine_jinja",
+            default_template_content_format="string",
+        )
+
+        assert params.chat_template_kwargs["add_generation_prompt"] is True
+
+    def test_rejects_mutually_exclusive_flags_across_layers(self):
+        """A top-level flag must conflict with the opposite flag set in kwargs.
+
+        `__post_init__` only checks the two top-level fields, so a cross-layer
+        conflict has to be caught by `merge_chat_template_kwargs` while
+        `ChatParams` is being built.
+        """
+        ctx = OfflineInputsContext(
+            pooling_task="embed",
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            chat_template_kwargs={"continue_final_message": True},
+            add_generation_prompt=True,
+        )
+
+        with pytest.raises(VLLMValidationError, match="Cannot set both"):
+            ctx.build_chat_params(
+                default_template="engine_jinja",
+                default_template_content_format="string",
+            )
+
 
 # ---------------------------------------------------------------------------
 # `PoolingIOProcessor.get_request_factory_offline` must call `.with_defaults`

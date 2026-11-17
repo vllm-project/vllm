@@ -33,6 +33,7 @@ from vllm.entrypoints.pooling.types import (
     OfflineScoringInputsContext,
     ScoringRenderParams,
 )
+from vllm.entrypoints.pooling.utils import merge_chat_template_kwargs
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
@@ -484,22 +485,18 @@ def test_scoring_detects_structured_content_with_saved_template(
 
 
 class TestMergeTemplateKwargs:
-    """Unit tests for `ScoringIOProcessor._merge_chat_template_kwargs`."""
+    """Unit tests for `pooling.utils.merge_chat_template_kwargs`."""
 
-    @pytest.fixture
-    def processor(self):
-        return CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
-
-    def test_ignores_none_flags(self, processor):
-        merged = processor._merge_chat_template_kwargs(
+    def test_ignores_none_flags(self):
+        merged = merge_chat_template_kwargs(
             None,
             add_generation_prompt=None,
             continue_final_message=None,
         )
         assert merged == {}
 
-    def test_keeps_existing_kwargs_when_no_flag_is_set(self, processor):
-        merged = processor._merge_chat_template_kwargs(
+    def test_keeps_existing_kwargs_when_no_flag_is_set(self):
+        merged = merge_chat_template_kwargs(
             {"existing": 1},
             add_generation_prompt=None,
             continue_final_message=None,
@@ -515,22 +512,22 @@ class TestMergeTemplateKwargs:
             ("continue_final_message", None),
         ],
     )
-    def test_injects_present_flag(self, processor, flag_name, kwargs):
-        merged = processor._merge_chat_template_kwargs(
+    def test_injects_present_flag(self, flag_name, kwargs):
+        merged = merge_chat_template_kwargs(
             kwargs,
-            add_generation_prompt=True
-            if flag_name == "add_generation_prompt"
-            else None,
-            continue_final_message=True
-            if flag_name == "continue_final_message"
-            else None,
+            add_generation_prompt=(
+                True if flag_name == "add_generation_prompt" else None
+            ),
+            continue_final_message=(
+                True if flag_name == "continue_final_message" else None
+            ),
         )
         expected = dict(kwargs or {})
         expected[flag_name] = True
         assert merged == expected
 
-    def test_explicit_kwargs_take_precedence_over_top_level_flags(self, processor):
-        merged = processor._merge_chat_template_kwargs(
+    def test_explicit_kwargs_take_precedence_over_top_level_flags(self):
+        merged = merge_chat_template_kwargs(
             {"add_generation_prompt": False, "continue_final_message": False},
             add_generation_prompt=True,
             continue_final_message=True,
@@ -540,19 +537,19 @@ class TestMergeTemplateKwargs:
             "continue_final_message": False,
         }
 
-    def test_rejects_mutually_exclusive_top_level_flags(self, processor):
+    def test_rejects_mutually_exclusive_top_level_flags(self):
         with pytest.raises(VLLMValidationError, match="Cannot set both"):
-            processor._merge_chat_template_kwargs(
+            merge_chat_template_kwargs(
                 None,
                 add_generation_prompt=True,
                 continue_final_message=True,
             )
 
-    def test_rejects_mutually_exclusive_flags_across_layers(self, processor):
+    def test_rejects_mutually_exclusive_flags_across_layers(self):
         """A top-level flag must still conflict with the same flag set in
         `chat_template_kwargs`."""
         with pytest.raises(VLLMValidationError, match="Cannot set both"):
-            processor._merge_chat_template_kwargs(
+            merge_chat_template_kwargs(
                 {"continue_final_message": True},
                 add_generation_prompt=True,
                 continue_final_message=None,
