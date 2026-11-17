@@ -29,8 +29,14 @@
   `check_embeddings_close`, or require `VLLM_BATCH_INVARIANT=1` for exact
   equality. Never synchronize with a fixed `sleep`; poll an explicit condition
   with a timeout, and force race orderings with events.
+- **No personal-account checkpoints.** Tests must not load models from
+  personal Hugging Face accounts; see `docs/contributing/model/tests.md`
+  (Model loading) for moving them into `vllm-project`.
 - **Make sure CI runs it.** A test no step in `.buildkite/test_areas/*.yaml`
   selects never runs, which looks like passing. Check that the step's
   `commands` and pytest markers (`core_model`, `slow_test`, `distributed`)
   select the test and its `source_file_dependencies` cover the changed files;
-  update the step if not.
+  update the step if not. When a command names more than one test path
+  (including `--ignore` / `--deselect`), write it as a `>-` block with
+  `pytest -v -s` on the first line and one path per line, so concurrent PRs
+  adding tests do not conflict on the same line.
