@@ -1323,12 +1323,12 @@ presets:
       - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview) with 4 tokens, probabilistic drafting and block rejection.
       - **Collectives and kernels:** FlashInfer all-reduce stays on (`VLLM_ALLREDUCE_USE_FLASHINFER=1`); NCCL symmetric memory and the sharded sequence-parallel shared expert stay off (`VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`), and so do TOKENSPEED_MLA's FP16 partials (`TOKENSPEED_MLA_FP16_PARTIALS=0`). NCCL runs over the NVLink domain (`NCCL_MNNVL_ENABLE=1`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`) without a network plugin (`NCCL_NET_PLUGIN=none`).
       - **KV transfer:** NIXL uses `UCX_MEMTYPE_REG_WHOLE=n` and `UCX_TCP_AF_PRIO=inet`. The Mooncake transfer engine uses `MC_SLICE_SIZE=1048576`, `MC_MAX_MR_SIZE=4294967296` and `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, and `WITH_NVIDIA_PEERMEM=0` for hosts without the nvidia-peermem module. vLLM loads from the store with 4 receive threads (`VLLM_MOONCAKE_LOAD_RECV_THREADS=4`), and `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE=1` makes a store lookup lease only the keys that a hit loads.
-      - **Timeouts and housekeeping:** `VLLM_ENGINE_READY_TIMEOUT_S=3600` (from the recipe's Blackwell settings), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `VLLM_RPC_TIMEOUT=600000`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. A store lookup may take up to 60 s (`lookup_timeout_s`; the connector's default is 1 s), and starts when the request arrives, with up to 16 lookups in flight (`lookup_prefetch_limit`) and results kept for 30 s (`lookup_prefetch_ttl_s`). `TILELANG_CLEANUP_TEMP_FILES=1` removes TileLang's temporary build files.
+      - **Timeouts and housekeeping:** `VLLM_ENGINE_READY_TIMEOUT_S=3600` (from the recipe's Blackwell settings), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `VLLM_RPC_TIMEOUT=600000`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. A store lookup may take up to 60 s (`lookup_timeout_s`; the connector's default is 1 s), and starts when the request arrives, with up to 16 lookups in flight (`lookup_prefetch_limit`) and results kept for 30 s (`lookup_prefetch_ttl_s`). `TILELANG_CLEANUP_TEMP_FILES=1` removes TileLang's temporary build files. Every worker loads the checkpoint with `--load-format fastsafetensors`, which changes load time only.
       - **Worker start:** every worker starts with `VLLM_WORKER_MULTIPROC_METHOD=spawn`, and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do; no `--numa-bind`.
 
       **Tool calling and reasoning** are on in this preset. Under Dynamo the builder renders `--dyn-tool-call-parser kimi_k3`, `--dyn-reasoning-parser kimi_k3` and vLLM's `--reasoning-parser kimi_k3`, and the preset adds `--dyn-enable-structural-tag`: the flags of the lane's accuracy runs.
 
-      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it (recompute on a failed store load, the NIXL KV buffer on the GPU, the 60 s lookup timeout, store lookups started on arrival, cross-layer blocks and store offload off). Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode and session affinity (the builder renders round-robin).
+      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it (recompute on a failed store load, the NIXL KV buffer on the GPU, the 60 s lookup timeout, store lookups started on arrival, cross-layer blocks and store offload off). Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode (the builder renders round-robin).
 
       ### Services
 
@@ -1587,7 +1587,7 @@ presets:
     # The connector options and draft length of the TP8 + DCP8 PD preset,
     # without its store lookup timeout.
     json_args:
-      "--speculative-config": { num_speculative_tokens: 4, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config":
         kv_load_failure_policy: recompute
         NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
@@ -1647,14 +1647,20 @@ presets:
       - **Decode:** the low-latency decode backend (`--additional-config '{"decode_backend":"latency_specialized"}'`) with `--use-replayssm`, `--max-num-batched-tokens 160`, and CUDA graphs for 5 to 160 rows in steps of 5 (32 requests × (1 + 4 draft tokens)) in vLLM's default graph mode, which the decode `--compilation-config` keeps by replacing the PD strategy's `FULL_DECODE_ONLY`. `VLLM_ENABLE_GEMM_RS=0`.
       - Everything else (precision, kernels, collectives, KV transfer, timeouts, tool-call and reasoning parsers, connector options) is as in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), except three settings this lane does not set: the BF16 indexer logits, the prefill `--kernel-config` and the 60 s store lookup timeout. The lane's env also keeps the direct DCP paths (`VLLM_USE_DIRECT_DCP_*=1`), which have no effect without DCP. All workers start with `VLLM_WORKER_MULTIPROC_METHOD=spawn`, and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do. The data-parallel RPC ports are the builder's placeholders; the lane used 13355 for prefill and 13345 for decode.
 
-      Start the services and the frontend as for the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd); the same benchmark-only settings are left out.
+      Start the services as for the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), and the frontend with that preset's env but with one-second session affinity, as the lane runs it; the same benchmark-only settings are left out.
+
+      ```bash
+      python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 1
+      ```
+
+      Session affinity keys on the `X-Dynamo-Session-Id` request header, so send one ID per conversation.
 
       ### Throughput measurement only (synthetic acceptance)
 
-      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.46. Only `--speculative-config` changes, on both roles: With `--block-size 16384` the draft's KV block is 16384 tokens, so prefix-cache hits stay block-aligned at any `--prefix-match-unit`.
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes, on both roles:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
@@ -1779,7 +1785,7 @@ presets:
       - **Mooncake store tail pruning** on both roles (`VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1`, `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1`), as in the [hybrid preset](#preset-gb300_agentx_pd_hybrid).
       - **Indexer.** BF16 indexer logits on both roles and the DeepSelect top-k on prefill, as in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd).
 
-      Everything else is as in the DEP16 preset. The lane's benchmark client also ran on a node of its own, which is not a server setting.
+      Everything else is as in the DEP16 preset, including the frontend's one-second session affinity (`--router-session-affinity-ttl-secs 1`). The lane's benchmark client also ran on a node of its own, which is not a server setting.
 
       ### Throughput measurement only (synthetic acceptance)
 
@@ -1894,7 +1900,7 @@ presets:
       - The env follows the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd) (collectives, kernels, Mooncake transfer settings, timeouts) with `VLLM_ENABLE_GEMM_RS=0` and `VLLM_SSM_CONV_STATE_LAYOUT=DS`. It also keeps the lane's `UCX_*` settings, which have no effect without NIXL.
       - The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row and sets the lane's options on its `MooncakeStoreConnector`: recompute on a failed load, asynchronous load and lookup, and cross-layer blocks and store offload off. Start the Mooncake master and size the store as for the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd).
 
-      **Served through Dynamo in the lane.** InferenceX ran this engine as one aggregated Dynamo worker (`python3 -m dynamo.vllm` on each tray with the same engine flags) behind the Dynamo frontend of the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), with `DYN_REQUEST_PLANE=tcp`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. The builder renders the same engine flags for `vllm serve` on the Multi-Node TP strategy, with vLLM's Rust frontend. Under Dynamo, tool calling and reasoning take `--dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` and `--reasoning-parser kimi_k3` in place of the rendered parser flags, as in the lane's accuracy runs.
+      **Served through Dynamo in the lane.** InferenceX ran this engine as one aggregated Dynamo worker (`python3 -m dynamo.vllm` on each tray with the same engine flags) behind the Dynamo frontend of the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), with `DYN_REQUEST_PLANE=tcp`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`, and loaded the checkpoint with `--load-format fastsafetensors`. The builder renders the same engine flags for `vllm serve` on the Multi-Node TP strategy, with vLLM's Rust frontend. Under Dynamo, tool calling and reasoning take `--dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` and `--reasoning-parser kimi_k3` in place of the rendered parser flags, as in the lane's accuracy runs.
 
       **Benchmark-only settings left out.** As in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd): `--served-model-name` (the model ID), `VLLM_SERVER_DEV_MODE=1`, and the job and benchmark-client settings. The throughput runs leave out the parser flags.
 
