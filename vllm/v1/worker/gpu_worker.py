@@ -112,13 +112,6 @@ from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
-from vllm.v1.metrics.iteration_timing import (
-    IterationTimer,
-    finish_iteration_timing,
-    make_iteration_timer,
-    start_iteration_timing,
-    time_dummy_batch,
-)
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -132,6 +125,12 @@ from vllm.v1.worker.extensible_kv_cache import (
     measure_kv_cache_blocks,
     pad_kv_cache_segments,
     registers_kv_cache_memory,
+)
+from vllm.v1.worker.iteration_timing import (
+    finish_iteration_timing,
+    make_iteration_timer,
+    start_iteration_timing,
+    time_dummy_batch,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -233,9 +232,6 @@ _MAX_SPLIT_SIZE_MB = 21
 
 
 class Worker(WorkerBase):
-    # Set in init_device on the worker that times engine iterations.
-    iteration_timer: IterationTimer | None = None
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -293,6 +289,9 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+
+        # Set on the worker that times engine iterations.
+        self.iteration_timer = make_iteration_timer(vllm_config, rank)
 
     def _validate_profiler_config(self) -> None:
         validate_worker_profiler_config(self.profiler_config)
@@ -599,7 +598,6 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         self._init_workspace_and_model_runner()
-        self.iteration_timer = make_iteration_timer(self.vllm_config, self.rank)
 
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""

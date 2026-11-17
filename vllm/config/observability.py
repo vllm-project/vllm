@@ -103,8 +103,8 @@ class ObservabilityConfig:
     If set, vllm EngineCore will log iteration details
     This includes number of context/generation requests and tokens
     and the elapsed time for the iteration: GPU time measured with CUDA
-    events where supported (see docs/design/metrics.md), otherwise the
-    wall-clock time EngineCore waited for the iteration."""
+    events where supported, otherwise the wall-clock time EngineCore
+    waited for the iteration."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""

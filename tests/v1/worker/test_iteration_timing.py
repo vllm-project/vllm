@@ -6,20 +6,21 @@ from unittest.mock import Mock
 
 import pytest
 
-import vllm.v1.metrics.iteration_timing as iteration_timing
+import vllm.config.vllm as vllm_config_module
+import vllm.v1.worker.iteration_timing as iteration_timing
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics import loggers
-from vllm.v1.metrics.iteration_timing import (
+from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+from vllm.v1.worker.iteration_timing import (
     IterationTimer,
     finish_iteration_timing,
     make_iteration_timer,
     start_iteration_timing,
     time_dummy_batch,
 )
-from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
 
@@ -247,8 +248,12 @@ def test_gpu_iteration_timing_conditions(change, expected, monkeypatch):
         "api_servers": 1,
         "multiprocessing": True,
     } | change
-    monkeypatch.setenv(
-        "VLLM_ENABLE_V1_MULTIPROCESSING", str(int(case["multiprocessing"]))
+    # Not through the environment: an engine created earlier in this process
+    # may have cached it.
+    monkeypatch.setattr(
+        vllm_config_module,
+        "envs",
+        SimpleNamespace(VLLM_ENABLE_V1_MULTIPROCESSING=case["multiprocessing"]),
     )
     config = SimpleNamespace(
         observability_config=SimpleNamespace(
