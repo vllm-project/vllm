@@ -857,6 +857,14 @@ class SpeculativeConfig:
             # Ripple's DFlash2 drafter is the one with NoPE layers.
             hf_config.update({"architectures": ["DFlash2RicursiveDraftModel"]})
             return hf_config
+        if (
+            initial_architecture == "DFlash2DraftModel"
+            and (getattr(hf_config, "dflash_config", None) or {}).get("attention_mode")
+            == "mla"
+        ):
+            # Kimi-K3.1's DFlash2 drafter is the one with MLA layers.
+            hf_config.update({"architectures": ["DFlash2KimiK3DraftModel"]})
+            return hf_config
         if initial_architecture == "Gemma4DSparkModel":
             # Normalize the Gemma4 DSpark draft's config keys to DSpark's.
             if (

@@ -180,7 +180,7 @@ def dense_mla_draft_bytes_per_token(vllm_config: VllmConfig) -> int:
     their full-attention MLA specs group with the target's (see
     `configure_dense_draft`)."""
     spec_config = vllm_config.speculative_config
-    if spec_config is None or spec_config.method not in ("eagle3", "dspark"):
+    if spec_config is None or spec_config.method not in ("eagle3", "dspark", "dflash"):
         return 0
     draft_model_config = spec_config.draft_model_config
     draft_config = draft_model_config.hf_text_config

@@ -246,6 +246,15 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
+        self._init_convs(vllm_config, config, quant_config, prefix)
+
+    def _init_convs(
+        self,
+        vllm_config: VllmConfig,
+        config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> None:
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None

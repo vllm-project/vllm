@@ -63,6 +63,28 @@ Draft sampling defaults to `greedy`; set `draft_sample_method` to
 Set `enable_adaptive_verification` to `true` in the speculative config to
 enable [adaptive verification](adaptive_verification.md).
 
+## Kimi-K3.1 DFlash2 with MLA layers
+
+DFlash2 drafts for Kimi-K3.1 whose layers are MLA
+(`dflash_config.attention_mode: "mla"` in the draft config, e.g.
+`RadixArk/Kimi-K3.1-Dflash2-Preview`) use the DFlash serving path on NVIDIA
+SM100 GPUs. Checkpoint metadata selects the model:
+
+```bash
+vllm serve moonshotai/Kimi-K3.1-Pro \
+  --speculative-config '{
+    "method": "dflash",
+    "model": "RadixArk/Kimi-K3.1-Dflash2-Preview",
+    "num_speculative_tokens": 4
+  }'
+```
+
+Set `num_speculative_tokens` to the checkpoint's block size minus one. The
+draft keeps its own fp8 KV cache. Sliding-window layers must be causal and do
+not support decode context parallelism. A draft config with
+`dflash_config.aux_hidden_stream: "attn_res"` makes the target feed the draft
+its AttnRes stream.
+
 ## Custom Speculators (Experimental)
 
 You can plug in your own speculator by registering it as a speculative method
