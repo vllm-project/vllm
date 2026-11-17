@@ -20,6 +20,15 @@ if TYPE_CHECKING:
 class HiSparseBackend:
     supports_shared_host_pool = False
     stats_dtype = torch.uint64
+    host_pool_alignment = 4096
+
+    def allocate_host_backing(self, size: int) -> torch.Tensor:
+        """Return owning, contiguous 1-D int8 CPU storage of ``size`` bytes.
+
+        Common code aligns and registers the allocation. Shared mmap pools
+        bypass this hook.
+        """
+        return torch.empty(size, dtype=torch.int8, device="cpu")
 
     def check_available(self) -> None:
         raise NotImplementedError
