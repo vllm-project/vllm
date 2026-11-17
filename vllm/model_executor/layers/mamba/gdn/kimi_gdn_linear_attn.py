@@ -208,8 +208,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 4 * self.local_projection_size + self.head_dim + self.local_num_heads
             )
             self.in_proj_padding = -local_output_size % 16
-            if self.in_proj_padding:
-                in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         else:
             in_proj_output_sizes = [self.projection_size] * 3 + [
                 self.num_heads,
@@ -221,12 +219,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             in_proj_output_sizes,
             replicated_shard_id=4,
             tp_size=self.tp_size,
+            padding_size=self.in_proj_padding,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvgfab",
         )
-        if self.in_proj_padding:
-            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,
