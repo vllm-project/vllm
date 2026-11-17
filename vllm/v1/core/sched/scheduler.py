@@ -3317,12 +3317,8 @@ class Scheduler(SchedulerInterface):
         return len(self.requests) > (num_running + num_waiting)
 
     def has_requests(self) -> bool:
-        # Override the interface default to also keep the engine alive while a
-        # connector still has pending push work (e.g. push-mode WRITE transfers
-        # in flight after all "live" requests have finished). Without this hook
-        # the engine would quiesce before the connector can drain completions.
-        # TODO: replace with a more general mechanism for connectors to keep
-        # the scheduler alive.
+        # Connectors may need steps to drain transfers or maintain external
+        # block references after local requests finish.
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
