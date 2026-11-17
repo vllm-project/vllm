@@ -178,6 +178,48 @@ class TestCoerceToSchemaType:
             # Exercises the final json.loads fallback path.
             assert coerce_to_schema_type("1e999", "unknown_type") == "1e999"
 
+    class TestDuplicateKeys:
+        """Duplicate keys inside an object/array argument must not be silently
+        resolved last-wins. Standard ``json.loads`` keeps the last of a repeated
+        key at every depth, which would let attacker-controlled text quoted into
+        an object argument override the value the model itself emitted. Both the
+        object/array branch and the final json.loads fallback reject duplicates,
+        so the raw string is preserved instead of a last-wins object."""
+
+        def test_benign_object_still_coerced(self):
+            assert coerce_to_schema_type(
+                '{"dry_run": true, "memo": "x"}', "object"
+            ) == {
+                "dry_run": True,
+                "memo": "x",
+            }
+
+        def test_legitimate_false_still_coerced(self):
+            # a model legitimately setting a flag off is NOT a duplicate
+            assert coerce_to_schema_type('{"dry_run": false}', "object") == {
+                "dry_run": False
+            }
+
+        def test_top_level_duplicate_not_last_wins(self):
+            raw = '{"dry_run": true, "memo": "", "dry_run": false}'
+            result = coerce_to_schema_type(raw, "object")
+            assert result == raw
+            assert not (isinstance(result, dict) and result.get("dry_run") is False)
+
+        def test_nested_duplicate_not_last_wins(self):
+            raw = '{"config": {"dry_run": true, "dry_run": false}}'
+            assert coerce_to_schema_type(raw, "object") == raw
+
+        def test_array_element_duplicate_not_last_wins(self):
+            raw = '[{"approved": false, "approved": true}]'
+            assert coerce_to_schema_type(raw, "array") == raw
+
+        def test_duplicate_rejected_in_fallback_path(self):
+            # Exercises the final json.loads fallback (unknown type), which must
+            # also reject duplicates rather than silently resolving last-wins.
+            raw = '{"x": 1, "x": 2}'
+            assert coerce_to_schema_type(raw, "unknown_type") == raw
+
     class TestBooleanType:
         def test_true(self):
             assert coerce_to_schema_type("true", "boolean") is True
