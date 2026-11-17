@@ -325,6 +325,7 @@ class BenchmarkResult:
     memory_allocated_mb: float | None = None
     memory_reserved_mb: float | None = None
     error: str | None = None
+    actual_sparse_mla_route: SparseMLAPrefillRoute | None = None
 
     @property
     def success(self) -> bool:
@@ -344,6 +345,11 @@ class BenchmarkResult:
             "memory_allocated_mb": self.memory_allocated_mb,
             "memory_reserved_mb": self.memory_reserved_mb,
             "error": self.error,
+            "actual_sparse_mla_route": (
+                self.actual_sparse_mla_route.name
+                if self.actual_sparse_mla_route is not None
+                else None
+            ),
         }
 
 
@@ -420,7 +426,10 @@ class ResultsFormatter:
                 if backend in spec_results:
                     r = spec_results[backend]
                     if r.success:
-                        row.append(f"{r.mean_time:.6f}")
+                        timing = f"{r.mean_time:.6f}"
+                        if r.actual_sparse_mla_route is not None:
+                            timing += f"\n{r.actual_sparse_mla_route.name}"
+                        row.append(timing)
                         if multi and compare_to_fastest:
                             pct = (
                                 (r.mean_time / best_time * 100) if best_time > 0 else 0
@@ -458,6 +467,7 @@ class ResultsFormatter:
                     "batch_spec",
                     "num_layers",
                     "kv_cache_dtype",
+                    "actual_sparse_mla_route",
                     "mean_time",
                     "std_time",
                     "throughput",
@@ -472,6 +482,11 @@ class ResultsFormatter:
                         "batch_spec": r.config.batch_spec,
                         "num_layers": r.config.num_layers,
                         "kv_cache_dtype": r.config.kv_cache_dtype,
+                        "actual_sparse_mla_route": (
+                            r.actual_sparse_mla_route.name
+                            if r.actual_sparse_mla_route is not None
+                            else ""
+                        ),
                         "mean_time": r.mean_time,
                         "std_time": r.std_time,
                         "throughput": r.throughput_tokens_per_sec or 0,

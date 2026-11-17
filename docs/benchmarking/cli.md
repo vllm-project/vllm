@@ -68,6 +68,13 @@ and `mqa` variants. When calling the benchmark runner from Python, set
 builder's decision. Import `SparseMLAPrefillRoute` from
 `vllm.v1.attention.backends.mla.sparse_utils`. This replaces
 the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
+`BenchmarkResult.actual_sparse_mla_route` records the executed prefill route
+(or `SPARSE_MQA` for decode-only sparse batches). The result table shows this
+route below each timing; JSON and CSV include its enum name in
+`actual_sparse_mla_route`. Decodes in mixed batches always use MQA.
+If automatic routing chooses MQA despite an explicit `prefill_backend`, the
+runner warns that the requested prefill backend was not executed. Set the route
+enum explicitly when measuring an MHA kernel.
 
 The YAML `prefill_backends` comparison explicitly measures MHA. For sparse MLA,
 it uses dense MHA when every sequence fits within the benchmark's top-k of 2048,

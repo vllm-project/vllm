@@ -33,9 +33,12 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
+
+logger = init_logger(__name__)
 
 
 def _safe_profile_name(value: str) -> str:
@@ -864,6 +867,13 @@ def _run_single_benchmark(
         raise RuntimeError("Metadata has neither decode nor prefill metadata")
     if output_scale is not None and not has_prefill:
         raise ValueError("FP8 output benchmarking requires an MHA prefill route")
+    actual_route = None
+    if is_sparse:
+        actual_route = (
+            metadata.prefill.route
+            if metadata.prefill is not None
+            else SparseMLAPrefillRoute.SPARSE_MQA
+        )
 
     num_decode = (
         metadata.num_decode_tokens
@@ -966,6 +976,7 @@ def _run_single_benchmark(
             min_time=0.0,
             max_time=0.0,
             throughput_tokens_per_sec=0.0,
+            actual_sparse_mla_route=actual_route,
         )
 
     if config.torch_profile:
@@ -1008,6 +1019,7 @@ def _run_single_benchmark(
             min_time=0.0,
             max_time=0.0,
             throughput_tokens_per_sec=0.0,
+            actual_sparse_mla_route=actual_route,
         )
 
     all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
@@ -1024,6 +1036,7 @@ def _run_single_benchmark(
         min_time=min(times),
         max_time=max(times),
         throughput_tokens_per_sec=total_q / mean_time if mean_time > 0 else 0,
+        actual_sparse_mla_route=actual_route,
     )
 
 
@@ -1247,6 +1260,18 @@ def _run_mla_benchmark_batched(
                     fuse_quant_op=fuse_quant_op,
                 )
                 results.append(result)
+                if (
+                    prefill_backend is not None
+                    and config.sparse_mla_route is None
+                    and result.actual_sparse_mla_route
+                    is SparseMLAPrefillRoute.SPARSE_MQA
+                ):
+                    logger.warning_once(
+                        "The actual sparse MLA route is SPARSE_MQA; requested "
+                        "prefill backend %r was not executed. Set "
+                        "BenchmarkConfig.sparse_mla_route explicitly to benchmark MHA.",
+                        prefill_backend,
+                    )
 
             finally:
                 # Restore original threshold
