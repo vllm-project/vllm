@@ -20,6 +20,7 @@ from typing import Any
 
 from hardware_detection import HardwareInfo
 from model_constraints import load_head_constraints, suggest_tensor_parallel_size
+from xpu_hardware_detection import XPUHardwareInfo
 
 from vllm.config.scheduler import SchedulerConfig
 
@@ -55,7 +56,12 @@ class TuningResult:
 
 
 Policy = Callable[
-    [dict[str, Any], HardwareInfo | None, WorkloadHints, TuningResult],
+    [
+        dict[str, Any],
+        HardwareInfo | XPUHardwareInfo | None,
+        WorkloadHints,
+        TuningResult,
+    ],
     None,
 ]
 
@@ -335,6 +341,77 @@ def _resolve_data_parallel_size(
     )
 
 
+def _validate_xpu_tensor_parallel_size(
+    config: dict[str, Any],
+    hardware: XPUHardwareInfo | None,
+    workload: WorkloadHints,
+    result: TuningResult,
+) -> None:
+    del workload
+    if hardware is None:
+        return
+    tp = config.get("tensor-parallel-size", 1)
+    pp = config.get("pipeline-parallel-size", 1)
+    dp = config.get("data-parallel-size", 1)
+    for name, value in (("TP", tp), ("PP", pp), ("DP", dp)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"Invalid {name} value in recipe: {value!r}")
+    required_devices = tp * pp * dp
+    if required_devices > hardware.gpu_count:
+        raise ValueError(
+            f"B70 recipe requires at least {required_devices} visible XPU "
+            f"devices (TP={tp}, PP={pp}, DP={dp}); detected "
+            f"{hardware.gpu_count}. Refusing to change TP without a model "
+            "memory-fit estimate."
+        )
+    result.notes.append(
+        f"XPU devices={hardware.gpu_count}; retained recipe TP={tp}, PP={pp}, "
+        f"DP={dp}. Device count alone does not establish memory fit or optimum TP"
+    )
+
+
+def _resolve_xpu_gpu_memory_utilization(
+    config: dict[str, Any],
+    hardware: XPUHardwareInfo | None,
+    workload: WorkloadHints,
+    result: TuningResult,
+) -> None:
+    del workload
+    if hardware is None:
+        return
+    # A conservative initial capacity guard, not a model-fit guarantee.
+    reserve_fraction = 0.05
+    min_free_fraction = min(
+        device.free_memory_bytes / device.total_memory_bytes
+        for device in hardware.devices
+    )
+    limit = int((min_free_fraction - reserve_fraction) * 100) / 100
+    if limit <= 0:
+        raise ValueError("Insufficient free XPU memory after 5% reserve")
+
+    recipe_value = config.get("gpu-memory-utilization", 0.90)
+    if (
+        isinstance(recipe_value, bool)
+        or not isinstance(recipe_value, (int, float))
+        or not 0 < recipe_value <= 1
+    ):
+        raise ValueError(f"Invalid gpu-memory-utilization: {recipe_value!r}")
+    candidate = min(float(recipe_value), limit)
+    if candidate < float(recipe_value):
+        _record_override(
+            result,
+            "gpu-memory-utilization",
+            round(candidate, 2),
+            "reduced using minimum free/total VRAM across visible XPUs "
+            "and a 5% reserve; model/KV-cache fit remains unverified",
+        )
+    else:
+        result.notes.append(
+            f"gpu-memory-utilization: retained recipe/default {recipe_value}; "
+            "XPU free-memory check did not require a reduction"
+        )
+
+
 DEFAULT_POLICIES: tuple[Policy, ...] = (
     _resolve_tensor_parallel_size,
     _resolve_gpu_memory_utilization,
@@ -346,12 +423,18 @@ SCHEDULER_TUNING_POLICIES: tuple[Policy, ...] = (
     _resolve_max_num_batched_tokens,
 )
 
+XPU_DEFAULT_POLICIES: tuple[Policy, ...] = (
+    _validate_xpu_tensor_parallel_size,
+    _resolve_xpu_gpu_memory_utilization,
+)
+
 # Select tuning behavior from the hardware requested by the Recipes rendering,
 # not from devices physically present in the host. A GPU server still exposes
 # its host CPU topology, so host inspection alone cannot determine deployment
 # intent.
 HARDWARE_TUNING_POLICIES: dict[str, tuple[Policy, ...]] = {
     "xeon6": DEFAULT_POLICIES,
+    "arc_pro_b70": XPU_DEFAULT_POLICIES,
 }
 
 
@@ -381,7 +464,7 @@ def get_runtime_tuning_policies(
 def finetune_runtime_config(
     config: dict[str, Any],
     *,
-    hardware: HardwareInfo | None = None,
+    hardware: HardwareInfo | XPUHardwareInfo | None = None,
     workload: WorkloadHints | None = None,
     policies: tuple[Policy, ...] = DEFAULT_POLICIES,
 ) -> TuningResult:

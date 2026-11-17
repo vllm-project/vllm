@@ -12,7 +12,8 @@ Runtime tuning combines up to three inputs:
 - **vLLM Recipe** — the required baseline from the Recipes JSON API or a direct
   recipe JSON file.
 - **Hardware information (optional)** — detected with `--detect-hardware`,
-  including effective CPU/NUMA topology and memory availability.
+  including effective CPU/NUMA topology and memory availability for Xeon 6,
+or process-visible GPU count, device names and free/total VRAM for Intel XPU.
 - **Workload information (optional)** — supplied through CLI hints such as input
   and output token lengths, concurrency, TTFT/TPOT objectives, and target QPS.
 
@@ -25,9 +26,9 @@ between these inputs and individual runtime parameters.
 ## Hardware Information
 
 Hardware detection is enabled only with `--detect-hardware`. It reports the
-effective resources available to the process or container, including CPU/NUMA
-topology and memory information. The current policy can use those values to
-refine `tensor-parallel-size` and `gpu-memory-utilization`.
+effective resources available to the process or container. Xeon 6 uses CPU/NUMA
+topology and memory to refine TP and memory utilization. Arc Pro B70 uses
+XPU-enabled PyTorch to inspect process-visible devices and free/total VRAM.
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -35,6 +36,15 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --hardware xeon6 \
   --detect-hardware
 ```
+
+For Intel Arc Pro B70, the detector calls `torch.xpu.is_available()`,
+`device_count()`, `get_device_properties(index)` and `mem_get_info(index)`.
+It honors the process/container's device visibility and records `ZE_AFFINITY_MASK`
+when present. The B70 policy verifies TP*PP*DP does not exceed the visible
+device count, retains recipe TP and may reduce `gpu-memory-utilization` based
+on minimum free/total VRAM minus a 5% reserve. This heuristic does not prove
+model/KV-cache fit. Model precision, context length, block size, and eager
+execution remain unchanged.
 
 Hardware detection is optional. Recipe hardware selects the tuning policy; host
 hardware detection provides resource information to that policy.
@@ -57,6 +67,7 @@ Example:
 python3 tools/recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6 \
+  --detect-hardware \
   --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
