@@ -9,27 +9,41 @@ import signal
 import time
 import uuid
 from collections import Counter
+from collections.abc import Iterator
 from concurrent.futures import Future
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from threading import Thread
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
+import zmq
 from transformers import AutoTokenizer
 
 from tests.utils import multi_gpu_test
 from vllm import SamplingParams
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.network_utils import get_open_zmq_ipc_path
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import (
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
 )
 from vllm.v1.engine.core import EngineCore
@@ -37,6 +51,7 @@ from vllm.v1.engine.core_client import (
     AsyncMPClient,
     DPLBAsyncMPClient,
     EngineCoreClient,
+    MPClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
@@ -442,6 +457,107 @@ def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
         expected[client.core_engines[1]].append("live")
     assert sent == expected
     assert not client.streaming_reqs
+
+
+@pytest.fixture
+def ready_response() -> EngineCoreReadyResponse:
+    return EngineCoreReadyResponse(
+        max_model_len=256,
+        num_gpu_blocks=100,
+        block_size=1056,
+        dp_stats_address=None,
+        dtype="bfloat16",
+        vllm_version="test",
+        world_size=1,
+        data_parallel_size=1,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        decode_context_parallel_size=1,
+        data_parallel_rank=0,
+        max_num_seqs=256,
+        max_num_batched_tokens=8192,
+        instance_id="test-instance",
+        supports_lora=False,
+        max_loras=0,
+    )
+
+
+@contextmanager
+def ready_client(*payloads: bytes) -> Iterator[MPClient]:
+    """Construct a real client with ready messages from external ZMQ peers."""
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model="vllm-project/tiny-random-LlamaForCausalLM",
+            max_model_len=512,
+            enforce_eager=True,
+        ),
+        cache_config=CacheConfig(block_size=16),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            data_parallel_size=len(payloads), data_parallel_size_local=len(payloads)
+        ),
+    )
+    addresses = {
+        "input_address": get_open_zmq_ipc_path(),
+        "output_address": get_open_zmq_ipc_path(),
+    }
+    with ExitStack() as stack:
+        context = stack.enter_context(zmq.Context())
+        for rank, payload in enumerate(payloads):
+            socket = stack.enter_context(context.socket(zmq.DEALER))
+            socket.linger = 0
+            socket.setsockopt(zmq.IDENTITY, rank.to_bytes(2, "little"))
+            socket.connect(addresses["input_address"])
+            socket.send(payload)
+
+        client = MPClient(False, config, Executor, False, client_addresses=addresses)
+        stack.callback(client.shutdown)
+        yield client
+
+
+@pytest.mark.parametrize(
+    ("effective_size", "other_size"),
+    [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
+)
+def test_apply_ready_response_syncs_engine_metadata(
+    ready_response, effective_size, other_size
+):
+    response = replace(
+        ready_response,
+        coord_store_port=1234,
+        coordinator_input_address="tcp://127.0.0.1:1235",
+        coordinator_output_address="tcp://127.0.0.1:1236",
+    )
+    fields = msgspec.msgpack.decode(msgspec.msgpack.encode(response))
+    if effective_size is None:
+        del fields["effective_attention_block_size"]
+    else:
+        fields["effective_attention_block_size"] = effective_size
+
+    with ready_client(msgspec.msgpack.encode(fields)) as client:
+        cache_config = client.vllm_config.cache_config
+        assert cache_config.block_size == 1056
+        assert cache_config.effective_attention_block_size == effective_size
+        assert cache_config.num_gpu_blocks == 100
+        assert client.vllm_config.model_config.max_model_len == 256
+
+        fields["effective_attention_block_size"] = other_size
+        client._apply_ready_response(msgspec.msgpack.encode(fields))
+        assert cache_config.effective_attention_block_size == (
+            effective_size if effective_size == other_size else None
+        )
+
+        client._apply_ready_response(b"")
+        assert cache_config.effective_attention_block_size is None
+        assert client.vllm_config.parallel_config._coord_store_port == 1234
+        assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+        assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
+
+
+def test_apply_ready_response_syncs_mamba_block_size(ready_response):
+    response = replace(ready_response, mamba_block_size=1056)
+    with ready_client(msgspec.msgpack.encode(response)) as client:
+        assert client.vllm_config.cache_config.mamba_block_size == 1056
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -1475,3 +1591,26 @@ def test_ready_response_queries_executor_with_weight_transfer():
 
     executor.supports_draft_weight_updates.assert_called_once()
     assert response.supports_draft_weight_updates is True
+
+
+def test_apply_ready_response_retains_kv_event_sources(ready_response):
+    """Retain publishers by DP rank and replace the port when a rank returns."""
+    rank1 = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:41233"
+    )
+    rank0_response = replace(ready_response, world_size=2, data_parallel_size=2)
+    rank1_response = replace(
+        rank0_response, data_parallel_rank=1, kv_events_config=rank1
+    )
+    with ready_client(
+        msgspec.msgpack.encode(rank0_response), msgspec.msgpack.encode(rank1_response)
+    ) as client:
+        assert client.get_kv_event_sources() == {1: rank1}
+
+        rank1_again = replace(rank1, endpoint="tcp://10.0.0.2:47001")
+        client._apply_ready_response(
+            msgspec.msgpack.encode(
+                replace(rank1_response, kv_events_config=rank1_again)
+            )
+        )
+        assert client.get_kv_event_sources() == {1: rank1_again}
