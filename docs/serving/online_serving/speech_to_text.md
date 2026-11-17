@@ -142,16 +142,25 @@ speaker segments. Supported models include
 }
 ```
 
-With `stream=true`, `diarized_json` returns server-sent events: one
-`transcript.text.segment` event per segment, then a `transcript.text.done` event
-with the full text and token usage. `OpenMOSS-Team/MOSS-Transcribe-Diarize`
-sends each segment once the model starts the next one. The Transformers
+With `stream=true`, `diarized_json` returns server-sent events. Each finalized
+segment produces a `transcript.text.delta` event with a `segment_id`, followed
+by a `transcript.text.segment` event with the same `id` and speaker information.
+Concatenating the deltas, including their language-dependent separators, gives
+the full text in the final `transcript.text.done` event, which also includes
+token usage.
+These deltas are emitted per segment, not per token.
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` sends each segment once the model starts
+the next one, and the last segment when generation ends. The Transformers
 backend sends the segments once generation completes. If the model produces
-an invalid diarized transcript, the stream sends an error after any completed
-segments.
+an invalid diarized transcript, the stream
+sends an error after any completed segments.
 
 ```text
+data: {"type":"transcript.text.delta","delta":"Hello.","segment_id":"seg_0"}
+
 data: {"type":"transcript.text.segment","id":"seg_0","start":0.0,"end":2.8,"text":"Hello.","speaker":"S01"}
+
+data: {"type":"transcript.text.delta","delta":" Hi, how are you?","segment_id":"seg_1"}
 
 data: {"type":"transcript.text.segment","id":"seg_1","start":3.1,"end":5.9,"text":"Hi, how are you?","speaker":"S02"}
 

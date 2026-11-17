@@ -23,6 +23,7 @@ from .protocol import (
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionStreamResponse,
+    TranscriptionTextDeltaEvent,
     TranscriptionTextDoneEvent,
     TranscriptionUsageTokens,
 )
@@ -118,8 +119,8 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
         audio_duration_s: float,
         separator: str,
     ) -> AsyncGenerator[str, None]:
-        """Stream `diarized_json` as `transcript.text.segment` events, then a
-        `transcript.text.done` event."""
+        """Stream each finalized segment as text delta and segment events,
+        followed by a `transcript.text.done` event."""
         segment_texts: list[str] = []
         num_prompt_tokens = 0
         completion_tokens = 0
@@ -133,7 +134,12 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
                     text=segment.text,
                     speaker=segment.speaker,
                 )
+                delta = TranscriptionTextDeltaEvent(
+                    delta=(separator if segment_texts else "") + segment.text,
+                    segment_id=event.id,
+                )
                 segment_texts.append(segment.text)
+                yield f"data: {delta.model_dump_json()}\n\n"
                 yield f"data: {event.model_dump_json()}\n\n"
 
         try:

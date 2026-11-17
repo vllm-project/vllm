@@ -433,6 +433,14 @@ class TranscriptionUsageTokens(OpenAIBaseModel):
     total_tokens: int
 
 
+class TranscriptionTextDeltaEvent(OpenAIBaseModel):
+    """Text added to a streamed diarized transcription."""
+
+    type: Literal["transcript.text.delta"] = "transcript.text.delta"
+    delta: str
+    segment_id: str
+
+
 class TranscriptionTextDoneEvent(OpenAIBaseModel):
     """Last event of a streamed `diarized_json` transcription."""
 

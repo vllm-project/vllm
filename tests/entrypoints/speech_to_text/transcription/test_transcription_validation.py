@@ -11,6 +11,7 @@ import soundfile as sf
 import transformers
 from fastapi import UploadFile
 from packaging.version import Version
+from prometheus_client.parser import text_string_to_metric_families
 from transformers import WhisperConfig
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
@@ -144,6 +145,49 @@ async def transcribe_and_check(
     return out_text
 
 
+async def transcription_token_usage(remote_server):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(remote_server.url_for("metrics"))
+        response.raise_for_status()
+    names = ("vllm:request_prompt_tokens_sum", "vllm:request_generation_tokens_sum")
+    samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        for sample in family.samples
+    ]
+    return tuple(sum(s.value for s in samples if s.name == name) for name in names)
+
+
+def check_diarized_stream_events(events, expected, usage_before, usage_after):
+    """Delta-only clients must receive the same text as the completed transcript."""
+    assert expected.segments
+    assert [event.type for event in events] == [
+        event_type
+        for _ in expected.segments
+        for event_type in ("transcript.text.delta", "transcript.text.segment")
+    ] + ["transcript.text.done"]
+    deltas = events[:-1:2]
+    segments = events[1:-1:2]
+    done = events[-1]
+    assert [delta.segment_id for delta in deltas] == [s.id for s in segments]
+    assert [delta.delta for delta in deltas] == [
+        (" " if index else "") + segment.text for index, segment in enumerate(segments)
+    ]
+    assert [segment.model_dump() for segment in segments] == [
+        segment.model_dump() for segment in expected.segments
+    ]
+    assert "".join(delta.delta for delta in deltas) == done.text == expected.text
+    assert done.usage.type == "tokens"
+    assert done.usage.input_tokens > 0
+    assert done.usage.output_tokens > 0
+    assert (done.usage.input_tokens, done.usage.output_tokens) == tuple(
+        after - before for before, after in zip(usage_before, usage_after)
+    )
+    assert done.usage.total_tokens == (
+        done.usage.input_tokens + done.usage.output_tokens
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     Version(transformers.__version__) < Version("5.23.0.dev0"),
@@ -176,25 +220,31 @@ async def test_transformers_backend_audio(mary_had_lamb):
 
         mary_had_lamb.seek(0)
         response = await client.audio.transcriptions.create(
-            model=model_name, file=mary_had_lamb, response_format="diarized_json"
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
         )
         assert "Mary had a little lamb" in response.text
         assert response.segments
         assert all(segment.end >= segment.start for segment in response.segments)
 
         mary_had_lamb.seek(0)
+        usage_before = await transcription_token_usage(remote_server)
         stream = await client.audio.transcriptions.create(
             model=model_name,
             file=mary_had_lamb,
             response_format="diarized_json",
+            temperature=0.0,
             stream=True,
         )
-        *segments, done = [event async for event in stream]
-        assert [segment.model_dump() for segment in segments] == [
-            segment.model_dump() for segment in response.segments
-        ]
-        assert done.type == "transcript.text.done"
-        assert done.text == response.text
+        events = [event async for event in stream]
+        check_diarized_stream_events(
+            events,
+            response,
+            usage_before,
+            await transcription_token_usage(remote_server),
+        )
 
 
 @pytest.mark.asyncio
@@ -431,6 +481,7 @@ async def test_diarized_json_stream_matches_non_stream(mary_had_lamb):
             temperature=0.0,
         )
         mary_had_lamb.seek(0)
+        usage_before = await transcription_token_usage(remote_server)
         stream = await client.audio.transcriptions.create(
             model=model_name,
             file=mary_had_lamb,
@@ -439,11 +490,9 @@ async def test_diarized_json_stream_matches_non_stream(mary_had_lamb):
             stream=True,
         )
         events = [event async for event in stream]
-
-    *segments, done = events
-    assert [segment.model_dump() for segment in segments] == [
-        segment.model_dump() for segment in expected.segments
-    ]
-    assert done.type == "transcript.text.done"
-    assert done.text == expected.text
-    assert done.usage.type == "tokens"
+        check_diarized_stream_events(
+            events,
+            expected,
+            usage_before,
+            await transcription_token_usage(remote_server),
+        )
