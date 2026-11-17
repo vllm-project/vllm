@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use memmap2::MmapMut;
 
@@ -25,6 +26,10 @@ pub const AUTH_SECRET_BYTES: usize = 32;
 pub const DATA_OFFSET: usize = AUTH_SECRET_BYTES;
 /// Exclusive monotonic id bound, so `2**31 - 1` is the max value.
 const ID_MAX: u32 = 1 << 31;
+/// Alignment of chunk positions within the data buffer.
+const CHUNK_ALIGN: usize = 8;
+const _: () =
+    assert!(DATA_OFFSET.is_multiple_of(CHUNK_ALIGN) && MD_SIZE.is_multiple_of(CHUNK_ALIGN));
 
 /// Marker for `MemoryError: "Not enough space in the data buffer"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -163,13 +168,17 @@ impl SingleWriterShmRingBuffer {
     ) -> std::result::Result<(usize, u32), NotEnoughSpace> {
         assert!(size > 0, "size must be greater than 0");
         let size = size + MD_SIZE; // add metadata size to the buffer size
+        let lap_start = self.data_buffer_end - self.data_buffer_end % self.data_buffer_size;
+        // Start each chunk at an aligned position so its reader count can be
+        // loaded atomically. Readers locate chunks by handle address and slice
+        // them by the header size, so the padding is invisible to them.
+        let position = (self.data_buffer_end % self.data_buffer_size).next_multiple_of(CHUNK_ALIGN);
         // reset to beginning if the buffer does not have enough contiguous space
-        let buffer_end_reset = self.data_buffer_end % self.data_buffer_size;
-        let buffer_end_reset = if buffer_end_reset + size > self.data_buffer_size {
-            (self.data_buffer_end / self.data_buffer_size + 1) * self.data_buffer_size
+        let buffer_end_reset = if position + size > self.data_buffer_size {
+            lap_start + self.data_buffer_size
         } else {
             // no reset needed
-            self.data_buffer_end
+            lap_start + position
         };
 
         // check if we have enough space in the data buffer
@@ -183,8 +192,13 @@ impl SingleWriterShmRingBuffer {
 
         // first 4 bytes as the monotonic id, next 4 bytes as the size
         let offset = self.chunk_offset(self.data_buffer_end);
-        self.write_bytes(offset, &self.monotonic_id_end.to_le_bytes());
-        self.write_bytes(offset + ID_NBYTES, &(size as u32).to_le_bytes());
+        // `monotonic_id_end < ID_MAX` and the object storage bounds `size`, so
+        // both fit the signed header fields readers decode.
+        self.write_i32(offset, self.monotonic_id_end as i32);
+        self.write_i32(
+            offset + ID_NBYTES,
+            i32::try_from(size).expect("chunk size fits i32"),
+        );
 
         // record metadata
         self.metadata.insert(self.monotonic_id_end, self.data_buffer_end);
@@ -208,18 +222,19 @@ impl SingleWriterShmRingBuffer {
     /// Read the reader reference count stored in the first 4 bytes of the
     /// chunk payload at the logical `address`.
     ///
-    /// Readers in other processes update this field concurrently, so the read
-    /// is done byte-wise with volatile semantics.
+    /// Readers in other processes update this field concurrently, so it is
+    /// loaded atomically.
     pub fn reader_count(&self, address: usize) -> i32 {
         let offset = self.chunk_offset(address) + MD_SIZE;
-        let bytes = &self.map[offset..offset + 4];
-        let mut out = [0u8; 4];
-        for (i, byte) in out.iter_mut().enumerate() {
-            // SAFETY: `offset + i` stays within the mapped segment; volatile
-            // because readers in other processes mutate these bytes.
-            *byte = unsafe { std::ptr::read_volatile(bytes.as_ptr().add(i)) };
-        }
-        i32::from_le_bytes(out)
+        assert!(
+            offset + 4 <= self.segment_size(),
+            "reader count out of bounds"
+        );
+        // SAFETY: in bounds per the assert, and 4-byte aligned because the
+        // mapping is page-aligned while `DATA_OFFSET`, `MD_SIZE`, and chunk
+        // positions are multiples of `CHUNK_ALIGN` (see `allocate_buf`).
+        let count = unsafe { AtomicI32::from_ptr(self.map.as_ptr().add(offset).cast_mut().cast()) };
+        i32::from_le(count.load(Ordering::Acquire))
     }
 
     /// Write `data` at `payload_offset` bytes into the payload of the chunk at
@@ -325,9 +340,8 @@ impl SingleWriterShmRingBuffer {
         DATA_OFFSET + self.data_buffer_size
     }
 
-    fn write_bytes(&mut self, offset: usize, data: &[u8]) {
-        debug_assert!(offset + data.len() <= self.segment_size());
-        self.map[offset..offset + data.len()].copy_from_slice(data);
+    fn write_i32(&mut self, offset: usize, value: i32) {
+        self.map[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
 
     fn read_i32(&self, offset: usize) -> i32 {
@@ -384,8 +398,9 @@ mod tests {
         assert_eq!((address, id), (0, 0));
         assert_eq!(buffer.chunk_header(address), (0, 28));
 
+        // The next chunk starts at the aligned position after 28.
         let (address, id) = buffer.allocate_buf(30).unwrap();
-        assert_eq!((address, id), (28, 1));
+        assert_eq!((address, id), (32, 1));
         assert_eq!(buffer.chunk_header(address), (1, 38));
     }
 
@@ -401,7 +416,7 @@ mod tests {
         let freed = buffer.free_buf(|id, _| id == 0, None);
         assert_eq!(freed, vec![0]);
         assert_eq!(buffer.monotonic_id_start, 1);
-        assert_eq!(buffer.data_buffer_start, 28);
+        assert_eq!(buffer.data_buffer_start, 32);
 
         let freed = buffer.free_buf(|_, _| true, None);
         assert_eq!(freed, vec![1]);
@@ -431,14 +446,36 @@ mod tests {
         buffer.allocate_buf(30).unwrap();
         buffer.free_buf(|id, _| id == 0, None);
 
-        // occupied_size_new = end + size - start = 66 + 28 - 28 = 66 fits.
+        // Aligned end 72: occupied_size_new = 72 + 28 - 32 = 68 fits.
         let (address, _) = buffer.allocate_buf(20).unwrap();
-        assert_eq!(address, 66);
-        // Next chunk wraps to offset 100 but 100 + 28 - 28 = 100 fits exactly.
+        assert_eq!(address, 72);
+        // Next chunk wraps to offset 100: 100 + 28 - 32 = 96 fits.
         let (address, _) = buffer.allocate_buf(20).unwrap();
         assert_eq!(address, 100);
         // No space left at all.
         assert_eq!(buffer.allocate_buf(1), Err(NotEnoughSpace));
+    }
+
+    #[test]
+    fn chunks_stay_aligned_across_wraparound() {
+        // A buffer size that is not a multiple of the alignment, so the second
+        // lap starts at an unaligned logical address (101).
+        let mut buffer = create_buffer(101);
+        let mut wrapped = false;
+        for _ in 0..8 {
+            // 21-byte chunks; when full, free only the oldest one so live
+            // chunks force a genuine wraparound instead of a reset to zero.
+            let (address, _) = buffer
+                .allocate_buf(13)
+                .or_else(|_| {
+                    buffer.free_buf(|_, _| true, Some(1));
+                    buffer.allocate_buf(13)
+                })
+                .unwrap();
+            assert_eq!(address % 101 % CHUNK_ALIGN, 0, "chunk at {address}");
+            wrapped |= address >= 101;
+        }
+        assert!(wrapped, "the sequence must wrap");
     }
 
     #[test]
