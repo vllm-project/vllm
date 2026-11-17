@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
@@ -176,7 +177,11 @@ class SimpleCPUOffloadWorker:
         )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
-        low_pri, _ = torch.cuda.Stream.priority_range()
+        # XPU's lowest priority streams cannot wait on events, see
+        # https://github.com/pytorch/pytorch/pull/204552
+        low_pri = (
+            0 if current_platform.is_xpu() else torch.cuda.Stream.priority_range()[0]
+        )
         self.load_stream = torch.cuda.Stream(priority=low_pri)
         self.store_stream = torch.cuda.Stream(priority=low_pri)
 

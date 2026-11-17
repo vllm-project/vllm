@@ -1,29 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host memory registration for CUDA/HIP DMA transfers."""
+"""Host memory registration for CUDA/HIP/XPU DMA transfers."""
 
 import math
 import mmap
 
 import torch
 
+from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
+
 HOST_REGISTER_CHUNK_BYTES = 256 << 30
 
 
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Register one CPU range, bypassing the caching host allocator's rounding."""
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
+    if not host_register(tensor.data_ptr(), tensor.nbytes):
+        raise RuntimeError("host registration failed")
 
 
 def unpin_tensor(tensor: torch.Tensor) -> None:
     """Unregister exactly the range passed to pin_tensor."""
-    cudart = torch.cuda.cudart()
-    err = cudart.cudaHostUnregister(tensor.data_ptr())
-    if err.value != 0:
-        cudart.cudaGetLastError()
-        raise RuntimeError(f"cudaHostUnregister failed (code={err.value}).")
+    host_unregister(tensor.data_ptr())
 
 
 def host_registration_ranges(
