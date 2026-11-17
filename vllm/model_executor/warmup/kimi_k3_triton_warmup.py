@@ -20,7 +20,9 @@ logger = init_logger(__name__)
 
 
 def _get_kda_layer(
-    worker: Worker, module: str = "vllm.models.kimi_k3.nvidia.kda"
+    worker: Worker,
+    module: str = "vllm.models.kimi_k3.nvidia.kda",
+    cls: str = "KimiK3DeltaAttention",
 ) -> KimiK3DeltaAttention | None:
     # Kimi model construction already imports kda. Avoid importing it here.
     kda = sys.modules.get(module)
@@ -39,7 +41,7 @@ def _get_kda_layer(
         (
             layer
             for layer in static_context.values()
-            if isinstance(layer, kda.KimiK3DeltaAttention)
+            if isinstance(layer, getattr(kda, cls))
         ),
         None,
     )
@@ -174,6 +176,48 @@ def _warm_recurrent_kda(
         )
 
 
+def _warm_shared_kda_decodes(layer, input_dtype: torch.dtype) -> None:
+    """The shared Kimi layer runs the decodes of mixed batches through
+    `fused_recurrent_kda` with one token per sequence."""
+    from vllm.models.kimi_k3.nvidia.ops.third_party.kda.fused_recurrent import (
+        fused_recurrent_kda,
+        get_fused_recurrent_kda_fwd_warmup_profiles,
+    )
+
+    kv_cache = layer.kv_cache
+    if not isinstance(kv_cache, (list, tuple)) or len(kv_cache) < 2:
+        return
+    state = kv_cache[1]
+    if not isinstance(state, torch.Tensor) or not state.numel():
+        return
+
+    logger.info("Warming up shared Kimi KDA recurrent kernels for mixed batches.")
+    h, d = int(layer.local_num_heads), int(layer.head_dim)
+    for num_seqs in get_fused_recurrent_kda_fwd_warmup_profiles(h):
+        shape = (1, num_seqs, h, d)
+        fused_recurrent_kda(
+            q=torch.empty(shape, dtype=input_dtype, device=state.device),
+            k=torch.empty(shape, dtype=input_dtype, device=state.device),
+            v=torch.empty(shape, dtype=input_dtype, device=state.device),
+            raw_g=torch.empty(shape, dtype=input_dtype, device=state.device),
+            raw_beta=torch.empty(
+                (1, num_seqs, h), dtype=input_dtype, device=state.device
+            ),
+            A_log=layer.A_log,
+            dt_bias=layer.dt_bias,
+            lower_bound=layer.gate_lower_bound,
+            initial_state=state,
+            cu_seqlens=torch.arange(
+                num_seqs + 1, dtype=torch.int32, device=state.device
+            ),
+            # Slot 0 is the null block: the kernel skips it without writing.
+            ssm_state_indices=torch.zeros(
+                num_seqs, dtype=torch.int32, device=state.device
+            ),
+            out=torch.empty(shape, dtype=input_dtype, device=state.device),
+        )
+
+
 def _warm_gluon_chunk_kda(layer, input_dtype: torch.dtype) -> None:
     from vllm.models.kimi_k3.amd.ops.kda_prefill import (
         chunk_kda_prefill,
@@ -229,6 +273,14 @@ def kimi_k3_triton_warmup(worker: Worker) -> None:
         return
     if not current_platform.is_cuda():
         return
+
+    shared = _get_kda_layer(
+        worker,
+        "vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn",
+        "KimiGatedDeltaNetAttention",
+    )
+    if shared is not None:
+        _warm_shared_kda_decodes(shared, worker.model_config.dtype)
 
     layer = _get_kda_layer(worker)
     if layer is None:

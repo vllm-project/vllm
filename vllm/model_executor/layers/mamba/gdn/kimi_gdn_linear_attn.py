@@ -535,7 +535,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # ---------- non-spec path (prefill or plain decode) ----------
         core_attn_out_non_spec = None
-        # Decodes peeled off a mixed batch are written to core_attn_out first.
         num_decode_tokens = 0
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None

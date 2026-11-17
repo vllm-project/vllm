@@ -114,7 +114,8 @@ def test_mixed_batch_decode_split_matches_chunk_path(
 
     # Both paths convolve the whole batch with the same kernel.
     torch.testing.assert_close(conv_state, ref_conv_state, atol=0, rtol=0)
-    # The recurrent and chunk kernels accumulate in different orders.
-    tol = 2e-2
+    # The recurrent and chunk kernels accumulate in different orders; the
+    # largest difference seen on B200 is 2e-3 for both.
+    tol = 5e-3
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
     torch.testing.assert_close(recurrent_state, ref_recurrent_state, atol=tol, rtol=tol)
