@@ -10,7 +10,11 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
+from vllm.utils.b12x import (
+    B12xWarmupUnit,
+    plan_b12x_blockscaled,
+    reuse_packed_weight_storage,
+)
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -169,19 +173,8 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         layer.b12x_nvfp4_packed_weight = reuse_packed_weight_storage(
             getattr(layer, "b12x_nvfp4_packed_weight", None), packed
         )
-        # Declare every serving shape now. An undeclared token count is
-        # prepared on first use, and that preparation evicts kernels compiled
-        # earlier, including ones already captured in CUDA graphs.
-        config = get_current_vllm_config()
-        capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
-        capacity = max(
-            config.scheduler_config.max_num_batched_tokens,
-            config.scheduler_config.max_num_scheduled_tokens or 0,
-            *capture_sizes,
-        )
-        query = blockscaled.BlockscaledQuery(
+        query_fields = dict(
             recipe="nvfp4",
-            num_tokens=capacity,
             in_features=packed.in_features,
             padded_in_features=packed.padded_in_features,
             out_features=packed.out_features,
@@ -189,11 +182,14 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             global_scale_kind=packed.global_scale_kind,
         )
         # A weight reload keeps the prepared plan when the shapes are unchanged.
-        if getattr(layer, "b12x_nvfp4_plan_query", None) != query:
-            layer.b12x_nvfp4_plan = blockscaled.plan_regimes(
-                query,
-                exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity})),
+        planned = getattr(layer, "b12x_nvfp4_plan_query", None)
+        if planned is None or any(
+            getattr(planned, name) != value for name, value in query_fields.items()
+        ):
+            query, plan = plan_b12x_blockscaled(
+                blockscaled, get_current_vllm_config(), query_fields
             )
+            layer.b12x_nvfp4_plan = plan
             layer.b12x_nvfp4_plan_query = query
 
     def get_b12x_warmup_unit(
