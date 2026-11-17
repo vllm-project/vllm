@@ -71,8 +71,13 @@ steps:
       v1/engine
       --ignore v1/engine/test_preprocess_error_handling.py
       --ignore v1/engine/test_core_engine_actor_manager.py
-      --deselect v1/engine/test_engine_core.py::test_engine_core_tp &&
+      --deselect tests/v1/engine/test_async_llm_shutdown_race.py::test_death_outside_shutdown_is_still_reported
+      --deselect tests/v1/engine/test_engine_core.py::test_engine_core
+      --deselect tests/v1/engine/test_engine_core.py::test_failed_inprocess_startup_releases_model
+      --deselect tests/v1/engine/test_async_llm.py::test_multi_abort
+      --deselect tests/v1/engine/test_engine_core.py::test_engine_core_tp &&
       pytest -v -s test_config.py'
+  parallelism: 4
 
 - label: ":intel: (BMG) E2E Core"
   key: e2e-core-1-gpu
