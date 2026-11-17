@@ -333,10 +333,19 @@ _TOOL_CALL_SAMPLES = [
 
 
 def _tool_suppression_expectations(
-    sample, think_end: str, tool_start: str, *, include_tool_block: bool
+    sample,
+    think_end: str,
+    tool_start: str,
+    *,
+    include_tool_block: bool,
+    reasoning_end_separator: str = "",
 ) -> tuple[str, str]:
     reasoning, content = _raw_tool_suppression_expectations(
-        sample, think_end, tool_start, include_tool_block=include_tool_block
+        sample,
+        think_end,
+        tool_start,
+        include_tool_block=include_tool_block,
+        reasoning_end_separator=reasoning_end_separator,
     )
     if sample.content_lstrip:
         content = content.lstrip(sample.content_lstrip)
@@ -344,7 +353,12 @@ def _tool_suppression_expectations(
 
 
 def _raw_tool_suppression_expectations(
-    sample, think_end: str, tool_start: str, *, include_tool_block: bool
+    sample,
+    think_end: str,
+    tool_start: str,
+    *,
+    include_tool_block: bool,
+    reasoning_end_separator: str = "",
 ) -> tuple[str, str]:
     """Expected (reasoning, content) from the raw token text.
 
@@ -365,9 +379,13 @@ def _raw_tool_suppression_expectations(
     if think_end:
         pos = after_reasoning.find(think_end)
         if pos >= 0:
+            # The template's separator after the end marker isn't content
+            after_end = after_reasoning[pos + len(think_end) :].removeprefix(
+                reasoning_end_separator
+            )
             if include_tool_block:
-                return (reasoning, after_reasoning[pos + len(think_end) :])
-            after_reasoning = after_reasoning[pos + len(think_end) :]
+                return (reasoning, after_end)
+            after_reasoning = after_end
     if tool_start:
         pos = after_reasoning.find(tool_start)
         if pos >= 0:
@@ -439,7 +457,13 @@ class TestToolCallFilteringReplay:
 
         include_block = mode == "skip_tool_parsing"
         expected_reasoning, expected_content = _tool_suppression_expectations(
-            sample, think_end, tool_start, include_tool_block=include_block
+            sample,
+            think_end,
+            tool_start,
+            include_tool_block=include_block,
+            reasoning_end_separator=(
+                parser.parser_engine_config.reasoning_end_separator
+            ),
         )
 
         assert output.reasoning == expected_reasoning, (
@@ -480,7 +504,13 @@ class TestToolCallFilteringNonStreaming:
         output = parse_non_streaming(parser, sample, request)
 
         expected_reasoning, expected_content = _tool_suppression_expectations(
-            sample, think_end, tool_start, include_tool_block=False
+            sample,
+            think_end,
+            tool_start,
+            include_tool_block=False,
+            reasoning_end_separator=(
+                parser.parser_engine_config.reasoning_end_separator
+            ),
         )
         assert output.reasoning == expected_reasoning, (
             f"Reasoning mismatch:\n"

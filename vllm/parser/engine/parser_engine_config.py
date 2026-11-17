@@ -129,6 +129,11 @@ class ParserEngineConfig:
     # Prevents trailing-whitespace accumulation across multi-turn conversations.
     strip_trailing_reasoning_whitespace: bool = True
 
+    # Fixed text the chat template puts right after the reasoning end marker
+    # (e.g. `"\n\n"` after Qwen3's `</think>`). It is consumed rather than
+    # emitted as content; if the output doesn't start with it, nothing is removed.
+    reasoning_end_separator: str = ""
+
     # Drop content that is entirely whitespace when tool calls follow.
     drop_whitespace_only_content_before_tools: bool = True
 

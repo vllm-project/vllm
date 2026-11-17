@@ -29,3 +29,5 @@ class SeedOssParser(Qwen3Parser):
     TOOL_START = "<seed:tool_call>"
     TOOL_END = "</seed:tool_call>"
     TURN_BOUNDARIES = frozenset(("<seed:bos>", "<seed:eos>"))
+    # Keep content as is: only Qwen3's template is known to write `</think>\n\n`
+    REASONING_END_SEPARATOR = ""

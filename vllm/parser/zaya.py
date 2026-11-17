@@ -13,3 +13,5 @@ class ZayaParser(Qwen3Parser):
     CONFIG_NAME = "zaya"
     TOOL_START = "<zyphra_tool_call>"
     TOOL_END = "</zyphra_tool_call>"
+    # Keep content as is: only Qwen3's template is known to write `</think>\n\n`
+    REASONING_END_SEPARATOR = ""
