@@ -2044,10 +2044,6 @@ class ModelOptInt8PbWoMoEMethod(FusedMoEMethodBase):
             shared_experts_input=shared_experts_input,
         )
 
-    @property
-    def supports_eplb(self) -> bool:
-        return self.backend == WNA16MoEBackend.TRITON
-
 
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     """Config class for ModelOpt MIXED_PRECISION.

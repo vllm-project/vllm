@@ -149,6 +149,18 @@ steps:
       - pytest -v -s tests/quantization/test_rocm_moe.py
       - pytest -v -s tests/quantization/test_gfx950_moe.py
 
+- label: ":nvidia: (H200 MIG 35GB) ModelOpt INT8_PB_WO"
+  device: h200_35gb
+  key: modelopt-int8-pb-wo
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/fused_moe/oracle/int_wna16.py
+  - vllm/model_executor/kernels/linear/mixed_precision
+  - tests/quantization/test_modelopt.py
+  commands:
+    # The vllm_runner cases fork after in-process CUDA tests without spawn.
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s quantization/test_modelopt.py -k int8_pb_wo
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
