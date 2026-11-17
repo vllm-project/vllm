@@ -356,7 +356,7 @@ impl ChatRequestProcessor {
         text_processor: &TextRequestProcessor,
         prompt_token_ids: Vec<u32>,
         outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
-    ) -> Result<ChatEventStream> {
+    ) -> Result<impl Stream<Item = Result<ChatEvent>> + Send + Unpin + 'static> {
         request.validate()?;
         // Decoding skips the text request, which validates these in generation.
         request.decode_options.validate(&request.request_id)?;
@@ -391,7 +391,7 @@ impl ChatRequestProcessor {
             })
         });
         let decoded_stream = vllm_text::output::decoded_text_event_stream(
-            request.request_id.clone(),
+            request.request_id,
             text_processor.tokenizer(),
             outputs,
             request.decode_options,
@@ -400,22 +400,7 @@ impl ChatRequestProcessor {
         .map_err(Error::from)
         .boxed();
 
-        // Nothing is sampled here; report the request's values over vLLM's
-        // defaults, without model generation-config defaults.
-        let params = &request.sampling_params;
-        let sampling = vllm_text::EffectiveSampling {
-            temperature: params.temperature.unwrap_or(1.0),
-            top_p: params.top_p.unwrap_or(1.0),
-            max_tokens: params.max_tokens.unwrap_or_default(),
-            presence_penalty: params.presence_penalty.unwrap_or(0.0),
-            frequency_penalty: params.frequency_penalty.unwrap_or(0.0),
-        };
-        let structured_stream = output_processor.process(decoded_stream)?;
-        Ok(ChatEventStream::new(
-            request.request_id,
-            sampling,
-            structured_stream,
-        ))
+        output_processor.process(decoded_stream)
     }
 
     fn new_output_processor(&self, request: &mut ChatRequest) -> Result<DynChatOutputProcessor> {

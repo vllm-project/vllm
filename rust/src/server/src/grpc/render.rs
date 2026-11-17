@@ -20,9 +20,8 @@ use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
-    ChatEvent, ChatEventStream, ChatMessage, ChatOptions, ChatRequest, ChatRequestProcessor,
-    ChatTool, ChatToolChoice, DetokenizeChunk, GenerationPromptMode, ResolvedToolContext,
-    SamplingParams,
+    ChatEvent, ChatMessage, ChatOptions, ChatRequest, ChatRequestProcessor, ChatTool,
+    ChatToolChoice, DetokenizeChunk, GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -329,7 +328,7 @@ impl DerenderInbound {
 /// the response that carries `finish_info`.
 #[try_stream]
 async fn derender_chat_stream_responses(
-    events: ChatEventStream,
+    events: impl Stream<Item = vllm_chat::Result<ChatEvent>> + Send + Unpin,
     mut end_rx: oneshot::Receiver<Result<pb::FinishInfo, Status>>,
     mut y: TryYielder<pb::DerenderChatStreamResponse, Status>,
 ) -> Result<(), Status> {
