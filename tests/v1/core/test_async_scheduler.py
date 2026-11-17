@@ -1551,6 +1551,32 @@ def test_session_request_running_at_a_prefix_cache_reset_resumes(
     assert engine.segments["r"] == [(0, "v1"), (32, None)]
 
 
+def test_session_request_resumed_after_a_reset_sends_hashes_from_its_hit():
+    engine = _tier_engine()
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 40, 12)
+    engine.scheduler.add_request(request)
+    for _ in range(6):
+        engine.step(engine.schedule(), {"r": [0]})
+    assert engine.scheduler.reset_prefix_cache(reset_running_requests=True)
+    resumed = engine.schedule()
+    while "r" not in resumed.num_scheduled_tokens:
+        engine.step(resumed, {})
+        resumed = engine.schedule()
+    num_hit = request.num_computed_tokens - resumed.num_scheduled_tokens["r"]
+    metadata = resumed.aux_output_connector_metadata
+    sent = metadata.block_hashes.get("r", ())
+    assert num_hit > 0
+    assert metadata.session_hash_starts == {"r": num_hit // 16}
+    assert (
+        list(sent)
+        == request.block_hashes[num_hit // 16 : request.num_computed_tokens // 16]
+    )
+    engine.step(resumed, {"r": [0]})
+    engine.run()
+    engine.close()
+
+
 def test_reset_writes_the_objects_its_preempted_session_request_completed():
     engine = _tier_engine(connector=None)
     engine.set_version(1)

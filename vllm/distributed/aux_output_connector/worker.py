@@ -79,6 +79,7 @@ class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     session: str | None = None
     block_hashes: list[bytes] = field(default_factory=list)
+    hash_start: int = 0
     staged: list[tuple[int, np.ndarray]] = field(default_factory=list)
     tail: tuple[str, np.ndarray] | None = None
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
@@ -555,7 +556,7 @@ class AuxOutputWorkerConnector:
             keys = (
                 state.aux_output_keys if state.session is None else state.block_hashes
             )
-            keyed_end = len(keys) * buffer.block_size
+            keyed_end = (state.hash_start + len(keys)) * buffer.block_size
             ready = [(start, rows) for start, rows in blocks if start < keyed_end]
             state.pending_blocks = [
                 (start, buffer.retain_block(rows))
@@ -680,6 +681,9 @@ class AuxOutputWorkerConnector:
                     request_id, _WorkerRequestState(emit_cursor=emit_start)
                 )
                 state.session = metadata.sessions.get(request_id, state.session)
+                state.hash_start = metadata.session_hash_starts.get(
+                    request_id, state.hash_start
+                )
                 if state.pending_outputs == 0:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.

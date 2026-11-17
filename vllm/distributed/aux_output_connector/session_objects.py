@@ -285,7 +285,7 @@ class SessionObjectWriter:
             key = aux_object_key(
                 self._key_prefix,
                 state.session,
-                state.block_hashes[end // len(rows) - 1].hex(),
+                state.block_hashes[end // len(rows) - 1 - state.hash_start].hex(),
             )
             keys.append(key)
             values.append(save(self._fields(np.concatenate(pieces))))
