@@ -130,7 +130,8 @@ mod tests {
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
+        ChatMessage, Function, MessageContent, Normalizable as _, StringOrArray, Tool, ToolChoice,
+        ToolChoiceValue,
     };
 
     fn served(names: &[&str]) -> ServedModelNames {
@@ -436,12 +437,14 @@ mod tests {
             (Some(2), Some(8), Some(1), false),
         ];
         for (min_tokens, max_tokens, max_completion_tokens, valid) in cases {
-            let request = ChatCompletionRequest {
+            let mut request = ChatCompletionRequest {
                 min_tokens,
                 max_tokens,
                 max_completion_tokens,
                 ..base_request()
             };
+            // `ValidatedJson` normalizes before validating.
+            request.normalize();
             assert_eq!(
                 request.validate().is_ok(),
                 valid,
