@@ -15,6 +15,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.config.cache import CacheConfig
@@ -148,8 +149,10 @@ def test_humming_fp8_matches_checkpoint_forward(
 )
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_deepseek_v41_mxfp8_scale_loading(
-    dist_init, default_vllm_config, monkeypatch, tmp_path, tp_rank, scale_dtype
+    default_vllm_config, monkeypatch, tmp_path, tp_rank, scale_dtype
 ):
     """Expand linear scales before TP slicing, including padded shared experts."""
     from transformers import LlamaConfig
@@ -893,12 +896,13 @@ def test_scaled_fp8_quant(dtype) -> None:
 #
 # this is the case for marlin as well as per-tensor Fp8MoEMethod
 @pytest.mark.parametrize("use_marlin", [False])  # skip True
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_fp8_reloading(
     default_vllm_config,
     method_cls,
     weight_block_size,
     use_marlin,
-    dist_init,
     monkeypatch,
 ):
     # NOTE(rob): this test fails when using DeepGEMM because the

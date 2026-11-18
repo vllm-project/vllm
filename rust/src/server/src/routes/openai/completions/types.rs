@@ -322,6 +322,8 @@ pub(super) struct CompletionStreamChoice {
     pub index: u32,
     pub text: String,
     pub logprobs: Option<LogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
