@@ -793,3 +793,137 @@ def test_clear_backend_without_grammar(skip_tokenizer_init, max_num_seqs):
     for executor in executors:
         with pytest.raises(RuntimeError, match="cannot schedule new futures"):
             executor.submit(int, 0)
+
+
+@pytest.fixture(scope="module")
+def kimi_protocol_model(tmp_path_factory):
+    """Real GPT-2 tokenizer with atomic protocol delimiters, without weights."""
+    from transformers import AutoConfig
+
+    path = tmp_path_factory.mktemp("kimi-protocol")
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<|open|>", "<|close|>", "<|sep|>"]}
+    )
+    tokenizer.save_pretrained(path)
+    config = AutoConfig.from_pretrained(TOKENIZER)
+    config.vocab_size = len(tokenizer)
+    config.save_pretrained(path)
+    return str(path)
+
+
+def _kimi_protocol_manager(model, enabled=True, prefix="<|open|>think<|sep|>"):
+    config = VllmConfig(
+        model_config=ModelConfig(model=model),
+        device_config=DeviceConfig(device="cpu"),
+        structured_outputs_config=StructuredOutputsConfig(
+            backend="xgrammar", reasoning_parser="kimi_k3", kimi_k3_protocol=enabled
+        ),
+    )
+    manager = StructuredOutputManager(config)
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+    )
+    params.verify(
+        config.model_config, None, config.structured_outputs_config, manager.tokenizer
+    )
+    params.update_from_generation_config({}, manager.tokenizer.eos_token_id)
+    request = Request(
+        request_id="kimi-protocol",
+        prompt_token_ids=manager.tokenizer.encode(prefix),
+        sampling_params=params,
+        pooling_params=None,
+        reasoning_ended=False,
+    )
+    manager.grammar_init(request)
+    _wait_for_grammar(request)
+    return manager, request
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["disabled", "enabled"])
+@pytest.mark.parametrize("split", range(4))
+def test_kimi_protocol_preserves_response_header(kimi_protocol_model, enabled, split):
+    """The same accepted response header must not be consumed as JSON."""
+    manager, request = _kimi_protocol_manager(kimi_protocol_model, enabled)
+    try:
+        tokenizer = manager.tokenizer
+        close = tokenizer.encode("<|close|>think<|sep|>")
+        assert len(close) == 3
+        prefix = tokenizer.encode(".") + close
+        # Exercise every split without allowing a later open to rewrite state.
+        for block in (prefix[:split], prefix[split:]):
+            request.append_output_token_ids(block)
+            assert manager.accept_tokens(request, block)
+        open_id = tokenizer.encode("<|open|>")[0]
+        mask = manager.grammar_bitmask(
+            {request.request_id: request}, [request.request_id], {}
+        )
+        allows_open = bool((int(mask[0, open_id // 32]) >> (open_id % 32)) & 1)
+        assert allows_open == enabled
+        if not enabled:
+            return
+        header = tokenizer.encode("<|open|>response")
+        request.append_output_token_ids(header)
+        assert manager.accept_tokens(request, header)
+        grammar = request.structured_output_request.grammar
+        assert grammar.body.num_processed_tokens == 0
+        sep = tokenizer.encode("<|sep|>")[0]
+        mask = manager.grammar_bitmask(
+            {request.request_id: request}, [request.request_id], {}
+        )
+        assert (int(mask[0, sep // 32]) >> (sep % 32)) & 1
+        assert not (int(mask[0, open_id // 32]) >> (open_id % 32)) & 1
+        tail = [sep] + tokenizer.encode("{}") + [tokenizer.eos_token_id]
+        request.append_output_token_ids(tail)
+        assert manager.accept_tokens(request, tail)
+        assert grammar.is_terminated()
+    finally:
+        manager.clear_backend()
+
+
+@pytest.mark.parametrize("accepted", range(8))
+def test_kimi_protocol_prefix_mask_matches_accept(kimi_protocol_model, accepted):
+    """Rollback removes speculative protocol state, including a complete reopen."""
+    import torch
+
+    from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+    from vllm.v1.structured_output.kimi_k3_protocol import KimiK3ProtocolGrammar
+
+    manager, request = _kimi_protocol_manager(kimi_protocol_model)
+    try:
+        tokenizer = manager.tokenizer
+        body = manager.backend.compile_grammar(
+            StructuredOutputOptions.JSON, JSON_SCHEMA
+        )
+        grammar = KimiK3ProtocolGrammar(
+            body, tokenizer, request.prompt_token_ids, True, 8, {tokenizer.eos_token_id}
+        )
+        raw = tokenizer.encode(".<|close|>think<|sep|><|open|>think<|sep|>")
+        assert len(raw) == 7
+        assert grammar.validate_tokens(raw) == raw
+        assert grammar.state.phase == "think"
+        for token in raw[:accepted]:
+            mask = torch.empty((1, (len(tokenizer) + 31) // 32), dtype=torch.int32)
+            grammar.fill_bitmask(mask, 0)
+            assert (int(mask[0, token // 32]) >> (token % 32)) & 1
+            assert grammar.accept_tokens(request.request_id, [token])
+        assert body.num_processed_tokens == 0
+        grammar.rollback(accepted)
+        assert grammar.state.phase == "think"
+        assert grammar.validate_tokens(raw) == raw
+    finally:
+        manager.clear_backend()
+
+
+def test_kimi_protocol_rejects_control_token_inside_json(kimi_protocol_model):
+    manager, request = _kimi_protocol_manager(kimi_protocol_model)
+    try:
+        tokenizer = manager.tokenizer
+        tokens = tokenizer.encode("<|close|>think<|sep|><|open|>response<|sep|>{")
+        request.append_output_token_ids(tokens)
+        assert manager.accept_tokens(request, tokens)
+        grammar = request.structured_output_request.grammar
+        assert grammar.validate_tokens(tokenizer.encode("<|open|>")) == []
+        assert grammar.validate_tokens(tokenizer.encode("}")) == tokenizer.encode("}")
+    finally:
+        manager.clear_backend()

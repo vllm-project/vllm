@@ -409,3 +409,30 @@ shown below:
     ```
 
 See also: [full example](../../examples/features/structured_outputs/structured_outputs_offline.py)
+
+## Experimental Kimi K3 protocol tracking
+
+`kimi_k3_protocol` is an experimental, disabled-by-default option for Kimi K3
+JSON generation with XGrammar. It tracks channel headers separately from the
+JSON body, so a speculative prefix ending in `<|open|>response` waits for
+`<|sep|>` instead of passing the header to the JSON matcher.
+
+Add the following option to a Kimi K3 server's existing launch configuration:
+
+```text
+--structured-outputs-config '{"backend":"xgrammar","reasoning_parser":"kimi_k3","kimi_k3_protocol":true}'
+```
+
+Use JSON or JSON-object constraints through `/v1/completions`. The protocol
+accepts direct JSON or a response wrapper after thinking, and permits another
+think block before the JSON body starts. Once JSON starts, reopening thinking
+is disallowed. This is an experimental protocol policy, not a claim that every
+Kimi checkpoint supports all these transitions.
+
+The option requires `enable_in_reasoning=False`; tools, regex, choice, and
+other grammar backends are outside its scope. It does not change rejection
+sampling or add scheduler recovery. Repeated think blocks are **not supported
+end to end by the existing Chat reasoning/content parsers**: a streaming
+response can expose the later think block as content, and a buffered response
+can omit earlier reasoning. Keep this option disabled for those Chat use cases.
+Accelerator performance and full model-quality qualification remain pending.
