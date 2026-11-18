@@ -34,7 +34,7 @@ adapter/projection stack.
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -134,11 +134,10 @@ def _get_canvas_with_most_tokens(
     do_resize: bool = True,
 ) -> ImageSize:
     if overrides is None or not (overrides.width or overrides.height):
-        height, width = max(
-            ((h, max_tokens // h) for h in range(1, max_tokens + 1)),
-            key=lambda hw: (hw[0] * hw[1], -abs(hw[0] - hw[1])),
+        height = next(
+            h for h in range(math.isqrt(max_tokens), 0, -1) if max_tokens % h == 0
         )
-        return ImageSize(width=factor * width, height=factor * height)
+        return ImageSize(width=factor * (max_tokens // height), height=factor * height)
 
     max_width = overrides.width or factor * max_tokens
     max_height = overrides.height or factor * max_tokens
@@ -238,18 +237,31 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         mm_kwargs = self._get_effective_mm_processor_kwargs({})
-        image_kwargs = mm_kwargs["images_kwargs"]
-        video_kwargs = mm_kwargs["videos_kwargs"]
-        num_frames = self.get_num_frames_with_most_features(
-            seq_len, mm_counts.get("video", 0)
+        _, max_tokens = self._get_max_tokens(
+            mm_kwargs, seq_len, mm_counts.get("video", 0)
         )
-        return {
-            "image": int(image_kwargs["max_image_tokens"]),
-            "video": (
-                num_frames
-                // int(video_kwargs["temporal_patch_size"])
-                * int(video_kwargs["max_video_frame_tokens"])
-            ),
+        return max_tokens
+
+    def _get_max_tokens(
+        self,
+        mm_kwargs: Mapping[str, Any],
+        seq_len: int,
+        num_videos: int,
+        *,
+        use_hints: bool = True,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        video_kwargs = mm_kwargs["videos_kwargs"]
+        group_tokens = {
+            "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
+            "video": int(video_kwargs["max_video_frame_tokens"]),
+        }
+        num_frames = self._get_num_frames(
+            seq_len, num_videos, video_kwargs, use_hints=use_hints
+        )
+        num_groups = num_frames // int(video_kwargs["temporal_patch_size"])
+        return group_tokens, {
+            **group_tokens,
+            "video": num_groups * group_tokens["video"],
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -260,19 +272,19 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         )
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
-        num_frames = self._get_max_num_frames(seq_len, num_videos)
-        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
-        if video_options and video_options.num_frames:
-            video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
-            temporal_patch_size = int(video_kwargs["temporal_patch_size"])
-            num_frames = min(
-                num_frames, round_up(video_options.num_frames, temporal_patch_size)
-            )
-        return num_frames
-
-    def _get_max_num_frames(self, seq_len: int, num_videos: int) -> int:
-        video_processor = self.get_hf_processor().video_processor
         video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        return self._get_num_frames(seq_len, num_videos, video_kwargs)
+
+    def _get_num_frames(
+        self,
+        seq_len: int,
+        num_videos: int,
+        video_kwargs: Mapping[str, Any],
+        *,
+        use_hints: bool = True,
+    ) -> int:
+        video_processor = self.get_hf_processor().video_processor
+        mm_config = self.ctx.get_mm_config()
         temporal_patch_size = int(video_kwargs["temporal_patch_size"])
         num_videos = max(num_videos, 1)
         groups = max(
@@ -280,11 +292,16 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
             seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
         num_frames = groups * temporal_patch_size
-        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
+        media_io_kwargs = mm_config.media_io_kwargs
         loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
         if loader_frames >= 0:
             max_frames = max(int(video_processor.num_frames), loader_frames)
             num_frames = min(num_frames, round_up(max_frames, temporal_patch_size))
+        video_options = mm_config.limit_per_prompt.get("video")
+        if use_hints and video_options and video_options.num_frames:
+            num_frames = min(
+                num_frames, round_up(video_options.num_frames, temporal_patch_size)
+            )
         return num_frames
 
 
@@ -325,8 +342,8 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             "video": self._get_dummy_videos(
                 width=video_size.width,
                 height=video_size.height,
-                num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts.get("video", 0)
+                num_frames=self.info._get_num_frames(
+                    seq_len, mm_counts.get("video", 0), video_kwargs
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),
@@ -345,21 +362,12 @@ class MuseGlimmerMultiModalProcessor(
         # vLLM samples video frames before processing
         hf_kwargs = {**hf_kwargs, "do_sample_frames": False}
         processed = super()._call_hf_processor(hf_data, hf_kwargs)
-        mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
-        video_kwargs = mm_kwargs["videos_kwargs"]
-        max_group_tokens = {
-            "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
-            "video": int(video_kwargs["max_video_frame_tokens"]),
-        }
-        max_num_frames = self.info._get_max_num_frames(
-            self.info.ctx.model_config.max_model_len, 1
+        max_group_tokens, max_tokens = self.info._get_max_tokens(
+            self.info._get_effective_mm_processor_kwargs({}),
+            self.info.ctx.model_config.max_model_len,
+            1,
+            use_hints=False,
         )
-        max_tokens = {
-            "image": max_group_tokens["image"],
-            "video": max_num_frames
-            // int(video_kwargs["temporal_patch_size"])
-            * max_group_tokens["video"],
-        }
         merge_length = self.info.get_hf_config().vision_config.merge_size ** 2
         for modality in ("image", "video"):
             grid_thw = processed.get(f"{modality}_grid_thw")

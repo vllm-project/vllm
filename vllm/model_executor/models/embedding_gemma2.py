@@ -426,10 +426,7 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         # Base-class behavior: add_special_tokens=True (BOS + EOS)
         return BaseProcessingInfo.get_default_tok_params(self)
 
-    def get_max_video_frames(self) -> int:
-        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
-            "videos_kwargs", {}
-        )
+    def get_max_video_frames(self, video_kwargs: Mapping[str, Any]) -> int:
         mm_config = self.ctx.model_config.get_multimodal_config()
 
         # The loader's max_frames cap is 128 when media_io_kwargs can raise it
@@ -453,10 +450,7 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
                 max_frames = min(max_frames, num_frames_opt)
         return max_frames
 
-    def get_video_max_soft_tokens(self) -> int:
-        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
-            "videos_kwargs", {}
-        )
+    def get_video_max_soft_tokens(self, video_kwargs: Mapping[str, Any]) -> int:
         video_max_soft = video_kwargs.get("max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS)
         if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
             raise ValueError(
@@ -487,8 +481,8 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
             "videos_kwargs", {}
         )
-        max_frames = self.get_max_video_frames()
-        video_max_soft = self.get_video_max_soft_tokens()
+        max_frames = self.get_max_video_frames(video_kwargs)
+        video_max_soft = self.get_video_max_soft_tokens(video_kwargs)
 
         # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
         # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
@@ -501,14 +495,15 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         return tokens
 
     def get_video_frame_size_with_most_features(
-        self, overrides: VideoDummyOptions | None = None
+        self,
+        video_kwargs: Mapping[str, Any],
+        overrides: VideoDummyOptions | None = None,
     ) -> ImageSize:
         vision_config = self.get_hf_config().vision_config
         unit = vision_config.patch_size * vision_config.pooling_kernel_size
-        max_soft_tokens = self.get_video_max_soft_tokens()
+        max_soft_tokens = self.get_video_max_soft_tokens(video_kwargs)
         patch_size = vision_config.patch_size
         max_patches = max_soft_tokens * vision_config.pooling_kernel_size**2
-        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
         do_resize = video_kwargs.get("do_resize") is not False
         sizes = [
             ImageSize(width=unit * (max_soft_tokens // h), height=unit * h)
@@ -682,8 +677,13 @@ class EmbeddingGemma2DummyInputsBuilder(Gemma4DummyInputsBuilder):
         num_videos: int,
         overrides=None,
     ) -> list[VideoItem]:
-        num_frames = self.info.get_max_video_frames()
-        width, height = self.info.get_video_frame_size_with_most_features(overrides)
+        video_kwargs = self.info._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
+        num_frames = self.info.get_max_video_frames(video_kwargs)
+        width, height = self.info.get_video_frame_size_with_most_features(
+            video_kwargs, overrides
+        )
         videos = super(Gemma4DummyInputsBuilder, self)._get_dummy_videos(
             width=width,
             height=height,
