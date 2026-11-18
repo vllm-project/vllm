@@ -5,8 +5,8 @@
 The original checkpoint is a Gemma3 VLM whose answer is the logits of the
 "Yes" and "No" tokens at the last position. A two-way softmax over those two
 logits equals sigmoid((lm_head[Yes] - lm_head[No]) . h), so the model is a
-Gemma3 converted with `as_seq_cls_model` and the output is P(Yes) over the
-full vocabulary. `ShieldGemma2ForImageClassificationConfig` selects the
+Gemma3 converted with `as_seq_cls_model` and the output is P(Yes) of that
+two-way softmax. `ShieldGemma2ForImageClassificationConfig` selects the
 conversion.
 """
 

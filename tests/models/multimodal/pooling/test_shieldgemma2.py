@@ -146,4 +146,4 @@ def test_classify_image_policy(server: RemoteOpenAIServer):
     output = ClassificationResponse.model_validate(response.json())
     assert len(output.data) == 1
     assert len(output.data[0].probs) == 1
-    assert 0.0 <= output.data[0].probs[0] <= 1.0
+    assert output.data[0].probs[0] < 0.5
