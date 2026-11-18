@@ -6,8 +6,7 @@ import torch
 
 from tests.kernels.utils import to_int8
 from vllm import _cpu_ops as ops
-from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -26,12 +25,6 @@ M_FACTORS = [
 ]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
-
-
-@pytest.fixture(autouse=True)
-def seed_each_test():
-    # Any subset of this file (a CI shard) then draws the same inputs.
-    set_random_seed(0)
 
 
 def rand_int8(shape: tuple, device: str = "cpu"):
@@ -209,22 +202,7 @@ def test_onednn_gemm(
     use_stride: bool,
     dtype: torch.dtype,
     primitive_cache_size: int,
-    request: pytest.FixtureRequest,
 ):
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and (
-        n,
-        k,
-        m_list,
-        use_bias,
-        use_stride,
-    ) == (16384, 4096, M_FACTORS[0], True, False):
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                reason="ACL bf16-output GEMM loses precision as k grows: "
-                "https://github.com/vllm-project/vllm/issues/67996",
-            )
-        )
     for m in m_list:
         onednn_gemm_test_helper(
             primitive_cache_size=primitive_cache_size,
