@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
+    VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -346,7 +347,6 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -1287,10 +1287,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
     # "copy_engine" uses copy engines instead of NCCL kernels: CUDA copy engines
-    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs TP=1 and
-    # fully connected PP GPUs on one node, and fails startup without.
-    # "auto" uses copy engines when every PP rank can, and NCCL otherwise; on
-    # ROCm it keeps NCCL.
+    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs each PP
+    # chain's GPUs directly connected: on one node, or with CUDA across nodes in
+    # one multi-node NVLink domain with an IMEX channel. It fails startup
+    # without. "auto" uses copy engines when every rank can, and NCCL otherwise;
+    # on ROCm it keeps NCCL.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
     ),
@@ -1363,6 +1364,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
+    # Muse Spark on ROCm with TP + expert parallelism: forwards of at least this
+    # many tokens keep the residual stream sharded by token across the TP ranks.
+    # Disabled by =0.
+    "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -2395,10 +2402,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
-    ),
-    # Force N-contiguous weight layout for all XPU unquantized linears.
-    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
-        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
