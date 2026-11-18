@@ -86,8 +86,12 @@ def _cuda_ints(values):
 
 
 def _replayssm_mixer(kv_cache, ring_start, committed, A):
+    # 8-bit SSM state keeps its FP32 scale page right after it (state 2).
+    quantized = kv_cache[1].dtype in (torch.int8, torch.float8_e4m3fn)
     return SimpleNamespace(
         kv_cache=kv_cache,
+        ssm_state_quantized=quantized,
+        ssm_state_scale=kv_cache[2] if quantized else None,
         _replayssm_ring_start=ring_start,
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
@@ -148,10 +152,11 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         block_stride_alignment=16,
     )
     if quantized:
+        # Production layout: (conv, ssm, ssm_scale, x, dt, B).
         spec = replace(
             spec,
-            shapes=(*spec.shapes, (heads, dim)),
-            dtypes=(*spec.dtypes, torch.float32),
+            shapes=(*spec.shapes[:2], (heads, dim), *spec.shapes[2:]),
+            dtypes=(*spec.dtypes[:2], torch.float32, *spec.dtypes[2:]),
         )
     spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
     vllm_config = SimpleNamespace(
@@ -187,7 +192,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         )
         MambaBase.bind_kv_cache(layer, page)
         caches[name] = layer.kv_cache
-    rings = {name: states[2:5] for name, states in caches.items()}
+    rings = {name: states[-3:] for name, states in caches.items()}
     for name, states in caches.items():
         x, dt, B = rings[name]
         if quantized:
@@ -202,7 +207,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             )
             states[1].fill_(8)
             states[1][..., -1] = qmax
-            states[5].copy_(factors)
+            states[2].copy_(factors)
             x.copy_((qmax * factors / 4)[:, :, None, :])
             dt.fill_(1)
             B.zero_()
@@ -224,10 +229,10 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         for name in names:
             caches[name][1][live].copy_(caches[name][1][prefix])
             if quantized:
-                caches[name][5][live].copy_(caches[name][5][prefix])
+                caches[name][2][live].copy_(caches[name][2][prefix])
     original = {name: states[1].clone() for name, states in caches.items()}
     original_scales = (
-        {name: states[5].clone() for name, states in caches.items()}
+        {name: states[2].clone() for name, states in caches.items()}
         if quantized
         else {}
     )
@@ -342,7 +347,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                         * B[src, 0, pos].float()[None, None, :]
                     )
                 if quantized:
-                    _assert_rows(expected, caches[name][1][dst], caches[name][5][dst])
+                    _assert_rows(expected, caches[name][1][dst], caches[name][2][dst])
                 else:
                     torch.testing.assert_close(
                         caches[name][1][dst].float(), expected, atol=2e-3, rtol=2e-3
@@ -358,7 +363,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             assert torch.equal(_bytes(states[1][slot]), _bytes(original[name][slot]))
             if quantized:
                 torch.testing.assert_close(
-                    states[5][slot], original_scales[name][slot], atol=0, rtol=0
+                    states[2][slot], original_scales[name][slot], atol=0, rtol=0
                 )
         for tensor, before in zip(rings[name], ring_before[name], strict=True):
             torch.testing.assert_close(tensor, before, atol=0, rtol=0)
@@ -366,7 +371,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     # Old plans beyond the new batch must not replay a second time.
     before_shrink = {name: states[1].clone() for name, states in caches.items()}
     scales_before_shrink = (
-        {name: states[5].clone() for name, states in caches.items()}
+        {name: states[2].clone() for name, states in caches.items()}
         if quantized
         else {}
     )
@@ -378,7 +383,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         assert torch.equal(_bytes(states[1]), _bytes(before_shrink[name]))
         if quantized:
             torch.testing.assert_close(
-                states[5], scales_before_shrink[name], atol=0, rtol=0
+                states[2], scales_before_shrink[name], atol=0, rtol=0
             )
 
 
