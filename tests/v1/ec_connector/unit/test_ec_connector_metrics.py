@@ -11,7 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.config import VllmConfig
+from vllm.config import ECTransferConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.distributed.ec_transfer.ec_connector.example_connector import (
     ECExampleConnector,
@@ -80,6 +80,21 @@ def test_logging_and_prom_are_no_ops_without_ec_transfer_config():
 
     vllm_config = Mock(spec=VllmConfig)
     vllm_config.ec_transfer_config = None
+    prom = ECConnectorProm(vllm_config, labelnames=[], per_engine_labelvalues={})
+    assert prom.prom_metrics is None
+    prom.observe({})  # Should not raise.
+
+
+def test_logging_and_prom_are_no_ops_with_inactive_ec_transfer_config():
+    """An inactive EC transfer config (no connector/role) must also stay silent."""
+    cfg = ECTransferConfig(ec_buffer_size=1048576)
+    assert not cfg.is_ec_transfer_instance
+    logging = ECConnectorLogging(ec_transfer_config=cfg)
+    assert logging.connector_cls is None
+    logging.log()  # Should not raise, nothing to log.
+
+    vllm_config = Mock(spec=VllmConfig)
+    vllm_config.ec_transfer_config = cfg
     prom = ECConnectorProm(vllm_config, labelnames=[], per_engine_labelvalues={})
     assert prom.prom_metrics is None
     prom.observe({})  # Should not raise.
