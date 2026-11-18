@@ -25,8 +25,10 @@ from transformers.activations import get_activation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -546,7 +548,23 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
+        budget = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+        if budget <= 0:
+            return {"audio": None}
+
+        extractor = self.get_feature_extractor()
+        float_bytes = np.dtype(np.float32).itemsize
+        padded_input_bytes = extractor.n_samples * (
+            float_bytes + np.dtype(np.int32).itemsize
+        )
+        # Include the complex STFT and its float32 magnitude and power tensors.
+        spectrum_values = (extractor.n_fft // 2 + 1) * (extractor.nb_max_frames + 1)
+        spectrum_bytes = spectrum_values * (
+            np.dtype(np.complex64).itemsize + 2 * float_bytes
+        )
+        feature_bytes = extractor.feature_size * extractor.nb_max_frames * float_bytes
+        bytes_per_item = padded_input_bytes + spectrum_bytes + feature_bytes
+        return {"audio": budget // bytes_per_item}
 
     def get_target_channels(self) -> int:
         return 1
@@ -645,6 +663,14 @@ class FunAudioChatMultiModalProcessor(
                 mm_data, hf_kwargs, passthrough_data, processed_data
             )
         assert isinstance(audios, Sequence)
+
+        max_audio_items = self.info.supported_mm_limits["audio"]
+        if max_audio_items is not None and len(audios) > max_audio_items:
+            raise VLLMValidationError(
+                f"At most {max_audio_items} audio(s) fit the FunAudioChat "
+                "preprocessing budget.",
+                parameter="audio",
+            )
 
         feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)

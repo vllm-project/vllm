@@ -3,15 +3,24 @@
 
 from unittest.mock import MagicMock
 
+import httpx
 import numpy as np
 import pytest
 import torch
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend, WhisperFeatureExtractor
 
+from tests.utils import RemoteLaunchRenderServer
+from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.funaudiochat import (
     FunAudioChatDummyInputsBuilder,
     FunAudioChatMultiModalProcessor,
     FunAudioChatProcessingInfo,
 )
+from vllm.multimodal.processing import InputProcessingContext
+from vllm.multimodal.utils import encode_audio_url
 from vllm.transformers_utils.configs.funaudiochat import FunAudioChatConfig
 
 
@@ -19,6 +28,9 @@ class RecordingFeatureExtractor:
     sampling_rate = 16000
     n_fft = 400
     hop_length = 160
+    n_samples = 300 * sampling_rate
+    nb_max_frames = n_samples // hop_length
+    feature_size = 128
 
     def __init__(self) -> None:
         self.last_kwargs: dict[str, object] | None = None
@@ -127,3 +139,73 @@ def test_profiled_max_audio_is_accepted(funaudiochat_processor):
     assert processed["speech_attention_mask"].sum().item() == 7500
     assert feature_extractor.last_kwargs is not None
     assert feature_extractor.last_kwargs.get("padding") == "max_length"
+
+
+@pytest.fixture
+def local_funaudiochat_model(tmp_path):
+    FunAudioChatConfig(
+        architectures=["FunAudioChatForConditionalGeneration"]
+    ).save_pretrained(tmp_path)
+    WhisperFeatureExtractor(chunk_length=1).save_pretrained(tmp_path)
+    audio_tokens = ["<|audio_bos|>", "<|AUDIO|>", "<|audio_eos|>"]
+    vocab = {
+        token: i for i, token in enumerate(["[UNK]", "<|audio_pad|>", *audio_tokens])
+    }
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="[UNK]")),
+        unk_token="[UNK]",
+        pad_token="<|audio_pad|>",
+        additional_special_tokens=audio_tokens,
+        chat_template="{% for msg in messages %}{{ msg.content }}{% endfor %}",
+    )
+    tokenizer.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path / "speech_tokenizer")
+    return str(tmp_path), tokenizer
+
+
+@pytest.mark.parametrize("validate", [True, False], ids=["admission", "processor"])
+def test_audio_items_fit_the_preprocessing_budget(
+    local_funaudiochat_model, monkeypatch, validate
+):
+    monkeypatch.setenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "500000")
+    model, tokenizer = local_funaudiochat_model
+    model_config = ModelConfig(model=model, dtype="float32", max_model_len=128)
+    info = FunAudioChatProcessingInfo(InputProcessingContext(model_config, tokenizer))
+    processor = FunAudioChatMultiModalProcessor(
+        info, FunAudioChatDummyInputsBuilder(info)
+    )
+    audio = np.zeros(1600, dtype=np.float32)
+    accepted = info.parse_mm_data({"audio": [audio]}, validate=validate)
+    assert processor._apply_hf_processor_main(accepted, {})["input_features"].shape == (
+        1,
+        80,
+        100,
+    )
+
+    with pytest.raises(VLLMValidationError, match="At most 1 audio"):
+        items = info.parse_mm_data({"audio": [audio, audio]}, validate=validate)
+        processor._apply_hf_processor_main(items, {})
+
+
+def test_render_respects_the_audio_preprocessing_budget(local_funaudiochat_model):
+    model, _ = local_funaudiochat_model
+    audio = {
+        "type": "audio_url",
+        "audio_url": {"url": encode_audio_url(np.zeros(1600, dtype=np.float32), 16000)},
+    }
+    with RemoteLaunchRenderServer(
+        model,
+        ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
+        env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": "500000"},
+    ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        for content, status in [([audio], 200), ([audio, audio], 400)]:
+            response = httpx.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                },
+            )
+            assert response.status_code == status, response.text[:512]
+        assert "At most 1 audio" in response.json()["error"]["message"]
