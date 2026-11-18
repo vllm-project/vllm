@@ -1232,7 +1232,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     q.shape[1],
                     min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
                 )
+                # Split-K writes the full K row as V; only valid without rope.
                 if attn_metadata.num_decode_tokens == num_tokens
+                and q.shape[-1] == self.kv_lora_rank
                 else 1
             )
             if decode_num_splits > 1:
