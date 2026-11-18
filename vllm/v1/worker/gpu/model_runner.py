@@ -627,6 +627,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if draft_model is not None:
             with set_current_vllm_config(self.vllm_config):
                 refresh_quantized_lm_heads(draft_model)
+                # Drafts that precompute weights from the target's (e.g. a
+                # folded LM head) re-derive them in place.
+                refresh = getattr(draft_model, "refresh_derived_weights", None)
+                if refresh is not None:
+                    refresh()
 
     def reload_weights(
         self,
