@@ -3601,10 +3601,22 @@ _LAZY_EXTRA_CONFIG = {
 
 def _make_lazy_runner(request_runner, async_scheduling: bool, num_gpu_blocks: int):
     """A runner that records each store offer of the lazy mode."""
+    return _make_lazy_runner_with_groups(
+        request_runner, async_scheduling, num_gpu_blocks
+    )
+
+
+def _make_lazy_runner_with_groups(
+    request_runner,
+    async_scheduling: bool,
+    num_gpu_blocks: int,
+    kv_cache_groups=None,
+):
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=num_gpu_blocks,
         async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
     )
     offers: list[tuple[list, ReqContext | None, StoreTrigger]] = []
@@ -3910,22 +3922,162 @@ def test_lazy_prefix_hit_is_not_a_death(request_runner, async_scheduling: bool):
     } == recorded_keys
 
 
-def test_lazy_restart_records_the_chunks_again(request_runner):
-    """A request that starts again from token 0 records every chunk again.
+def _recorded_keys(overwrite_handler: OnOverwriteStoreHandler) -> set:
+    return {
+        chunk.key
+        for chunks in overwrite_handler._overwrite_map.by_block.values()
+        for chunk in chunks
+    }
 
-    The CPU tier can lose the old chunks, so the recomputed chunks must go in
-    the overwrite map again.
+
+def _preempt_and_restart(runner) -> None:
+    """Preempt the running request, then run it again from token 0.
+
+    The GPU prefix cache is reset, so the request recomputes its prompt on
+    blocks other than the ones it had.
     """
-    runner, _, _ = _make_lazy_runner(request_runner, False, num_gpu_blocks=20)
-    runner.new_request(token_ids=list(range(12)))
-    runner.run(decoded_tokens=[0])
+    req_id = str(runner.req_id)
+    free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
+    managers = runner.scheduler.kv_cache_manager.coordinator.single_type_managers
+    num_free_blocks_after_preemption = free_block_queue.num_free_blocks + sum(
+        len(manager.req_to_blocks[req_id]) for manager in managers
+    )
+    free_block_queue.num_free_blocks = 0
+    runner.run(decoded_tokens=[])
+    assert runner.scheduler.requests[req_id].status is RequestStatus.PREEMPTED
+    free_block_queue.num_free_blocks = num_free_blocks_after_preemption
+    runner.scheduler.reset_prefix_cache()
+    runner.run(decoded_tokens=[0] * 4)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_lazy_restart_records_the_chunks_again(request_runner, async_scheduling: bool):
+    """A preempted request records its recomputed chunks on its new blocks.
+
+    Without it, the new blocks hold chunks that the overwrite map does not
+    know, so they are lost when the pool gives the blocks away.
+    """
+    runner, _, _ = _make_lazy_runner(request_runner, async_scheduling, 13)
     scheduler = runner.connector_scheduler
     overwrite_handler = _on_overwrite(scheduler)
+    runner.new_request(token_ids=list(range(12)))
+    runner.run(decoded_tokens=[0] * 9)
     req_status = scheduler._req_status[str(runner.req_id)]
-    assert overwrite_handler.first_live_chunk_idx(req_status, 0) > 0
+    first_blocks = set(req_status.group_states[0].block_ids)
 
-    scheduler.get_num_new_matched_tokens(req_status.req, 0)
-    assert overwrite_handler.first_live_chunk_idx(req_status, 0) == 0
+    _preempt_and_restart(runner)
+
+    req_status = scheduler._req_status[str(runner.req_id)]
+    new_blocks = req_status.group_states[0].block_ids
+    assert first_blocks.isdisjoint(new_blocks)
+    assert set(new_blocks[:4]) <= set(overwrite_handler._overwrite_map.by_block)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_lazy_preempted_request_offers_each_key_once(
+    request_runner, async_scheduling: bool
+):
+    """A preempted request leaves its old chunks in the map, and its restart
+    records the same keys on new blocks. When another request takes every
+    block, each key is still stored once."""
+    runner, offers, _ = _make_lazy_runner(request_runner, async_scheduling, 13)
+    overwrite_handler = _on_overwrite(runner.connector_scheduler)
+    runner.new_request(token_ids=list(range(12)))
+    runner.run(decoded_tokens=[0] * 9)
+    _preempt_and_restart(runner)
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+    recorded_keys = _recorded_keys(overwrite_handler)
+    assert recorded_keys
+
+    offers.clear()
+    runner.new_request(token_ids=list(range(100, 148)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    offered_keys = _offered_keys(offers, StoreTrigger.ON_OVERWRITE)
+    assert len(offered_keys) == len(set(offered_keys))
+    assert recorded_keys <= set(offered_keys)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_lazy_sliding_window_chunk_is_stored_when_the_request_reuses_its_block(
+    request_runner, async_scheduling: bool
+):
+    """The window frees a block of a recorded chunk and the same request gets
+    it back for a new position. The chunk is stored once, from the block ids
+    that were recorded, before the new data lands."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=5,
+        blocks_per_chunk=3,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["swa"],
+                sliding_window_layer(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            )
+        ],
+        extra_config_overrides=_LAZY_EXTRA_CONFIG,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
+    )
+    scheduler = runner.connector_scheduler
+    overwrite_handler = _on_overwrite(scheduler)
+    runner.new_request(token_ids=list(range(3 * block_size)))
+    runner.run(decoded_tokens=[0])
+    req_status = scheduler._req_status[str(runner.req_id)]
+    assert overwrite_handler.first_live_chunk_idx(req_status, 0) == 1
+
+    for _ in range(6):
+        runner._run(decoded_tokens=[0] * block_size, complete_transfers=True)
+
+    handler = runner.offloading_spec.handler
+    stored_block_ids = [
+        gpu_spec.block_ids.tolist()
+        for gpu_spec, _ in handler.transfer_specs.values()
+        if isinstance(gpu_spec, GPULoadStoreSpec)
+    ]
+    assert stored_block_ids == [[1, 2, 3], [4, 1, 2]]
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_lazy_two_groups_offer_the_chunks_of_every_group(
+    request_runner, async_scheduling: bool
+):
+    """A full-attention group and a sliding-window group share the pool. When
+    another request takes their blocks, the chunks of both groups are stored."""
+    attention = dict(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    runner, offers, _ = _make_lazy_runner_with_groups(
+        request_runner,
+        async_scheduling,
+        num_gpu_blocks=14,
+        kv_cache_groups=[
+            make_kv_cache_group(["full"], AttentionSpec(**attention)),
+            make_kv_cache_group(
+                ["swa"], sliding_window_layer(**attention, sliding_window=8)
+            ),
+        ],
+    )
+    overwrite_handler = _on_overwrite(runner.connector_scheduler)
+    runner.new_request(token_ids=list(range(20)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+    first_keys = _recorded_keys(overwrite_handler)
+    assert {get_offload_group_idx(key) for key in first_keys} == {0, 1}
+
+    offers.clear()
+    runner.new_request(token_ids=list(range(100, 120)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    offered_keys = _offered_keys(offers, StoreTrigger.ON_OVERWRITE)
+    assert set(offered_keys) <= first_keys
+    assert {get_offload_group_idx(key) for key in offered_keys} == {0, 1}
 
 
 def test_overwrite_store_jobs_keep_null_placeholders(request_runner):
