@@ -33,6 +33,7 @@ import torch
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 TP = 8
@@ -92,6 +93,16 @@ def _fill(name: str, t: torch.Tensor) -> None:
         t.copy_(randn())
     else:
         t.copy_(randn(0.02))
+
+
+def _host_reads(hook):
+    """The probes copy activations to the host inside the checked step."""
+
+    def wrapper(*args, **kwargs):
+        with gpu_sync_allowed():
+            return hook(*args, **kwargs)
+
+    return wrapper
 
 
 @register_model_loader(LOAD_FORMAT)
@@ -197,10 +208,10 @@ class MonoProbe:
             )
 
         for i, layer in self._decoder_layers().items():
-            layer.register_forward_hook(hook(i), with_kwargs=True)
+            layer.register_forward_hook(_host_reads(hook(i)), with_kwargs=True)
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
-            layer.ffn.register_forward_pre_hook(gap, with_kwargs=True)
+            layer.ffn.register_forward_pre_hook(_host_reads(gap), with_kwargs=True)
 
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]
