@@ -38,18 +38,21 @@ class MockCommunicationGroup:
 
 
 class MockConsumerCommunicationGroup:
-    """Mock communication group for consumer that returns pre-stored tensors."""
+    """Fills each receive with the next of `chunks`, the one at `delay` after
+    a GPU sleep (`filled` is recorded after it)."""
 
-    def __init__(self, tensors_to_return: list[torch.Tensor]):
-        self.tensors_to_return = tensors_to_return
-        self.current_index = 0
+    def __init__(self, chunks: list[torch.Tensor], delay: int | None = None):
+        self.chunks, self.delay, self.calls = chunks, delay, 0
+        self.filled = torch.Event()
         self.device = torch.device("cuda:0")
 
     def broadcast(self, tensor, src):
-        """Mock broadcast that fills the tensor with pre-stored data."""
-        if self.current_index < len(self.tensors_to_return):
-            tensor.copy_(self.tensors_to_return[self.current_index])
-            self.current_index += 1
+        if self.calls == self.delay:
+            torch.cuda._sleep(SLEEP_CYCLES)
+        tensor.copy_(self.chunks[self.calls])
+        if self.calls == self.delay:
+            self.filled.record()
+        self.calls += 1
 
 
 def create_mock_model_params(
@@ -190,6 +193,14 @@ class TestPackedBroadcastRoundtrip:
         """Test roundtrip with different target batch sizes."""
         params = create_mock_model_params(num_layers=5)
         roundtrip([(n, t.cuda()) for n, t in params], buffer_size_bytes=target_size)
+
+    def test_roundtrip_parameters(self):
+        """Parameters requiring grad, whole and split, pack like tensors."""
+        params = [
+            (f"p{i}", torch.nn.Parameter(torch.randn(n, device="cuda")))
+            for i, n in enumerate([5, 300, 7])
+        ]
+        roundtrip(params, buffer_size_bytes=512)
 
     def test_roundtrip_non_contiguous_tensors(self):
         """Test roundtrip with non-contiguous tensors from the trainer."""
@@ -396,46 +407,9 @@ class TestPackedIpcProducer:
         # each tensor is named once, by the chunk holding its first bytes
         assert [n for c in chunks for n in c.names] == [n for n, _ in params]
 
-    def test_producers_pack_parameters(self):
-        """Parameters (requiring grad), whole and split, pack like tensors."""
-        params = [
-            (f"p{i}", torch.nn.Parameter(torch.randn(n, device="cuda")))
-            for i, n in enumerate([5, 300, 7])
-        ]
-        ipc = list(
-            packed_ipc_producer(
-                iterator=iter(params),
-                gpu_uuid="uuid",
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=512,
-            )
-        )
-        assert len(ipc) == 3
-        group = MockCommunicationGroup()
-        packed_nccl_broadcast_producer(
-            iterator=iter(params),
-            group=group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=512,
-        )
-        tensors = [t.detach().cpu() for _, t in params]
-        layout = list(chunks(((t.shape, t.dtype) for t in tensors), 512))
-        sent = [t.cpu().numpy().tobytes() for t in group.broadcasted_tensors]
-        expected = _layout_bytes(layout, tensors)
-        assert len(sent) == len(expected) == len(layout)
-
-        def pieces(chunk_bytes: bytes, chunk: Chunk) -> list[bytes]:
-            # the alignment padding between tensors is never written
-            return [
-                chunk_bytes[p.offset : p.offset + p.end - p.start] for p in chunk.pieces
-            ]
-
-        for got, want, chunk in zip(sent, expected, layout):
-            assert pieces(got, chunk) == pieces(want, chunk)
-
     def test_producer_ipc_handle_has_uuid(self):
-        """Test that each chunk's ipc_handle is keyed by the given UUID."""
+        """The first chunk carries the handle, keyed by the given UUID; the
+        rest carry none."""
         params = [("w", torch.randn(10, dtype=torch.float32).cuda())]
 
         chunks = list(
@@ -443,11 +417,13 @@ class TestPackedIpcProducer:
                 iterator=iter(params),
                 gpu_uuid="my-gpu-uuid",
                 post_iter_func=lambda x: x[1],
-                buffer_size_bytes=10_000_000,
+                buffer_size_bytes=16,
             )
         )
 
-        assert "my-gpu-uuid" in chunks[0].ipc_handle
+        assert len(chunks) == 3
+        assert list(chunks[0].ipc_handle) == ["my-gpu-uuid"]
+        assert [c.ipc_handle for c in chunks[1:]] == [None, None]
 
     def test_producer_dtype_names_are_strings(self):
         """Test that dtype_names are string representations."""
@@ -494,7 +470,7 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
     try:
         torch.accelerator.set_device_index(device_index)
         all_results = []
-        consumer = PackedIpcConsumer()
+        consumer = PackedIpcConsumer(device_index)
         while True:
             cd = cmd_q.get()
             if cd is None:
@@ -504,7 +480,6 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
                 names=cd["names"],
                 shapes=cd["shapes"],
                 dtype_names=cd["dtype_names"],
-                device_index=device_index,
             )
             for name, tensor in result:
                 # independent storage: the producer reuses its IPC buffer
@@ -515,6 +490,7 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
             all_results.extend([(name, tensor.cpu()) for name, tensor in result])
             del result
             ack_q.put("ack")
+        consumer.close()
         result_q.put(("ok", all_results))
     except Exception as e:
         result_q.put(("error", str(e)))
@@ -767,6 +743,25 @@ class TestPackedIpcRoundtrip:
         for (n, orig), (m, res) in zip(params, result, strict=True):
             assert n == m and torch.equal(res, orig.cpu())
 
+    def test_roundtrip_parameters(self):
+        """Parameters requiring grad, whole and split, pack like tensors."""
+        params = [
+            (f"p{i}", torch.nn.Parameter(torch.randn(n, device="cuda")))
+            for i, n in enumerate([5, 300, 7])
+        ]
+        num_chunks, result = self._run_roundtrip(
+            packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid=self._get_gpu_uuid(),
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=512,
+            ),
+            torch.cuda.current_device(),
+        )
+        assert num_chunks == 3
+        for (n, orig), (m, res) in zip(params, result, strict=True):
+            assert n == m and torch.equal(res, orig.detach().cpu())
+
     def test_consumer_wrong_uuid_raises(self):
         """Test that consumer raises ValueError for unknown GPU UUID."""
         params = [("w", torch.randn(10, dtype=torch.float32).cuda())]
@@ -785,12 +780,11 @@ class TestPackedIpcRoundtrip:
         fake_handle = {"fake-uuid-12345": c.ipc_handle[gpu_uuid]}
 
         with pytest.raises(ValueError, match="IPC handle not found"):
-            PackedIpcConsumer().receive(
+            PackedIpcConsumer(torch.cuda.current_device()).receive(
                 ipc_handle=fake_handle,
                 names=c.names,
                 shapes=c.shapes,
                 dtype_names=c.dtype_names,
-                device_index=torch.cuda.current_device(),
             )
 
 
@@ -915,7 +909,7 @@ class TestChunkedRoundtrip:
     def test_unpack_waits_for_each_receive(self):
         """Each chunk is unpacked only after its (slow) receive ends."""
         big = torch.randn(8, 64, device="cuda")  # 2048 B: chunks of 1024, 1024
-        group = _ChunkGroup(_packed_chunks([big], 1024), delay=1)
+        group = MockConsumerCommunicationGroup(_packed_chunks([big], 1024), delay=1)
         got: list[torch.Tensor] = []
         fill_pending: list[bool] = []
 
@@ -969,23 +963,6 @@ class TestChunkedRoundtrip:
         assert growth < big.nbytes + 8 * limit, growth / mib
 
 
-class _ChunkGroup:
-    """Fills each receive with the next pre-packed chunk, the one at `delay`
-    after a GPU sleep."""
-
-    def __init__(self, chunks: list[torch.Tensor], delay: int | None = None):
-        self.chunks, self.delay, self.calls = chunks, delay, 0
-        self.filled = torch.Event()
-
-    def broadcast(self, tensor, src):
-        if self.calls == self.delay:
-            torch.cuda._sleep(SLEEP_CYCLES)
-        tensor.copy_(self.chunks[self.calls])
-        if self.calls == self.delay:
-            self.filled.record()
-        self.calls += 1
-
-
 def _packed_chunks(tensors, limit):
     layout = list(chunks(((t.shape, t.dtype) for t in tensors), limit))
     cpu = [t.cpu() for t in tensors]
@@ -1005,7 +982,7 @@ class TestConsumerStreamOrdering:
         # The first run loads the kernels: loading one waits for the device
         # to go idle, which would end the caller's sleep before the receive.
         for run in range(2):
-            group = _ChunkGroup(_packed_chunks([weight], 1 << 16))
+            group = MockConsumerCommunicationGroup(_packed_chunks([weight], 1 << 16))
             torch.accelerator.synchronize()
             zeroed = torch.Event()
             zero_pending: list[bool] = []

@@ -1788,6 +1788,115 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
+def _packed_ipc_engine(monkeypatch, buf: torch.Tensor):
+    """A packed IPC worker engine whose handle rebuilds to `buf`."""
+    import vllm.distributed.weight_transfer.packed_tensor as packed_mod
+    import vllm.model_executor.model_loader.reload as reload_mod
+
+    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *args: buf)
+    monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
+    monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
+    model = MagicMock(spec=torch.nn.Module)
+    model.load_weights = MagicMock()
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        model,
+    )
+    engine.init_transfer_engine(IPCWeightTransferInitInfo(packed=True))
+    return engine, model
+
+
+def _packed_ipc_chunk(handle: dict, names: list[str], n: int):
+    return IPCWeightTransferUpdateInfo(
+        names=names,
+        dtype_names=["float32"] * len(names),
+        shapes=[[n]] * len(names),
+        ipc_handles=handle,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_finish_raises_on_a_cut_short_transfer(monkeypatch):
+    """A chunk ending inside a tensor loads nothing, and finishing there
+    raises instead of dropping the tensor."""
+    buf = torch.arange(4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+    engine, model = _packed_ipc_engine(monkeypatch, buf)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    chunk = _packed_ipc_chunk({uuid: tuple(range(8))}, ["w"], 8)  # 2 chunks
+
+    with pytest.raises(RuntimeError, match="outside"):
+        engine.receive_weights(chunk)  # before start_weight_update
+    engine.start_weight_update()
+    engine.receive_weights(chunk)
+    model.load_weights.assert_not_called()  # the chunk completes no tensor
+    with pytest.raises(RuntimeError, match="inside a split tensor"):
+        engine.finish_weight_update()
+    assert engine._packed_consumer is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_handle_is_read_from_the_first_chunk_only(monkeypatch):
+    buf = torch.arange(4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+    engine, model = _packed_ipc_engine(monkeypatch, buf)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    engine.start_weight_update()
+    engine.receive_weights(_packed_ipc_chunk({uuid: tuple(range(8))}, ["w"], 8))
+    engine.receive_weights(_packed_ipc_chunk({}, [], 8))
+    engine.finish_weight_update()
+    ((weights,), _) = model.load_weights.call_args
+    [(name, w)] = weights
+    assert name == "w" and w.tolist() == [0, 1, 2, 3] * 2
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda size: IPCTrainerInitInfo(
+            rank=0, packed=True, packed_buffer_size_bytes=size
+        ),
+        lambda size: NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=0,
+            packed_buffer_size_bytes=size,
+        ),
+        lambda size: NCCLWeightTransferInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            rank_offset=1,
+            world_size=2,
+            packed=True,
+            packed_buffer_size_bytes=size,
+        ),
+    ],
+    ids=["ipc-trainer", "nccl-trainer", "nccl-worker"],
+)
+def test_packed_buffer_under_the_alignment_is_rejected_at_init(make):
+    make(16)
+    with pytest.raises(ValueError, match="at least 16 bytes"):
+        make(15)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_discard_receives_every_chunk_whole():
+    """A relay rank receives chunks larger than the first one in full."""
+    sizes: list[int] = []
+    group = SimpleNamespace(
+        device=torch.device("cuda:0"),
+        broadcast=lambda t, src: sizes.append(t.numel()),
+    )
+    engine = object.__new__(NCCLTrainerWeightTransferEngine)
+    engine.model_update_group = group
+    engine.packed = True
+    engine.packed_buffer_size_bytes = 32
+    meta = [ParamMeta(f"p{i}", torch.float32, (n,)) for i, n in enumerate([6, 8, 1])]
+    engine._discard(meta, src=1)
+    assert sizes == [24, 32, 4]
+
+
 class RecordingClient:
     """A fake VLLMWeightSyncClient that records the order of calls."""
 
