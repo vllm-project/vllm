@@ -204,6 +204,17 @@ pub enum MmField {
     Shared(MmSharedField),
 }
 
+impl MmField {
+    /// Whether the model reads this field on the CPU.
+    pub fn keep_on_cpu(&self) -> bool {
+        match self {
+            Self::Batched(field) => field.keep_on_cpu,
+            Self::Flat(field) => field.keep_on_cpu,
+            Self::Shared(field) => field.keep_on_cpu,
+        }
+    }
+}
+
 /// Info: `MultiModalFieldConfig.batched`.
 ///
 /// Original Python definition:

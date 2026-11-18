@@ -16,6 +16,8 @@ use std::{fmt, fs};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use rmpv::Value;
 use serde_json::json;
@@ -35,7 +37,9 @@ use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::protocol::lora::LoraRequest;
-use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue, MmModality};
+use vllm_engine_core_client::protocol::multimodal::{
+    MmField, MmKwargValue, MmKwargsItem, MmModality,
+};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
     StopReason, UtilityCallOutput,
@@ -5423,7 +5427,126 @@ async fn render_chat_mm_payload_none_returns_layout_only() {
     let features = &render_json["features"];
     assert_eq!(features["mm_hashes"], json!({"image": ["uuid:image-1"]}));
     assert!(features["mm_placeholders"]["image"][0]["length"].as_u64().unwrap() > 1);
-    assert!(features.get("kwargs_data").is_none(), "{features}");
+    // Like Python, the unset payloads are `null` rather than omitted.
+    assert_eq!(
+        features.get("kwargs_data"),
+        Some(&json!(null)),
+        "{features}"
+    );
+    assert_eq!(
+        features.get("mm_metadata"),
+        Some(&json!(null)),
+        "{features}"
+    );
+}
+
+/// Decode one base64 MessagePack kwargs item from render `features`.
+fn decode_feature_item(item: &serde_json::Value) -> MmKwargsItem {
+    let bytes = BASE64.decode(item.as_str().expect("base64 item")).expect("base64");
+    crate::mm_wire::decode_kwargs(&bytes).expect("kwargs item")
+}
+
+/// `metadata` keeps each item's `keep_on_cpu` fields, here Qwen2-VL's
+/// `image_grid_thw`, and drops the processed tensors.
+#[tokio::test]
+async fn render_chat_mm_payload_metadata_returns_metadata_without_tensors() {
+    let decode = |body: axum::body::Bytes| -> serde_json::Value {
+        serde_json::from_slice(&body).expect("decode json")
+    };
+    let metadata = decode(render_image_chat(Some("metadata"), Some("image-1")).await);
+    let tensors = decode(render_image_chat(Some("tensors"), Some("image-1")).await);
+
+    let features = &metadata["features"];
+    assert_eq!(
+        features.get("kwargs_data"),
+        Some(&json!(null)),
+        "{features}"
+    );
+    for key in ["mm_hashes", "mm_placeholders", "mm_metadata"] {
+        assert_eq!(features[key], tensors["features"][key], "{key}");
+    }
+    let item = decode_feature_item(&features["mm_metadata"]["image"][0]);
+    assert_eq!(item.keys().collect::<Vec<_>>(), ["image_grid_thw"]);
+    assert!(item["image_grid_thw"].field.keep_on_cpu());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_metadata_only_features_without_ec_transfer_params() {
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&render_image_chat(Some("metadata"), Some("image-1")).await)
+            .expect("decode render response");
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-metadata-only-without-ec",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+
+    let (status, json) = post_json(
+        &mut multimodal_generate_app(chat),
+        "/inference/v1/generate",
+        rendered,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["param"], "ec_transfer_params");
+    assert_eq!(
+        json["error"]["message"],
+        "metadata-only multimodal items require ec_transfer_params"
+    );
+}
+
+/// With `ec_transfer_params`, a `metadata` render reaches the engine with the
+/// metadata fields only: the embeddings come through the EC connector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_accepts_metadata_only_features_with_ec_transfer_params() {
+    let mut rendered: serde_json::Value =
+        serde_json::from_slice(&render_image_chat(Some("metadata"), Some("image-1")).await)
+            .expect("decode render response");
+    let ec_transfer_params = json!({"do_remote_encode": false});
+    rendered["ec_transfer_params"] = ec_transfer_params.clone();
+    let placeholder = rendered["features"]["mm_placeholders"]["image"][0].clone();
+
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-generate-metadata-only-with-ec",
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
+        move |request| {
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            assert_eq!(features.len(), 1);
+            assert_eq!(features[0].identifier, "uuid:image-1");
+            assert_eq!(
+                features[0].mm_position.offset as u64,
+                placeholder["offset"].as_u64().unwrap()
+            );
+            let data = features[0].data.as_ref().expect("feature data");
+            assert_eq!(data.keys().collect::<Vec<_>>(), ["image_grid_thw"]);
+            let extra_args = request
+                .sampling_params
+                .as_ref()
+                .and_then(|params| params.extra_args.as_ref())
+                .expect("extra args");
+            assert_eq!(extra_args["ec_transfer_params"], ec_transfer_params);
+        },
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+
+    let (status, json) = post_json(
+        &mut multimodal_generate_app(chat),
+        "/inference/v1/generate",
+        rendered,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.finish().await;
 }
 
 /// A client `uuid` spelled like another item's content hash gets a different
