@@ -46,8 +46,6 @@ def can_use_dsv4_topk(
     )
 
 
-# The PDL intrinsics below sit behind a constexpr that is_arch_support_pdl()
-# leaves false off CUDA, so they compile out on ROCm.
 if dsv4_topk_platform_supported():
 
     @triton.jit
