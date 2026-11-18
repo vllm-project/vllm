@@ -47,9 +47,9 @@ def run_test(
     audio_assets,
     monkeypatch,
     lora_request,
-    expected_suffix: str | None,
+    expected_suffix: str,
     **kwargs,
-) -> str:
+) -> None:
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
@@ -69,9 +69,7 @@ def run_test(
         ]
         output = outputs[-1][-1][-1]
 
-    if expected_suffix is not None:
-        assert output.endswith(expected_suffix)
-    return output
+    assert output.endswith(expected_suffix)
 
 
 def run_greedy_logprobs(vllm_runner, audio_assets, monkeypatch, **kwargs):
