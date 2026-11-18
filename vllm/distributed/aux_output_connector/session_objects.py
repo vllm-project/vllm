@@ -17,6 +17,7 @@ from safetensors.numpy import save
 from vllm.distributed.aux_output_connector.object_store import (
     AuxObjectStoreFullError,
     MooncakeAuxObjectStore,
+    release_aux_keys,
 )
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
 from vllm.exceptions import VLLMValidationError
@@ -196,8 +197,11 @@ class SessionObjectWriter:
         max_pending_batches: int,
         fields: Callable[[np.ndarray], dict[str, np.ndarray]],
         put_stall_timeout_s: float = 600.0,
+        remove_timeout_s: float = 30.0,
     ) -> None:
         self._store = store
+        self._remove_timeout_s = remove_timeout_s
+        self.num_unremoved = 0
         self._key_prefix = key_prefix
         self._fields = fields
         self._put_stall_timeout_s = put_stall_timeout_s
@@ -239,7 +243,16 @@ class SessionObjectWriter:
     def _write(self, batch: tuple[list[str], list[bytes] | None]) -> None:
         keys, values = batch
         if values is None:
-            self._store.remove(keys)
+            unremoved = release_aux_keys(self._store, keys, self._remove_timeout_s)
+            if unremoved:
+                self.num_unremoved += len(unremoved)
+                logger.warning(
+                    "%d auxiliary output objects were not removed, %d in total; "
+                    "first: %s",
+                    len(unremoved),
+                    self.num_unremoved,
+                    unremoved[0],
+                )
             self._last_progress = time.monotonic()
             return
         while keys:

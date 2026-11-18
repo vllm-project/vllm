@@ -2936,6 +2936,48 @@ def test_session_object_writer_counts_each_written_object_as_progress():
     assert list(client.objects) == keys
 
 
+@pytest.mark.parametrize("code", [-703, -704], ids=["not-ready", "not-found-yet"])
+def test_session_object_writer_removes_an_object_the_store_refused_once(code):
+    client, store = fake_store()
+    batch_remove = client.batch_remove
+    refused = []
+
+    def refuse_once(keys, force):
+        if not refused:
+            refused.append(keys)
+            return [code] * len(keys)
+        return batch_remove(keys, force)
+
+    client.batch_remove = refuse_once
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=2,
+        fields=lambda rows: {"routed_experts": rows},
+    )
+    writer._put((["job/s/a"], [b"a"]))
+    writer.remove(["job/s/a"])
+    writer.drain(timeout_s=10)
+    writer.close()
+    assert refused and not client.objects and writer.num_unremoved == 0
+
+
+def test_session_object_writer_counts_objects_it_could_not_remove():
+    client, store = fake_store()
+    client.batch_remove = lambda keys, force: [-706] * len(keys)
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=2,
+        fields=lambda rows: {"routed_experts": rows},
+    )
+    writer._put((["job/s/a", "job/s/b"], [b"a", b"b"]))
+    writer.remove(["job/s/a", "job/s/b"])
+    writer.drain(timeout_s=10)
+    writer.close()
+    assert writer.num_unremoved == 2
+
+
 def _run_within(call, timeout_s=30.0):
     errors = []
 
