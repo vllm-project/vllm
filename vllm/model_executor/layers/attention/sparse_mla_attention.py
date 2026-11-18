@@ -960,6 +960,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         # The attention layer decides whether to use ShardQ.
         self.use_shardq = (
             self.supports_shardq
+            and not envs.VLLM_BATCH_INVARIANT
             and vllm_config.attention_config.sparse_mla_shard_q
             and vllm_config.attention_config.hisparse_config is None
             and parallel_config.tensor_parallel_size > 1

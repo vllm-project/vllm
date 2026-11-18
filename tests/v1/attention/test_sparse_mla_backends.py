@@ -502,12 +502,20 @@ def test_prefill_route(seq_len, overrides, expected):
 
 
 @pytest.mark.parametrize(
-    "cache_dtype, expected", [("auto", _MASKED), ("fp8_ds_mla", _MQA)]
+    "cache_dtype, bi, expected",
+    [("auto", False, _MASKED), ("fp8_ds_mla", False, _MQA), ("auto", True, _MQA)],
 )
 def test_masked_route_needs_layer_masked_mha(
-    default_vllm_config, dist_init, workspace_init, cache_dtype, expected
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+    cache_dtype,
+    bi,
+    expected,
 ):
-    """A quantized layer cache rules out masked MHA despite the global workspace."""
+    """BI forces sparse MQA; quantized layer caches rule out masked MHA."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     if not _is_masked_mha_available(128, 512, 128, 64, 128, "auto"):
         pytest.skip("masked MHA needs SM100 and FA4")
     vllm_config = create_vllm_config(
@@ -539,10 +547,12 @@ def test_masked_route_needs_layer_masked_mha(
             vllm_config,
             torch.device(DEVICE_TYPE),
         )
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(bi)))
+        prefill_len = 2048 if bi else 4096
         metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=create_common_attn_metadata(
-                BatchSpec(seq_lens=[4096], query_lens=[4096]),
+                BatchSpec(seq_lens=[prefill_len], query_lens=[prefill_len]),
                 64,
                 torch.device(DEVICE_TYPE),
                 arange_block_indices=True,
@@ -551,6 +561,42 @@ def test_masked_route_needs_layer_masked_mha(
     assert builder.topk_mask_workspace is not None
     assert metadata.prefill is not None
     assert metadata.prefill.route is expected
+
+
+@pytest.mark.parametrize("unsupported", ["model", "dcp", "pcp", "hisparse", "spec"])
+def test_batch_invariant_dsa_rejects_unvalidated_configs(monkeypatch, unsupported):
+    from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+
+    config = create_vllm_config(
+        model_name=(
+            "deepseek-ai/DeepSeek-V3.2" if unsupported == "model" else "zai-org/GLM-5.3"
+        )
+    )
+    if unsupported == "dcp":
+        config.parallel_config.tensor_parallel_size = 2
+        config.parallel_config.decode_context_parallel_size = 2
+    elif unsupported == "pcp":
+        config.parallel_config.prefill_context_parallel_size = 2
+    elif unsupported == "hisparse":
+        config.attention_config.hisparse_config = HiSparseConfig()
+    elif unsupported == "spec":
+        config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=2
+        )
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with set_current_vllm_config(config):
+        cache = DeepseekV32IndexerCache(
+            132, torch.uint8, "indexer", config.cache_config
+        )
+        with pytest.raises(
+            NotImplementedError,
+            match=(
+                "GlmMoeDsaForCausalLM|context parallelism|HiSparse|speculative decoding"
+            ),
+        ):
+            indices = torch.empty((1, 2048), dtype=torch.int32)
+            SparseAttnIndexer(cache, 128, "ue8m0", 2048, 128, 1024, 1024, indices)
 
 
 def test_unified_mla_prepares_batch_without_slot_mapping(monkeypatch):

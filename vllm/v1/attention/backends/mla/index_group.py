@@ -121,7 +121,7 @@ class SparseMLAIndexGroup:
         num_tokens = logical_topk_indices.shape[0]
         if (
             num_tokens > self.physical_topk_indices.shape[0]
-            # Avoid side-stream writes racing a later batch's attention.
+            # BI uses compute-stream conversion with a fresh output.
             or envs.VLLM_BATCH_INVARIANT
         ):
             return triton_convert_req_index_to_global_index(

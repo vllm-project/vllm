@@ -1397,15 +1397,22 @@ class SparseAttnIndexer(CustomOp):
         ]
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and current_platform.is_cuda()
-            and self.dcp_world_size > 1
-        ):
-            raise NotImplementedError(
-                "VLLM_BATCH_INVARIANT does not support the DSA indexer with "
-                "decode context parallelism."
-            )
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+            if vllm_config.model_config.architecture != "GlmMoeDsaForCausalLM":
+                raise NotImplementedError(
+                    "Batch-invariant DSA is experimental and restricted to "
+                    "GlmMoeDsaForCausalLM."
+                )
+            if (
+                self.dcp_world_size > 1
+                or parallel_config.prefill_context_parallel_size > 1
+                or vllm_config.attention_config.hisparse_config is not None
+                or vllm_config.speculative_config is not None
+            ):
+                raise NotImplementedError(
+                    "VLLM_BATCH_INVARIANT does not support DSA with decode or "
+                    "prefill context parallelism, HiSparse, or speculative decoding."
+                )
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
