@@ -98,6 +98,7 @@ from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
+    _RootConfig,
     get_fp8_padded_hidden_size,
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
@@ -1548,6 +1549,15 @@ def get_sub_grids(
 
 
 class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
+    def __init__(
+        self,
+        hf_config: _RootConfig[PixtralVisionConfig],
+        image_size: int | None = None,
+    ) -> None:
+        super().__init__(hf_config)
+        # The image processor's `size["longest_edge"]`, if given
+        self.image_size = image_size or self.vision_config.image_size
+
     def get_num_image_tokens(
         self,
         *,
@@ -1561,7 +1571,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return ncols * nrows
 
     def get_image_size(self) -> int:
-        return self.vision_config.image_size
+        return self.image_size
 
     def get_patch_size(self) -> int:
         # spatial_merge_size is needed for Mistral3
