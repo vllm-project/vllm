@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Finding amdgpu's exact VRAM counter from KFD topology and DRM sysfs. Plain
-files in a temporary directory, so this runs without a GPU."""
+"""ROCm device queries that must work without the usual source: amdgpu's exact
+VRAM counter from KFD topology and DRM sysfs (plain files in a temporary
+directory), and RocmPlatform's fallbacks when amdsmi cannot initialize, as on
+WSL2. Both run without a GPU."""
+
+import importlib.util
+import types
 
 import pytest
+import torch
 
 from vllm.platforms.rocm_device_memory import find_vram_used_file
 
@@ -131,3 +137,81 @@ def test_vram_total_must_match_hip(root, vram_total, found):
 def test_no_kfd_topology(tmp_path):
     path, reason = _find(tmp_path)
     assert path is None and "no KFD topology" in reason
+
+
+GPU_NAME = "AMD Radeon RX 9060 XT"
+
+
+class _DeviceProperties:
+    gcnArchName = "gfx1200"
+
+
+def _amdsmi_init_fails() -> None:
+    # What amdsmi raises on WSL2 (https://github.com/vllm-project/vllm/issues/64664).
+    raise RuntimeError("AmdSmiLibraryException(34)")
+
+
+@pytest.fixture
+def rocm(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    # Private copy, because the import-time GPU arch query is stubbed and must not
+    # leak into sys.modules for other tests.
+    monkeypatch.setattr(
+        torch.cuda, "get_device_properties", lambda *_: _DeviceProperties()
+    )
+    spec = importlib.util.find_spec("vllm.platforms.rocm")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # raising=False because amdsmi_init does not exist on hosts without amdsmi.
+    monkeypatch.setattr(module, "amdsmi_init", _amdsmi_init_fails, raising=False)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *_: GPU_NAME)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    return module
+
+
+def test_get_device_name_falls_back_to_torch(rocm: types.ModuleType) -> None:
+    assert rocm.RocmPlatform.get_device_name(0) == GPU_NAME
+
+
+@pytest.mark.parametrize("init_fails", [True, False])
+@pytest.mark.parametrize(
+    ("visible_devices", "expected"), [(None, "rocm:0"), ("1", "rocm:1")]
+)
+def test_get_device_uuid_falls_back_to_physical_id(
+    rocm: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    init_fails: bool,
+    visible_devices: str | None,
+    expected: str,
+) -> None:
+    """Also when amdsmi starts but the UUID query fails: a per-GPU placeholder,
+    so callers matching GPUs by UUID never see every GPU as the same one."""
+    if not init_fails:
+
+        def uuid_query_fails(_handle):
+            # AmdSmiException where amdsmi is installed.
+            raise getattr(rocm, "AmdSmiException", RuntimeError)("uuid")
+
+        monkeypatch.setattr(rocm, "amdsmi_init", lambda: None, raising=False)
+        monkeypatch.setattr(rocm, "amdsmi_shut_down", lambda: None, raising=False)
+        monkeypatch.setattr(
+            rocm, "amdsmi_get_processor_handles", lambda: [0, 1], raising=False
+        )
+        monkeypatch.setattr(
+            rocm, "amdsmi_get_gpu_device_uuid", uuid_query_fails, raising=False
+        )
+    if visible_devices is not None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    assert rocm.RocmPlatform.get_device_uuid(0) == expected
+
+
+def test_is_fully_connected_is_false_without_amdsmi(rocm: types.ModuleType) -> None:
+    assert not rocm.RocmPlatform.is_fully_connected([0, 1])
+
+
+def test_numa_nodes_are_unknown_without_amdsmi(
+    rocm: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rocm.RocmPlatform, "device_count", classmethod(lambda _: 2))
+    assert rocm.RocmPlatform.get_all_device_numa_nodes() is None

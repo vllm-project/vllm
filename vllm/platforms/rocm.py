@@ -228,16 +228,16 @@ def _query_device_name_from_amdsmi(physical_device_id: int) -> str:
 
 @with_amdsmi_context
 def _query_device_uuid_from_amdsmi(physical_device_id: int) -> str:
-    try:
-        device = amdsmi_get_processor_handles()[physical_device_id]
-    except AmdSmiException as error:
-        logger.error("amdsmi device query failed ", exc_info=error)
-        return ""
-    try:
-        return amdsmi_get_gpu_device_uuid(device)
-    except AmdSmiException as error:
-        logger.error("amdsmi device uuid query failed ", exc_info=error)
-        return ""
+    return amdsmi_get_gpu_device_uuid(
+        amdsmi_get_processor_handles()[physical_device_id]
+    )
+
+
+@with_amdsmi_context
+def _query_numa_node_from_amdsmi(physical_device_id: int) -> int:
+    return amdsmi_topo_get_numa_node_number(
+        amdsmi_get_processor_handles()[physical_device_id]
+    )
 
 
 def _get_gcn_arch() -> str:
@@ -1071,7 +1071,13 @@ class RocmPlatform(Platform):
         try:
             return _query_is_fully_connected_from_amdsmi(physical_device_ids)
         except Exception as e:
-            logger.debug("Failed to query XGMI topology via amdsmi: %s", e)
+            # warning_once() causes a circular import on WSL, see #48397.
+            logger.warning(
+                "Could not query the XGMI topology via amdsmi (%s). Treating the "
+                "GPUs as not fully connected, which disables custom and quick "
+                "all-reduce for more than two GPUs.",
+                e,
+            )
             return False
 
     @classmethod
@@ -1081,10 +1087,12 @@ class RocmPlatform(Platform):
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
             return _query_device_name_from_amdsmi(physical_device_id)
         except Exception as e:
-            logger.debug("Failed to get device name via amdsmi: %s", e)
-            logger.warning_once(
-                "Failed to get device name via amdsmi, falling back to "
-                "torch.cuda. This will initialize CUDA."
+            # Cached per device, so this logs once; warning_once() causes a
+            # circular import on WSL, see #48397.
+            logger.warning(
+                "Failed to get the device name via amdsmi (%s), falling back to "
+                "torch.cuda. This will initialize CUDA.",
+                e,
             )
             return torch.cuda.get_device_name(device_id)
 
@@ -1094,6 +1102,7 @@ class RocmPlatform(Platform):
         try:
             return _query_device_uuid_from_amdsmi(physical_device_id)
         except Exception as e:
+            # Unique per GPU on this host.
             logger.debug("Failed to get device uuid via amdsmi: %s", e)
             return f"rocm:{physical_device_id}"
 
@@ -1494,18 +1503,14 @@ class RocmPlatform(Platform):
         )
 
     @classmethod
-    @with_amdsmi_context
     def get_all_device_numa_nodes(cls) -> list[int] | None:
         """Get NUMA nodes for all visible GPU devices."""
         try:
-            handles = amdsmi_get_processor_handles()
             numa_nodes = []
             for device_id in range(cls.device_count()):
                 physical_device_id = cls.device_id_to_physical_device_id(device_id)
                 try:
-                    numa_node = amdsmi_topo_get_numa_node_number(
-                        handles[physical_device_id]
-                    )
+                    numa_node = _query_numa_node_from_amdsmi(physical_device_id)
                 except AmdSmiException as e:
                     logger.warning(
                         "Could not detect NUMA node for GPU %d, "
