@@ -756,6 +756,7 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
         assert not hasattr(model, "_direct_reload_refusals")
     elif match is None:
         start_reload(model)
+        model.load_weights(_checkpoint().items())
         finish_reload(model, _MODEL_CONFIG, _DEVICE)
     else:
         # a refused model records no layout
