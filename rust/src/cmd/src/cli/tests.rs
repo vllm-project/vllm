@@ -306,6 +306,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -2368,6 +2369,7 @@ fn frontend_args_accept_json() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -3395,6 +3397,7 @@ fn serve_args_accept_handshake_aliases() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -4311,4 +4314,50 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
     );
     let engine = args.to_managed_engine_config(1234, &topology(&args), None);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+}
+
+#[test]
+fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
+    // An explicit `--enable-scale-out false` does not turn the routes off, as
+    // in Python's dedicated mode.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--tokens-only",
+        "--enable-scale-out",
+        "false",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert!(config.api_server_options.enable_scale_out);
+    assert!(config.skip_tokenizer_init);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(engine.python_args.iter().any(|arg| arg == "--skip-tokenizer-init"));
+    assert!(!engine.python_args.iter().any(|arg| arg == "--tokens-only"));
+
+    // The Python-supervised path receives `tokens_only` without
+    // `skip_tokenizer_init`, which Python sets on the model config only.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","tokens_only":true,"skip_tokenizer_init":false}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.api_server_options.enable_scale_out);
+    assert!(config.skip_tokenizer_init);
 }

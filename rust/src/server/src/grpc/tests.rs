@@ -3469,12 +3469,12 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
-        super::media::from_proto(rendered.media, None).expect("decode media")
-    else {
-        panic!("expected preprocessed media");
-    };
-    assert!(decoded[0].data.is_some());
+    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
+    assert!(
+        !decoded.preprocessed.is_empty(),
+        "expected preprocessed media"
+    );
+    assert!(decoded.preprocessed[0].data.is_some());
 }
 
 #[tokio::test]
