@@ -68,8 +68,7 @@ def _seam_spy(monkeypatch):
 def test_seam_dispatch(num_tokens, default_vllm_config, monkeypatch):
     """The seam runs from 64 tokens and matches post then pre.
 
-    63 stays on `MHCPreDelayedOp`. The three eps values differ, so a swapped
-    argument fails.
+    63 stays on `MHCPreDelayedOp`.
     """
     set_random_seed(0)
     residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(num_tokens)
