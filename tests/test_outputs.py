@@ -32,6 +32,11 @@ def test_request_output_forward_compatible():
     assert output is not None
 
 
+@pytest.mark.parametrize("size", [1, 3])
+def test_pooling_outputs_with_different_shapes_are_unequal(size):
+    assert PoolingOutput(torch.ones(2)) != PoolingOutput(torch.ones(size))
+
+
 @pytest.mark.parametrize(
     ("output_type", "empty_value"),
     [
