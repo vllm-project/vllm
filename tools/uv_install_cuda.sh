@@ -10,6 +10,11 @@
 #                  release index.
 #   what           passed to `uv pip install`: wheel files, or -r <file>
 # Env: CUDA_VERSION (e.g. 13.2.1), PYTORCH_CUDA_INDEX_BASE_URL
+#
+# The release path searches PyPI first and the CUDA index second: uv ranks
+# --extra-index-url above --index-url. PyTorch is already installed from the
+# CUDA index by then (vllm-runtime-base); searching that index first here would
+# take its older copies of common packages, such as urllib3 1.26.
 set -euo pipefail
 
 torch_nightly=$1
