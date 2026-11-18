@@ -10,6 +10,7 @@ back, skipping checkpoint reads and weight conversion.
 Enabled with VLLM_WEIGHT_SNAPSHOT_DIR; see load_model().
 """
 
+import contextlib
 import json
 import mmap
 import os
@@ -21,6 +22,7 @@ import regex as re
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -232,7 +234,12 @@ def save(roots: dict[str, nn.Module], path: Path) -> None:
     t0 = time.perf_counter()
     tensors, scalars, aliases = collect_state(roots)
     header = json.dumps(
-        {"magic": _MAGIC, "tensors": _describe(tensors, aliases), "scalars": scalars}
+        {
+            "magic": _MAGIC,
+            "tensors": _describe(tensors, aliases),
+            "scalars": scalars,
+            "skipped_funcs": {k: v for k, v in _recorded.items() if v},
+        }
     ).encode()
     data_off = _round_up(len(header) + 8)
     tmp = path.with_suffix(f".tmp{os.getpid()}")  # concurrent cold starts on one node
@@ -482,6 +489,64 @@ def _plausible_dummy_weights():
     return lambda: setattr(dummy_loader, "initialize_single_dummy_weight", orig)
 
 
+# Output structure of skip-listed calls during a save, written to the header.
+_recorded: dict[str, list] = {}
+
+
+def _spec(x):
+    if isinstance(x, torch.Tensor):
+        return {"t": [list(x.shape), str(x.dtype), str(x.device)]}
+    if isinstance(x, (list, tuple)):
+        return {"seq": [_spec(v) for v in x], "tuple": isinstance(x, tuple)}
+    if isinstance(x, dict):
+        return {"map": {k: _spec(v) for k, v in x.items()}}
+    raise TypeError(type(x))
+
+
+def _empty(spec):
+    if "t" in spec:
+        shape, dtype, device = spec["t"]
+        return torch.empty(shape, dtype=getattr(torch, dtype[6:]), device=device)
+    if "seq" in spec:
+        out = [_empty(v) for v in spec["seq"]]
+        return tuple(out) if spec["tuple"] else out
+    return {k: _empty(v) for k, v in spec["map"].items()}
+
+
+def _shapes(args) -> list:
+    return [list(a.shape) for a in args if isinstance(a, torch.Tensor)]
+
+
+def _patch_skip_funcs(replay: dict | None):
+    """Record output structure of listed functions (save) or replay empty outputs
+    with that structure (restore), falling back when input shapes differ."""
+    import importlib
+
+    names = [n for n in envs.VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS.split(",") if n]
+    undo = []
+    for name in names:
+        mod_name, fn_name = name.split(":")
+        try:
+            mod = importlib.import_module(mod_name)
+            orig = getattr(mod, fn_name)
+        except (ImportError, AttributeError):
+            continue
+        calls = list((replay or {}).get(name, []))
+        _recorded[name] = []
+
+        def wrapper(*args, _o=orig, _n=name, _c=calls, **kwargs):
+            if replay is not None and _c and _c[0]["in"] == _shapes(args):
+                return _empty(_c.pop(0)["out"])
+            out = _o(*args, **kwargs)
+            with contextlib.suppress(TypeError):
+                _recorded[_n].append({"in": _shapes(args), "out": _spec(out)})
+            return out
+
+        setattr(mod, fn_name, wrapper)
+        undo.append(lambda m=mod, f=fn_name, o=orig: setattr(m, f, o))
+    return lambda: [u() for u in undo]
+
+
 _restoring = False
 
 
@@ -498,13 +563,23 @@ def load_model(model_runner, path: Path) -> None:
     into it; otherwise load normally and save the post-processed state."""
     global _restoring
     restore_ = path.exists()
-    undo = _plausible_dummy_weights() if restore_ else None
+    replay = None
+    if restore_:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            replay = _read_header(fd)[0].get("skipped_funcs", {})
+        finally:
+            os.close(fd)
+    undo = [_patch_skip_funcs(replay)]
+    if restore_:
+        undo.append(_plausible_dummy_weights())
     _restoring = restore_
     try:
         model_runner.load_model(load_dummy_weights=restore_)
     finally:
         _restoring = False
-        if undo is not None:
-            undo()
+        for u in undo:
+            if u is not None:
+                u()
     roots = _roots(model_runner)
     (restore if restore_ else save)(roots, path)

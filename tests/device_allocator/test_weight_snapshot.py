@@ -3,7 +3,10 @@
 """Weight snapshot: save/restore of post-processed model state."""
 
 import os
+import sys
+import types
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -275,3 +278,66 @@ def test_restore_creates_attributes_only_the_real_load_made(tmp_path):
     dst.fused = None
     ws.restore(_roots(dst), path)
     torch.testing.assert_close(dst.fused, src.fused)
+
+
+@cuda
+def test_pure_prep_functions_are_skipped_on_restore(tmp_path, monkeypatch):
+    calls = []
+    mod: Any = types.ModuleType("ws_test_prep")
+
+    def pack(x):
+        calls.append(tuple(x.shape))
+        return x.repeat(2, 1)
+
+    mod.pack = pack
+    monkeypatch.setitem(sys.modules, "ws_test_prep", mod)
+    monkeypatch.setenv("VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS", "ws_test_prep:pack")
+
+    class Runner:
+        def __init__(self):
+            self.model: Any = None
+            self.dummy: list = []
+
+        def load_model(self, load_dummy_weights=False):
+            self.dummy.append((load_dummy_weights, ws.is_restoring()))
+            m = _Toy()
+            m.packed = sys.modules["ws_test_prep"].pack(m.table)
+            self.model = m
+
+    path = tmp_path / "snap.bin"
+    first = Runner()
+    ws.load_model(first, path)  # save
+    assert calls == [(3, 5)] and first.dummy == [(False, False)]
+
+    second = Runner()
+    ws.load_model(second, path)  # restore: pack returns an empty of the same shape
+    assert calls == [(3, 5)], "pack must not run on restore"
+    assert second.dummy == [(True, True)]
+    assert not ws.is_restoring()
+    torch.testing.assert_close(second.model.packed, first.model.packed)
+    assert sys.modules["ws_test_prep"].pack is pack, "patch not undone"
+
+
+@cuda
+def test_skip_falls_back_when_input_shapes_differ(tmp_path, monkeypatch):
+    calls = []
+    mod: Any = types.ModuleType("ws_test_prep2")
+
+    def pack(x):
+        calls.append(tuple(x.shape))
+        return x * 2
+
+    mod.pack = pack
+    monkeypatch.setitem(sys.modules, "ws_test_prep2", mod)
+    monkeypatch.setenv("VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS", "ws_test_prep2:pack")
+    replay = {
+        "ws_test_prep2:pack": [
+            {"in": [[9, 9]], "out": {"t": [[9, 9], "torch.float32", "cuda:0"]}}
+        ]
+    }
+    undo = ws._patch_skip_funcs(replay)
+    try:
+        sys.modules["ws_test_prep2"].pack(torch.ones(3, 5, device="cuda"))
+    finally:
+        undo()
+    assert calls == [(3, 5)]
