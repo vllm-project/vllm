@@ -273,7 +273,7 @@ pub(crate) fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use xgrammar_structural_tag::builders::Qwen3Builder;
 
     use super::*;
@@ -436,6 +436,36 @@ mod tests {
 
         assert_eq!(tag_string(&pinned), tag_string(&strict));
         assert_ne!(tag_string(&pinned), tag_string(&envelope_only));
+    }
+
+    #[test]
+    fn strict_tool_without_parameters_takes_any_arguments() {
+        // An omitted `parameters` deserializes to `Null`, which is not a schema.
+        let without_parameters = |strict| Tool {
+            parameters: Value::Null,
+            ..tool("get_time", strict)
+        };
+        let any_arguments = build_at_level(
+            ToolChoice::required(),
+            vec![without_parameters(None)],
+            ToolStrictLevel::Auto,
+        );
+
+        for (strict, level) in [
+            (Some(true), ToolStrictLevel::Auto),
+            (None, ToolStrictLevel::Parameter),
+        ] {
+            let pinned = build_at_level(
+                ToolChoice::required(),
+                vec![without_parameters(strict)],
+                level,
+            );
+            assert_eq!(
+                tag_string(&pinned),
+                tag_string(&any_arguments),
+                "strict: {strict:?}, level: {level:?}"
+            );
+        }
     }
 
     #[test]

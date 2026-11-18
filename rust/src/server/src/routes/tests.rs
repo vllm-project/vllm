@@ -24,7 +24,7 @@ use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
     ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
-    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection, ToolStrictLevel,
+    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
 use vllm_engine_core_client::mock_engine::DEFAULT_MOCK_MAX_MODEL_LEN;
 use vllm_engine_core_client::mock_engine::default_ready_response;
@@ -4641,77 +4641,6 @@ async fn chat_structured_outputs_use_configured_backend() {
         assert_eq!(response.status(), StatusCode::OK, "{backend:?}");
         to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
         engine_task.await.expect("mock engine task");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn chat_strict_tool_without_parameters_takes_any_arguments() {
-    // Like Python, a tool without `parameters` takes any JSON arguments, both
-    // when the request marks it strict and when the server pins every schema.
-    for (strict, tool_strict_level) in
-        [(Some(true), None), (None, Some(ToolStrictLevel::Parameter))]
-    {
-        let chat_backend = Arc::new(FakeChatBackend::new());
-        let (structural_tag_tx, structural_tag_rx) = std::sync::mpsc::channel();
-        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
-            |llm| {
-                let text = TextLlm::new(llm, chat_backend.clone());
-                ChatLlm::new(text, chat_backend)
-                    .with_tool_call_parser(ParserSelection::Explicit("hermes".to_string()))
-                    .with_tool_strict_level(tool_strict_level)
-            },
-            move |request| {
-                // Assert after the response: a panic in the mock engine would
-                // leave the request waiting for output.
-                let structural_tag = request
-                    .sampling_params
-                    .as_ref()
-                    .and_then(|params| params.structured_outputs.as_ref())
-                    .and_then(|outputs| outputs.params.constraint.as_structural_tag())
-                    .cloned();
-                structural_tag_tx.send(structural_tag).expect("send structural tag");
-            },
-        )
-        .await;
-
-        let mut function = json!({"name": "get_time"});
-        if let Some(strict) = strict {
-            function["strict"] = json!(strict);
-        }
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "model": "Qwen/Qwen1.5-0.5B-Chat",
-                            "messages": [{"role": "user", "content": "What time is it?"}],
-                            "max_tokens": 2,
-                            "tools": [{"type": "function", "function": function}],
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build request"),
-            )
-            .await
-            .expect("call app");
-        assert_eq!(response.status(), StatusCode::OK, "{tool_strict_level:?}");
-        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
-        engine_task.await.expect("mock engine task");
-
-        let structural_tag = structural_tag_rx
-            .recv()
-            .expect("engine request")
-            .expect("structural tag constraint");
-        let schemas = structural_tag.matches(r#""json_schema":"#).count();
-        let any_arguments = structural_tag.matches(r#""json_schema":true"#).count();
-        assert!(
-            schemas > 0 && any_arguments == schemas,
-            "strict: {strict:?}, tool strict level: {tool_strict_level:?}: {structural_tag}"
-        );
     }
 }
 
