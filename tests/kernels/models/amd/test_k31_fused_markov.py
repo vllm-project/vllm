@@ -468,3 +468,132 @@ def test_k31_fused_markov_graph_replay(monkeypatch, row_mapped):
         )
         assert torch.equal(s.draft_logits.values, g_cache), i
         _assert_slots_clear()
+
+
+def _tp_run(monkeypatch, temp, row_mapped, greedy, tp_size, padded=False):
+    """VLLM_K31_BEAT_MARKOVTP's launches (``markov_sample.run``'s ``tp``) on
+    ``tp_size`` simulated ranks of one GPU: a thread each, in lockstep, with
+    their own slots and logits slices, the all-gather concatenating every
+    rank's tensor along the last dim. Returns each rank's (tokens, cache) and
+    the whole-vocabulary launch's on the same state."""
+    import threading
+
+    from vllm.models.kimi_k3.amd.ops import markov_sample
+
+    def make():
+        s = _speculator(temp, seed=31, row_mapped=row_mapped, greedy=greedy)
+        if padded:
+            s.sample_idx_mapping.fill_(-1)
+            s.sample_pos.zero_()
+        if s.draft_logits is not None:
+            s.draft_logits.values.zero_()
+        return s
+
+    def base(s):
+        return s.model.base[:N_SPEC].view(1, N_SPEC, VOCAB)
+
+    ref = make()
+    assert markov_sample.run(ref, 1, base(ref))
+    torch.accelerator.synchronize()
+    want = (ref.draft_tokens[0].clone(), _cache_of(ref))
+    del ref
+
+    # Per-thread slots and slices (the module keeps one set a device).
+    local = threading.local()
+    real_slots = markov_sample._slots
+
+    def slots(*a):
+        if not hasattr(local, "slots"):
+            local.slots = real_slots(*a).clone()
+        return local.slots
+
+    def logits(device, n_spec, nv):
+        if not hasattr(local, "loc"):
+            local.loc = torch.empty(n_spec, nv, dtype=torch.bfloat16, device=device)
+        return local.loc
+
+    monkeypatch.setattr(markov_sample, "_slots", slots)
+    monkeypatch.setattr(markov_sample, "_local_logits", logits)
+    specs = [make() for _ in range(tp_size)]
+    # Compile once, single-threaded (any gather of the right shape will do).
+    warm = make()
+    markov_sample.run(
+        warm, 1, base(warm), (0, tp_size, lambda x: torch.cat([x] * tp_size, -1))
+    )
+    torch.accelerator.synchronize()
+    del warm
+    local.__dict__.clear()
+
+    bar = threading.Barrier(tp_size)
+    bufs: list = [None] * tp_size
+    errs: list = []
+
+    def rank(r):
+        def gather(x):
+            bufs[r] = x.clone()
+            bar.wait()
+            out = torch.cat(bufs, -1)
+            bar.wait()
+            return out
+
+        try:
+            assert markov_sample.run(specs[r], 1, base(specs[r]), (r, tp_size, gather))
+            torch.accelerator.synchronize()
+            # Every rank leaves its slots cleared.
+            assert not bool(local.slots.view(torch.int64).any())
+        except BaseException as e:  # noqa: BLE001
+            errs.append(e)
+            bar.abort()
+
+    threads = [threading.Thread(target=rank, args=(r,)) for r in range(tp_size)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errs:
+        raise errs[0]
+    got = [(s.draft_tokens[0].clone(), _cache_of(s)) for s in specs]
+    return want, got
+
+
+def _cache_of(s):
+    return None if s.draft_logits is None else s.draft_logits.values.clone()
+
+
+@pytest.mark.parametrize("tp_size", [2, 8])
+@pytest.mark.parametrize(
+    "temp,row_mapped,greedy,padded",
+    [
+        (1.0, False, False, False),
+        (0.6, True, False, False),
+        (0.0, False, False, False),
+        (0.0, False, True, False),
+        (1.0, False, False, True),
+    ],
+)
+def test_k31_fused_markov_tp_split(
+    monkeypatch, tp_size, temp, row_mapped, greedy, padded
+):
+    """The TP-split launches give every rank exactly the whole-vocabulary
+    launch's draft tokens and cached logits (the same bias, noise and key per
+    token; only which rank computes it changes)."""
+    (want_tok, want_cache), got = _tp_run(
+        monkeypatch, temp, row_mapped, greedy, tp_size, padded
+    )
+    for r, (tok, cache) in enumerate(got):
+        assert torch.equal(tok, want_tok), (r, tok.tolist(), want_tok.tolist())
+        if want_cache is not None:
+            assert torch.equal(cache.view(torch.int16), want_cache.view(torch.int16)), r
+    if padded:
+        assert not bool(got[0][1].view(torch.int16).any())
+
+
+def test_k31_fused_markov_tp_split_why_not():
+    from vllm.models.kimi_k3.amd.ops import markov_sample
+
+    assert markov_sample.tp_split_why_not(1, VOCAB, 8) is None
+    assert markov_sample.tp_split_why_not(1, VOCAB, 2) is None
+    assert markov_sample.tp_split_why_not(2, VOCAB, 8) is not None
+    assert markov_sample.tp_split_why_not(1, VOCAB, 1) is not None
+    assert markov_sample.tp_split_why_not(1, VOCAB, 6) is not None
+    assert markov_sample.tp_split_why_not(1, VOCAB + 32, 8) is not None

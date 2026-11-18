@@ -47,6 +47,8 @@ would turn off the batch-sharded draft logits cache
 them instead (``specialized_decode/levers/dspark.py``).
 """
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.logger import init_logger
@@ -63,6 +65,8 @@ K_CHUNK = 128
 NUM_WARPS = 4
 # Sub-slots a step's atomic maxima spread over (same-address atomics serialize).
 NSUB = 64
+# Vocabulary tokens a program copies into the cache after a TP-split loop.
+CBLOCK = 2048
 # Requests beyond which the stock loop runs: a request is a grid row that reads
 # markov_w2 again, so from 2 requests on (c1 decode has 1 a rank) the stock
 # loop's one GEMM a step is as fast or faster.
@@ -108,6 +112,9 @@ def _k31_markov_step_kernel(
     temp_ptr,
     seeds_ptr,
     vocab,
+    keys_ptr,  # TP_SPLIT: the previous step's all-gathered slots [NKEY]
+    loc_ptr,  # TP_SPLIT, not GREEDY: this rank's logits slice [k, vocab]
+    v_off,  # TP_SPLIT: this rank's first vocabulary token (else 0)
     GREEDY: tl.constexpr,
     STEP: tl.constexpr,
     RANK: tl.constexpr,
@@ -115,14 +122,25 @@ def _k31_markov_step_kernel(
     K_CHUNK: tl.constexpr,
     NSLOT: tl.constexpr,
     NSUB: tl.constexpr,
+    TP_SPLIT: tl.constexpr = False,
+    NKEY: tl.constexpr = 1,
 ):
     r64 = tl.program_id(0).to(tl.int64)
     p = tl.program_id(1)
-    v = p * BLOCK + tl.arange(0, BLOCK)
-    vmask = v < vocab
+    # TP_SPLIT: ``vocab`` is this rank's slice, from token ``v_off`` on.
+    vl = p * BLOCK + tl.arange(0, BLOCK)
+    vmask = vl < vocab
+    v = v_off + vl
     rslots = slots_ptr + r64 * NSLOT * NSUB
     if STEP == 0:
         prev = tl.load(input_ids_ptr + tl.load(anchor_idx_ptr + r64)).to(tl.int64)
+    elif TP_SPLIT:
+        prev = _key_token(keys_ptr, NKEY)
+        if p == 0:
+            tl.store(tokens_ptr + r64 * tokens_stride + (STEP - 1), prev)
+            # Step STEP - 1's slots are all-gathered: nobody reads them now.
+            jj = tl.arange(0, NSUB)
+            tl.store(rslots + (STEP - 1) * NSUB + jj, tl.zeros([NSUB], tl.uint64))
     else:
         prev = _key_token(rslots + (STEP - 1) * NSUB, NSUB)
         if p == 0:
@@ -155,11 +173,15 @@ def _k31_markov_step_kernel(
         valid = req >= 0
         row = draft_logits_row(req, row_map_ptr)
         # The cache holds the logits before temperature, as gumbel_sample stores.
-        tl.store(
-            cache_ptr + row * cache_stride0 + STEP * cache_stride1 + v,
-            logits,
-            mask=vmask & (row >= 0),
-        )
+        if TP_SPLIT:
+            # The slice is all-gathered into the cache after the last step.
+            tl.store(loc_ptr + STEP * vocab + vl, logits, mask=vmask)
+        else:
+            tl.store(
+                cache_ptr + row * cache_stride0 + STEP * cache_stride1 + v,
+                logits,
+                mask=vmask & (row >= 0),
+            )
         temp = tl.load(temp_ptr + req, mask=valid, other=0.0).to(tl.float32)
         # gumbel_sample mixes the cache column (the draft step) into the seed
         # and keys a draw by the position before the sampled token.
@@ -178,7 +200,7 @@ def _k31_markov_step_kernel(
         )
     tl.atomic_max(
         rslots + STEP * NSUB + p % NSUB,
-        _pack_key(value.to(tl.float32), p * BLOCK + idx),
+        _pack_key(value.to(tl.float32), v_off + p * BLOCK + idx),
         sem="relaxed",
     )
 
@@ -204,6 +226,44 @@ def _k31_markov_last_kernel(
     tl.store(
         rslots + j, tl.zeros([NSLOT * NSUB], tl.uint64), mask=j >= (STEP - 1) * NSUB
     )
+
+
+@triton.jit
+def _k31_markov_tp_last_kernel(
+    slots_ptr,
+    keys_ptr,  # the last step's all-gathered slots [NKEY]
+    tokens_ptr,
+    gathered_ptr,  # not GREEDY: the all-gathered logits [k, vocab]
+    cache_ptr,
+    cache_stride0,
+    cache_stride1,
+    row_map_ptr,
+    idx_map_ptr,
+    vocab,
+    GREEDY: tl.constexpr,
+    STEP: tl.constexpr,
+    NSUB: tl.constexpr,
+    NKEY: tl.constexpr,
+    CBLOCK: tl.constexpr,
+):
+    # One request (MAX_ROWS): program (0, 0) takes the last token and clears
+    # the last step's slots (the earlier ones the step launches cleared); the
+    # programs copy the gathered logits into the request's cache row.
+    s = tl.program_id(0)
+    c = tl.program_id(1)
+    if s == 0 and c == 0:
+        tl.store(tokens_ptr + STEP, _key_token(keys_ptr, NKEY))
+        jj = tl.arange(0, NSUB)
+        tl.store(slots_ptr + STEP * NSUB + jj, tl.zeros([NSUB], tl.uint64))
+    if not GREEDY:
+        row = draft_logits_row(tl.load(idx_map_ptr + s).to(tl.int64), row_map_ptr)
+        v = c * CBLOCK + tl.arange(0, CBLOCK)
+        x = tl.load(gathered_ptr + s * vocab + v, mask=v < vocab)
+        tl.store(
+            cache_ptr + row * cache_stride0 + s * cache_stride1 + v,
+            x,
+            mask=(v < vocab) & (row >= 0),
+        )
 
 
 _SLOTS: dict = {}
@@ -289,10 +349,35 @@ def why_not(spec, num_reqs: int) -> str | None:
     return None
 
 
-def run(spec, num_reqs: int, base_logits: torch.Tensor) -> bool:
+def tp_split_why_not(num_reqs: int, vocab: int, tp_size: int) -> str | None:
+    """Why the launches keep the whole vocabulary on every rank rather than
+    splitting it over TP (``run``'s ``tp``)."""
+    if tp_size <= 1:
+        return "TP 1"
+    if tp_size & (tp_size - 1):
+        return f"TP {tp_size} (the gathered slots are a power-of-2 block)"
+    if num_reqs != 1:
+        return f"{num_reqs} requests"
+    if vocab % (tp_size * BLOCK):
+        return f"vocabulary {vocab} does not split over TP {tp_size}"
+    return None
+
+
+def run(
+    spec,
+    num_reqs: int,
+    base_logits: torch.Tensor,
+    tp: tuple[int, int, Callable[[torch.Tensor], torch.Tensor]] | None = None,
+) -> bool:
     """The Markov loop of ``_sample_sequential`` from its base logits
     ([num_reqs, k, V]) on. Returns False, having done nothing, when the base
-    logits are not what the fused launch takes."""
+    logits are not what the fused launch takes.
+
+    ``tp`` = (rank, size, all_gather_last): each rank's launches read only its
+    1 / size of ``markov_w2`` (its vocabulary slice) and the step's slots are
+    all-gathered between the launches (every rank then takes the same token),
+    the logits slices once after the last step. Every logit, noise draw and
+    token is the whole-vocabulary launch's (``tp_split_why_not`` first)."""
     n_spec = spec.num_speculative_steps
     vocab = base_logits.shape[-1]
     head = spec.model.model.markov_head
@@ -330,6 +415,10 @@ def run(spec, num_reqs: int, base_logits: torch.Tensor) -> bool:
         type(spec.model).__name__, "greedy" if greedy else "probabilistic",
         n_spec, vocab, rank,
     )  # fmt: skip
+    if tp is not None:
+        _run_tp(spec, base_logits, w1, w2, greedy, cache, row_mapping, idx_map,
+                sample_pos, tokens, slots, nslot, tp)  # fmt: skip
+        return True
     for step in range(n_spec):
         _k31_markov_step_kernel[(num_reqs, nb)](
             slots,
@@ -352,6 +441,9 @@ def run(spec, num_reqs: int, base_logits: torch.Tensor) -> bool:
             spec.temperature,
             spec.seeds,
             vocab,
+            None,
+            None,
+            0,
             GREEDY=greedy,
             STEP=step,
             RANK=rank,
@@ -371,3 +463,85 @@ def run(spec, num_reqs: int, base_logits: torch.Tensor) -> bool:
         num_warps=1,
     )
     return True
+
+
+def _run_tp(
+    spec, base_logits, w1, w2, greedy, cache, row_mapping, idx_map, sample_pos,
+    tokens, slots, nslot, tp,
+) -> None:  # fmt: skip
+    """``run``'s launches for one request with the vocabulary split over TP."""
+    tp_rank, tp_size, gather = tp
+    n_spec = spec.num_speculative_steps
+    vocab = base_logits.shape[-1]
+    nv = vocab // tp_size
+    loc = None if greedy else _local_logits(base_logits.device, n_spec, nv)
+    keys = None
+    for step in range(n_spec):
+        _k31_markov_step_kernel[(1, nv // BLOCK)](
+            slots,
+            spec.input_buffers.input_ids,
+            spec._anchor_idx,
+            tokens,
+            tokens.stride(0),
+            w1,
+            w2,
+            base_logits[:, step],
+            base_logits.stride(0),
+            cache,
+            cache.stride(0),
+            cache.stride(1),
+            row_mapping,
+            idx_map,
+            idx_map.stride(0),
+            sample_pos,
+            sample_pos.stride(0),
+            spec.temperature,
+            spec.seeds,
+            nv,
+            keys,
+            loc,
+            tp_rank * nv,
+            GREEDY=greedy,
+            STEP=step,
+            RANK=w1.shape[1],
+            BLOCK=BLOCK,
+            K_CHUNK=K_CHUNK,
+            NSLOT=nslot,
+            NSUB=NSUB,
+            TP_SPLIT=True,
+            NKEY=tp_size * NSUB,
+            num_warps=NUM_WARPS,
+        )
+        # Every rank's NSUB slots of the step (64-bit keys as int32 pairs).
+        keys = gather(slots[0, step : step + 1].view(torch.int32)).view(torch.uint64)
+    gathered = None if greedy else gather(loc)
+    _k31_markov_tp_last_kernel[(1 if greedy else n_spec, triton.cdiv(vocab, CBLOCK))](
+        slots,
+        keys,
+        tokens,
+        gathered,
+        cache,
+        cache.stride(0),
+        cache.stride(1),
+        row_mapping,
+        idx_map,
+        vocab,
+        GREEDY=greedy,
+        STEP=n_spec - 1,
+        NSUB=NSUB,
+        NKEY=tp_size * NSUB,
+        CBLOCK=CBLOCK,
+        num_warps=4,
+    )
+
+
+_LOCAL: dict = {}
+
+
+def _local_logits(device, n_spec: int, nv: int) -> torch.Tensor:
+    """This rank's logits slices [k, nv] (one buffer: captured graphs keep
+    its address)."""
+    key = (device, n_spec, nv)
+    if key not in _LOCAL:
+        _LOCAL[key] = torch.empty(n_spec, nv, dtype=torch.bfloat16, device=device)
+    return _LOCAL[key]

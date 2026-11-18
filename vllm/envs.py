@@ -237,6 +237,10 @@ if TYPE_CHECKING:
     VLLM_K31_BEAT_K2SYNC: bool = True
     VLLM_K31_BEAT_EAGERPREP: bool = True
     VLLM_K31_BEAT_KDAK1: bool = True
+    VLLM_K31_BEAT_DRAFTFC: bool = True
+    VLLM_K31_BEAT_LOGITSAG: bool = True
+    VLLM_K31_BEAT_MARKOVTP: bool = True
+    VLLM_K31_BEAT_CTXKV: bool = True
     VLLM_K31_DRAFT_FLYDSL_ATTN: bool = True
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
@@ -1857,6 +1861,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # instead of draining from L2 at kernel end. Bit-exact. Under
     # decode_backend=latency_specialized only.
     "VLLM_K31_BEAT_KDAK1": lambda: bool(int(os.getenv("VLLM_K31_BEAT_KDAK1", "1"))),
+    # Kimi-K3.1 DSpark on ROCm: a DFlash-family draft's replicated aux-hidden
+    # fc (5 x 7168 -> 7168 bf16, ~0.5 GB a rank) keeps 1 / TP of its output
+    # columns a rank and all-gathers the outputs. Under
+    # decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_DRAFTFC": lambda: bool(int(os.getenv("VLLM_K31_BEAT_DRAFTFC", "1"))),
+    # Kimi-K3.1 on ROCm: the lm_head logits all-gather (target and draft) over
+    # the TP group's AITER IPC all-gather instead of RCCL when it fits its
+    # buffer. Under decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_LOGITSAG": lambda: bool(
+        int(os.getenv("VLLM_K31_BEAT_LOGITSAG", "1"))
+    ),
+    # Kimi-K3.1 DSpark on ROCm: the fused Markov launches (one request) split
+    # the vocabulary over TP, all-gathering the step maxima between launches.
+    # Same tokens and logits. Under decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_MARKOVTP": lambda: bool(
+        int(os.getenv("VLLM_K31_BEAT_MARKOVTP", "1"))
+    ),
+    # Kimi-K3.1 on ROCm: a DFlash-family draft's context K norm, RoPE and
+    # per-layer cache writes as one launch (bf16 TRITON_ATTN-layout caches).
+    # Under decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_CTXKV": lambda: bool(int(os.getenv("VLLM_K31_BEAT_CTXKV", "1"))),
     # Kimi-K3.1 on ROCm: a GQA sliding-window draft (the release DSpark) gets
     # KIMI_K3_FLYDSL_SWA_GQA, TRITON_ATTN with a FlyDSL decode/verify kernel
     # (gfx950; calls outside it fall back to Triton and log why). 0 keeps

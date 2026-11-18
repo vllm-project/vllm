@@ -70,7 +70,10 @@ def sample_sequential(spec, num_reqs: int, head_hidden: torch.Tensor) -> None:
     sample_hidden = head_hidden[spec.sample_indices[:num_sample]]
     base_logits = spec.model.compute_draft_logits(sample_hidden)
     base_logits = base_logits.view(num_reqs, n_spec, base_logits.shape[-1])
-    if markov_sample.run(spec, num_reqs, base_logits):
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import tpgather
+
+    tp = tpgather.markov_tp(num_reqs, base_logits.shape[-1])
+    if markov_sample.run(spec, num_reqs, base_logits, tp):
         embeds = None
     else:
         idx_map = spec.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)

@@ -58,8 +58,9 @@ with it set, the DSA layers run vLLM's sparse MLA, then K2.
 `latency_specialized` also turns on the c1 / c4 levers in `levers/`, each an env
 flag that defaults to 1 and is ignored without it: `VLLM_K31_BEAT_MARKOV`,
 `VLLM_K31_BEAT_DRAFTMETA`, `VLLM_K31_BEAT_K2SYNC`, `VLLM_K31_BEAT_EAGERPREP`,
-`VLLM_K31_BEAT_KDAK1`, `VLLM_K3_INDEXER_SAMPLED_TOPK` and
-`VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER` (the last only with `VLLM_KIMI_SD_DSA_PROLOGUE=1`,
+`VLLM_K31_BEAT_KDAK1`, `VLLM_K31_BEAT_DRAFTFC`, `VLLM_K31_BEAT_LOGITSAG`,
+`VLLM_K31_BEAT_MARKOVTP`, `VLLM_K31_BEAT_CTXKV`,
+`VLLM_K3_INDEXER_SAMPLED_TOPK` and `VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER` (the last only with `VLLM_KIMI_SD_DSA_PROLOGUE=1`,
 which defaults to 0, and `VLLM_K3_FUSED_INDEXER_PREP=1`). Set one to 0 to turn
 that lever off.
 
@@ -102,6 +103,25 @@ The levers by drafter:
   the preview's MLA draft builds. The release's GQA backend (Triton or FlyDSL)
   plans none, so the planner is not used. Startup logs the draft's backend and
   which applies.
+- `VLLM_K31_BEAT_DRAFTFC`: the release draft's `fc` (a replicated 5 x 7168 ->
+  7168 bf16 `ReplicatedLinear`, ~0.5 GB read by every rank each step) keeps
+  each rank's 1 / TP of the output columns, all-gathered along the last dim
+  (`levers/tpgather.py`). The preview has no such fc; startup logs why not.
+- `VLLM_K31_BEAT_LOGITSAG`: both drafts and the target; `LogitsProcessor`'s
+  vocab-parallel all-gather runs over the TP group's AITER IPC all-gather
+  instead of RCCL. Both gathers fall back to RCCL for payloads larger than the
+  AITER buffer (prefill).
+- `VLLM_K31_BEAT_MARKOVTP`: both drafts, one request, TP a power of 2 that
+  divides the vocabulary in Markov blocks. Each rank's fused Markov launches
+  read only its 1 / TP of `markov_w2` (168 MB) and its vocabulary slice; the
+  step maxima (one packed key a sub-slot) are all-gathered between the
+  launches and the draft logits once after them (AITER IPC all-gather). Same
+  tokens and cached logits as the whole-vocabulary launches.
+- `VLLM_K31_BEAT_CTXKV`: the release draft (any DFlash-family `Qwen3` draft
+  with bf16 `TRITON_ATTN`-layout caches); `precompute_and_store_context_kv`'s
+  K norm, RoPE and per-layer cache writes run as one launch
+  (`ops/ctx_kv_store.py`) after the stock K/V projection. Others run stock and
+  log why.
 - `VLLM_K31_BEAT_K2SYNC`, `_EAGERPREP`, `_KDAK1`, `VLLM_K3_INDEXER_SAMPLED_TOPK`
   and the DSA prologue indexer touch only the target.
 
@@ -211,6 +231,7 @@ levers/          the c1 / c4 levers: the gate (lever_on), the v1 patches
     mla.py       the bs1 MLA planner hook, the sparse MLA fused indptr
     mla_bs1_meta.py  the closed-form bs=1 MLA planner
     runner.py    the identity logits rows slice
+    tpgather.py  the draft fc's TP sharding, the logits all-gather over AITER
 runtime/
     __init__.py  DecodeConfig, specialized_decode_config(), unsupported(),
                  m1_reasons()
