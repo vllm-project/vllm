@@ -1237,6 +1237,48 @@ def test_update_state_preserves_each_mamba_group():
     ]
 
 
+def _make_ring_read_scheduler():
+    """DeepSeek-V4.1 shape: attention group 0 plus a ring group 1, no mamba."""
+    sched = _make_read_scheduler()
+    sched._has_mamba = False
+    sched._attn_group_ids = [0, 1]
+    sched._mamba_group_ids = []
+    sched._attn_group_is_state = [False, True]
+    sched._has_state_attn_groups = True
+    sched._is_hma_required = True
+    sched.blocks_per_sw = [0, 0]
+    return sched
+
+
+def test_update_state_ring_block_survives_partial_hit_alignment():
+    # The ring owns one block on both sides, so the suffix alignment that
+    # trims the attention group's locally recomputed tail must leave it whole.
+    sched = _make_ring_read_scheduler()
+    request = _make_read_request([[10, 11], [90]])
+
+    sched.update_state_after_alloc(
+        request,
+        _FakeBlocks(all_groups=([100, 101, 102], [200])),
+        num_external_tokens=256,
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
+    assert sched._req_kv_params["req"]["remote_block_ids"] == [[10, 11], [90]]
+
+
+def test_update_state_full_attention_hit_still_carries_ring_block():
+    sched = _make_ring_read_scheduler()
+    request = _make_read_request([[10, 11], [90]])
+
+    sched.update_state_after_alloc(
+        request,
+        _FakeBlocks(all_groups=([100, 101], [200])),
+        num_external_tokens=0,
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[], [200]]
+
+
 def test_align_read_blocks_allows_configured_lookahead_tail():
     assert moriio_connector.MoRIIOConnectorScheduler._align_read_blocks(
         [100, 101, 102], [10], max_decode_tail_blocks=2
