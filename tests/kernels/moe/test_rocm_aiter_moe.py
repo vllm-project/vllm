@@ -2000,3 +2000,27 @@ def test_aiter_experts_output_width_with_packed_fp4_input(
     _, _, output = experts.workspace_shapes(5, 512, 128, 2, 16, 2, None, None)
 
     assert output == (5, 256 if fp4 and epv1 else 128)
+
+
+@pytest.mark.parametrize("epv1", [True, False])
+@pytest.mark.parametrize("dsv4, w4a16, fp4", _MORI_FP4_DISPATCH_CASES)
+def test_aiter_experts_output_hidden_dim_with_packed_fp4_input(
+    dsv4: bool, w4a16: bool, fp4: bool, epv1: bool
+):
+    """An EP rank that receives no tokens sizes its empty output from the
+    dispatched width, which packed MXFP4 halves; it maps back to the hidden
+    size. The layer's unpacked hidden states keep their width."""
+    import types
+
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+
+    experts = object.__new__(AiterMxfp4Experts)
+    experts.moe_config = _MoriMoEConfig(dsv4, epv1=epv1)
+    experts.quant_config = types.SimpleNamespace(
+        use_mxfp4_w4a4=False, use_mxfp4_w4a16=w4a16
+    )
+
+    assert experts.output_hidden_dim(128) == (256 if fp4 and epv1 else 128)
+    assert experts.output_hidden_dim(256) == 256
