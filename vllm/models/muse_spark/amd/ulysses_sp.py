@@ -35,7 +35,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from . import fp8_dense
-from .ops import fp8_linear
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -308,7 +307,7 @@ def build_weights(
     """The full FP8 weights of the TP-sharded fused `[q|k|v|o-gate]` (`q`, `kv`:
     this rank's sizes) and O projections."""
     qkv_rows, gate_rows = slice(0, q + 2 * kv), slice(q + 2 * kv, 2 * q + 2 * kv)
-    if fp8_dense.is_converted(qkv_proj):
+    if fp8_dense.is_fp8(qkv_proj):
         # Rows are quantized independently, so the gathered FP8 rows and scales
         # equal quantizing the gathered BF16 weight.
         weights, scales = fp8_dense.full_weight_parts(
@@ -342,11 +341,22 @@ def require_bf16_o_proj(
         )
 
 
+def quant_rows(x: torch.Tensor) -> FP8Weight:
+    """Per-token dynamic FP8 quantization of `x` (aiter)."""
+    return rocm_aiter_ops.per_token_quant(x.contiguous(), current_platform.fp8_dtype())
+
+
 def gemm(
     xq: FP8Weight, w: FP8Weight, out_dtype: torch.dtype, scaled_mm: bool = False
 ) -> torch.Tensor:
     """FP8 GEMM of per-token FP8 rows `xq` with `w`: aiter CK, or with `scaled_mm`
     hipBLASLt's row-wise scaled GEMM."""
     if scaled_mm:
-        return fp8_linear.scaled_mm(xq[0], xq[1], w[0], w[1], out_dtype)
+        return torch._scaled_mm(
+            xq[0],
+            w[0].t(),
+            scale_a=xq[1].view(-1, 1),
+            scale_b=w[1].view(1, -1),
+            out_dtype=out_dtype,
+        )
     return rocm_aiter_ops.w8a8_gemm(xq[0], w[0], xq[1], w[1], None, out_dtype)

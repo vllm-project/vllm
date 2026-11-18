@@ -85,7 +85,6 @@ from .muse_moe_runner import (
     MuseSparkRoutedExperts,
     token_sharded_moe_output,
 )
-from .ops import fp8_linear
 from .ops.fused_norm_expand import fused_rmsnorm_expand
 from .ops.fused_qk_norm_rope_kv import rocm_fused_qk_norm_rope_kv_insert
 from .ops.router_bf16x3 import (
@@ -339,7 +338,7 @@ class MuseSparkMoE(nn.Module):
             prefix=f"{prefix}.unpooler",
         )
         for linear in (self.pooler, self.unpooler):
-            if not fp8_dense.use_muse_kernels(linear, online_config):
+            if not fp8_dense.use_online_fp8(linear, online_config):
                 # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy
                 # split-K BF16-accumulating kernels for these shapes.
                 linear.quant_method = MuseSparkTorchLinearMethod()
@@ -455,7 +454,7 @@ class MuseSparkMoE(nn.Module):
         rows and scales `fp8_act` when given."""
         assert self.pooler is not None
         if fp8_act is not None:
-            return fp8_linear.linear(self.pooler, *fp8_act)
+            return self.pooler(fp8_dense.fp8_input(*fp8_act, hidden_states.dtype))[0]
         return self.pooler(hidden_states)[0]
 
     def _pool(
@@ -688,7 +687,7 @@ class MuseSparkAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         if not is_draft:
-            fp8_dense.use_muse_kernels(self.qkv_proj, quant_config)
+            fp8_dense.use_online_fp8(self.qkv_proj, quant_config)
 
         # GPT-J style: rotates interleaved adjacent channel pairs.
         self.rotary_emb: RotaryEmbedding | None = None
@@ -866,15 +865,15 @@ class MuseSparkAttention(nn.Module):
         xs: torch.Tensor,
         shard: TokenShard | None = None,
     ) -> torch.Tensor:
-        """`forward` with the FP8 qkv-gate GEMM: `xq` / `xs` are the pre-qkv norm's
-        per-token FP8 output. `o_proj` stays BF16.
+        """`forward` on the pre-qkv norm's per-token FP8 output `xq` / `xs`, for a
+        `qkv_proj` that takes FP8 input. `o_proj` stays BF16.
         """
         if isinstance(shard, UlyssesShard):
             return self.forward_ulysses(positions, (xq, xs), shard)
         if shard is not None:
             xq = usp.gather_bytes(xq, shard)
             xs = shard.gather(xs)
-        qkv = fp8_linear.linear(self.qkv_proj, xq, xs)
+        qkv, _ = self.qkv_proj(fp8_dense.fp8_input(xq, xs, self.o_proj.weight.dtype))
         q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
         if self.fused_qk_norm_rope_kv_insert:
             attn_output = self.attn(q, None, None)
@@ -909,10 +908,10 @@ class MuseSparkAttention(nn.Module):
         w = self.ulysses_weights
         assert w is not None
         dtype = self.o_proj.weight.dtype
-        # The FP8 qkv_proj's gathered weights run on its large-M GEMM; O is
-        # Ulysses' own copy.
-        scaled_mm = fp8_dense.is_converted(self.qkv_proj)
-        xq = x if isinstance(x, tuple) else fp8_linear.quant_rows(x)
+        # The FP8 qkv_proj's gathered weights run on row-wise torch._scaled_mm;
+        # O is Ulysses' own copy.
+        scaled_mm = fp8_dense.is_fp8(self.qkv_proj)
+        xq = x if isinstance(x, tuple) else usp.quant_rows(x)
         qkv = usp.a2a_tokens_to_heads(
             usp.gemm(xq, w.qkv, dtype, scaled_mm), self.q_size + 2 * self.kv_size, shard
         )
@@ -932,7 +931,7 @@ class MuseSparkAttention(nn.Module):
             "sigmoid",
             eps=self.rms_norm_eps,
         )
-        return usp.gemm(fp8_linear.quant_rows(gated.reshape(heads.shape)), w.o, dtype)
+        return usp.gemm(usp.quant_rows(gated.reshape(heads.shape)), w.o, dtype)
 
     def back(
         self,
@@ -1061,11 +1060,6 @@ class MuseSparkDecoderLayer(nn.Module):
                 bias=False,
                 prefix=f"{prefix}.feed_forward",
             )
-        # The preceding norms quantize the inputs of the FP8 qkv_proj and pooler.
-        self.fp8_qkv = fp8_dense.is_converted(self.self_attn.qkv_proj)
-        self.fp8_pooler = fp8_dense.is_converted(
-            getattr(self.feed_forward, "pooler", None)
-        )
         self.post_attn_norm = MuseSparkRMSNorm(
             config.hidden_size,
             eps=post_norm_eps,
@@ -1121,7 +1115,9 @@ class MuseSparkDecoderLayer(nn.Module):
 
         With `shard`, the stream holds the current rank's tokens only.
         """
-        if self.fp8_qkv:
+        # The preceding norms quantize the inputs of an FP8 qkv_proj and pooler
+        # whose kernels take per-token FP8 rows.
+        if fp8_dense.takes_fp8_input(self.self_attn.qkv_proj):
             xq, xs, stream = self._pre_attention_fp8(x)
             attn_out = self.self_attn.forward_fp8(positions, xq, xs, shard)
             return self.after_attention(stream, attn_out, shard)
@@ -1154,7 +1150,7 @@ class MuseSparkDecoderLayer(nn.Module):
                 and x.dim() == 2
                 and x.shape[-1] <= 8192
             ):
-                xq = torch.empty_like(x, dtype=fp8_linear.F8)
+                xq = torch.empty_like(x, dtype=current_platform.fp8_dtype())
                 xs = x.new_empty(x.shape[0], dtype=torch.float32)
                 fused_rmsnorm_fwd(
                     x,
@@ -1166,7 +1162,7 @@ class MuseSparkDecoderLayer(nn.Module):
                     out_scale=xs,
                 )
                 return xq, xs, x
-            xq, xs = fp8_linear.quant_rows(norm(x, out_dtype=self.default_dtype))
+            xq, xs = usp.quant_rows(norm(x, out_dtype=self.default_dtype))
             return xq, xs, x
         out = _norm_residual_norm_fp8(x, norm, out_dtype=None)
         if out is not None:
@@ -1175,7 +1171,7 @@ class MuseSparkDecoderLayer(nn.Module):
         attn_input, stream = norm_residual_then_norm(
             x, norm, out_dtype=self.default_dtype
         )
-        xq, xs = fp8_linear.quant_rows(attn_input)
+        xq, xs = usp.quant_rows(attn_input)
         return xq, xs, stream
 
     def after_attention(
@@ -1185,7 +1181,7 @@ class MuseSparkDecoderLayer(nn.Module):
         shard: TokenShard | None = None,
     ) -> MuseSparkResidualStream:
         """Attention boundary and FFN; the FFN boundary is returned unblended."""
-        if self.fp8_pooler:
+        if fp8_dense.takes_fp8_input(getattr(self.feed_forward, "pooler", None)):
             boundary = MuseSparkResidualStream(
                 stream=stream,
                 branch=attn_out,
@@ -1307,6 +1303,8 @@ class MuseSparkModel(LlamaModel):
                 usp.require_bf16_o_proj(
                     layer.self_attn.o_proj, vllm_config.quant_config
                 )
+                if fp8_dense.is_fp8(layer.self_attn.qkv_proj):
+                    fp8_dense.require_plain_layout(layer.self_attn.qkv_proj)
 
     def _make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device

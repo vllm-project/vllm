@@ -3,25 +3,28 @@
 """FP8 W8A8 dense linears for Muse Spark's target decoder on ROCm gfx950.
 
 The online `fp8_per_channel` quantization (`--quantization-config`) of the target
-model's fused qkv+o-gate (`qkv_proj`), MoE `pooler` and `unpooler` runs on the
-`ops.fp8_linear` GEMMs instead of the generic FP8 linear kernels.
-
-Weights are quantized as `fp8_per_channel` does (FP8 e4m3, one FP32 scale per output
-channel) but kept in `[N, K]` layout. Activations are quantized per token (`amax /
-448` of the BF16-rounded row) by the norm that precedes each GEMM instead of by a
-separate kernel:
+model's fused qkv+o-gate (`qkv_proj`), MoE `pooler` and `unpooler` runs on vLLM's
+FP8 linear kernels. Where the selected kernel takes pre-quantized per-token FP8
+input (`QuantizedActivation`), the norm that precedes the GEMM quantizes it instead
+of a separate kernel:
 
 * pre-qkv norm: FP8 and scales only;
 * pre-FFN norm: BF16 (the router needs it), FP8 and scales;
-* unpooler: its input is the experts' BF16 output (W8A16, or per-token quant plus
-  W8A8, by M).
+* unpooler: its input is the experts' BF16 output, which the kernel quantizes.
 """
 
 import torch
 
 from vllm import envs
 from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    RowWiseTorchFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.online.base import (
@@ -29,19 +32,19 @@ from vllm.model_executor.layers.quantization.online.base import (
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineLinearMethod,
-    _fp8_channel_scale,
-    _fp8_quant_per_channel,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+)
 from vllm.platforms import current_platform
-
-from .ops import fp8_linear
-
-logger = init_logger(__name__)
 
 # Quick all-reduce levels whose error on top of the FP8 GEMMs costs too much accuracy.
 _UNSUPPORTED_QUICK_REDUCE = ("INT4", "INT3")
+# Kernels that keep the `[N, K]` FP8 weight bytes the Ulysses prefill gathers.
+_PLAIN_LAYOUT_KERNELS = (
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    RowWiseTorchFP8ScaledMMLinearKernel,
+)
 
 
 def online_quant_config(
@@ -62,28 +65,18 @@ def online_target(layer: LinearBase, quant_config: QuantizationConfig | None) ->
     )
 
 
-def _on_gfx950() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx950
-
-    return on_gfx950()
-
-
-def use_muse_kernels(
-    layer: LinearBase, quant_config: QuantizationConfig | None
-) -> bool:
-    """Run an online `fp8_per_channel` layer on the Muse FP8 kernels.
+def use_online_fp8(layer: LinearBase, quant_config: QuantizationConfig | None) -> bool:
+    """Check an online `fp8_per_channel` layer for the Muse FP8 paths.
 
     Returns:
-        Whether the layer is FP8 now; False if no online target applies to it.
+        Whether the layer is FP8; False if no online target applies to it.
 
     Raises:
         NotImplementedError: For another online target (including a Hadamard
-            wrapper), a requantized checkpoint layer, or off gfx950 / without
-            AITER.
-        ValueError: With LoRA (the FP8 paths call the base GEMMs directly),
-            `--monokernel` (it reads the BF16 weights), or a coarse quick
+            wrapper or weight-only FP8), a requantized checkpoint layer, or off
+            gfx950 / without AITER.
+        ValueError: With LoRA (its wrappers do not take the fused norms' FP8
+            input), `--monokernel` (it reads the BF16 weights), or a coarse quick
             all-reduce (INT4 / INT3), whose quantization error on top of FP8 GEMMs
             costs too much accuracy.
 
@@ -91,24 +84,32 @@ def use_muse_kernels(
     if not online_target(layer, quant_config):
         return False
     method = layer.quant_method
-    if type(method) is not Fp8PtpcOnlineLinearMethod or (
-        method.requantization_source is not None
+    if (
+        type(method) is not Fp8PtpcOnlineLinearMethod
+        or method.requantization_source is not None
+        or method.activation_quant_key != kFp8DynamicTokenSym
     ):
         raise NotImplementedError(
             f"Muse Spark supports only the 'fp8_per_channel' online quantization "
-            f"of BF16 weights on {layer.prefix}; got {type(method).__name__}."
+            f"of BF16 weights with per-token FP8 activations on {layer.prefix}; got "
+            f"{type(method).__name__}."
         )
     from vllm._aiter_ops import is_aiter_found_and_supported
 
-    if not (_on_gfx950() and is_aiter_found_and_supported()):
+    supported = current_platform.is_rocm()
+    if supported:
+        from vllm.platforms.rocm import on_gfx950
+
+        supported = on_gfx950() and is_aiter_found_and_supported()
+    if not supported:
         raise NotImplementedError(
             "Muse Spark FP8 dense linears need ROCm gfx950 with AITER."
         )
     vllm_config = get_current_vllm_config()
     if vllm_config.lora_config is not None:
         raise ValueError(
-            "Muse Spark FP8 dense linears do not support LoRA: the FP8 paths call "
-            "the base layers' GEMMs directly."
+            "Muse Spark FP8 dense linears do not support LoRA: the fused norms feed "
+            "the base layers pre-quantized FP8 input."
         )
     if vllm_config.kernel_config.monokernel:
         raise ValueError("Muse Spark FP8 dense linears do not support --monokernel.")
@@ -120,51 +121,54 @@ def use_muse_kernels(
             "quantization on top of FP8 GEMMs collapses accuracy. Use INT8, FP or "
             "NONE."
         )
-    layer.quant_method = Fp8DenseLinearMethod()
     return True
 
 
-def is_converted(layer: torch.nn.Module | None) -> bool:
-    return isinstance(getattr(layer, "quant_method", None), Fp8DenseLinearMethod)
+def is_fp8(layer: torch.nn.Module | None) -> bool:
+    return isinstance(getattr(layer, "quant_method", None), Fp8PtpcOnlineLinearMethod)
 
 
-class Fp8DenseLinearMethod(Fp8PtpcOnlineLinearMethod):
-    """`fp8_per_channel` in the Muse kernels' layout: `weight` `[N, K]` e4m3 and
-    `weight_scale` `[N]` FP32. A BF16 input runs W8A16, or quant + W8A8 (the paths
-    that do not come through a fused FP8 producer, such as the unpooler).
-    """
+def takes_fp8_input(layer: torch.nn.Module | None) -> bool:
+    """Whether `layer`'s kernel takes per-token FP8 rows (`fp8_input`)."""
+    return layer is not None and get_input_quant_key(layer) == kFp8DynamicTokenSym
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-        weight = layer.weight
-        scale = _fp8_channel_scale(weight_amax(weight, dim=-1, keepdim=True))
-        replace_parameter(layer, "weight", _fp8_quant_per_channel(weight, scale))
-        replace_parameter(layer, "weight_scale", scale.view(-1))
-        layer.input_scale = None
-        layer._already_called_process_weights_after_loading = True
-        n, k = layer.weight.shape
-        logger.info_once(
-            "Muse Spark FP8 dense [%d, %d] GEMMs: %s.",
-            n,
-            k,
-            fp8_linear.routes(n, k),
-            scope="local",
+
+def fp8_input(
+    xq: torch.Tensor, xs: torch.Tensor, dtype: torch.dtype
+) -> QuantizedActivation:
+    """Per-token FP8 rows `xq` and their scales `xs` as a linear layer's input."""
+    return QuantizedActivation(
+        data=xq,
+        scale=xs.view(-1, 1),
+        orig_dtype=dtype,
+        orig_shape=xq.shape,
+        quant_key=kFp8DynamicTokenSym,
+    )
+
+
+def require_plain_layout(layer: torch.nn.Module) -> None:
+    """Refuse an FP8 kernel that reorders the weight bytes the Ulysses prefill
+    gathers."""
+    kernel = getattr(layer.quant_method, "fp8_linear", None)
+    if not isinstance(kernel, _PLAIN_LAYOUT_KERNELS):
+        raise NotImplementedError(
+            f"Muse Spark ulysses_prefill gathers the FP8 {layer.prefix} weight in "
+            f"[N, K] layout, which {type(kernel).__name__} does not keep."
         )
-
-    def apply(self, layer, x, bias=None):
-        assert bias is None
-        return fp8_linear.linear(layer, x)
 
 
 def full_weight_parts(layer: torch.nn.Module, group, world: int):
-    """All-gather the FP8 shards and their row scales: `([wq_r], [ws_r])` in rank
-    order.
+    """All-gather the `[N, K]` FP8 shards and their row scales: `([wq_r], [ws_r])`
+    in rank order.
     """
-    wq = layer.weight.data
-    ws = layer.weight_scale.data
+    w = layer.weight.data
+    # RowWise keeps the `[K, N]` view of the `[N, K]` tensor; AiterPerToken stores
+    # the `[N, K]` tensor itself.
+    wq = w if w.is_contiguous() else w.t()
+    assert wq.is_contiguous()
+    ws = layer.weight_scale.data.view(-1)
     wparts = [torch.empty_like(wq.view(torch.uint8)) for _ in range(world)]
     torch.distributed.all_gather(wparts, wq.view(torch.uint8), group=group)
     sparts = [torch.empty_like(ws) for _ in range(world)]
     torch.distributed.all_gather(sparts, ws, group=group)
-    return [p.view(fp8_linear.F8) for p in wparts], sparts
+    return [p.view(wq.dtype) for p in wparts], sparts

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Muse Spark ROCm FP8 dense GEMMs: the weight quantization (CPU), the Ulysses
-weight gather (gloo; one device per rank) and, on gfx950, the online
-`fp8_per_channel` mapping, the routed GEMM and fused-norm numerics and prompt
-logprobs against the BF16 path."""
+"""Muse Spark ROCm FP8 dense linears: the Ulysses weight gather (gloo; one device
+per rank) and, on gfx950, the online `fp8_per_channel` mapping, the GEMMs on BF16
+and pre-quantized input, the fused-norm numerics and prompt logprobs against the
+BF16 path."""
 
 import json
 import zlib
@@ -33,13 +33,13 @@ from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PtpcOnlineLinearMethod,
     _fp8_channel_scale,
     _fp8_quant_per_channel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.models.muse_spark.amd import fp8_dense
 from vllm.models.muse_spark.amd import ulysses_sp as usp
-from vllm.models.muse_spark.amd.ops import fp8_linear
 from vllm.models.muse_spark.common.layers import MuseSparkQKVOGateParallelLinear
 from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
     fused_norm_residual_norm_fwd,
@@ -53,7 +53,7 @@ from ..utils import multi_gpu_marks, multi_gpu_test
 from .test_muse_spark_rocm_mono import TINY_TEXT, _checkpoint_config
 from .test_muse_spark_rocm_ulysses_sp import _random_weights
 
-F8 = fp8_linear.F8
+F8 = torch.float8_e4m3fn
 FP8_DENSE = {"linear": "fp8_per_channel", "ignore": ["*o_proj"]}
 
 
@@ -120,32 +120,14 @@ class _Linear(torch.nn.Module):
 
 
 def _fp8_linear(weight: torch.Tensor, config: VllmConfig) -> _Linear:
-    layer = _Linear(weight)
+    """A layer as online `fp8_per_channel` leaves it: `weight` the `[K, N]` view of
+    the `[N, K]` FP8 tensor, `weight_scale` `[N, 1]`."""
+    scale = _fp8_channel_scale(weight_amax(weight, dim=-1, keepdim=True))
+    layer = _Linear(_fp8_quant_per_channel(weight, scale).t())
+    layer.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
     with set_current_vllm_config(config):
-        layer.quant_method = fp8_dense.Fp8DenseLinearMethod()
-    layer.quant_method.process_weights_after_loading(layer)
+        layer.quant_method = Fp8PtpcOnlineLinearMethod()
     return layer
-
-
-@pytest.mark.cpu_test
-def test_weights_are_quantized_as_fp8_per_channel_in_n_k_layout(config) -> None:
-    gen = torch.Generator().manual_seed(0)
-    w = torch.randn(96, 64, generator=gen).to(torch.bfloat16)
-    w[3] *= 50.0  # rows are scaled independently
-    w[7] = 0.0  # an all-zero row keeps a finite scale
-    layer = _fp8_linear(w.clone(), config)
-
-    assert fp8_dense.is_converted(layer)
-    assert layer.weight.dtype == F8 and layer.weight.shape == w.shape
-    assert layer.weight.is_contiguous() and layer.weight_scale.shape == (96,)
-    # The online fp8_per_channel numerics (tests/quantization/test_fp8_per_channel).
-    ref_scale = (
-        w.abs().amax(-1).float() / torch.tensor(448.0, dtype=torch.float32)
-    ).clamp_min(1.0 / (448 * 512))
-    ref = (w / ref_scale[:, None]).clamp(-448, 448).to(F8)
-    assert torch.equal(layer.weight_scale, ref_scale)
-    assert torch.equal(layer.weight.view(torch.uint8), ref.view(torch.uint8))
-    assert torch.equal(layer.weight[7].float(), torch.zeros(64))
 
 
 def _gather_worker(rank: int, world_size: int, port: int, checkpoint) -> None:
@@ -174,7 +156,7 @@ def _gather_worker(rank: int, world_size: int, port: int, checkpoint) -> None:
 
         def quantize(w: torch.Tensor):
             ref = _fp8_linear(w, config)
-            return ref.weight, ref.weight_scale
+            return ref.weight.t(), ref.weight_scale.view(-1)
 
         # The gathered FP8 shards are the bytes that quantizing the gathered BF16
         # weight yields: rows are independent.
@@ -224,33 +206,72 @@ def _skip_unless_gfx950() -> None:
         pytest.skip("Muse Spark FP8 dense needs gfx950")
 
 
+# Per-rank (N, K) of the qkv-gate (TEP4, TEP8), pooler and unpooler.
+DENSE_SHAPES = {
+    "qkvg_tp4": (4608, 8192),
+    "qkvg_tp8": (2304, 8192),
+    "pooler": (4096, 8192),
+    "unpooler": (8192, 4096),
+}
+
+
+def _online_linear(
+    config: VllmConfig, n: int, k: int, name: str, args: dict = FP8_DENSE
+) -> tuple[OnlineQuantizationConfig, ReplicatedLinear]:
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    online = OnlineQuantizationConfig(QuantizationConfigArgs(**args))
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        layer = ReplicatedLinear(
+            k, n, bias=False, quant_config=online, prefix=f"model.layers.0.{name}"
+        )
+    return online, layer
+
+
+@pytest.fixture
+def aiter_enabled(monkeypatch: pytest.MonkeyPatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
 @rocm_gfx950
-@pytest.mark.parametrize("name", sorted(set(fp8_linear.SHAPES.values())))
-@pytest.mark.parametrize(
-    "m", [1, 5, 8, 9, 24, 40, 48, 64, 100, 128, 192, 256, 320, 321, 2048]
-)
-def test_routed_gemm_matches_the_dequantized_reference(
-    config, name: str, m: int
+@pytest.mark.parametrize("name", sorted(DENSE_SHAPES))
+@pytest.mark.parametrize("m", [1, 8, 40, 64, 96, 192, 256, 257, 2048])
+def test_dense_gemms_match_the_dequantized_reference(
+    dist_init, aiter_enabled, config, name: str, m: int
 ) -> None:
-    """Every (shape, M bucket) kernel, on a BF16 activation (W8A16 or quant + W8A8),
-    against a float32 GEMM on the dequantized weight (and the quantized activation)."""
+    """The online FP8 dense layers on BF16 input and on the fused norms' per-token
+    FP8 rows (`fp8_input`), against a float32 GEMM on the dequantized weight and
+    activation. Shapes AITER has tuned run on its per-token GEMMs."""
     _skip_unless_gfx950()
-    (n, k) = next(nk for nk, nm in fp8_linear.SHAPES.items() if nm == name)
+    n, k = DENSE_SHAPES[name]
+    online, layer = _online_linear(config, n, k, f"feed_forward.{name}")
+    with set_current_vllm_config(config):
+        assert fp8_dense.use_online_fp8(layer, online)
     gen = torch.Generator(device="cuda").manual_seed(0)
     w = torch.randn(n, k, generator=gen, device="cuda").to(torch.bfloat16)
+    layer.weight.weight_loader(layer.weight, w)
+    # `[N, K]`, whichever layout the selected kernel keeps.
+    wq = layer.weight if layer.weight.shape == (n, k) else layer.weight.t()
+    w_dq = wq.float() * layer.weight_scale.view(-1, 1)
     x = torch.randn(m, k, generator=gen, device="cuda").to(torch.bfloat16)
-    layer = _fp8_linear(w, config)
-    w_dq = layer.weight.float() * layer.weight_scale[:, None]
-    got = fp8_linear.linear(layer, x)
-    uses_a8 = not (name in fp8_linear.W8A16_TABLE and m <= 64)
-    if uses_a8:
-        xq, xs = fp8_linear.quant_rows(x)
-        x_ref = xq.float() * xs.view(-1, 1)
-    else:
-        x_ref = x.float()
-    ref = x_ref @ w_dq.t()
-    rel = (got.float() - ref).norm() / ref.norm()
-    assert rel < 5e-3
+    xq, xs = usp.quant_rows(x)
+    ref = (xq.float() * xs.view(-1, 1)) @ w_dq.t()
+    outs = [layer(x)[0]]
+    if fp8_dense.takes_fp8_input(layer):
+        outs.append(layer(fp8_dense.fp8_input(xq, xs.view(-1), torch.bfloat16))[0])
+    for got in outs:
+        assert got.shape == (m, n) and got.dtype == torch.bfloat16
+        assert (got.float() - ref).norm() / ref.norm() < 5e-3
 
 
 def _assert_quant_close(q, qs, ref_q, ref_s) -> None:
@@ -286,9 +307,7 @@ def test_fused_norm_quant_matches_the_unfused_norm_then_quant() -> None:
         out=q,
         out_scale=qs,
     )
-    _assert_quant_close(
-        q, qs, *fp8_linear.quant_rows(norm(x, out_dtype=torch.bfloat16))
-    )
+    _assert_quant_close(q, qs, *usp.quant_rows(norm(x, out_dtype=torch.bfloat16)))
 
 
 @rocm_gfx950
@@ -331,7 +350,7 @@ def test_fused_boundary_quant_matches_the_boundary_then_quant(
         torch.testing.assert_close(out, ref_out)
     else:
         assert out is None
-    _assert_quant_close(q, qs, *fp8_linear.quant_rows(ref_out))
+    _assert_quant_close(q, qs, *usp.quant_rows(ref_out))
 
 
 def _online_linears(
@@ -353,16 +372,22 @@ def _online_linears(
 
 
 @rocm_gfx950
-def test_online_fp8_per_channel_loads_into_the_muse_fp8_linear(
+def test_online_fp8_per_channel_loads_the_fused_qkv_gate_layer(
     dist_init, config
 ) -> None:
-    """`--quantization-config` `fp8_per_channel` maps the fused QKV-gate layer to
-    the Muse FP8 linear: its `load_weights` goes through the online loader, which
-    quantizes once every shard is loaded (and counts the layer in its summary), to
-    the same bytes and output as converting the BF16 weight directly."""
+    """`--quantization-config` `fp8_per_channel` applies to the fused QKV-gate
+    layer: its `load_weights` goes through the online loader, which quantizes once
+    every shard is loaded (and counts the layer in its summary), to the same bytes
+    as quantizing the BF16 weight directly."""
     _skip_unless_gfx950()
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
     online = OnlineQuantizationConfig(QuantizationConfigArgs(**FP8_DENSE))
-    with set_current_vllm_config(config), torch.device("cuda"):
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
         qkv = MuseSparkQKVOGateParallelLinear(
             512,
             64,
@@ -374,8 +399,8 @@ def test_online_fp8_per_channel_loads_into_the_muse_fp8_linear(
         o_proj = ReplicatedLinear(
             256, 512, quant_config=online, prefix="model.layers.0.self_attn.o_proj"
         )
-        assert fp8_dense.use_muse_kernels(qkv, online)
-        assert not fp8_dense.use_muse_kernels(o_proj, online)
+        assert fp8_dense.use_online_fp8(qkv, online)
+        assert not fp8_dense.use_online_fp8(o_proj, online)
     assert list(online.quantized_layers) == ["model.layers.0.self_attn.qkv_proj"]
 
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -388,7 +413,9 @@ def test_online_fp8_per_channel_loads_into_the_muse_fp8_linear(
     assert torch.equal(qkv.weight.view(torch.uint8), ref.weight.view(torch.uint8))
     assert torch.equal(qkv.weight_scale, ref.weight_scale)
     x = torch.randn(5, 512, generator=gen, device="cuda").to(torch.bfloat16)
-    assert torch.equal(qkv(x)[0], fp8_linear.linear(ref, x))
+    xq, xs = usp.quant_rows(x)
+    ref_out = (xq.float() * xs) @ (ref.weight.float() * ref.weight_scale.t())
+    assert (qkv(x)[0].float() - ref_out).norm() / ref_out.norm() < 5e-3
 
 
 HADAMARD_MXFP4 = {
@@ -417,10 +444,11 @@ HADAMARD_MXFP4 = {
 def test_unsupported_online_fp8_dense_setups_are_refused(
     dist_init, checkpoint, config, monkeypatch, args, name, setup, error, match
 ) -> None:
-    """Other online targets (also behind a Hadamard rotation), the monokernel (it
-    reads the BF16 weights), LoRA (the FP8 paths skip its deltas), INT4 quick
-    all-reduce (collapses accuracy on top of FP8), and an online `o_proj` under
-    the Ulysses prefill (it reads the BF16 weight)."""
+    """Other online targets (also behind a Hadamard rotation), the
+    monokernel (it reads the BF16 weights), LoRA (its wrappers do not take the
+    fused norms' FP8 input), INT4 quick all-reduce (collapses accuracy on top of
+    FP8), and an online `o_proj` under the Ulysses prefill (it reads the BF16
+    weight)."""
     _skip_unless_gfx950()
     if setup == "int4":
         monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4")
@@ -434,7 +462,32 @@ def test_unsupported_online_fp8_dense_setups_are_refused(
         if name.endswith("o_proj"):
             usp.require_bf16_o_proj(layer, online)
         else:
-            fp8_dense.use_muse_kernels(layer, online)
+            fp8_dense.use_online_fp8(layer, online)
+
+
+@pytest.mark.cpu_test
+def test_ulysses_refuses_a_reordered_fp8_qkv_layout() -> None:
+    """The Ulysses prefill gathers the FP8 qkv weight as `[N, K]` bytes, which
+    kernels that preshuffle the weight do not keep."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.kernels.linear import (
+        AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    )
+
+    def layer(kernel_cls: type) -> SimpleNamespace:
+        kernel: object = object.__new__(kernel_cls)
+        return SimpleNamespace(
+            prefix="model.layers.0.self_attn.qkv_proj",
+            quant_method=SimpleNamespace(fp8_linear=kernel),
+        )
+
+    fp8_dense.require_plain_layout(layer(AiterPerTokenFp8ScaledMMLinearKernel))
+    with pytest.raises(NotImplementedError, match="Preshuffled"):
+        fp8_dense.require_plain_layout(
+            layer(AiterPreshuffledPerTokenFp8ScaledMMLinearKernel)
+        )
 
 
 @rocm_gfx950
@@ -481,25 +534,50 @@ def test_model_refuses_an_online_o_proj_only_with_ulysses(
 
 def _random_weights_fp8(model: torch.nn.Module) -> int:
     """`_random_weights`, with each FP8 dense layer given the `fp8_per_channel`
-    quantization of the BF16 weight `_random_weights` draws for it."""
+    quantization of the BF16 weight `_random_weights` draws for it, and run on
+    AITER's per-token FP8 kernel class, so the fused norms feed it per-token FP8
+    rows."""
+    from unittest import mock
+
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.distributed import get_tensor_model_parallel_rank
+    from vllm.model_executor.kernels.linear import (
+        AiterPerTokenFp8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        expose_input_quant_key,
+    )
     from vllm.model_executor.layers.linear import ColumnParallelLinear
 
     built = _random_weights(model)
     rank = get_tensor_model_parallel_rank()
     for prefix, module in model.named_modules():
-        if not fp8_dense.is_converted(module):
+        if not fp8_dense.is_fp8(module):
             continue
         tag = rank if isinstance(module, ColumnParallelLinear) else -1
         seed = zlib.crc32(f"{prefix}.weight:{tag}".encode())
         gen = torch.Generator(device=module.weight.device).manual_seed(seed)
         weight = torch.empty(
-            module.weight.shape, dtype=torch.bfloat16, device=module.weight.device
+            module.weight.t().shape, dtype=torch.bfloat16, device=module.weight.device
         )
         weight.normal_(generator=gen).mul_(weight.shape[-1] ** -0.5)
         scale = _fp8_channel_scale(weight_amax(weight, dim=-1, keepdim=True))
-        module.weight.copy_(_fp8_quant_per_channel(weight, scale))
-        module.weight_scale.copy_(scale.view(-1))
+        module.weight.copy_(_fp8_quant_per_channel(weight, scale).t())
+        module.weight_scale.copy_(scale)
+        method = module.quant_method
+        with (
+            mock.patch.object(
+                rocm_aiter_ops,
+                "is_triton_gemm_a8w8_per_token_tuned",
+                lambda *args: True,
+            ),
+            set_current_vllm_config(VllmConfig()),
+        ):
+            method.fp8_linear = AiterPerTokenFp8ScaledMMLinearKernel(
+                method.fp8_linear.config, method.fp8_linear.layer_param_names
+            )
+        method.fp8_linear.process_weights_after_loading(module)
+        expose_input_quant_key(module, method.fp8_linear)
     for layer in model.modules():
         if getattr(layer, "ulysses_weights", None):
             layer.build_ulysses_weights()
@@ -507,10 +585,11 @@ def _random_weights_fp8(model: torch.nn.Module) -> int:
 
 
 def _converted_layers(model: torch.nn.Module) -> list[str]:
+    """The FP8 dense layers that take the fused norms' FP8 rows."""
     return sorted(
         name.split("layers.", 1)[1]
         for name, module in model.named_modules()
-        if fp8_dense.is_converted(module)
+        if fp8_dense.is_fp8(module) and fp8_dense.takes_fp8_input(module)
     )
 
 

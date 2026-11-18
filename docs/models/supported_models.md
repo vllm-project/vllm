@@ -762,9 +762,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     On ROCm gfx950 (MI355X), `MuseSparkForConditionalGeneration` runs the
     [online](../features/quantization/online.md) `fp8_per_channel` quantization of
-    the target decoder's fused QKV-gate projection and MoE pooler and unpooler on
-    its own FP8 W8A8 GEMMs, with the per-token activations quantized by the
-    preceding norm. Enable it with
+    the target decoder's fused QKV-gate projection and MoE pooler and unpooler as
+    FP8 W8A8, with the per-token activations quantized by the preceding norm where
+    the selected FP8 kernel takes pre-quantized input. Enable it with
     `--quantization-config '{"linear": "fp8_per_channel", "ignore": ["*o_proj"]}'`.
     Other online targets are rejected on these layers. Keep `o_proj` in BF16: FP8
     costs more accuracy there, and the Ulysses prefill requires it. The DSpark

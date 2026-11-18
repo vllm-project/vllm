@@ -431,7 +431,7 @@ steps:
       - vllm/platforms/rocm.py
       - tests/models/test_muse_spark_rocm_fp8_dense.py
       - vllm/models/muse_spark/amd/fp8_dense.py
-      - vllm/models/muse_spark/amd/ops/fp8_linear.py
+      - vllm/model_executor/kernels/linear/scaled_mm/aiter.py
       - vllm/models/muse_spark/amd/ulysses_sp.py
       - vllm/models/muse_spark/amd/model.py
       commands:
