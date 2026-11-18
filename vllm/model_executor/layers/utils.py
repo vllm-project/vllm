@@ -530,7 +530,9 @@ def rocm_unquantized_gemm_impl(
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
-        return gemm_a16w16(x, weight, bias)
+        # gemm_a16w16 only accepts 2D activations.
+        out = gemm_a16w16(x.reshape(-1, x.size(-1)), weight, bias)
+        return out.reshape(*x.shape[:-1], m)
 
     use_skinny_n5to8 = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
