@@ -46,6 +46,7 @@ else:
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+_USE_FUSED_PAGED_MQA_LOGITS = _ON_GFX942 or _ON_GFX950 or _ON_RDNA
 
 
 def _decode_logits_workspace(num_rows: int, max_model_len: int) -> torch.Tensor:
@@ -786,7 +787,7 @@ def paged_mqa_logits_module():
                 str(error),
             )
             return None
-        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+        if _USE_FUSED_PAGED_MQA_LOGITS:
             function_name = "deepgemm_fp8_paged_mqa_logits"
             required_parameters = {
                 "Preshuffle",
@@ -885,7 +886,7 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+        if _USE_FUSED_PAGED_MQA_LOGITS:
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,
@@ -1442,7 +1443,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
+        if _USE_FUSED_PAGED_MQA_LOGITS:
             _decode_logits_workspace(decode_rows, decode_max_model_len)
         else:
             workspace_manager.get_simultaneous(
