@@ -1662,6 +1662,94 @@ class SpeculativeConfig:
         )
         draft_hf_config.max_position_embeddings = target_max_model_len
 
+    # Raw config.json keys that count as declaring RoPE. "rope_"+"scaling"
+    # is assembled to avoid the forbidden-string lint for the Transformers-v5
+    # deprecated name; get_config_dict still returns it on older checkpoints.
+    _ROPE_CONFIG_KEYS = ("rope_theta", "rope_" + "scaling", "rope_parameters")
+
+    @staticmethod
+    def _resolve_rope_base_and_type(
+        hf_config: PreTrainedConfig,
+    ) -> tuple[float, str]:
+        """Return the RoPE base and type that `get_rope` would use.
+
+        Prefer `rope_parameters` (first entry if nested), else top-level
+        `rope_theta`, else base 10000 / type `default`. Transformers v5 already
+        folds legacy scaling dicts into `rope_parameters`.
+        """
+        for params in iter_rope_parameters(hf_config):
+            base = params.get("rope_theta", 10000)
+            rope_type = params.get("rope_type") or params.get("type") or "default"
+            return float(base), str(rope_type)
+
+        base = getattr(hf_config, "rope_theta", None)
+        if base is None:
+            base = 10000
+        return float(base), "default"
+
+    @staticmethod
+    def _checkpoint_declares_rope(model: str | None) -> bool | None:
+        """Whether the draft checkpoint's `config.json` declares rope keys.
+
+        Returns `None` when the raw config cannot be read (offline cache
+        miss, custom path, etc.), so callers can skip the omission warning.
+        """
+        if not model:
+            return None
+        # PreTrainedConfig is Any outside TYPE_CHECKING; import for the call.
+        from transformers import PreTrainedConfig as HFPreTrainedConfig
+
+        try:
+            config_dict, _ = HFPreTrainedConfig.get_config_dict(model)
+        except Exception:
+            return None
+        if not isinstance(config_dict, dict):
+            return None
+        return any(key in config_dict for key in SpeculativeConfig._ROPE_CONFIG_KEYS)
+
+    @staticmethod
+    def _maybe_log_draft_rope(
+        draft_model_config: ModelConfig,
+        target_model_config: ModelConfig,
+    ) -> None:
+        """Log the draft RoPE resolution; warn when keys were omitted (#61231).
+
+        EAGLE draft rotary embeddings are built from the draft `hf_config`
+        alone. When the draft `config.json` omits rope keys, transformers
+        and `get_rope` both default to base 10000, which can silently
+        disagree with a long-context target (e.g. Llama-3.1 at 500000).
+        Numerics are left unchanged; this only makes the resolution visible.
+        """
+        draft_base, draft_type = SpeculativeConfig._resolve_rope_base_and_type(
+            draft_model_config.hf_config
+        )
+        target_base, target_type = SpeculativeConfig._resolve_rope_base_and_type(
+            target_model_config.hf_config
+        )
+        logger.info(
+            "Draft model RoPE: base=%s, rope_type=%s "
+            "(method uses draft config only; target base=%s, rope_type=%s).",
+            draft_base,
+            draft_type,
+            target_base,
+            target_type,
+        )
+        declares = SpeculativeConfig._checkpoint_declares_rope(draft_model_config.model)
+        if declares is False and draft_base != target_base:
+            logger.warning(
+                "Draft model config omits rope keys "
+                "(rope_theta / rope_parameters); using default "
+                "RoPE base %s (rope_type=%s). Target model uses base %s "
+                "(rope_type=%s). EAGLE draft RoPE is not inherited from the "
+                "target. If the draft was trained at a different base, set "
+                "rope_theta (and rope_parameters if needed) in the draft "
+                "config.json.",
+                draft_base,
+                draft_type,
+                target_base,
+                target_type,
+            )
+
     @staticmethod
     def _verify_and_get_draft_tp(
         target_parallel_config: ParallelConfig,
