@@ -146,3 +146,56 @@ def feature_finish(
         enable_fp_fusion=False,
     )
     return normalized
+
+
+@triton.jit
+def _score_shortlist(
+    Weight,
+    Hidden,
+    Ids,
+    Scores,
+    H: tl.constexpr,
+    C: tl.constexpr,
+    STRIDE_W0: tl.constexpr,
+    STRIDE_W1: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    row = tl.program_id(0)
+    candidate = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
+    token = tl.load(Ids + row * C + candidate, candidate < C, 0).to(tl.int64)
+    hidden_idx = tl.arange(0, BLOCK_H)
+    score = tl.full((BLOCK_C, BLOCK_H), 0.0, tl.float32)
+    for offset in tl.static_range((H + BLOCK_H - 1) // BLOCK_H):
+        h = offset * BLOCK_H + hidden_idx
+        hidden = tl.load(Hidden + row * H + h, h < H, 0).to(tl.float32)
+        weight = tl.load(
+            Weight + token[:, None] * STRIDE_W0 + h[None, :] * STRIDE_W1,
+            (candidate[:, None] < C) & (h[None, :] < H),
+            0,
+        ).to(tl.float32)
+        score += hidden[None, :] * weight
+    tl.store(Scores + row * C + candidate, tl.sum(score, axis=1), candidate < C)
+
+
+def score_shortlist(
+    weight: torch.Tensor, hidden: torch.Tensor, ids: torch.Tensor
+) -> torch.Tensor:
+    """Gathered BF16 head scores without a token-by-candidate-by-hidden buffer."""
+    rows, candidates = ids.shape
+    scores = hidden.new_empty((rows, candidates))
+    _score_shortlist[(rows, triton.cdiv(candidates, 4))](
+        weight,
+        hidden.contiguous(),
+        ids.contiguous(),
+        scores,
+        hidden.shape[1],
+        candidates,
+        weight.stride(0),
+        weight.stride(1),
+        1024,
+        4,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return scores

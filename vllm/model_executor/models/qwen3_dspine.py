@@ -27,7 +27,12 @@ from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dspine_injection import fused_adjacent_injection
-from .qwen3_dspine_refinement import exact_features, feature_finish, feature_message
+from .qwen3_dspine_refinement import (
+    exact_features,
+    feature_finish,
+    feature_message,
+    score_shortlist,
+)
 from .utils import WeightsMapper, maybe_prefix
 
 _BRIDGE_METADATA = (
@@ -477,8 +482,7 @@ class DSpineQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         shortlist, _ = self.logits_processor.get_top_k_tokens(
             self._coarse_lm_head, hidden_states, shortlist_size
         )
-        weights = self.lm_head.weight[shortlist]
-        scores = torch.bmm(weights, hidden_states.unsqueeze(-1)).squeeze(-1)
+        scores = score_shortlist(self.lm_head.weight, hidden_states, shortlist)
         values, ranks = scores.topk(k, dim=-1)
         values = values.float() * self.logits_processor.scale
         if self.logits_processor.soft_cap is not None:
