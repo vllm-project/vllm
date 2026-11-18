@@ -199,6 +199,15 @@ def can_initialize(
         ):
             pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
 
+    if model_arch in ("Inkling2ForConditionalGeneration", "Inkling2DSparkModel"):
+        from vllm.platforms import current_platform
+
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            pytest.skip("Inkling2 requires Blackwell (SM10x)")
+
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform
 
@@ -250,7 +259,7 @@ def can_initialize(
             speculative_config={
                 "model": model_info.speculative_model,
                 "method": model_info.speculative_method,
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": model_info.num_speculative_tokens,
             }
             if model_info.speculative_model
             else None,
