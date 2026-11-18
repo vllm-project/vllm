@@ -6139,6 +6139,9 @@ async fn happy_path_returns_sse_stream() {
         0.0
     );
 
+    // The recorded duration must cover the time the body is still being read.
+    let body_gap = Duration::from_millis(50);
+    tokio::time::sleep(body_gap).await;
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
@@ -6192,6 +6195,14 @@ async fn happy_path_returns_sse_stream() {
             None,
         ),
         1.0
+    );
+    assert!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_sum",
+            None,
+        ) >= body_gap.as_secs_f64()
     );
 }
 
