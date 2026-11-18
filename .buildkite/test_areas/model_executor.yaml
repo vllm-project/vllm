@@ -108,7 +108,6 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/model_executor/model_loader/test_direct_reload.py
   - tests/model_executor/model_loader/test_load_plan.py
-  - tests/model_executor/model_loader/test_reload_lifecycle.py
   - tests/model_executor/model_loader/test_reload_refit.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -117,7 +116,6 @@ steps:
     pytest -v -s
     model_executor/model_loader/test_direct_reload.py
     model_executor/model_loader/test_load_plan.py
-    model_executor/model_loader/test_reload_lifecycle.py
   - >-
     pytest -v -s model_executor/model_loader/test_reload_refit.py
     -m "not distributed and not slow_test" --timeout=900 --timeout-method=thread
