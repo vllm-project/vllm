@@ -27,6 +27,11 @@ engine drives on your behalf:
 3. **Weight Update** (`update_weights`): transfers updated weights. May be called one or more times (e.g. for chunked transfers).
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
+Checkpoint-format backends reload in the mode set by the `VLLM_RELOAD_MODE`
+environment variable. For RL weight updates, prefer
+[direct reload](../direct_reload.md) (`VLLM_RELOAD_MODE=direct`) over the
+default [layerwise reload](../layerwise.md).
+
 ## Available Backends
 
 | Backend | Transport | Use Case |
@@ -149,6 +154,21 @@ engine = WeightTransferTrainerFactory.trainer_init(
 )
 engine.send_weights()  # called on every rank
 ```
+
+## Verifying a New Model Without a Trainer
+
+To check that weight updates work for a new model before wiring up an RL
+framework, the [checkpoint publisher and weight-update verifier](https://github.com/vllm-project/vllm/tree/vllm-state-transition-verifier/tools/state_transition_verifier) on the
+`vllm-state-transition-verifier` branch pushes a local Hugging Face checkpoint
+into a running `vllm serve` over NCCL, without a trainer, and compares
+fixed-token outputs and GSM8K accuracy before and after the update. Get it with:
+
+```bash
+git fetch origin vllm-state-transition-verifier
+git checkout FETCH_HEAD -- tools/state_transition_verifier
+```
+
+and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 

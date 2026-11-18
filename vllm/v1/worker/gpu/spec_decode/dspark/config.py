@@ -8,10 +8,24 @@ from vllm.config.speculative import (
     _get_minimax_m3_dspark_draft,
     _validate_qwen3_omni_dspark,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import (
+    check_draft_lm_head_quantization,
+)
 
 if TYPE_CHECKING:
-    from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
+
+
+def dspark_draft_supports_eplb(draft_model_config: "ModelConfig") -> bool:
+    """Return whether a DSpark draft should register with EPLB here."""
+    if current_platform.is_rocm():
+        return False
+    return getattr(draft_model_config.hf_config, "model_type", None) in (
+        "deepseek_v4",
+        "deepseek_v41",
+    )
 
 
 class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
@@ -19,7 +33,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )
-    supported_options = frozenset({"dspark_draft_topk"})
+    supported_options = frozenset({"dspark_draft_topk", "draft_lm_head_quantization"})
     uses_separate_workspace_lane = True
     # DSpark predicts acceptance with its own confidence head.
     adaptive_verification_uses_draft_logits = False
@@ -40,8 +54,12 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             return _get_minimax_m3_dspark_draft(
                 target, load_config.download_dir if load_config else None
             )
-        # DeepSeek DSpark can ship the weights inside the target checkpoint
-        if not spec.quantization:
+        # DeepSeek DSpark can ship the weights inside the target checkpoint.
+        # Mistral Large 4 DSpark drafts ship in BF16.
+        if (
+            not spec.quantization
+            and target.hf_text_config.model_type != "mistral_large_4"
+        ):
             spec.quantization = target.quantization
         return target.model
 
@@ -59,7 +77,13 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             ]
             draft.quantization = target.quantization
             spec.update_arch_()
-        spec.parallel_drafting = True
+        elif (
+            "MistralLarge4DSparkModel" in draft.architectures
+            and spec.kv_cache_dtype is None
+        ):
+            # The target's sparse fp8_ds_mla cache layout does not apply to the
+            # dense MLA draft layers.
+            spec.kv_cache_dtype = "auto"
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
@@ -97,6 +121,17 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                 )
             hf_config.dspark_draft_topk = dspark_draft_topk
 
+        if spec.draft_lm_head_quantization is not None:
+            # Other drafters may read lm_head.weight directly (e.g. Muse Spark).
+            if not {"DSparkDraftModel", "DSparkV41DraftModel"} & set(
+                draft.architectures
+            ):
+                raise ValueError(
+                    "draft_lm_head_quantization is only supported by the "
+                    "DeepSeek-V4/V4.1 DSpark drafters"
+                )
+            check_draft_lm_head_quantization(spec)
+
         assert spec.target_model_config is not None
         _validate_qwen3_omni_dspark(
             spec.target_model_config, draft, spec.num_speculative_tokens
@@ -109,19 +144,22 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query).
-            return self.num_speculative_tokens
+            return self.num_scheduled_spec_tokens
         return super().num_lookahead_tokens
 
     def hash_factors(self) -> list[Any]:
-        # Adaptive verification changes the DSpark draft graph.
-        return [self.spec_config.enable_adaptive_verification]
+        # Adaptive verification and draft TP both change the draft graph.
+        return [
+            self.spec_config.enable_adaptive_verification,
+            self.spec_config.draft_tensor_parallel_size,
+        ]
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
         dcp_size = parallel_config.decode_context_parallel_size
         pcp_size = parallel_config.prefill_context_parallel_size
         if (
             dcp_size not in (1, pcp_size)
-            and self.spec_config.draft_model_config.use_mla
+            and self.spec_config.draft_decode_context_parallel_size != 1
         ):
             return (
                 "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
