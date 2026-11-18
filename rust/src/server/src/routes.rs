@@ -29,7 +29,7 @@ use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{get, post};
+use axum::routing::{MethodRouter, get, post};
 use axum::{Json, Router};
 use tower::ServiceExt as _;
 use tower_http::trace::TraceLayer;
@@ -45,9 +45,6 @@ const SCALE_OUT_DISABLED_MESSAGE: &str =
 /// Scale-out routes that Python registers together with
 /// `/inference/v1/generate` but the Rust frontend does not implement yet.
 const UNIMPLEMENTED_SCALE_OUT_ROUTES: &[&str] = &[
-    "/inference/v1/abort_requests",
-    "/v1/chat/completions/render",
-    "/v1/completions/render",
     "/v1/messages/render",
     "/v1/responses/render",
     "/v1/chat/completions/derender",
@@ -171,15 +168,34 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
 
+    let scale_out_routes: [(&str, MethodRouter<Arc<AppState>>); 4] = [
+        ("/inference/v1/generate", post(inference::generate)),
+        (
+            "/inference/v1/abort_requests",
+            post(inference::abort_requests),
+        ),
+        (
+            "/v1/chat/completions/render",
+            post(render::render_chat::<AppState>),
+        ),
+        (
+            "/v1/completions/render",
+            post(render::render_completion::<AppState>),
+        ),
+    ];
     if gates.scale_out {
-        router = router.route("/inference/v1/generate", post(inference::generate));
+        for (path, handler) in scale_out_routes {
+            router = router.route(path, handler);
+        }
         // TODO: implement the remaining scale-out routes.
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(not_supported));
         }
     } else {
         info!("{SCALE_OUT_DISABLED_MESSAGE}");
-        router = router.route("/inference/v1/generate", post(disabled_scale_out));
+        for (path, _) in scale_out_routes {
+            router = router.route(path, post(disabled_scale_out));
+        }
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
         }

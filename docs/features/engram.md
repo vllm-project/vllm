@@ -183,6 +183,13 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+On ROCm, `VLLM_ROCM_ENGRAM_HIP_VMM=1` places the shared tables in HIP VMM host
+memory instead, which is faster to fill than `/dev/shm`. It is off by default:
+on affected amdgpu drivers (for example 6.16.6) the tables' host memory is not
+freed after the replicas exit, until reboot
+([ROCm/rocm-systems#13573](https://github.com/ROCm/rocm-systems/issues/13573)).
+Any HIP VMM failure falls back to `/dev/shm` on every replica.
+
 ## Splitting GPU tables across engines (DeepSeek V4.1)
 
 Engines in one NVLink domain, such as the prefill engines of a disaggregated

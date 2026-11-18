@@ -19,7 +19,7 @@ MUSE_SPARK_CONFIG = {
 TP_SIZES = (4, 8, 16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     tp: int
     # Tokens per request in a verify step (1 + draft tokens).
@@ -155,7 +155,10 @@ def unsupported(vllm_config) -> str | None:
             not in (None, getattr(draft, "vocab_size", None)),
             "a reduced DSpark draft vocabulary",
         ),
-        (kv_dtype not in ("bfloat16", torch.bfloat16), "KV cache dtypes but BF16"),
+        (
+            kv_dtype not in ("bfloat16", torch.bfloat16, "fp8", "fp8_e4m3"),
+            "KV cache dtypes but BF16 and FP8 E4M3",
+        ),
         (cache.block_size != 16, "KV cache block sizes but 16"),
         (vllm_config.kv_transfer_config is not None, "KV transfer"),
         (envs.VLLM_BATCH_INVARIANT, "batch-invariant mode"),

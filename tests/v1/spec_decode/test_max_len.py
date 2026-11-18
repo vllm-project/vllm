@@ -23,7 +23,6 @@ def test_ngram_max_len(method: str, num_speculative_tokens: int, vllm_runner):
     """N-gram decoding stops at max_model_len."""
     with vllm_runner(
         "facebook/opt-125m",
-        trust_remote_code=False,
         max_model_len=100,
         enable_chunked_prefill=None,
         enforce_eager=True,  # For faster initialization.
@@ -56,7 +55,6 @@ def test_eagle_max_len(
 
     with vllm_runner(
         "meta-llama/Meta-Llama-3-8B-Instruct",
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         enforce_eager=True,  # For faster initialization.
         speculative_config={
