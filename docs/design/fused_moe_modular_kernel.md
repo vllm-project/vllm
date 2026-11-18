@@ -187,7 +187,7 @@ This section describes the significance of the various functions exposed by the 
 
 `FusedMoEPrepareAndFinalizeModular::finalize()`: Maybe perform TopK Weight Application and Reduction and All2All Combine. Typically the Combine function from the relevant All2AllManager is invoked.
 
-`FusedMoEPrepareAndFinalizeModular::activation_format()`: Return `FusedMoEActivationFormat.BatchedExperts` if the output of the prepare method (i.e. the All2All dispatch) is Batched. Return `FusedMoEActivationFormat.Standard` otherwise.
+`FusedMoEPrepareAndFinalizeModular::activation_format()`: Return `FusedMoEActivationFormat.BatchedExperts` when dispatch produces per-expert batches, `FusedMoEActivationFormat.PaddedStandard` when it produces a token-major buffer whose row count is an upper bound with inactive padding rows, and `FusedMoEActivationFormat.Standard` for an exact token-major buffer.
 
 `FusedMoEPrepareAndFinalizeModular::topk_indices_dtype()`: Data type of the TopK ids. Some All2All kernels have strict requirements pertaining to the data type of the TopK ids. This requirement is passed on to the `FusedMoe::select_experts` function so it could be respected. If there are no strict requirements return None.
 
@@ -201,7 +201,7 @@ We suggest picking an already existing `FusedMoEPrepareAndFinalizeModular` imple
 
 FusedMoEExpertsModular performs the core of the fused MoE operations. The various functions exposed by the abstract class and their significance is as follows,
 
-`FusedMoEExperts::activation_format()`: A static method returning the activation format (Standard or BatchedExperts) for the `apply` method.
+`FusedMoEExperts::activation_format()`: A static method returning the activation format (`Standard`, `PaddedStandard`, or `BatchedExperts`) consumed by the `apply` method. A `PaddedStandard` experts implementation can also consume `Standard` input, but not vice versa.
 
 `FusedMoEExperts::is_supported_config()`: A static method used by the oracle system to determine whether a particular experts class can handle a given deployment configuration. Checks quantization type, activation format, platform capabilities, and other constraints.
 
