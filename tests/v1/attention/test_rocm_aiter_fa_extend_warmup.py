@@ -71,3 +71,49 @@ def test_compile_runs_the_calls_extend_forward_makes(monkeypatch):
     assert causal["sink_ptr"] is not None and context["sink_ptr"] is None
     assert causal["max_seqlen_k"] == causal["max_seqlen_q"]
     assert context["max_seqlen_k"] > context["max_seqlen_q"]
+
+
+@pytest.mark.parametrize("enable_jit_warmup", [True, False])
+def test_builder_registers_the_extend_warmup(monkeypatch, enable_jit_warmup):
+    """Selecting the backend registers the warmup the runner later performs."""
+    from tests.v1.attention.utils import (
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    config = create_vllm_config(dtype="bfloat16")
+    config.kernel_config.enable_jit_warmup = enable_jit_warmup
+    model_config = config.model_config
+    head_size = model_config.get_head_size()
+    registry = JitWarmupRegistry(config)
+    with set_current_vllm_config(config):
+        Attention(
+            model_config.get_num_attention_heads(config.parallel_config),
+            head_size,
+            head_size**-0.5,
+            model_config.get_num_kv_heads(config.parallel_config),
+            cache_config=config.cache_config,
+            prefix="layer",
+            attn_backend=rocm_aiter_fa.AiterFlashAttentionBackend,
+        )
+        with registry.activate():
+            rocm_aiter_fa.AiterFlashAttentionMetadataBuilder(
+                create_standard_kv_cache_spec(config),
+                ["layer"],
+                config,
+                torch.device(current_platform.device_type),
+            )
+
+    calls = []
+    ops = MagicMock()
+    ops.flash_attn_varlen_func.side_effect = lambda **kwargs: calls.append(kwargs)
+    monkeypatch.setattr(rocm_aiter_fa, "rocm_aiter_ops", ops)
+    registry.warmup()
+
+    assert [call["causal"] for call in calls] == (
+        [True, False] if enable_jit_warmup else []
+    )
+    assert all(call["return_lse"] for call in calls)
