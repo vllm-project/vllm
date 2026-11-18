@@ -52,18 +52,24 @@ _OFFLOAD_SYNC_TIMEOUT = 60
 
 
 def _kv_transfer_config(
-    connector: str, cpu_gib: int = 4, spec_name: str = "CPUOffloadingSpec"
+    connector: str,
+    cpu_gib: int = 4,
+    spec_name: str = "CPUOffloadingSpec",
+    store_mode: str | None = None,
 ) -> str:
     if connector == "OffloadingConnector":
+        extra_config = {
+            "spec_name": spec_name,
+            "cpu_bytes_to_use": cpu_gib << 30,
+            "eviction_policy": "lru",
+        }
+        if store_mode is not None:
+            extra_config["store_mode"] = store_mode
         return json.dumps(
             {
                 "kv_connector": "OffloadingConnector",
                 "kv_role": "kv_both",
-                "kv_connector_extra_config": {
-                    "spec_name": spec_name,
-                    "cpu_bytes_to_use": cpu_gib << 30,
-                    "eviction_policy": "lru",
-                },
+                "kv_connector_extra_config": extra_config,
             }
         )
     elif connector == "UMBPStoreConnector":
@@ -147,6 +153,8 @@ class OffloadingModelConfig:
     cpu_offload_gib: int = 4
     startup_timeout: int = 600
     spec_name: str = "CPUOffloadingSpec"
+    # `store_mode` of the offloading connector: `eager` or `lazy`.
+    store_mode: str | None = None
     assert_reload: bool = False
     num_shots: int = NUM_FEWSHOT
 
@@ -216,6 +224,22 @@ MODELS = [
         cpu_offload_gib=8,
         startup_timeout=1200,
         spec_name="TieringOffloadingSpec",
+    ),
+    OffloadingModelConfig(
+        id="offloading-lazy-qwen2.5-1.5b",
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        connector="OffloadingConnector",
+        # The README example sets 0.54 for this model on the full set. 200
+        # questions carry about +/-0.035 of noise, so confirm the value on the
+        # CI device.
+        accuracy_threshold=0.45,
+        # A pure-attention model: the lazy store is refused for a KV cache that
+        # needs zeroing (Mamba layers or a mixed-precision cache).
+        store_mode="lazy",
+        cpu_offload_gib=1,
+        # Lazy stores happen only when a block is reused, so a second run that
+        # skipped its reload must fail here.
+        assert_reload=True,
     ),
     # ── SimpleCPUOffloadConnector ────────────────────────────────────
     OffloadingModelConfig(
@@ -300,7 +324,9 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--enable-prefix-caching",
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
-        _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
+        _kv_transfer_config(
+            cfg.connector, cfg.cpu_offload_gib, cfg.spec_name, cfg.store_mode
+        ),
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
     ]

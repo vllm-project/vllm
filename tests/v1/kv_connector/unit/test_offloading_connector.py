@@ -560,6 +560,64 @@ def test_cpu_offloading_metrics() -> None:
         del llm
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_cpu_offloading_lazy_store() -> None:
+    """A lazy store saves the blocks that a new request takes over.
+
+    The lazy store mode saves a chunk only when the pool gives one of its
+    blocks to a request that writes different data there. So the prompt is run
+    on its own first, then filler prompts push its blocks out of the pool, and
+    only then is it loaded back from the CPU after the GPU cache is dropped.
+    """
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 500 << 20,
+            "store_mode": "lazy",
+        },
+    )
+    llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        max_model_len=2048,
+        gpu_memory_utilization=0.5,
+        # A small pool, so a few filler requests evict the prompt's blocks.
+        num_gpu_blocks_override=32,
+        kv_transfer_config=kv_transfer_config,
+    )
+    try:
+        block_size = llm.llm_engine.vllm_config.cache_config.block_size
+        sampling_params = SamplingParams(max_tokens=16, temperature=0.0)
+        # The last token is left out of the reusable prefix, as a request must
+        # compute at least one token to get logits.
+        prefix_len = 8 * block_size
+        prompt = TokensPrompt(prompt_token_ids=list(range(1, prefix_len + 2)))
+
+        [cold] = llm.generate([prompt], sampling_params, use_tqdm=False)
+        assert cold.num_cached_tokens == 0
+
+        # Filler requests take the blocks of the cold run, which offers its
+        # chunks to the CPU cache. A rerun of the same prompt would not: a
+        # prefix hit keeps the data that the block already holds.
+        fillers = [
+            TokensPrompt(prompt_token_ids=list(range(1000 + 200 * i, 1150 + 200 * i)))
+            for i in range(4)
+        ]
+        llm.generate(fillers, sampling_params, use_tqdm=False)
+
+        # Drop the GPU prefix cache, so the next run must load from the CPU.
+        _wait_for_prefix_cache_reset(llm)
+
+        [warm] = llm.generate([prompt], sampling_params, use_tqdm=False)
+
+        assert warm.num_cached_tokens == prefix_len, (
+            "the prompt was not loaded from the CPU cache"
+        )
+        assert warm.outputs[0].token_ids == cold.outputs[0].token_ids
+    finally:
+        del llm
+
+
 @pytest.mark.parametrize("multiprocessing", [True, False])
 def test_sleep_keeps_offloaded_blocks_unless_reset(
     monkeypatch: pytest.MonkeyPatch, multiprocessing: bool
