@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @dataclass
 class SSDFuser(BaseFuser):
     """A Mamba2 mixer that runs its causal conv and scan through the Transformers
-    `causal_conv1d_forward` and `ssd_forward`, which vLLM replaces with
+    `causal_conv1d_forward` and `mamba2_scan_forward`, which vLLM replaces with
     `kernelize`. Its layers are sharded for tensor parallelism (see
     `shard_mamba2_mixer`)."""
 

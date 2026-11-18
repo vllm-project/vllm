@@ -253,7 +253,7 @@ class TransformersMamba2SSM(Mamba2SSM):
 
 def attach_ssm(mixer: nn.Module, ssm: TransformersMamba2SSM) -> None:
     """Attach `ssm` to `mixer` and to its `conv1d`, from which the replacements
-    of `ssd_forward` and `causal_conv1d_forward` find it."""
+    of `mamba2_scan_forward` and `causal_conv1d_forward` find it."""
     setattr(mixer, VLLM_SSM_ATTR, ssm)
     # Weak and not a submodule, so `ssm` stays a child of the mixer only
     mixer.conv1d.__dict__[VLLM_SSM_ATTR] = weakref.ref(ssm)
@@ -278,7 +278,7 @@ class VllmCausalConv1dForward(nn.Module):
 
 
 class VllmSSDForward(nn.Module):
-    """Replaces Transformers' `ssd_forward` for a vLLM-served mixer."""
+    """Replaces Transformers' `mamba2_scan_forward` for a vLLM-served mixer."""
 
     def forward(
         self,
@@ -307,7 +307,7 @@ class _InProcessRepository:
 
 
 CAUSAL_CONV1D_FORWARD = "causal_conv1d_forward"
-SSD_FORWARD = "ssd_forward"
+SSD_FORWARD = "mamba2_scan_forward"
 
 
 def kernelize_ssm(mixer: nn.Module, device_type: str) -> None:
