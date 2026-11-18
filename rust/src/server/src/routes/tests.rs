@@ -855,44 +855,58 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> (axum::Router, MockEn
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn chat_completions_with_tools_returns_400_when_tool_parser_disabled() {
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-tool-parser-disabled",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let mut app = build_router_with_gates(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat.with_tool_call_parser(ParserSelection::None),
-        )),
-        RouteGates::default(),
-    );
+async fn chat_completions_with_tools_returns_400_without_tool_parser() {
+    // `auto` resolves no tool parser for `test-model`.
+    let cases = [
+        (
+            ParserSelection::None,
+            "tool parsing is disabled by frontend configuration",
+        ),
+        (
+            ParserSelection::Auto,
+            "tool parsing is not available for model `test-model`",
+        ),
+    ];
+    for (tool_call_parser, message) in cases {
+        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-no-tool-parser",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat.with_tool_call_parser(tool_call_parser),
+            )),
+            RouteGates::default(),
+        );
 
-    let (status, json) = post_json(
-        &mut app,
-        "/v1/chat/completions",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"city": {"type": "string"}},
-                        "required": ["city"]
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"]
+                        }
                     }
-                }
-            }]
-        }),
-    )
-    .await;
+                }]
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{message}");
+        assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(json["error"]["message"], message);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4051,39 +4065,6 @@ async fn invalid_request_returns_openai_error() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["type"], "BadRequestError");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn chat_completions_with_tools_and_unavailable_auto_parser_returns_400() {
-    let (mut app, _engine_task) = test_app().await;
-    let (status, json) = post_json(
-        &mut app,
-        "/v1/chat/completions",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"city": {"type": "string"}},
-                        "required": ["city"]
-                    }
-                }
-            }]
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
-    assert_eq!(
-        json["error"]["message"],
-        "tool parsing is not available for model `test-model`"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
