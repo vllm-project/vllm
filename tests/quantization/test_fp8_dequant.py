@@ -16,6 +16,7 @@ cold-start addresses."""
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
@@ -37,9 +38,12 @@ from vllm.model_executor.utils import get_live_param
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="FP8 linear kernels need a GPU"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="FP8 linear kernels need a GPU"
+    ),
+    pytest.mark.skip_global_cleanup,
+]
 
 _DEVICE = torch.device("cuda")
 # q_a / kv_a-like shards of unequal sizes; the last ends in a partial block
@@ -50,7 +54,8 @@ _SCALE = {"block": "weight_scale_inv", "tensor": "weight_scale"}
 
 
 @pytest.fixture
-def model_config(dist_init):
+@override_parallel_groups(SingleRankGroup())
+def model_config():
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 
     config = ModelConfig(

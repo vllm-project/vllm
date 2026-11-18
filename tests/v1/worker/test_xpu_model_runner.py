@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch._dynamo.variables.torch import TorchInGraphFunctionVariable
 
+from tests.utils import fork_new_process_for_each_test
 from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
 
 # XPU-only: needs distinct torch.cuda vs torch.xpu current_stream symbols.
@@ -17,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 
 # Child process: patched torch.cuda must not leak to other tests in the session.
-@pytest.mark.forked
+@fork_new_process_for_each_test
 def test_torch_cuda_wrapper_allows_dynamo_handler_registration() -> None:
     """Guard against XPU CUDA shim breaking Torch Dynamo during AOT compile.
 

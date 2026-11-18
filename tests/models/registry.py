@@ -391,9 +391,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "vllm-project/tiny-random-LlamaForCausalLM",
         },
     ),
-    "LLaMAForCausalLM": _HfExamplesInfo(
-        "decapoda-research/llama-7b-hf", is_available_online=False
-    ),
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
@@ -455,6 +452,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "",
         trust_remote_code=True,
         is_available_online=False,
+    ),
+    "NemotronLabsDiffusionForCausalLM": _HfExamplesInfo(
+        "nvidia/Nemotron-Labs-Diffusion-3B",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["NemotronLabsDiffusionForCausalLM"]},
+    ),
+    "NemotronLabsDiffusionModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Labs-Diffusion-3B",
     ),
     "NanbeigeForCausalLM": _HfExamplesInfo(
         "Nanbeige/Nanbeige4.2-3B",
@@ -1331,6 +1336,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-35B-A3B",
+        max_model_len=4096,
+    ),
+    "Qwen3_5ForSlotDecision": _HfExamplesInfo(
+        "baselabs/elephant-1",
+        extras={"mammoth": "baselabs/mammoth-1"},
         max_model_len=4096,
     ),
     "Qwen4ExpForConditionalGeneration": _HfExamplesInfo(
