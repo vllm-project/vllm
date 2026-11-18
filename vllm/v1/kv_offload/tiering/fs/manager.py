@@ -189,9 +189,12 @@ class FileSystemTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         )
 
-        # Write config file. A read-only tier must not write anything.
+        config_path = self.file_mapper.get_config_file_path()
+
+        # Write config file. A read-only tier must not write anything, and may
+        # be backed by a read-only mount (where even mkdir fails), so only a
+        # writable tier touches the directory or creates the file.
         if self.access_mode.can_write:
-            config_path = self.file_mapper.get_config_file_path()
             os.makedirs(os.path.dirname(config_path), exist_ok=True)
             if not os.path.exists(config_path):
                 with open(config_path, "w") as f:
@@ -199,17 +202,19 @@ class FileSystemTierManager(SecondaryTierManager):
                         self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
                     )
 
-            # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
-            # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
-            # rather than failing every block.
-            self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
-            if not self._use_o_direct:
-                logger.warning(
-                    "O_DIRECT is not supported at '%s'; falling back to buffered "
-                    "I/O for the '%s' KV offload tier.",
-                    root_dir,
-                    tier_type,
-                )
+        # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
+        # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
+        # rather than failing every block.
+        # This can result in a write as part of the probe even if we are in
+        # read only mode.
+        self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
+        if not self._use_o_direct:
+            logger.warning(
+                "O_DIRECT is not supported at '%s'; falling back to buffered "
+                "I/O for the '%s' KV offload tier.",
+                root_dir,
+                tier_type,
+            )
 
         self._pool = DualQueueThreadPool(
             n_read_threads,

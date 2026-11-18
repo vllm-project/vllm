@@ -311,6 +311,22 @@ def test_every_lookup_result_has_a_declared_cascade_behavior():
     assert set(_CASCADE_SUPPLY_BEHAVIOR) == set(LookupResult)
 
 
+def test_factory_forwards_access_mode_to_example_tier():
+    """Every built-in secondary tier accepts access_mode, not just fs/obj."""
+    region = _mock_mmap_region(1)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {"type": "example", "access_mode": "read"},
+        region.create_kv_memoryview(),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, ExampleSecondaryTierManager)
+        assert tier.access_mode is OffloadAccessMode.READ
+        assert not tier.access_mode.can_write
+    finally:
+        tier.shutdown()
+
+
 class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
 
