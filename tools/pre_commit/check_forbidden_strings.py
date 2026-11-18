@@ -156,8 +156,6 @@ CHECK_STRINGS = {
         ),
     ),
     "rope_scaling": ForbiddenString(
-        # Config compatibility tests intentionally exercise legacy checkpoints.
-        allowed_files={"tests/transformers_utils/test_config.py"},
         pattern=r"\brope_scaling\b",
         tip=(
             "`rope_scaling` is deprecated in Transformers v5, use `rope_parameters`. "
