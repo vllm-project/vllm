@@ -28,7 +28,7 @@ from .moe import HYV4FlashFeedForward, HYV4FlashMoE
 
 _EXPERT_WEIGHT = re.compile(
     r"(.*\.experts)\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
-    r"(\.weight(?:_packed|_scale(?:_inv)?)?|_scale(?:_inv)?)?"
+    r"(\.weight(?:_packed|_scale(?:_inv|_2)?)?|\.input_scale|_scale(?:_inv)?)?"
 )
 
 
@@ -78,9 +78,13 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
             raise ValueError(
                 "Flash online quantization requires MoE-only fp8_per_block"
             )
+    elif quantization == "modelopt_fp4":
+        # ModelOpt NVFP4: per-expert weight, block scale, global scale and input scale
+        pass
     elif quantization is not None:
         raise ValueError(
-            "HYV4 Flash supports blockwise FP8 or compressed-tensors MXFP4"
+            "HYV4 Flash supports blockwise FP8, compressed-tensors MXFP4 or "
+            "ModelOpt NVFP4"
         )
 
 
@@ -234,9 +238,12 @@ class HYV4FlashModel(HYV4Model):
                     "down_proj": ("w2",),
                     "gate_up_proj": ("w1", "w3"),
                 }[projection]
-                suffix = (suffix or "").removeprefix(".weight")
-                param_name = "w2_weight" if projection == "down_proj" else "w13_weight"
-                target = f"{prefix}.routed_experts.{param_name}{suffix}"
+                half = "w2" if projection == "down_proj" else "w13"
+                if suffix == ".input_scale":
+                    target = f"{prefix}.routed_experts.{half}_input_scale"
+                else:
+                    suffix = (suffix or "").removeprefix(".weight")
+                    target = f"{prefix}.routed_experts.{half}_weight{suffix}"
                 if target not in parameters:
                     raise ValueError(f"Unknown Flash expert weight: {name}")
                 parameter = parameters[target]
@@ -252,7 +259,11 @@ class HYV4FlashModel(HYV4Model):
                     if not 0 <= index < self.config.num_experts:
                         raise ValueError(f"Expert index out of range: {name}")
                     tensor = value[index] if expert_id is None else value
-                    pieces = tensor.chunk(len(shards), dim=-2)
+                    pieces = (
+                        (tensor,)
+                        if len(shards) == 1
+                        else tensor.chunk(len(shards), dim=-2)
+                    )
                     for shard, piece in zip(shards, pieces):
                         success = parameter.weight_loader(
                             parameter,
@@ -314,7 +325,7 @@ class HYV4FlashModel(HYV4Model):
             module_name, _, leaf = name.rpartition(".")
             module = self.get_submodule(module_name)
             expected: set[Any]
-            if leaf.startswith(("w13_weight", "w2_weight")):
+            if leaf.startswith(("w13_", "w2_")):
                 expert_map = module.expert_map_manager.expert_map
                 local_ids = (
                     range(self.config.num_experts)
@@ -325,7 +336,10 @@ class HYV4FlashModel(HYV4Model):
                 expected = {(i, s) for i in local_ids for s in shards}
             else:
                 expected = set(range(len(module.output_sizes)))
-            if parts != expected:
+            # NVFP4 per-tensor scales (input_scale, weight_scale_2) also load for
+            # experts another expert-parallel rank owns.
+            per_tensor = leaf.endswith(("_input_scale", "_weight_scale_2"))
+            if not (expected <= parts if per_tensor else parts == expected):
                 raise ValueError(f"Incomplete Flash checkpoint shards: {name}")
 
 

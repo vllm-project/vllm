@@ -235,6 +235,9 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
             _validate_checkpoint_quantization(
                 target.model_arch_config.quantization_config
             )
+        elif target.quantization == "modelopt_fp4":
+            # ModelOpt NVFP4 target; its exclude list keeps the draft layers BF16
+            pass
         elif target.quantization is not None:
             from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
             from vllm.model_executor.layers.quantization.utils.quant_utils import (

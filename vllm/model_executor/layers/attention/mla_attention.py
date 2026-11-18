@@ -520,10 +520,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        if sliding_window is not None and kv_cache_dtype in (
-            "fp8_ds_mla",
-            "nvfp4_ds_mla",
-        ):
+        if sliding_window is not None and kv_cache_dtype == "nvfp4_ds_mla":
             raise ValueError(
                 f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
             )
