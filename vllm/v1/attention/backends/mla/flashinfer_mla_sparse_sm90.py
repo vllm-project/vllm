@@ -58,6 +58,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    SparseMLAPrefillRoute,
     align_blocks_to_rows,
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
@@ -448,7 +449,6 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
-        self._attention_layer = attention_layer
         impl = attention_layer.impl
         if not isinstance(impl, FlashInferMLASparseSM90Impl):
             raise TypeError(
@@ -542,9 +542,10 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # refreshed buffers.
         num_rows, kv_lens, exact = self._kv_lens_host(common_attn_metadata)
         # MHA prefills are removed from q before forward_mqa. Plan only the
-        # decode prefix in that case, using the same routing decision as MLA.
-        if metadata.num_prefills > 0 and self._attention_layer._use_sparse_mha(
-            metadata
+        # decode prefix in that case.
+        if (
+            metadata.prefill is not None
+            and metadata.prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
