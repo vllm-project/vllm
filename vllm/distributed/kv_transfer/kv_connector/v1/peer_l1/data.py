@@ -39,6 +39,7 @@ class CopyJob:
     grant: Grant
     # (cache group, source row, destination row).
     blocks: tuple[tuple[int, int, int], ...]
+    request_id: str = ""
 
 
 @dataclass
@@ -50,8 +51,14 @@ class PeerMetadata(KVConnectorMetadata):
 @dataclass
 class PeerWorkerMetadata(KVConnectorWorkerMetadata):
     completed_step: int
+    quarantined: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    drained: set[str] = field(default_factory=set)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> "PeerWorkerMetadata":
         if not isinstance(other, PeerWorkerMetadata):
             raise TypeError("Incompatible peer L1 worker metadata")
-        return PeerWorkerMetadata(min(self.completed_step, other.completed_step))
+        return PeerWorkerMetadata(
+            min(self.completed_step, other.completed_step),
+            {**self.quarantined, **other.quarantined},
+            self.drained | other.drained,
+        )

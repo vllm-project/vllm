@@ -37,6 +37,10 @@ COUNTERS = {
         for reason in ("frozen", "lease_expiry", "missing_key", "cap", "budget")
     },
     "reader_lookups": "Calls to peer prefix matching, including retries.",
+    "reader_quarantined_rows": "Target rows held against uncertain RDMA writes.",
+    "worker_rdma_reads": "RDMA read grants submitted.",
+    "worker_rdma_failures": "Failed asynchronous receive requests.",
+    "worker_rdma_bytes": "Bytes submitted for RDMA reads.",
     "reader_peer_tokens": "Eligible lookup tokens by peer or no-peer source.",
     "reader_none_tokens": "Eligible lookup tokens by peer or no-peer source.",
     "reader_peer_decisions": "Terminal peer lookup decisions by source.",
@@ -177,9 +181,8 @@ class PeerL1Stats(KVConnectorStats):
         index = bisect_left(buckets, value)
         hist["counts"][index] += 1
         hist["sum"] += value
-        if name.startswith("reader_deferral_"):
-            sums = hist.setdefault("sums", [0.0] * (len(buckets) + 1))
-            sums[index] += value
+        sums = hist.setdefault("sums", [0.0] * (len(buckets) + 1))
+        sums[index] += value
 
     def reset(self) -> None:
         self.data = {}
@@ -270,29 +273,18 @@ class PeerL1PromMetrics(KVConnectorPromMetrics):
             self.metrics[engine_idx, name].set(value)
         for name, hist in transfer_stats_data.get("histograms", {}).items():
             metric = self.metrics[engine_idx, name]
-            if "sums" in hist:
-                # Deferred acquires are rare. Replay bin means through the public
-                # API in the frontend; transport and scheduler storage stay fixed.
-                bounds = (0.0, *HISTOGRAMS[name][0], inf)
-                for index, (count, total) in enumerate(
-                    zip(hist["counts"], hist["sums"], strict=True)
-                ):
-                    if not count:
-                        continue
-                    value = min(
-                        bounds[index + 1],
-                        max(
-                            0.0 if index == 0 else nextafter(bounds[index], inf),
-                            total / count,
-                        ),
-                    )
-                    for _ in range(count):
-                        metric.observe(value)
-                continue
-            # Histogram.observe increments one non-cumulative bin. Apply the
-            # fixed-bin payload directly, preserving the exact sum without
-            # replaying individual samples in the frontend.
-            for bucket, count in zip(metric._buckets, hist["counts"], strict=True):
-                if count:
-                    bucket.inc(count)
-            metric._sum.inc(hist["sum"])
+            bounds = (0.0, *HISTOGRAMS[name][0], inf)
+            for index, (count, total) in enumerate(
+                zip(hist["counts"], hist["sums"], strict=True)
+            ):
+                if not count:
+                    continue
+                value = min(
+                    bounds[index + 1],
+                    max(
+                        0.0 if index == 0 else nextafter(bounds[index], inf),
+                        total / count,
+                    ),
+                )
+                for _ in range(count):
+                    metric.observe(value)

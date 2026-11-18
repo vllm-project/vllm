@@ -34,6 +34,7 @@ class Owner {
     bool leased;
     std::vector<Key> pending_keys;
     uint64_t queued_at = 0;
+    bool deferred_leased = false;
   };
   std::mutex mutex_;
   std::vector<Row> rows_;
@@ -148,15 +149,21 @@ class Owner {
     }
     size_t extra = 0;
     for (auto row : unique) extra += !rows_[row].absorbed && !rows_[row].window;
-    if (request.op == AcquireDeferred &&
+    if ((request.op == AcquireDeferred ||
+         request.op == AcquireDeferredLeased) &&
         (new_pins_ + extra > window_ || refs_ + unique.size() > cap_)) {
       if (queued_keys_ + keys.size() > cap_) {
         ++stats_[3];
         return {-3 - generation_, static_cast<int64_t>(window_)};
       }
       auto created = lease_now();
-      grants_.emplace(id,
-                      Grant{{}, {}, created, false, keys, ++deferred_serial_});
+      grants_.emplace(id, Grant{{},
+                                {},
+                                created,
+                                false,
+                                keys,
+                                ++deferred_serial_,
+                                request.op == AcquireDeferredLeased});
       queued_keys_ += keys.size();
       published_[rows_.size()] = 1;
       wake();
@@ -168,7 +175,8 @@ class Owner {
       return {-3 - generation_, static_cast<int64_t>(window_)};
     }
     auto created = lease_now();
-    bool leased = request.op == AcquireLeased;
+    bool leased =
+        request.op == AcquireLeased || request.op == AcquireDeferredLeased;
     auto inserted = grants_.emplace(
         id, Grant{result, {unique.begin(), unique.end()}, created, leased, {}});
     try {
@@ -455,19 +463,27 @@ class Owner {
       uint64_t cost = 0;
       for (auto row : unique)
         cost += !rows_[row].absorbed && !rows_[row].pins && !live.count(row);
-      int rejected = frozen_                                      ? 12
-                     : result.size() != grant.pending_keys.size() ? 14
-                     : refs_ + unique.size() > cap_               ? 15
-                     : cost > free_budget                         ? 16
-                                                                  : 0;
+      int rejected =
+          frozen_ ? 12
+          : grant.deferred_leased &&
+                  lease_now() >=
+                      grant.created + std::chrono::milliseconds(lease_ms_)
+              ? 13
+          : result.size() != grant.pending_keys.size() ? 14
+          : refs_ + unique.size() > cap_               ? 15
+          : cost > free_budget                         ? 16
+                                                       : 0;
       if (rejected) {
         ++stats_[rejected];
         finish(id);
         continue;
       }
+      if (grant.deferred_leased)
+        expirations_.emplace(
+            grant.created + std::chrono::milliseconds(lease_ms_), id);
       queued_keys_ -= grant.pending_keys.size();
       std::vector<Key>().swap(grant.pending_keys);
-      grant.leased = false;
+      grant.leased = grant.deferred_leased;
       grant.rows = std::move(result);
       grant.unique_rows.assign(unique.begin(), unique.end());
       free_budget -= cost;

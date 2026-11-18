@@ -143,6 +143,7 @@ class PeerL1Connector(KVConnectorBase_V1, SupportsHMA):
         if self._kv_transfer_config.kv_role != "kv_both":
             raise ValueError("Peer L1 requires kv_role=kv_both")
         supported = supported_groups(kv_cache_config)
+        self._supported = supported
         self._scheduler: PeerScheduler | None = None
         self._worker: PeerWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
@@ -179,6 +180,9 @@ class PeerL1Connector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[int | None, bool]:
         assert self._scheduler is not None
         return self._scheduler.match(request, num_computed_tokens)
+
+    def get_loaded_kv_cache_group_ids(self, request: Request) -> tuple[int, ...]:
+        return self._supported
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int

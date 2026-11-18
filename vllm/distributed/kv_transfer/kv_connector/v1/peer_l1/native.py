@@ -27,6 +27,7 @@ class Operation(IntEnum):
     ACQUIRE_LEASED = 9
     SUBSCRIBE = 10
     ACQUIRE_DEFERRED = 11
+    ACQUIRE_DEFERRED_LEASED = 12
 
 
 @lru_cache(maxsize=1)

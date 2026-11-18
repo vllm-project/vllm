@@ -61,12 +61,14 @@ inline int64_t rpc(const char* endpoint, Request request, const Key* keys,
         transfer_bytes(fd, &reply, sizeof(reply), false, deadline)) {
       if (reply.epoch != request.epoch)
         result = -2;
-      else if (reply.n <= std::max<uint64_t>(
-                              request.n, request.op == AcquireExact ||
-                                                 request.op == AcquireLeased ||
-                                                 request.op == AcquireDeferred
-                                             ? 2
-                                             : 0) &&
+      else if (reply.n <=
+                   std::max<uint64_t>(
+                       request.n, request.op == AcquireExact ||
+                                          request.op == AcquireLeased ||
+                                          request.op == AcquireDeferred ||
+                                          request.op == AcquireDeferredLeased
+                                      ? 2
+                                      : 0) &&
                transfer_bytes(fd, out, reply.n * sizeof(int64_t), false,
                               deadline))
         result = reply.n;

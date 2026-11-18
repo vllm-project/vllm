@@ -1245,3 +1245,171 @@ def test_acquire_after_refcount_snapshot_waits_for_the_next_absorb(adaptive_peer
     channel.cancel_unsubmitted(grant.sequence)
     source.build()
     assert all(block.ref_cnt == 1 for block in blocks)
+
+
+@pytest.mark.parametrize("outcome", ["success", "before", "late", "abort", "step"])
+def test_async_receives_keep_uncertain_dma_targets_and_grants(
+    owner_resources, monkeypatch, outcome
+):
+    from concurrent.futures import Future
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import async_load
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import CopyJob
+
+    owner, _, cleanup = owner_resources
+    channel = NativeOwnerChannel(owner.endpoint, owner.epoch, 71, cleanup, lease_s=1.0)
+    key = peer_key(b"async")
+    owner.publish([key], [1])
+    grant = channel.acquire_exact([key])
+    now = [time.monotonic()]
+    monkeypatch.setattr(async_load, "monotonic", lambda: now[0])
+    receives = async_load.AsyncReceives(channel.release)
+    read = receives.add(
+        CopyJob(0, grant, ((0, 1, 17),), "async-rid"),
+        0.1 if outcome == "step" else 1.0,
+    )
+    assert read.deadline == pytest.approx(grant.acquired_before + 0.5)
+    late_dma: Future[bytes] = Future()
+    if outcome == "step":
+        now[0] += 0.2
+        assert not receives.poll().finished_recving
+    if outcome in ("success", "late", "step"):
+        assert read.begin()
+    if outcome in ("success", "step"):
+        read.complete(True, drained=True)
+    elif outcome == "late":
+        read.complete(False, drained=False, drain_query=late_dma.done)
+    elif outcome == "before":
+        now[0] += 1.0
+    result = receives.poll({"async-rid"} if outcome == "abort" else set())
+    assert result.finished_recving == {"async-rid"}
+    assert result.failed_recving == (
+        set() if outcome in ("success", "step") else {"async-rid"}
+    )
+    assert not receives.poll().finished_recving
+    meta = receives.metadata(0)
+    if outcome == "late":
+        assert meta.quarantined == {read.identity: (17,)}
+        assert owner.refs == 1
+        second = channel.acquire_exact([key])
+        retry = receives.add(CopyJob(0, second, ((0, 1, 18),), "async-rid"), 1.0)
+        assert retry.begin()
+        retry.complete(True, drained=True)
+        assert receives.poll().finished_recving == {"async-rid"}
+        assert read.identity in receives.reads
+        late_dma.set_result(b"late bytes")
+        assert not receives.poll().finished_recving
+        assert receives.metadata(0).drained == {read.identity}
+    else:
+        assert not meta.quarantined
+    assert not read.begin()
+    wait_until(lambda: owner.refs == 0)
+
+
+def test_leased_deferred_grant_does_not_renew_on_retry(owner_resources, clock):
+    owner, _, cleanup = owner_resources
+    key = peer_key(b"leased-queue")
+    owner.publish([key], [1])
+    owner.absorb(free_blocks=0)
+    channel = NativeOwnerChannel(owner.endpoint, owner.epoch, 82, cleanup, lease_s=1.0)
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.session import (
+        OwnerDeferred,
+    )
+
+    with pytest.raises(OwnerDeferred) as queued:
+        channel.acquire_exact([key], defer=True)
+    owner.absorb(free_blocks=100)
+    grant = channel.acquire_exact(
+        [key],
+        defer=True,
+        sequence=queued.value.sequence,
+        acquired_before=queued.value.acquired_before,
+    )
+    assert grant.acquired_before == queued.value.acquired_before
+    assert grant.lease_s == pytest.approx(1.0) and owner.refs == 1
+    clock.advance(1.1)
+    wait_until(lambda: owner.refs == 0)
+    owner.absorb()
+    assert owner.freeze()
+    owner.thaw()
+
+
+@pytest.mark.parametrize("leased", [False, True])
+def test_deferred_decision_uses_the_original_lease_clock(
+    owner_resources, clock, leased
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.session import (
+        OwnerDeferred,
+    )
+
+    _, _, cleanup = owner_resources
+    owner = NativeOwner(
+        f"vllm-peer-l1/clock/{uuid4().hex}",
+        73,
+        128,
+        window=10,
+        initial_window=0,
+        lease_ms=20,
+        clock=clock,
+    )
+    try:
+        key = peer_key(b"pending")
+        owner.publish([key], [1])
+        channel = NativeOwnerChannel(
+            owner.endpoint, owner.epoch, 93, cleanup, lease_s=0.02 if leased else None
+        )
+        with pytest.raises(OwnerDeferred) as queued:
+            channel.acquire_exact([key], defer=True)
+        clock.advance(0.04)
+        assert owner.pending() and owner.refs == 0
+        assert not owner.freeze()
+        owner.thaw()
+        owner.absorb(free_blocks=100)
+        grant = channel.acquire_exact(
+            [key],
+            defer=True,
+            sequence=queued.value.sequence,
+            acquired_before=queued.value.acquired_before,
+        )
+        if leased:
+            assert grant is None and owner.refs == 0
+        else:
+            assert grant.rows == (1,)
+            clock.advance(10)
+            owner.absorb(free_blocks=100)
+            assert owner.refs == 1
+            channel.cancel_unsubmitted(grant.sequence)
+        owner.absorb()
+        assert owner.freeze()
+        owner.thaw(clear=True)
+    finally:
+        owner.close()
+
+
+def test_scheduler_quarantine_reference_survives_request_free(scheduler_resources):
+    from tests.v1.core.test_prefix_caching import make_request
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import (
+        PeerWorkerMetadata,
+    )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.outputs import KVConnectorOutput
+
+    peer, manager, _ = scheduler_resources
+    request = make_request("quarantine", list(range(33)), 4, sha256)
+    blocks = manager.allocate_slots(request, 32, delay_cache_blocks=True)
+    rows = tuple(row for group in blocks.get_block_ids() for row in group if row)
+    output = KVConnectorOutput(
+        kv_connector_worker_meta=PeerWorkerMetadata(0, {"dma": rows})
+    )
+    peer.update(output)
+    peer.update(output)
+    manager.free(request)
+    assert all(manager.block_pool.blocks[row].ref_cnt == 1 for row in rows)
+    reused = manager.block_pool.get_new_blocks(manager.block_pool.get_num_free_blocks())
+    assert not set(rows).intersection(block.block_id for block in reused)
+    peer.update(
+        KVConnectorOutput(
+            kv_connector_worker_meta=PeerWorkerMetadata(0, drained={"dma"})
+        )
+    )
+    assert all(manager.block_pool.blocks[row].ref_cnt == 0 for row in rows)

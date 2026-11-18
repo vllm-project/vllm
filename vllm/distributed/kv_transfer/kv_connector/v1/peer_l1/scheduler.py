@@ -86,6 +86,7 @@ class _Queued:
     local_tokens: int
     positions: tuple[tuple[int, int], ...]
     started: float
+    acquired_before: float
     wait_reported: bool = False
 
 
@@ -113,8 +114,8 @@ class PeerScheduler:
         assert transfer is not None
         self.options = transfer.kv_connector_extra_config
         self.rank = config.parallel_config.data_parallel_rank
-        self.window = int(self.options.get("pin_window", 512))
-        self.pin_cap = int(self.options.get("pin_cap", 4096))
+        self.window = int(self.options.get("pin_window", 16384))
+        self.pin_cap = int(self.options.get("pin_cap", 65536))
         self.timeout = int(self.options.get("rpc_timeout_ms", 50))
         self.busy_timeout = int(self.options.get("busy_timeout_ms", 1000)) / 1000
         if min(self.window, self.pin_cap, self.timeout, self.busy_timeout) <= 0:
@@ -128,6 +129,7 @@ class PeerScheduler:
         self._reserve = 0
         self._published: memoryview | None = None
         self._pending: dict[int, dict[BlockHashWithGroupId, int]] = {}
+        self._quarantined: dict[str, tuple[KVCacheBlock, ...]] = {}
         self._reads: dict[str, _Read] = {}
         self._busy: dict[str, _Busy] = {}
         self._round_robin = 0
@@ -183,6 +185,7 @@ class PeerScheduler:
             window=self.window,
             pin_cap=self.pin_cap,
             initial_window=self._reserve,
+            lease_ms=int(self.options.get("lease_ms", 1000)),
         )
         self._published = self._owner.published_rows
         peers = [member for member in metadata.members if member.rank != self.rank]
@@ -346,7 +349,7 @@ class PeerScheduler:
         self._reads[request.request_id] = _Read(
             peer, grant, length - local_tokens, positions
         )
-        return length - local_tokens, False
+        return length - local_tokens, grant.lease_s is not None
 
     def _defer(self, waiting: _Busy) -> tuple[None, bool]:
         if not waiting.deferred:
@@ -415,7 +418,7 @@ class PeerScheduler:
         self._stats.inc("reader_lookups")
         saved = self._reads.get(request.request_id)
         if saved is not None:
-            return saved.tokens, False
+            return saved.tokens, saved.grant.lease_s is not None
         limit = (
             min(
                 get_reusable_prefix_length(
@@ -452,7 +455,10 @@ class PeerScheduler:
             else:
                 try:
                     grant = self._channels[queued.peer].acquire_exact(
-                        queued.keys, defer=True, sequence=queued.sequence
+                        queued.keys,
+                        defer=True,
+                        sequence=queued.sequence,
+                        acquired_before=queued.acquired_before,
                     )
                 except OwnerDeferred as deferred:
                     waiting.generations[queued.peer] = deferred.generation
@@ -638,6 +644,7 @@ class PeerScheduler:
                         local_tokens,
                         positions,
                         monotonic(),
+                        deferred.acquired_before,
                     )
                     return self._defer(waiting)
                 except OwnerBusy as busy:
@@ -695,7 +702,7 @@ class PeerScheduler:
         )
         if len(plan) != len(read.positions):
             raise RuntimeError("Peer L1 required a null destination block")
-        read.job = CopyJob(self._ranks[read.peer], read.grant, plan)
+        read.job = CopyJob(self._ranks[read.peer], read.grant, plan, request.request_id)
 
     @_timed
     def build(self) -> PeerMetadata:
@@ -746,6 +753,22 @@ class PeerScheduler:
         meta = output.kv_connector_worker_meta
         if not isinstance(meta, PeerWorkerMetadata):
             return
+        assert self._pool is not None
+        for transfer, quarantined_rows in meta.quarantined.items():
+            if transfer not in self._quarantined:
+                blocks = tuple(self._pool.blocks[row] for row in set(quarantined_rows))
+                self._pool.touch(blocks)
+                self._quarantined[transfer] = blocks
+                self._stats.inc("reader_quarantined_rows", len(blocks))
+                logger.error(
+                    "Peer L1 quarantined transfer=%s rows=%d; "
+                    "retaining targets until drain",
+                    transfer,
+                    len(blocks),
+                )
+        for transfer in meta.drained:
+            blocks = self._quarantined.pop(transfer, ())
+            self._pool.free_blocks(blocks)
         assert self._owner is not None
         keys, rows = [], []
         for row, pending in list(self._pending.items()):

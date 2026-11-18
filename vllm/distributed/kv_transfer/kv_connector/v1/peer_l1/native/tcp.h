@@ -80,7 +80,7 @@ class TcpServer {
     if (r.magic != Request{}.magic || r.n > (1 << 20) ||
         (r.op != Release && r.op != Cancel && r.op != Cleanups &&
          r.op != AcquireExact && r.op != Hello && r.op != AcquireLeased &&
-         r.op != AcquireDeferred))
+         r.op != AcquireDeferred && r.op != AcquireDeferredLeased))
       return false;
     size_t body_keys = r.op == Hello ? 0 : r.n;
     c.keys.resize(body_keys);

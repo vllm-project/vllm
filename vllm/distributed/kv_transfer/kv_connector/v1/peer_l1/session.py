@@ -81,9 +81,10 @@ class OwnerBusy(Exception):
 
 
 class OwnerDeferred(OwnerBusy):
-    def __init__(self, generation: int, sequence: int):
+    def __init__(self, generation: int, sequence: int, acquired_before: float):
         super().__init__(generation, -1)
         self.sequence = sequence
+        self.acquired_before = acquired_before
 
 
 class NativeOwnerChannel:
@@ -94,9 +95,12 @@ class NativeOwnerChannel:
         reader: int,
         cleanup: CleanupQueue,
         timeout_ms: int = 50,
+        *,
+        lease_s: float | None = None,
     ):
         self.endpoint, self.epoch, self.reader = endpoint, epoch, reader
         self.cleanup, self.timeout_ms = cleanup, timeout_ms
+        self.lease_s = lease_s
         self._sequence = 0
         self._lib = library()
 
@@ -124,18 +128,30 @@ class NativeOwnerChannel:
         *,
         defer: bool = False,
         sequence: int | None = None,
+        acquired_before: float | None = None,
     ) -> Grant | None:
-        started = time.monotonic()
+        started = time.monotonic() if acquired_before is None else acquired_before
         if sequence is None:
             self._sequence += 1
             sequence = self._sequence
         seq = sequence
-        n, out = self._rpc(
-            Operation.ACQUIRE_DEFERRED if defer else Operation.ACQUIRE_EXACT, seq, keys
+        op = (
+            (
+                Operation.ACQUIRE_DEFERRED_LEASED
+                if self.lease_s is not None
+                else Operation.ACQUIRE_DEFERRED
+            )
+            if defer
+            else (
+                Operation.ACQUIRE_LEASED
+                if self.lease_s is not None
+                else Operation.ACQUIRE_EXACT
+            )
         )
+        n, out = self._rpc(op, seq, keys)
         if n == 2 and out[0] <= -3:
             if out[1] == -1:
-                raise OwnerDeferred(-3 - int(out[0]), seq)
+                raise OwnerDeferred(-3 - int(out[0]), seq, started)
             raise OwnerBusy(-3 - int(out[0]), int(out[1]))
         if n != len(keys):
             if n == -1:
@@ -150,6 +166,7 @@ class NativeOwnerChannel:
             seq,
             tuple(int(row) for row in out[:n]),
             started,
+            self.lease_s,
         )
 
     def cancel_unsubmitted(self, seq: int) -> None:

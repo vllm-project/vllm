@@ -18,7 +18,8 @@ enum Operation : uint64_t {
   Hello,
   AcquireLeased,
   Subscribe = 10,
-  AcquireDeferred = 11
+  AcquireDeferred = 11,
+  AcquireDeferredLeased
 };
 struct Request {
   uint64_t magic = 0x4c314f574e455231ULL;

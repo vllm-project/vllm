@@ -55,3 +55,14 @@ a decided result before applying its busy deadline to an undecided result.
 IPC batches share a copy stream and one completion callback releases all grants
 for the step. A possible failed load retains ownership under fail-stop; there is
 no timer that can release a possibly active IPC read.
+
+Leased async grants retain their original lease clock. Queueing, setup and the GPU fence
+must fit within half that lease. The first possible post starts the transfer
+budget, capped by the same bound; subsequent segments do not renew it.
+
+An unsubmitted failure is cancelled and released. A possible post releases only
+when drained. Otherwise the worker reports both failed and finished, and the
+scheduler takes an extra reference on each target row before recomputation,
+abort or normal finish can free the request's references. Quarantine belongs to
+the transfer identity, independently of the request, until drain or process exit.
+An elapsed lease or failed status alone is not drain proof.
