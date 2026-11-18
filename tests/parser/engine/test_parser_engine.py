@@ -39,6 +39,14 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.glm47_moe import glm47_moe_config
+from vllm.parser.kimi_k2 import (
+    TOOL_ARG_START,
+    TOOL_CALL_END,
+    TOOL_CALL_START,
+    TOOL_SECTION_END,
+    TOOL_SECTION_START,
+    KimiK2Parser,
+)
 from vllm.parser.parser_manager import ParserManager
 from vllm.parser.qwen3 import Qwen3Parser
 
@@ -2272,3 +2280,171 @@ class TestThinkMarkupWithoutReasoningParser:
         assert tool_calls is not None and len(tool_calls) == 1
         assert tool_calls[0].name == "get_weather"
         assert content == think
+
+
+PREFIX = "Let me check the weather."
+
+FULL_CALL = (
+    PREFIX
+    + TOOL_SECTION_START
+    + TOOL_CALL_START
+    + "functions.get_weather:0"
+    + TOOL_ARG_START
+    + '{"city": "Paris"}'
+    + TOOL_CALL_END
+    + TOOL_SECTION_END
+)
+
+_MARKER_VOCAB = {
+    TOOL_SECTION_START: 200,
+    TOOL_SECTION_END: 201,
+    TOOL_CALL_START: 202,
+    TOOL_CALL_END: 203,
+    TOOL_ARG_START: 204,
+}
+
+
+def cut_at(text: str, marker: str, chars: int) -> str:
+    """Text up to `chars` characters into the last occurrence of marker."""
+    i = text.rfind(marker)
+    assert i != -1, f"marker not found: {marker!r}"
+    return text[: i + chars]
+
+
+def norm_calls(tool_calls) -> list[tuple[str, str]]:
+    return [(t.function.name, t.function.arguments) for t in tool_calls]
+
+
+@pytest.fixture
+def k2_tokenizer():
+    return make_mock_tokenizer(_MARKER_VOCAB)
+
+
+@pytest.fixture
+def k2_parser(k2_tokenizer):
+    return KimiK2Parser(k2_tokenizer, chat_template_kwargs={"thinking": False})
+
+
+class TestKimiK2FinishFlushNonStreaming:
+    """extract_tool_calls is a single-pass feed followed by finish().
+
+    A truncation inside the call-end marker must not leak the withheld
+    fragment into the arguments (Fix A); truncation points that were
+    already clean must stay clean.  The section-start cut stays at
+    main behavior by design: its fragment lives in content state,
+    where upstream pins flush-as-content.
+    """
+
+    def test_cut_inside_call_end_marker(self, k2_parser, mock_request):
+        result = k2_parser.extract_tool_calls(
+            cut_at(FULL_CALL, TOOL_CALL_END, 7), mock_request
+        )
+
+        assert result.content == PREFIX
+        assert norm_calls(result.tool_calls) == [("get_weather", '{"city": "Paris"}')]
+        assert result.tools_called is True
+
+    def test_cut_inside_call_start_marker_stays_clean(self, k2_parser, mock_request):
+        # derived expectation (no archived baseline for this cut):
+        # TOOL_PREAMBLE has no content-events entry, so the fragment
+        # is dropped on main and after the fix alike -- the red run
+        # doubles as its verification
+        result = k2_parser.extract_tool_calls(
+            cut_at(FULL_CALL, TOOL_CALL_START, 7), mock_request
+        )
+
+        assert result.content == PREFIX
+        assert result.tool_calls == []
+
+    def test_cut_inside_section_end_marker_keeps_call(self, k2_parser, mock_request):
+        # derived expectation (no archived baseline for this cut): the
+        # call already closed via the complete call-end marker; the
+        # fragment lands in TOOL_BETWEEN, which has no content-events
+        # entry -- clean on main and after the fix
+        result = k2_parser.extract_tool_calls(
+            cut_at(FULL_CALL, TOOL_SECTION_END, 7), mock_request
+        )
+
+        assert result.content == PREFIX
+        assert norm_calls(result.tool_calls) == [("get_weather", '{"city": "Paris"}')]
+
+    def test_full_control(self, k2_parser, mock_request):
+        result = k2_parser.extract_tool_calls(FULL_CALL, mock_request)
+
+        assert result.content == PREFIX
+        assert norm_calls(result.tool_calls) == [("get_weather", '{"city": "Paris"}')]
+        assert result.tools_called is True
+
+
+class TestKimiK2FinishMalformedArgsLookalike:
+    """Both outcomes of a lookalike tail under malformed arguments,
+    made explicit.  The brace and string guards are completion
+    proxies, not proof.  Bare-text arguments leave both vacuously
+    true, so the tail drops as in raw-args grammars.  Arguments
+    truncated inside a string fail the string guard, so the tail
+    flushes into the arguments as before this PR.  These tests
+    document the bound; if the guards ever get a real completion
+    signal, tighten the criterion and update them together.
+    """
+
+    def test_bare_args_tail_resembling_terminal_dropped(self, k2_parser, mock_request):
+        text = (
+            PREFIX
+            + TOOL_SECTION_START
+            + TOOL_CALL_START
+            + "functions.get_weather:0"
+            + TOOL_ARG_START
+            + "city Paris"
+            + TOOL_CALL_END[:12]
+        )
+        result = k2_parser.extract_tool_calls(text, mock_request)
+
+        # The lookalike tail is dropped: bare-text arguments leave the
+        # brace and string guards vacuously true, so the kimi_k2 drop
+        # criterion sees a completed argument region.
+        assert result.content == PREFIX
+        assert result.tools_called is True
+        assert norm_calls(result.tool_calls) == [("get_weather", "city Paris")]
+
+    def test_in_string_tail_resembling_terminal_kept(self, k2_parser, mock_request):
+        text = (
+            PREFIX
+            + TOOL_SECTION_START
+            + TOOL_CALL_START
+            + "functions.get_weather:0"
+            + TOOL_ARG_START
+            + '{"city": "Par'
+            + TOOL_CALL_END[:12]
+        )
+        result = k2_parser.extract_tool_calls(text, mock_request)
+
+        # The string guard fails at end of stream, so the withheld
+        # fragment flushes into the arguments exactly as before.
+        assert result.content == PREFIX
+        assert result.tools_called is True
+        assert norm_calls(result.tool_calls) == [
+            ("get_weather", '{"city": "Par' + TOOL_CALL_END[:12])
+        ]
+
+
+class TestKimiK2FinishSkipsNeverStartedCalls:
+    """A call that entered TOOL_ARGS without ever beginning its
+    arguments must not surface as a half call with invented
+    arguments (Fix B, narrowed scope: truncated-name and
+    argument-start-marker cuts surface, matching upstream)."""
+
+    def test_argument_start_without_args(self, k2_parser, mock_request):
+        # the argument-start marker arrived, zero argument characters
+        # followed, then the stream finished: state is TOOL_ARGS with
+        # no argument chunk ever emitted
+        text = (
+            PREFIX
+            + TOOL_SECTION_START
+            + TOOL_CALL_START
+            + "functions.get_weather:0"
+            + TOOL_ARG_START
+        )
+        result = k2_parser.extract_tool_calls(text, mock_request)
+
+        assert result.content == PREFIX
+        assert result.tool_calls == []

@@ -190,6 +190,24 @@ class StreamingParserEngine:
         self._args_brace_depth: int = 0
         self._args_in_string: bool = False
         self._args_escape_next: bool = False
+        self._args_chunk_emitted: bool = False
+
+    def _emit_arg_chunk(
+        self, value: str, token_count: int = 0
+    ) -> SemanticEvent:
+        """Single construction point for argument-value events.
+
+        Every ARG_VALUE_CHUNK marks the current call as having started
+        its arguments; finish() uses that flag to tell an args-bearing
+        call from one that never got past its name.
+        """
+        self._args_chunk_emitted = True
+        return SemanticEvent(
+            EventType.ARG_VALUE_CHUNK,
+            value=value,
+            tool_index=self.tool_index,
+            token_count=token_count,
+        )
 
     def _reset_json_collection_state(self) -> None:
         # State shared by JSON-array and semicolon-separated tool bodies.
@@ -296,16 +314,23 @@ class StreamingParserEngine:
     def finish(self) -> list[SemanticEvent]:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
-        events.extend(self._process_lex_tokens(self._lexer.flush()))
+        # A held terminal fragment is a leak only where the engine can
+        # prove the argument region completed: in TOOL_ARGS with
+        # balanced braces outside any string it can only be a
+        # truncated terminal tail. Every other state may still hold
+        # legitimate content (including text a delegating router hands
+        # to a downstream parser), so those keep flush-as-content.
+        drop_held = (
+            self.state == ParserState.TOOL_ARGS
+            and self._args_brace_depth == 0
+            and not self._args_in_string
+        )
+        events.extend(
+            self._process_lex_tokens(self._lexer.flush(drop_held=drop_held))
+        )
 
         if self._args_buffer:
-            events.append(
-                SemanticEvent(
-                    EventType.ARG_VALUE_CHUNK,
-                    value=self._args_buffer,
-                    tool_index=self.tool_index,
-                )
-            )
+            events.append(self._emit_arg_chunk(self._args_buffer))
             self._args_buffer = ""
             self._args_safe_end = 0
 
@@ -322,7 +347,21 @@ class StreamingParserEngine:
                 if self.config.tool_call_body_collection is not None
                 else True
             )
-            if end_open_call and self.tool_index >= 0:
+            # A call that entered TOOL_ARGS but never emitted an
+            # argument chunk cannot be closed meaningfully: a synthetic
+            # close would fabricate a call with invented arguments. A
+            # call still in TOOL_NAME at end of stream (truncated
+            # mid-name) is closed and surfaced as-is; surfacing
+            # truncated-name calls is pinned upstream behavior.
+            args_never_started = (
+                self.state == ParserState.TOOL_ARGS
+                and not self._args_chunk_emitted
+            )
+            if (
+                end_open_call
+                and self.tool_index >= 0
+                and not args_never_started
+            ):
                 events.append(
                     SemanticEvent(
                         EventType.TOOL_CALL_END,
@@ -494,14 +533,7 @@ class StreamingParserEngine:
                 return self._feed_json_collection_text(text)
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
-            return [
-                SemanticEvent(
-                    EventType.ARG_VALUE_CHUNK,
-                    value=text,
-                    tool_index=self.tool_index,
-                    token_count=token_count,
-                )
-            ]
+            return [self._emit_arg_chunk(text, token_count)]
         content_type = self.config.content_events.get(self.state)
         if content_type is not None:
             return [
@@ -535,13 +567,7 @@ class StreamingParserEngine:
             and transition.next_state != ParserState.TOOL_ARGS
             and self._args_buffer
         ):
-            events.append(
-                SemanticEvent(
-                    EventType.ARG_VALUE_CHUNK,
-                    value=self._args_buffer,
-                    tool_index=self.tool_index,
-                )
-            )
+            events.append(self._emit_arg_chunk(self._args_buffer))
             self._args_buffer = ""
 
         if previous_state == ParserState.MESSAGE_HEADER:
@@ -555,6 +581,7 @@ class StreamingParserEngine:
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:
                 self.tool_index += 1
+                self._args_chunk_emitted = False
             event_value = (
                 message_header
                 if previous_state == ParserState.MESSAGE_HEADER
@@ -647,13 +674,7 @@ class StreamingParserEngine:
         to_emit = self._args_buffer[: self._args_safe_end]
         self._args_buffer = self._args_buffer[self._args_safe_end :]
         self._args_safe_end = 0
-        return [
-            SemanticEvent(
-                EventType.ARG_VALUE_CHUNK,
-                value=to_emit,
-                tool_index=self.tool_index,
-            )
-        ]
+        return [self._emit_arg_chunk(to_emit)]
 
     # ── Multi-object JSON tool bodies ───────────────────────────────────
 
@@ -743,13 +764,7 @@ class StreamingParserEngine:
         events: list[SemanticEvent] = []
         # Flush the held closing '}' so the slot body is the full element.
         if self._args_buffer:
-            events.append(
-                SemanticEvent(
-                    EventType.ARG_VALUE_CHUNK,
-                    value=self._args_buffer,
-                    tool_index=self.tool_index,
-                )
-            )
+            events.append(self._emit_arg_chunk(self._args_buffer))
             self._args_buffer = ""
             self._args_safe_end = 0
         events.append(

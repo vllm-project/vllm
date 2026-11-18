@@ -396,3 +396,49 @@ def test_streaming_parallel_calls_are_chunk_invariant(
 def test_registered_tool_parser_aliases(name):
     parser_class = ToolParserManager.get_tool_parser(name)
     assert parser_class.__name__ == "LlamaJsonEngineToolParser"
+
+
+class TestFinishFlushPreservesCollectionElements:
+    """End-of-stream truncation inside a JSON collection element must
+    keep the buffered element, and a truncated later element must not
+    cost an earlier complete element.  Reverse protection for the
+    emitted-args flag and the per-slot completed flag.
+
+    The leading text is load-bearing, not decoration: with no text
+    before the tool-start marker, llama_json's non-streaming validator
+    classifies the truncated tool output as non-call text and returns
+    the whole string as content (extract early-return), so the
+    truncation shape under test never reaches the engine.  The prefix
+    matches the cross-family baseline sample.
+    """
+
+    def test_cut_inside_arguments_keeps_call(self, parser):
+        text = (
+            "Let me check the weather.\n"
+            + TOOL_START
+            + '{"name": "get_weather", "arguments": {"city": "Par'
+        )
+        result = parser.extract_tool_calls(text, None)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        call = result.tool_calls[0]
+        assert call.function.name == "get_weather"
+        assert call.function.arguments == '{"city": "Par'
+
+    def test_cut_inside_second_element_keeps_both(self, parser):
+        text = (
+            "Let me check the weather.\n"
+            + TOOL_START
+            + '{"name": "a", "arguments": {"x": 1}}; '
+            + '{"name": "get_weather", "arguments": {"city": "Par'
+        )
+        result = parser.extract_tool_calls(text, None)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        first, second = result.tool_calls
+        assert first.function.name == "a"
+        assert json.loads(first.function.arguments) == {"x": 1}
+        assert second.function.name == "get_weather"
+        assert second.function.arguments == '{"city": "Par'
