@@ -66,7 +66,10 @@ class OMPProcessManager:
 
         self._parse_omp_threads_bind_env()
 
-        assert not self.simulate_multi_node or self.auto_setup
+        assert not self.simulate_multi_node or self.auto_setup, (
+            "VLLM_CPU_SIM_MULTI_NUMA requires VLLM_CPU_OMP_THREADS_BIND=auto, "
+            f"got {envs.VLLM_CPU_OMP_THREADS_BIND!r}."
+        )
 
     @contextmanager
     def configure_omp_envs(self, rank: int, local_rank: int):

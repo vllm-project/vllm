@@ -8,8 +8,8 @@ MiniMax M2 tool call format::
     <parameter name="city">Seattle</parameter>
     </invoke></minimax:tool_call>
 
-Each ``<invoke>`` block becomes one tool call. The argument body consists
-of ``<parameter name="...">...</parameter>`` tags.
+Each `<invoke>` block becomes one tool call. The argument body consists
+of `<parameter name="...">...</parameter>` tags.
 """
 
 from __future__ import annotations

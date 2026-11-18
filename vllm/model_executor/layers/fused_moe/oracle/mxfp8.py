@@ -45,8 +45,8 @@ def _mxfp8_backend_to_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Resolve the MXFP8 expert classes for a backend.
 
-    DeepGEMM resolves directly to ``DeepGemmExperts`` (not the
-    ``TritonOrDeepGemmExperts`` wrapper, whose Triton fallback cannot handle the
+    DeepGEMM resolves directly to `DeepGemmExperts` (not the
+    `TritonOrDeepGemmExperts` wrapper, whose Triton fallback cannot handle the
     MXFP8 1x32 scheme); all other backends defer to the FP8 resolver.
     """
     if backend == Fp8MoeBackend.DEEPGEMM:
@@ -80,6 +80,7 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """MXFP8 MoE backend selection for one deployment configuration."""
 
     name = "Mxfp8"
+    placeholder_backend = Fp8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
@@ -104,9 +105,15 @@ def select_mxfp8_moe_backend(
     """Select the MXFP8 MoE backend and the best expert class.
 
     Returns:
-        A tuple of (fp8_backend, experts_cls).
+        A tuple of (fp8_backend, experts_cls); `NONE` and a placeholder experts
+        class for requantization sources, which have no kernel.
 
     """
+    # TODO: migrate to oracle base method.
+    source = Mxfp8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         backend = _BACKEND_NAME_MAP.get(runner_backend)

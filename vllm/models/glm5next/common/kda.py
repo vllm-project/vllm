@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
-from dataclasses import replace
-
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -50,8 +48,10 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
@@ -68,7 +68,7 @@ else:
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
-    Extends K3's ``_KimiGDNMergedColumnParallelLinear`` to support two
+    Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two
     replicated shards (f_a, g_a) instead of one. Pre-multiplies each
     replicated entry's output_size by tp_size so the per-rank shard
     divides back to the full size, and forces tp_rank=0 during weight
@@ -143,8 +143,8 @@ def _resolve_kda_prefill_backend(
 ) -> str:
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
     SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
-    ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
+    `chunk_kda_with_fused_gate` path. `backend` comes from
+    `additional_config.kda_prefill_backend` (auto / triton / flashkda)."""
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
     capability = current_platform.get_device_capability()
@@ -167,10 +167,10 @@ def _resolve_kda_prefill_backend(
 def _fused_qkv_conv1d(
     conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
 ) -> ColumnParallelLinear:
-    """The q|k|v short convs as one ``[3 * C_local, 1, K]`` parameter.
+    """The q|k|v short convs as one `[3 * C_local, 1, K]` parameter.
 
-    Checkpoint ``q/k/v_conv1d`` weights load as shards 0/1/2 (see
-    ``stacked_params_mapping``). The conv kernels read this parameter directly,
+    Checkpoint `q/k/v_conv1d` weights load as shards 0/1/2 (see
+    `stacked_params_mapping`). The conv kernels read this parameter directly,
     so every weight write (load, refit, offload, IPC cache) lands in it and its
     address stays fixed for cudagraphs (#55087).
     """
@@ -199,15 +199,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     num_heads: int
     conv_size: int
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def get_state_dtype(
         self,
@@ -320,7 +313,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim,
+            activation="sigmoid",
+            enforce_enable=current_platform.is_rocm(),
+        )
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
@@ -367,7 +364,22 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
+        self._triton_checkpoint_spec: tuple[tuple[int, ...], torch.dtype] | None = None
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
+        if self.kda_prefill_backend == "triton":
+            max_seqs = vllm_config.scheduler_config.max_num_seqs
+            self._triton_checkpoint_spec = (
+                (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
+                self.get_state_dtype()[1],
+            )
+            if is_workspace_manager_initialized():
+                current_workspace_manager().get_simultaneous(
+                    self._triton_checkpoint_spec
+                )
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -393,9 +405,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     vllm_config.model_config.dtype,
                 ),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
-                state_len=self.conv_size - 1
-            )
 
     def _flashkda_prefill(
         self,
@@ -412,12 +421,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         conv_state: torch.Tensor | None = None,
         recurrent_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits ``g``
-        and raw ``beta`` logits, l2-normalizes q/k in-kernel and applies the
-        bounded gate ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
-        matching ``chunk_kda_with_fused_gate(..., safe_gate=True)``. Writes the
-        attention output into ``out`` (a workspace buffer when ``None``) and
-        returns ``(out, final_state)``."""
+        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits `g`
+        and raw `beta` logits, l2-normalizes q/k in-kernel and applies the
+        bounded gate `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`,
+        matching `chunk_kda_with_fused_gate(..., safe_gate=True)`. Writes the
+        attention output into `out` (a workspace buffer when `None`) and
+        returns `(out, final_state)`."""
         assert self._flashkda_buffer_specs is not None
         final_state, checkpoint_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)
@@ -729,6 +738,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     recurrent_state=recurrent_state,
                 )
             else:
+                checkpoint = attn_metadata_narrowed.checkpoint
+                checkpoint_state = checkpoint_offsets = None
+                if checkpoint is not None:
+                    assert self._triton_checkpoint_spec is not None
+                    (checkpoint_state,) = current_workspace_manager().get_simultaneous(
+                        self._triton_checkpoint_spec
+                    )
+                    checkpoint_state = checkpoint_state[: initial_state.shape[0]]
+                    checkpoint_offsets = checkpoint.checkpoint_offsets
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -748,7 +766,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
                 )
+                if checkpoint is not None:
+                    assert self._checkpoint_exporter is not None
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=raw_qkv_ns,
+                        conv_state=conv_state,
+                        recurrent_checkpoint=checkpoint_state,
+                        recurrent_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
             # Init cache
             scatter_states(
                 recurrent_state,

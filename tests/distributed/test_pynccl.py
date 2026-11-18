@@ -536,6 +536,7 @@ def test_pynccl_suspend_resume_idempotent():
     comm.disabled = False
     comm._suspended = False
     comm.comm = object()
+    comm._stream_comms = {}
     comm.nccl = Mock()
 
     comm.suspend()

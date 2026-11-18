@@ -96,7 +96,7 @@ _GFX1100_SW_2D_MIN_FILL = {64: 32, 512: 8}
 
 def _prefill_band_config(configs, head_size_padded, max_seqlen_q):
     """2D launch for a batch with prefill tokens: (BLOCK_M, TILE_SIZE, num_warps,
-    num_stages) from ``configs`` for the max_seqlen_q band, or None."""
+    num_stages) from `configs` for the max_seqlen_q band, or None."""
     bands = configs.get(head_size_padded)
     if bands is None:
         return None
@@ -104,8 +104,8 @@ def _prefill_band_config(configs, head_size_padded, max_seqlen_q):
 
 
 def _decode_2d_config(configs, head_size_padded, min_tile):
-    """2D decode launch: (TILE_SIZE, num_warps, num_stages) from ``configs``, with
-    TILE_SIZE at least ``min_tile``, or None."""
+    """2D decode launch: (TILE_SIZE, num_warps, num_stages) from `configs`, with
+    TILE_SIZE at least `min_tile`, or None."""
     config = configs.get(head_size_padded)
     if config is None:
         return None
@@ -118,7 +118,7 @@ def _gfx1201_split_kv_segments(
 ):
     """gfx1201: segments so that requests x KV heads x segments is about 128 (more
     for small batches; fewer, down to 4, for larger ones with a 16-bit query).
-    Sliding windows < 2048 keep ``segments``."""
+    Sliding windows < 2048 keep `segments`."""
     if 0 < sliding_window < 2048:
         return segments
     programs = 64 if fp8_query and head_size_padded == 256 else 128
@@ -157,10 +157,10 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
 
     Modes handled inside the core kernel:
 
-    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
-      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+    - `KV_QUANT_MODE == 0` (NONE) and `2` (INT8 per-token-head) and
+      `3` (FP8 per-token-head): plain cast.  Per-token-head modes apply
       their scales separately on S/P inside the loop.
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
+    - `KV_QUANT_MODE == 1` (FP8 per-tensor): dequantize using the
       tensor-wide scale, unless Q is also FP8 and the caller folds the scales
       into the attention score and output accumulator.
     """
@@ -197,16 +197,16 @@ def _load_q_td(
 ):
     """Load Q via a 2D tensor descriptor.
 
-    Caller guarantees (via the wrapper's ``use_td_qo`` gate):
-      * ``HEAD_SIZE == HEAD_SIZE_PADDED`` (head_size is a power of 2),
-      * ``num_queries_per_kv`` is a power of 2,
-      * the ``num_queries_per_kv`` heads of the current KV group are
-        contiguous in memory (``query_stride_1 == HEAD_SIZE``, which is
+    Caller guarantees (via the wrapper's `use_td_qo` gate):
+      * `HEAD_SIZE == HEAD_SIZE_PADDED` (head_size is a power of 2),
+      * `num_queries_per_kv` is a power of 2,
+      * the `num_queries_per_kv` heads of the current KV group are
+        contiguous in memory (`query_stride_1 == HEAD_SIZE`, which is
         the default vLLM query layout).
 
     Under those preconditions the inner two axes are flattened into one
-    row of size ``num_queries_per_kv * HEAD_SIZE`` with stride 1, which
-    avoids the non-power-of-2 ``block_shape`` error from the Triton
+    row of size `num_queries_per_kv * HEAD_SIZE` with stride 1, which
+    avoids the non-power-of-2 `block_shape` error from the Triton
     tensor-descriptor validator.  Returns (BLOCK_M, HEAD_SIZE_PADDED).
     """
     q_base = (
@@ -242,7 +242,7 @@ def _load_kv_tile_td(
 
     Returns shape (TILE_SIZE, HEAD_SIZE_PADDED). Caller transposes for K.
     Tensor descriptors zero-pad reads beyond the shape boundary, so
-    ``HEAD_SIZE_PADDED > HEAD_SIZE`` is handled correctly.
+    `HEAD_SIZE_PADDED > HEAD_SIZE` is handled correctly.
     """
     base = (
         cache_ptr
@@ -272,10 +272,10 @@ def _store_output_td(
 ):
     """Store an output tile via a tensor descriptor.
 
-    The 2D and 3D epilogues differ only in ``base_ptr`` and the
-    ``(stride_token, stride_head)`` pair: 2D writes directly to the
+    The 2D and 3D epilogues differ only in `base_ptr` and the
+    `(stride_token, stride_head)` pair: 2D writes directly to the
     flat output buffer, 3D writes to a single per-segment slice of
-    ``segm_output_ptr``.  Descriptor shape / block_shape / reshape
+    `segm_output_ptr`.  Descriptor shape / block_shape / reshape
     are the same in both modes, so share one helper.
     """
     acc = acc.to(base_ptr.dtype.element_ty)
@@ -1078,22 +1078,32 @@ def unified_attention(
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
+    tuned_prefill_tile: int | None = None
 
-    # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
-    # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
-    # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
-    # more query rows per block + 8 warps is ~2x faster on B200.
+    # Prefill-shaped head_size 256 batches (diffusion-gemma canvas, gemma-4
+    # sliding layers) are under-tiled by the decode defaults. BLOCK_M=32 is
+    # ~2x faster on B200 (128 KV tile, 8 warps) and ~1.6x on B70 (4 warps:
+    # XPU warps are 16 lanes). XPU keeps short spec-decode verify batches on
+    # the 3D split-K path, which is faster for them.
+    is_xpu = current_platform.is_xpu()
     tuned_large_head = (
         head_size == 256
+        # Preserve batch invariance between single- and multi-query calls.
+        and not is_batch_invariant
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
-        and current_platform.is_device_capability_family(100)
+        and (
+            (is_xpu and max_seqlen_q > MAX_3D_QUERY_LEN)
+            or current_platform.is_device_capability_family(100)
+        )
     )
     if tuned_large_head:
         BLOCK_M = 32
         BLOCK_Q = BLOCK_M // num_queries_per_kv
-        launch_num_warps = 8
+        launch_num_warps = 4 if is_xpu else 8
         launch_num_stages = 2
+        if not is_xpu:
+            tuned_prefill_tile = 128
 
     # gfx1201: prefill / chunked-prefill / mixed launch. It sets BLOCK_Q, so it comes
     # before the grid size and the 2D/3D choice. The default launch is kept for
@@ -1146,10 +1156,9 @@ def unified_attention(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
-    # Wider KV tile for the tuned large-head path (see above). Only the 2D
-    # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
-    if tuned_large_head:
-        TILE_SIZE_PREFILL = 128
+    # Only the 2D path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
+    if tuned_prefill_tile is not None:
+        TILE_SIZE_PREFILL = tuned_prefill_tile
     elif rdna_prefill_tile is not None:
         TILE_SIZE_PREFILL = rdna_prefill_tile
 

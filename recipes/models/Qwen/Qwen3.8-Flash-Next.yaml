@@ -42,8 +42,6 @@ model:
   base_args:
     - "--max-num-seqs"
     - "256"
-    - "--gpu-memory-utilization"
-    - "0.90"
     - "--enable-prefix-caching"
   base_env: {}
 
@@ -101,8 +99,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "32"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -116,8 +112,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "16"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -133,8 +127,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "32"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -148,8 +140,6 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "16"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
@@ -195,8 +185,6 @@ hardware_overrides:
     extra_args:
       - "--moe-backend"
       - "triton"
-      - "--gpu-memory-utilization"
-      - "0.85"
       - "--kv-cache-dtype"
       - "fp8"
       - "--attention-config.indexer_kv_dtype"
@@ -285,7 +273,6 @@ guide: |
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.90 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
@@ -319,7 +306,6 @@ guide: |
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --moe-backend triton \
-    --gpu-memory-utilization 0.85 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
@@ -345,7 +331,6 @@ guide: |
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --moe-backend triton \
-    --gpu-memory-utilization 0.85 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
@@ -399,8 +384,7 @@ guide: |
 
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
   --tensor-parallel-size 4 \
-  --max-model-len auto \
-  --gpu-memory-utilization 0.9
+  --max-model-len auto
   ```
 
   MTP is opt-in on MI355X; to turn it on, add the option from the MTP
@@ -474,7 +458,11 @@ guide: |
   - **FP8 on eight GPUs:** use TEP8; plain TP8 is incompatible with this
     checkpoint. TP4 is also supported if GPU memory capacity allows.
   - **Mamba-cache capacity error at startup:** keep `--max-num-seqs 256`.
-  - **Runtime OOM on large multimodal batches:** keep `--gpu-memory-utilization 0.90`.
+  - **Runtime OOM on large multimodal batches:** lower `--max-num-batched-tokens`
+    or `--limit-mm-per-prompt`. On CUDA and ROCm, vLLM sizes the KV cache from
+    memory measured after warmup, so leave `--gpu-memory-utilization` unset
+    unless the GPU is shared
+    ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
   - **Out of memory while loading:** enable N-gram Embedding CPU offload, increase
     TP size, or reduce `--max-model-len` to reserve less KV cache. On 4x H100
     80GB, plain TP4 OOMs at engine startup without PLE CPU offload — keep the

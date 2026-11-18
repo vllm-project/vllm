@@ -87,7 +87,7 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
 
     Identical in structure to InternVLChatModel (InternViT vision encoder +
     pixel-shuffle MLP connector + Qwen3 language model).  This class exists
-    solely to register the ``QianfanOCRForConditionalGeneration`` architecture
+    solely to register the `QianfanOCRForConditionalGeneration` architecture
     name that appears in the model's config.json.
     """
 

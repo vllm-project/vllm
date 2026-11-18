@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized DSpark drafter's collectives (``drafter/comm.py``) on real ranks
-(2 GPUs by default; ``KIMI_K31_DRAFTER_COMM_WORLD=4`` / 8 runs more).
+"""The specialized DSpark drafter's collectives (`drafter/comm.py`) on real ranks
+(2 GPUs by default; `KIMI_K31_DRAFTER_COMM_WORLD=4` / 8 runs more).
 
-- ``ArNorm``: the all-reduce + residual + RMSNorm against a reference that sums the
+- `ArNorm`: the all-reduce + residual + RMSNorm against a reference that sums the
   ranks' BF16 rows in FP32 in rank order and rounds once (flashinfer's one-shot
   order), adds the residual with one BF16 rounding and normalizes the new residual
   (FP32 sum of squares in another order: at most one BF16 ulp on the output);
   the new residual is bit-exact. Both mailbox parities, repeated calls (re-arm),
   1-64 rows, with and without a residual; also against vLLM's own
-  ``fused_allreduce_rms_norm`` (flashinfer) when it runs.
-- ``Gather``: the context and logits gathers are byte copies of NCCL's
+  `fused_allreduce_rms_norm` (flashinfer) when it runs.
+- `Gather`: the context and logits gathers are byte copies of NCCL's
   all-gather (a sentinel pair (+0, -0) arrives as (+0, +0)); the in-place query
-  gather fills head block ``rank`` of every rank's DCP q mailbox.
-- ``DcpValue`` as the draft DCP attention calls it (flashinfer natural-log LSE):
+  gather fills head block `rank` of every rank's DCP q mailbox.
+- `DcpValue` as the draft DCP attention calls it (flashinfer natural-log LSE):
   the LSE merge over the DCP sources and W_UV against an FP32 reference.
 """
 
@@ -40,7 +40,7 @@ pytestmark = [
 
 
 def _bf16_ulp(x):
-    """One BF16 ulp of each element of ``x`` (FP32)."""
+    """One BF16 ulp of each element of `x` (FP32)."""
     e = torch.floor(torch.log2(x.abs().clamp_min(2.0**-126)))
     return torch.exp2(e - 7)
 
@@ -307,7 +307,7 @@ STEP_CASES = ("d1=1*5@1900:4", "d4=4*5@1500:4", "d12=12*5@900:4")
 
 
 def _step_worker(rank, port, out_dir, dcp):
-    """``vllm bench forward`` in-process on the layer-truncated K3.1 with its DSpark
+    """`vllm bench forward` in-process on the layer-truncated K3.1 with its DSpark
     drafter; every eager draft step runs twice from the same state: with the stock
     collectives (the specialized drafter's hook, context and lm_head mailboxes
     detached: aa72383eeb's drafter) and with the mailboxes; the draft tokens and

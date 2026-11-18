@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     KVConnectorOutput,
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepTimingSample:
     forward_ms: float
     drafter_ms: float
@@ -38,7 +39,7 @@ def _timing_event() -> torch.cuda.Event:
     return torch.cuda.Event(enable_timing=True)
 
 
-@dataclass
+@dataclass(slots=True)
 class StepTimingEvents:
     forward_start: torch.cuda.Event = field(default_factory=_timing_event)
     forward_end: torch.cuda.Event = field(default_factory=_timing_event)
@@ -47,7 +48,7 @@ class StepTimingEvents:
 
 
 class StepTimingCollector:
-    """Times the steps run inside ``collect``; record calls no-op outside it.
+    """Times the steps run inside `collect`; record calls no-op outside it.
 
     Every step gets its own events, so the steps queue back-to-back and the
     block resolves them all behind one sync on the way out.
@@ -60,7 +61,7 @@ class StepTimingCollector:
         self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
 
     @contextlib.contextmanager
-    def collect(self) -> Iterator[list[StepTimingSample]]:
+    def collect(self) -> Generator[list[StepTimingSample]]:
         """Time every step run in this block.
 
         The yielded list holds one sample per timed step once the block exits;
@@ -123,6 +124,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        num_drafted_tokens_per_req: torch.Tensor | None = None,
+        num_verified_tokens_per_req: torch.Tensor | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -131,9 +134,15 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.num_drafted_tokens_per_req = num_drafted_tokens_per_req
+        self.num_verified_tokens_per_req = num_verified_tokens_per_req
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._has_fault_gpu: torch.Tensor | None = None
+        if check_ep_fault:
+            # Computed on the main stream: the copy stream only carries copies.
+            self._has_fault_gpu = get_ep_all2all_manager().query_fault()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -148,6 +157,16 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
+            self.num_drafted_tokens_per_req_np = (
+                async_copy_to_np(num_drafted_tokens_per_req)
+                if num_drafted_tokens_per_req is not None
+                else None
+            )
+            self.num_verified_tokens_per_req_np = (
+                async_copy_to_np(num_verified_tokens_per_req)
+                if num_verified_tokens_per_req is not None
+                else None
+            )
             self.sampling_mask_tensors: SamplingMaskTensors | None = None
             if sampler_output.sampling_mask_tensors is not None:
                 self.sampling_mask_tensors = (
@@ -166,9 +185,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
                 )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
+            if self._has_fault_gpu is not None:
+                self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
@@ -183,6 +201,12 @@ class AsyncOutput(AsyncModelRunnerOutput):
         for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
+        if self.num_drafted_tokens_per_req_np is not None:
+            assert self.num_verified_tokens_per_req_np is not None
+            num_drafted = self.num_drafted_tokens_per_req_np.tolist()
+            num_verified = self.num_verified_tokens_per_req_np.tolist()
+            self.model_runner_output.num_drafted_tokens_per_req = num_drafted
+            self.model_runner_output.num_verified_tokens_per_req = num_verified
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
@@ -272,6 +296,19 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True, copy=True).numpy()
+
+
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+    """Create a stream for non_blocking D2H copies.
+
+    It must only carry copies: compute anything it copies on the producer stream
+    first (see `conf_compute_utils.new_external_d2h_stream()`).
+    """
+    if not current_platform.is_confidential_compute():
+        return torch.cuda.Stream(device)
+    from vllm.v1.conf_compute_utils import new_external_d2h_stream
+
+    return new_external_d2h_stream(device)
 
 
 @contextlib.contextmanager

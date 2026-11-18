@@ -124,7 +124,7 @@ class TestArgConverter:
         return f'<｜DSML｜parameter name="{name}">{value}{_PARAM_CLOSE}'
 
     def test_missing_string_attribute_keeps_literal(self):
-        """The model sometimes omits ``string``; the parameter must survive."""
+        """The model sometimes omits `string`; the parameter must survive."""
         raw = self._bare("name", "alpha")
         assert json.loads(_dsml_arg_converter(raw, partial=False)) == {"name": "alpha"}
 
@@ -375,8 +375,8 @@ class TestMissingInvokeEnd:
 
 
 class TestMissingToolCallsWrapper:
-    """The model sometimes drops ``<｜DSML｜tool_calls>`` at long context and
-    opens ``<｜DSML｜invoke ...>`` directly (#48931). The invoke itself must
+    """The model sometimes drops `<｜DSML｜tool_calls>` at long context and
+    opens `<｜DSML｜invoke ...>` directly (#48931). The invoke itself must
     anchor tool-call detection so the block is never leaked as content.
     """
 
@@ -408,7 +408,7 @@ class TestMissingToolCallsWrapper:
         self, mock_tokenizer, mock_request, trailing_end
     ):
         """Text after a tool block is dropped whether or not the closing
-        wrapper is present, so a missing ``</｜DSML｜tool_calls>`` does not
+        wrapper is present, so a missing `</｜DSML｜tool_calls>` does not
         change what the client sees."""
         text = "pre\n" + self._ORPHAN
         if trailing_end:
@@ -482,7 +482,7 @@ class TestMissingToolCallsWrapper:
     def test_drafted_invoke_in_reasoning_does_not_hijack_real_call(
         self, mock_tokenizer, mock_request
     ):
-        """A drafted invoke in ``<think>`` must not steal the real call."""
+        """A drafted invoke in `<think>` must not steal the real call."""
         parser = DeepSeekV4Parser(
             mock_tokenizer, chat_template_kwargs={"thinking": True}
         )
@@ -1363,7 +1363,7 @@ _WRAPPER_VARIANTS = list(DSML_TOOL_START_VARIANTS)
 
 class TestMalformedDsmlNoise:
     """DeepSeek-V4-Flash intermittently misspells the tool-call opener, e.g.
-    ``<｜DSML｜toolcalls>``. Known corrupted openers open a tool block like
+    `<｜DSML｜toolcalls>`. Known corrupted openers open a tool block like
     the real wrapper so the markup never surfaces as assistant content.
     """
 
@@ -1408,7 +1408,7 @@ class TestMalformedDsmlNoise:
     def test_corrupted_wrapper_ends_reasoning(
         self, mock_tokenizer, mock_request, wrapper
     ):
-        """Like the real wrapper, a corrupted one inside ``<think>`` closes
+        """Like the real wrapper, a corrupted one inside `<think>` closes
         the reasoning block and starts the tool call."""
         text = f"thinking{wrapper}\n{self._INNER}"
         parser = self._parser(mock_tokenizer, thinking=True)
@@ -1452,7 +1452,7 @@ class TestMalformedDsmlNoise:
         """A registered spelling mentioned in prose behaves exactly like a
         prose mention of the real wrapper: the opener starts a tool block and
         the rest of the message is dropped. That is pre-existing behavior of
-        ``<｜DSML｜tool_calls>``; the variants must not differ from it either
+        `<｜DSML｜tool_calls>`; the variants must not differ from it either
         way."""
         template = "The opener looks like {} and then params follow. Done."
         text = template.format(wrapper)

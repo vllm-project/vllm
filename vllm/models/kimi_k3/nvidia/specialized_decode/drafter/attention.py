@@ -2,34 +2,36 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dense MLA decode of the DSpark draft block with the query tokens folded into heads.
 
-A DSpark draft step runs ``k`` query tokens per request (anchor + ``k - 1`` noise
+A DSpark draft step runs `k` query tokens per request (anchor + `k - 1` noise
 tokens) through each dense MLA draft layer. The block is non-causal: every query
 token of a request attends to exactly the same keys (the whole context plus the
-block itself, already written to the cache). The stock ``FLASHINFER_MLA`` decode
-has no non-causal flag, so it flattens the block into ``R * k`` independent
+block itself, already written to the cache). The stock `FLASHINFER_MLA` decode
+has no non-causal flag, so it flattens the block into `R * k` independent
 single-token rows, each with its own copy of the request's block table. Every row
-then streams the request's whole latent cache again: ``k`` times the KV bytes, and
-each CTA's MMA sees only the ``H`` local heads of one token (8 at TP8).
+then streams the request's whole latent cache again: `k` times the KV bytes, and
+each CTA's MMA sees only the `H` local heads of one token (8 at TP8).
 
 Absorbed MLA decode is MQA (one latent KV head), so query heads are independent
-rows over a shared key set. Folding the ``k`` tokens of a request into the head
-axis, ``[R * k, H, D] -> [R, 1, k * H, D]``, gives one decode row per request with
-``k * H`` heads over the same keys. That is the same attention, exactly: every
+rows over a shared key set. Folding the `k` tokens of a request into the head
+axis, `[R * k, H, D] -> [R, 1, k * H, D]`, gives one decode row per request with
+`k * H` heads over the same keys. That is the same attention, exactly: every
 (token, head) pair still gets its own full softmax over the identical key set, at
 the same precision (FP8 Q and KV, the stock bmm scales); only the kernel's tiling
 (which CTA holds which head, the KV split) can differ. The KV is read once per
-request instead of ``k`` times, and the MMA M grows ``k``-fold (32-56 heads at TP8,
+request instead of `k` times, and the MMA M grows `k`-fold (32-56 heads at TP8,
 256-448 at TP1 / DCP).
 
-The output ``[R, 1, k * H, L]`` and LSE ``[R, k * H]`` are the stock
-``[R * k, H, L]`` / ``[R * k, H]`` in the same memory order (token-major,
-then head), so the DCP combine and the ``W_UV`` up-projection are unchanged.
+The output `[R, 1, k * H, L]` and LSE `[R, k * H]` are the stock
+`[R * k, H, L]` / `[R * k, H]` in the same memory order (token-major,
+then head), so the DCP combine and the `W_UV` up-projection are unchanged.
 """
 
 import functools
 from typing import Any
 
 import torch
+
+from vllm.triton_utils import tl, triton
 
 _COUNTER: dict[torch.device, torch.Tensor] = {}
 _WORKSPACE: dict[torch.device, torch.Tensor] = {}
@@ -57,7 +59,7 @@ def cake_workspace_bytes(
     max_reqs: int, k: int, heads: int, max_seq_len: int, sm_count: int
 ) -> int:
     """The largest CAKE split-KV workspace any folded draft batch of up to
-    ``max_reqs`` requests needs (CUDA graphs plan at ``max_seq_len``)."""
+    `max_reqs` requests needs (CUDA graphs plan at `max_seq_len`)."""
     from flashinfer.mla.cake_kimi_k3_mla import plan_attention, workspace_bytes
 
     need = 0
@@ -78,7 +80,7 @@ def reserve_cake_workspace(
 ) -> int:
     """Allocate the CAKE workspace for the deployment's largest draft batch now,
     at model load (before the KV-cache memory profile and every graph capture,
-    which bind its address), at most ``CAKE_WORKSPACE_MAX_BYTES``. Returns its
+    which bind its address), at most `CAKE_WORKSPACE_MAX_BYTES`. Returns its
     size. (GB300, 1M plan length: TP8 64 x k5 6 MiB; DEP 128 x k4 324 MiB,
     128 x k5 589 MiB, 256 x k5 4.9 GiB -> capped, its largest batches fold on
     trtllm-gen.) An eager batch planned at a shorter length can need more; the
@@ -96,12 +98,12 @@ def reserve_cake_workspace(
     return nbytes
 
 
-def foldable(attn_metadata, num_rows: int) -> int:
+def foldable(attn_metadata, num_rows: int, causal_ok: bool = False) -> int:
     """Query tokens per request when the decode batch can be folded, else 0.
 
     Folding needs a non-causal decode batch in which every request has the same
     number of query tokens (a DSpark draft block always does)."""
-    if getattr(attn_metadata, "causal", True):
+    if getattr(attn_metadata, "causal", True) and not causal_ok:
         return 0
     decode = attn_metadata.decode
     if decode is None:
@@ -151,12 +153,12 @@ CUTE_DSL_MAX_HEADS = 128
 def fold_plan(k: int, heads: int, need_lse: bool, cake_ok: bool) -> tuple[int, str]:
     """(query tokens folded into one decode row, FlashInfer MLA backend).
 
-    Without an LSE (TP / DEP) all ``k`` tokens fold into one row per request and
+    Without an LSE (TP / DEP) all `k` tokens fold into one row per request and
     run the Kimi K3 CAKE kernel, whose two-CTA wide route shares each 128-key tile
-    across 128 packed (token, head) rows (``auto`` = trtllm-gen when CAKE cannot
+    across 128 packed (token, head) rows (`auto` = trtllm-gen when CAKE cannot
     run: it reads the tile once per 64-head group). With an LSE (DCP) the cute-dsl
-    kernel takes at most 128 heads per row: fold the largest divisor ``f`` of
-    ``k`` with ``f * heads <= 128`` (k=4 at 64 heads: pairs, half the KV reads)."""
+    kernel takes at most 128 heads per row: fold the largest divisor `f` of
+    `k` with `f * heads <= 128` (k=4 at 64 heads: pairs, half the KV reads)."""
     if not need_lse:
         return k, "cake" if cake_ok else "auto"
     f = max(
@@ -223,8 +225,8 @@ def _sm_count(device: torch.device) -> int:
 
 def balanced_tiers(device: torch.device, rows: int) -> tuple[int, ...]:
     """The split tiers (rows each, longest first) of a cute-dsl LSE draft decode of
-    ``rows`` decode rows; () runs the one launch. Balanced from the row count on
-    which the one launch runs unsplit (``sms // (2 * rows) < 2``: below it the
+    `rows` decode rows; () runs the one launch. Balanced from the row count on
+    which the one launch runs unsplit (`sms // (2 * rows) < 2`: below it the
     kernel splits every row already), keeping at least half the rows unsplit."""
     if rows * 4 <= _sm_count(device):
         return ()
@@ -238,12 +240,12 @@ def balanced_tiers(device: torch.device, rows: int) -> tuple[int, ...]:
 
 def tier_workspace_bytes(rows: int, splits: int, heads: int, lora: int) -> int:
     """The cute-dsl decode's split-KV workspace: FP32 partials + LSE per split
-    (``mla_decode.get_workspace_size``)."""
+    (`mla_decode.get_workspace_size`)."""
     return rows * splits * -(-heads // 128) * 128 * (lora + 1) * 4
 
 
 def _streams(device: torch.device, count: int) -> list[torch.cuda.Stream]:
-    """``count`` streams, the first the highest priority, each next one lower."""
+    """`count` streams, the first the highest priority, each next one lower."""
     streams = _STREAMS.setdefault(device, [])
     low, high = torch.cuda.Stream.priority_range()
     while len(streams) < count:
@@ -254,8 +256,8 @@ def _streams(device: torch.device, count: int) -> list[torch.cuda.Stream]:
 
 @functools.cache
 def _row_copy_kernel():
-    """``dst[i] = src[i]`` row by row (int32 words), for the rows whose ``target``
-    is below ``bound`` only: gathers (``gather``: dst row i <- src row target[i])
+    """`dst[i] = src[i]` row by row (int32 words), for the rows whose `target`
+    is below `bound` only: gathers (`gather`: dst row i <- src row target[i])
     or scatters (dst row target[i] <- src row i). Cost: the moved rows."""
     from vllm.triton_utils import tl, triton
 
@@ -280,7 +282,7 @@ def _row_copy_kernel():
 
 
 def _row_copy(src, dst, target, bound, gather):
-    """See ``_row_copy_kernel``; ``src`` / ``dst``: [rows, ...] contiguous rows."""
+    """See `_row_copy_kernel`; `src` / `dst`: [rows, ...] contiguous rows."""
     s = src.reshape(src.shape[0], -1).view(torch.int32)
     d = dst.reshape(dst.shape[0], -1).view(torch.int32)
     words = s.shape[1]
@@ -293,7 +295,7 @@ def _row_copy(src, dst, target, bound, gather):
 
 @functools.cache
 def _plan_kernel():
-    """One CTA: which rows the split tiers take (see ``_balanced_tables``)."""
+    """One CTA: which rows the split tiers take (see `_balanced_tables`)."""
     from vllm.triton_utils import tl, triton
 
     @triton.jit
@@ -323,11 +325,11 @@ def _plan_kernel():
 
 
 def _balanced_tables(cache: dict | None, bt, sl, tot, split_rows, pairs):
-    """Which rows the split tiers take, cached per batch like ``_group_tables``
-    (every draft layer of a step sees the same lengths): of the ``split_rows``
-    longest (longest first), those longer than ``MOVE`` of a pair's share of the
-    batch's keys (``sum / pairs``). Returns (each tier row's batch row, or
-    ``rows`` when it stays in the unsplit launch; every row's length in the
+    """Which rows the split tiers take, cached per batch like `_group_tables`
+    (every draft layer of a step sees the same lengths): of the `split_rows`
+    longest (longest first), those longer than `MOVE` of a pair's share of the
+    batch's keys (`sum / pairs`). Returns (each tier row's batch row, or
+    `rows` when it stays in the unsplit launch; every row's length in the
     unsplit launch, 0 for the moved ones; the tier rows' block table, lengths
     (0 when not moved) and global lengths)."""
     rows = sl.shape[0]
@@ -358,10 +360,10 @@ def balanced_decode(
     kv_lora_rank: int,
     tiers: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The cute-dsl LSE decode of ``common`` (``folded_decode``'s FlashInfer
-    arguments) as the split ``tiers`` of the longest rows and one unsplit launch
-    of the rest (see ``TIERS``). Returns ``[rows, 1, heads, kv_lora_rank]`` BF16
-    and ``[rows, heads]`` FP32, as the one launch."""
+    """The cute-dsl LSE decode of `common` (`folded_decode`'s FlashInfer
+    arguments) as the split `tiers` of the longest rows and one unsplit launch
+    of the rest (see `TIERS`). Returns `[rows, 1, heads, kv_lora_rank]` BF16
+    and `[rows, heads]` FP32, as the one launch."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     query = common["query"]
@@ -437,7 +439,7 @@ def balanced_decode(
 
 
 def _group_tables(cache: dict | None, block_table, seq_lens, tot, num_reqs, groups):
-    """Per decode-row tables when each request spans ``groups`` rows (cached per
+    """Per decode-row tables when each request spans `groups` rows (cached per
     batch: every draft layer of a step sees the same tables)."""
     if groups == 1:
         return (
@@ -481,13 +483,13 @@ def folded_decode(
     backend: str | None = None,
     table_cache: dict | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Non-causal dense MLA decode of ``R`` requests x ``k`` query tokens.
+    """Non-causal dense MLA decode of `R` requests x `k` query tokens.
 
-    ``q``: ``[R * k, H, kv_lora_rank + rope]`` (token-major per request);
-    ``kv_cache``: ``[pages, page_size, kv_lora_rank + rope]``; ``block_table`` /
-    ``seq_lens`` (/ ``dcp_tot_seq_lens``): per request. Returns ``[R * k, H,
-    kv_lora_rank]`` and, with ``return_lse``, ``[R * k, H]``. ``backend`` forces
-    a FlashInfer backend (benchmarks); by default :func:`fold_plan` picks."""
+    `q`: `[R * k, H, kv_lora_rank + rope]` (token-major per request);
+    `kv_cache`: `[pages, page_size, kv_lora_rank + rope]`; `block_table` /
+    `seq_lens` (/ `dcp_tot_seq_lens`): per request. Returns `[R * k, H,
+    kv_lora_rank]` and, with `return_lse`, `[R * k, H]`. `backend` forces
+    a FlashInfer backend (benchmarks); by default `fold_plan` picks."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     rows, heads, dim = q.shape
@@ -581,9 +583,9 @@ def folded_decode(
 def draft_forward_mqa(
     impl, q: torch.Tensor, kv_cache: torch.Tensor, attn_metadata, layer
 ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
-    """``FlashInferMLAImpl.forward_mqa`` for a DSpark draft block, folded.
+    """`FlashInferMLAImpl.forward_mqa` for a DSpark draft block, folded.
 
-    Returns None (the caller runs the stock ``forward_mqa``) for a batch that
+    Returns None (the caller runs the stock `forward_mqa`) for a batch that
     cannot be folded or a backend other than FLASHINFER_MLA."""
     from vllm.v1.attention.backends.mla.flashinfer_mla import (
         FlashInferMLAImpl,
@@ -593,7 +595,10 @@ def draft_forward_mqa(
 
     if not isinstance(impl, FlashInferMLAImpl) or isinstance(q, tuple):
         return None
-    k = foldable(attn_metadata, q.shape[0])
+    causal = getattr(attn_metadata, "causal", True)
+    if causal and (impl.dcp_world_size > 1 or impl.need_to_return_lse_for_decode):
+        return None  # causal folding: TP only
+    k = foldable(attn_metadata, q.shape[0], causal_ok=causal)
     if k == 0:
         return None
     if impl.bmm1_scale is None:
@@ -606,6 +611,21 @@ def draft_forward_mqa(
             impl.bmm2_scale *= layer._k_scale_float
     return_lse = impl.need_to_return_lse_for_decode
     decode = attn_metadata.decode
+    if causal:
+        return causal_folded_decode(
+            q,
+            kv_cache,
+            decode.block_table,
+            decode.seq_lens,
+            attn_metadata.max_seq_len,
+            k,
+            kv_lora_rank=impl.kv_lora_rank,
+            qk_nope_head_dim=impl.qk_nope_head_dim,
+            qk_rope_head_dim=impl.qk_rope_head_dim,
+            bmm1_scale=impl.bmm1_scale,
+            bmm2_scale=impl.bmm2_scale,
+            max_reqs=impl._mla_counter_max_batch,
+        )
     cake = not return_lse and cake_supported(
         q, kv_cache, impl.kv_lora_rank, impl.qk_rope_head_dim
     )
@@ -634,7 +654,7 @@ def draft_forward_mqa(
 
 
 def _scales(impl, layer):
-    """The stock decode's bmm1 / bmm2 scales (``FlashInferMLAImpl.forward_mqa``)."""
+    """The stock decode's bmm1 / bmm2 scales (`FlashInferMLAImpl.forward_mqa`)."""
     from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if impl.bmm1_scale is None:
@@ -650,6 +670,77 @@ def _scales(impl, layer):
 
 LOG2E = 1.4426950408889634
 
+# The causal draft block's decode on the DCP mailbox path, per DCP size (the path
+# runs with DCP = TP, so this is also the TP size) and decode rows (``batch_table``
+# spans; unlisted sizes and rows: "fold"):
+#   "native"  the stock MLA causal DCP decode (``dcp_causal_native_decode``): the
+#             call ``FlashInferMLAImpl.forward_mqa`` makes for a uniform causal DCP
+#             batch, one decode launch and its reducer.
+#   "fold"    the shared context folded with its LSE, then this rank's block keys
+#             merged causally (``dcp_causal_block_merge``).
+# Larger row counts keep "fold": on a graph padded past the live requests, its split
+# tiers spread a long context over more SMs than the native decode's split.
+CAUSAL_DCP_DECODE = {16: "1-35:native"}
+
+
+def causal_dcp_decode(world: int, rows: int) -> str:
+    """`CAUSAL_DCP_DECODE`'s decode of a causal draft block of `rows` rows."""
+    from ..cutedsl.common.policy import batch_table
+
+    return batch_table(CAUSAL_DCP_DECODE.get(world, "")).get(rows, "fold")
+
+
+def dcp_causal_native_decode(
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    tot_seq_lens: torch.Tensor,
+    max_seq_len: int,
+    tokens_per_request: int,
+    world: int,
+    rank: int,
+    *,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    bmm1_scale: float,
+    bmm2_scale: float,
+    workspace: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Causal MLA decode of `R` requests x `k` draft tokens on this DCP rank, as
+    the stock uniform causal DCP decode: `query` `[R * k, H, D]` as `[R, k, H,
+    D]`, this rank's local lengths (`seq_lens`) and the global ones
+    (`tot_seq_lens`, the block included); the kernel masks the block causally over
+    the interleave-1 shard. Returns `[R * k, H, kv_lora_rank]` and the natural-log
+    LSE `[R * k, H]`."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    rows, heads, dim = query.shape
+    k = tokens_per_request
+    reqs = rows // k
+    assert reqs * k == rows
+    o, lse = trtllm_batch_decode_with_kv_cache_mla(
+        query=query.view(reqs, k, heads, dim),
+        kv_cache=kv_cache.unsqueeze(1),
+        workspace_buffer=workspace,
+        qk_nope_head_dim=qk_nope_head_dim,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        block_tables=block_table[:reqs],
+        seq_lens=seq_lens[:reqs],
+        max_seq_len=max_seq_len,
+        bmm1_scale=bmm1_scale,
+        bmm2_scale=bmm2_scale,
+        return_lse=True,
+        enable_dcp=True,
+        cp_world=world,
+        cp_rank=rank,
+        causal_seqlens_kv_global=tot_seq_lens[:reqs],
+        backend="cute-dsl",
+    )
+    return o.view(rows, heads, o.shape[-1]), lse.view(rows, heads)
+
 
 class DraftDcp:
     """The draft block's MLA decode under DCP (DCP = TP: rank d owns head block d)
@@ -658,12 +749,13 @@ class DraftDcp:
     reducer, the LSE all-to-all push + combine) plus the W_UV bmm:
 
       query      every rank multicasts its FP8 query rows [T, H, 576] into head
-                 block ``rank`` of every rank's ``DcpBox`` q mailbox [T, DCP*H, 576]
-                 (``comm.Gather``, in place) and polls until all landed
-      decode     the stock folded draft decode (``folded_decode``: the k tokens of a
+                 block `rank` of every rank's `DcpBox` q mailbox [T, DCP*H, 576]
+                 (`comm.Gather`, in place) and polls until all landed
+      decode     the stock folded draft decode (`folded_decode`: the k tokens of a
                  request folded into heads, every DCP*H head over the local KV
-                 shard, rank-local BF16 rows + LSE), reading the mailbox
-      value      ``mla.dcp.DcpValue``: re-arms the q mailbox, pushes each row to its
+                 shard, rank-local BF16 rows + LSE), reading the mailbox; a causal
+                 block as `CAUSAL_DCP_DECODE` picks
+      value      `mla.dcp.DcpValue`: re-arms the q mailbox, pushes each row to its
                  head owner, the owner merges its H heads over the DCP sources
                  (exp2(lse - max) / sum in FP32, one BF16 rounding, as the stock
                  combine) and applies W_UV (BF16 MMA, FP32 accumulation) into the
@@ -687,7 +779,7 @@ class DraftDcp:
     @staticmethod
     def eligible(attn, heads) -> bool:
         """The draft layers this path serves: the stock folded draft decode
-        (``draft_fold`` on FlashInfer MLA, which takes the FP8 query this path
+        (`draft_fold` on FlashInfer MLA, which takes the FP8 query this path
         gathers), FP8 per-tensor KV, the q-LoRA path without output gate or fused
         GEMM-RS-AR, H local heads of 576 / 512."""
         from vllm.v1.attention.backends.mla.flashinfer_mla import FlashInferMLAImpl
@@ -728,7 +820,7 @@ class DraftDcp:
         return compiled
 
     def forward(self, attn, positions, hidden, parity):
-        """``attn(positions, hidden)`` (a draft layer's MultiHeadLatentAttention) on
+        """`attn(positions, hidden)` (a draft layer's MultiHeadLatentAttention) on
         this path, or None when this batch takes the stock module."""
         from vllm.forward_context import get_forward_context
 
@@ -741,11 +833,24 @@ class DraftDcp:
         n = metadata.num_actual_tokens
         if metadata.num_decode_tokens != n or not 1 <= n <= self.cap or n > rows:
             return None
-        k = foldable(metadata, n)
+        # Causal blocks need interleave 1 (rank (L + i) % W holds key L + i), which the
+        # FlashInfer MLA DCP builder this path runs on already enforces
+        # (flashinfer_mla.py: "native DCP requires cp_kv_cache_interleave_size=1").
+        causal = getattr(metadata, "causal", True)
+        k = foldable(metadata, n, causal_ok=causal)
         if k == 0 or metadata.decode.dcp_tot_seq_lens is None:
+            _draft_dcp_note(
+                "not foldable (k %d, tot lens %s)",
+                k,
+                metadata.decode.dcp_tot_seq_lens is not None,
+            )
             return None
         if torch.cuda.is_current_stream_capturing() and (n, k) not in self.values:
+            _draft_dcp_note("capture before warmup (n %d, k %d)", n, k)
             return None  # compiled at the eager warmup of every captured size
+        if causal:
+            _draft_dcp_note("serves a causal block (k %d)", k)
+            _draft_dcp_note("causal block decode: %s", causal_dcp_decode(self.size, n))
         return self._forward(attn, positions, hidden, metadata, context, n, k, parity)
 
     def _forward(self, attn, positions, hidden, metadata, context, n, k, parity):
@@ -802,27 +907,87 @@ class DraftDcp:
         bmm1, bmm2 = _scales(impl, attn)
         from vllm.v1.attention.backends.mla.flashinfer_mla import _get_workspace_buffer
 
-        o, lse = folded_decode(
-            query,
-            attn._attn_read_kv_cache(),
-            decode.block_table,
-            decode.seq_lens,
-            metadata.max_seq_len,
-            k,
-            kv_lora_rank=attn.kv_lora_rank,
-            qk_nope_head_dim=attn.qk_nope_head_dim,
-            qk_rope_head_dim=attn.qk_rope_head_dim,
-            bmm1_scale=bmm1,
-            bmm2_scale=bmm2,
-            workspace=_get_workspace_buffer(True),
-            return_lse=True,
-            dcp_world_size=self.size,
-            dcp_rank=self.rank,
-            dcp_tot_seq_lens=decode.dcp_tot_seq_lens,
-            table_cache=decode.__dict__.setdefault("_draft_fold_tables", {}),
-        )
-        assert lse is not None
         reqs = n // k
+        kv_cache = attn._attn_read_kv_cache()
+        causal = getattr(metadata, "causal", True)
+        mode = causal_dcp_decode(self.size, n) if causal else ""
+        if mode == "native":
+            o, lse = dcp_causal_native_decode(
+                query,
+                kv_cache,
+                decode.block_table,
+                decode.seq_lens,
+                decode.dcp_tot_seq_lens,
+                metadata.max_seq_len,
+                k,
+                self.size,
+                self.rank,
+                kv_lora_rank=attn.kv_lora_rank,
+                qk_nope_head_dim=attn.qk_nope_head_dim,
+                qk_rope_head_dim=attn.qk_rope_head_dim,
+                bmm1_scale=bmm1,
+                bmm2_scale=bmm2,
+                workspace=_get_workspace_buffer(True),
+            )
+        elif causal:
+            # The context keys (global < L) folded, then this rank's block keys.
+            ctx_tot = (decode.dcp_tot_seq_lens[:reqs] - k).to(torch.int32)
+            ctx_local = torch.clamp(
+                (ctx_tot - self.rank + self.size - 1) // self.size, min=0
+            ).to(torch.int32)
+            o, lse = folded_decode(
+                query,
+                kv_cache,
+                decode.block_table,
+                ctx_local,
+                metadata.max_seq_len,
+                k,
+                kv_lora_rank=attn.kv_lora_rank,
+                qk_nope_head_dim=attn.qk_nope_head_dim,
+                qk_rope_head_dim=attn.qk_rope_head_dim,
+                bmm1_scale=bmm1,
+                bmm2_scale=bmm2,
+                workspace=_get_workspace_buffer(True),
+                return_lse=True,
+                dcp_world_size=self.size,
+                dcp_rank=self.rank,
+                dcp_tot_seq_lens=ctx_tot,
+                table_cache=None,
+            )
+            o, lse = dcp_causal_block_merge(
+                query,
+                kv_cache,
+                decode.block_table,
+                ctx_tot,
+                o,
+                lse,
+                k,
+                self.size,
+                self.rank,
+                bmm1,
+                bmm2,
+            )
+        else:
+            o, lse = folded_decode(
+                query,
+                kv_cache,
+                decode.block_table,
+                decode.seq_lens,
+                metadata.max_seq_len,
+                k,
+                kv_lora_rank=attn.kv_lora_rank,
+                qk_nope_head_dim=attn.qk_nope_head_dim,
+                qk_rope_head_dim=attn.qk_rope_head_dim,
+                bmm1_scale=bmm1,
+                bmm2_scale=bmm2,
+                workspace=_get_workspace_buffer(True),
+                return_lse=True,
+                dcp_world_size=self.size,
+                dcp_rank=self.rank,
+                dcp_tot_seq_lens=decode.dcp_tot_seq_lens,
+                table_cache=decode.__dict__.setdefault("_draft_fold_tables", {}),
+            )
+        assert lse is not None
         w_uv = self.uv[id(attn)]
         value = self.value(n, k, w_uv)
         mail = box.mailbox(n)
@@ -853,8 +1018,8 @@ def cutlass_int(value):
 
 
 def _compile_value(heads, size, batch, cap, w_uv, device, sms, q):
-    """``mla.dcp.compile_value``'s BF16 DcpValue of ``batch`` rows (``q`` per
-    request) for flashinfer's natural-log LSE (``lse_scale`` log2(e))."""
+    """`mla.dcp.compile_value`'s BF16 DcpValue of `batch` rows (`q` per
+    request) for flashinfer's natural-log LSE (`lse_scale` log2(e))."""
     import cutlass.cute as cute
     from cutlass import Int32
     from cutlass.cute.runtime import make_fake_stream
@@ -883,3 +1048,259 @@ def _compile_value(heads, size, batch, cap, w_uv, device, sms, q):
     )
     with torch.accelerator.device_index(device.index):
         return cute.compile(value, *args)
+
+
+# ---------------------------------------------------------------------------
+# Causal draft blocks (K3.1 DSpark): fold the shared context, add the block exactly.
+# ---------------------------------------------------------------------------
+def causal_folded_decode(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_seq_len: int,
+    tokens_per_request: int,
+    *,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    bmm1_scale: float,
+    bmm2_scale: float,
+    max_reqs: int = 0,
+) -> tuple[torch.Tensor, None]:
+    """Causal dense MLA decode of `R` requests x `k` draft tokens: token j of a
+    request attends its context keys [0, L) and the block keys [L, L + j], L =
+    seq_len - k. The context part, shared by the block's tokens, runs folded with its
+    LSE (one KV stream per request); the block part (at most k keys) and the LSE merge
+    run in one Triton program per (token, head group)."""
+    from vllm.v1.attention.backends.mla.flashinfer_mla import _get_workspace_buffer
+
+    k = tokens_per_request
+    rows, heads, dim = q.shape
+    num_reqs = rows // k
+    ctx = (seq_lens[:num_reqs] - k).to(torch.int32)
+    o, lse = folded_decode(
+        q,
+        kv_cache,
+        block_table,
+        ctx,
+        max_seq_len,
+        k,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        bmm1_scale=bmm1_scale,
+        bmm2_scale=bmm2_scale,
+        workspace=_get_workspace_buffer(True),
+        return_lse=True,
+        max_reqs=max_reqs,
+        table_cache=None,
+    )
+    assert lse is not None
+    q = q.contiguous()
+    o = o.contiguous()
+    lse = lse.float().contiguous()
+    out = torch.empty_like(o)
+    page = kv_cache.shape[-2]
+    assert kv_cache.stride(1) == dim and kv_cache.stride(2) == 1
+    group = 16
+    grid = (rows, triton.cdiv(heads, group))
+    _causal_block_merge[grid](
+        q,
+        kv_cache,
+        block_table,
+        ctx,
+        o,
+        lse,
+        out,
+        heads,
+        block_table.stride(0),
+        kv_cache.stride(0),
+        float(bmm1_scale),
+        float(bmm2_scale),
+        K=k,
+        PAGE=page,
+        LORA=kv_lora_rank,
+        ROPE=qk_rope_head_dim,
+        GROUP=group,
+        num_warps=4,
+    )
+    return out, None
+
+
+@triton.jit
+def _causal_block_merge(
+    q_ptr,
+    kv_ptr,
+    bt_ptr,
+    ctx_ptr,
+    o_ptr,
+    lse_ptr,
+    out_ptr,
+    H,
+    bt_stride,
+    page_stride,
+    scale1,
+    scale2,
+    K: tl.constexpr,
+    PAGE: tl.constexpr,
+    LORA: tl.constexpr,
+    ROPE: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    """One draft token (row = request * K + j) x GROUP heads: start from the folded
+    context output and its LSE (natural log), add the block keys [L, L + j] with an
+    online softmax, write the merged output (BF16)."""
+    row = tl.program_id(0)
+    h = tl.program_id(1) * GROUP + tl.arange(0, GROUP)
+    hm = h < H
+    r = row // K
+    j = row % K
+    ctx = tl.load(ctx_ptr + r)
+    dl = tl.arange(0, LORA)
+    dr = tl.arange(0, ROPE)
+    D: tl.constexpr = LORA + ROPE
+    qb = q_ptr + (row * H + h[:, None]) * D
+    q_l = tl.load(qb + dl[None, :], mask=hm[:, None], other=0.0).to(tl.float32)
+    q_r = tl.load(qb + LORA + dr[None, :], mask=hm[:, None], other=0.0).to(tl.float32)
+    lse = tl.load(lse_ptr + row * H + h, mask=hm, other=float("-inf")).to(tl.float32)
+    ob = (row * H + h[:, None]) * LORA + dl[None, :]
+    acc = tl.load(o_ptr + ob, mask=hm[:, None], other=0.0).to(tl.float32)
+    empty = lse == float("-inf")
+    acc = tl.where(empty[:, None], 0.0, acc)
+    m_run = lse
+    tot = tl.where(empty, 0.0, 1.0)
+    for i in tl.static_range(K):
+        pos = ctx + i
+        pg = tl.load(bt_ptr + r * bt_stride + pos // PAGE)
+        kb = kv_ptr + pg.to(tl.int64) * page_stride + (pos % PAGE) * D
+        kv_l = tl.load(kb + dl).to(tl.float32)
+        kv_r = tl.load(kb + LORA + dr).to(tl.float32)
+        s = (tl.sum(q_l * kv_l[None, :], 1) + tl.sum(q_r * kv_r[None, :], 1)) * scale1
+        s = tl.where(i <= j, s, float("-inf"))
+        m_new = tl.maximum(m_run, s)
+        m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+        alpha = tl.exp(m_run - m_safe)
+        beta = tl.exp(s - m_safe)
+        acc = acc * alpha[:, None] + beta[:, None] * (kv_l[None, :] * scale2)
+        tot = tot * alpha + beta
+        m_run = m_new
+    res = acc / tot[:, None]
+    tl.store(out_ptr + ob, res.to(out_ptr.dtype.element_ty), mask=hm[:, None])
+
+
+def dcp_causal_block_merge(
+    q, kv_cache, block_table, ctx_tot, o, lse, k, world, rank, scale1, scale2
+):
+    """Add this rank's share of a causal block's keys (global L + i, i < k; rank
+    (L + i) % world holds it at local position (L + i) // world) to the folded
+    context partial (`o`, `lse`: natural log) of every gathered head; returns the
+    updated partial for DcpValue's combine."""
+    rows, heads, dim = q.shape
+    lora = o.shape[-1]
+    q = q.contiguous()
+    o = o.reshape(rows, heads, lora).contiguous()
+    lse = lse.reshape(rows, heads).float().contiguous()
+    o_out = torch.empty_like(o)
+    lse_out = torch.empty_like(lse)
+    page = kv_cache.shape[-2]
+    assert kv_cache.stride(1) == dim and kv_cache.stride(2) == 1
+    group = 16
+    grid = (rows, triton.cdiv(heads, group))
+    _dcp_causal_block_merge[grid](
+        q,
+        kv_cache,
+        block_table,
+        ctx_tot,
+        o,
+        lse,
+        o_out,
+        lse_out,
+        heads,
+        block_table.stride(0),
+        kv_cache.stride(0),
+        float(scale1),
+        float(scale2),
+        world,
+        rank,
+        K=k,
+        PAGE=page,
+        LORA=lora,
+        ROPE=dim - lora,
+        GROUP=group,
+        num_warps=4,
+    )
+    return o_out, lse_out
+
+
+@triton.jit
+def _dcp_causal_block_merge(
+    q_ptr,
+    kv_ptr,
+    bt_ptr,
+    ctx_ptr,
+    o_ptr,
+    lse_ptr,
+    out_ptr,
+    lse_out_ptr,
+    H,
+    bt_stride,
+    page_stride,
+    scale1,
+    scale2,
+    world,
+    rank,
+    K: tl.constexpr,
+    PAGE: tl.constexpr,
+    LORA: tl.constexpr,
+    ROPE: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    row = tl.program_id(0)
+    h = tl.program_id(1) * GROUP + tl.arange(0, GROUP)
+    hm = h < H
+    r = row // K
+    j = row % K
+    ctx = tl.load(ctx_ptr + r)
+    dl = tl.arange(0, LORA)
+    dr = tl.arange(0, ROPE)
+    D: tl.constexpr = LORA + ROPE
+    qb = q_ptr + (row * H + h[:, None]) * D
+    q_l = tl.load(qb + dl[None, :], mask=hm[:, None], other=0.0).to(tl.float32)
+    q_r = tl.load(qb + LORA + dr[None, :], mask=hm[:, None], other=0.0).to(tl.float32)
+    lse = tl.load(lse_ptr + row * H + h, mask=hm, other=float("-inf")).to(tl.float32)
+    ob = (row * H + h[:, None]) * LORA + dl[None, :]
+    acc = tl.load(o_ptr + ob, mask=hm[:, None], other=0.0).to(tl.float32)
+    empty = lse == float("-inf")
+    acc = tl.where(empty[:, None], 0.0, acc)
+    m_run = lse
+    tot = tl.where(empty, 0.0, 1.0)
+    for i in tl.static_range(K):
+        pos = ctx + i
+        mine = (pos % world) == rank
+        local = pos // world
+        pg = tl.load(bt_ptr + r * bt_stride + local // PAGE, mask=mine, other=0)
+        kb = kv_ptr + pg.to(tl.int64) * page_stride + (local % PAGE) * D
+        kv_l = tl.load(kb + dl, mask=(dl < LORA) & mine, other=0.0).to(tl.float32)
+        kv_r = tl.load(kb + LORA + dr, mask=(dr < ROPE) & mine, other=0.0).to(
+            tl.float32
+        )
+        s = (tl.sum(q_l * kv_l[None, :], 1) + tl.sum(q_r * kv_r[None, :], 1)) * scale1
+        s = tl.where((i <= j) & mine, s, float("-inf"))
+        m_new = tl.maximum(m_run, s)
+        m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+        alpha = tl.exp(m_run - m_safe)
+        beta = tl.exp(s - m_safe)
+        acc = acc * alpha[:, None] + beta[:, None] * (kv_l[None, :] * scale2)
+        tot = tot * alpha + beta
+        m_run = m_new
+    res = tl.where(tot[:, None] > 0, acc / tl.maximum(tot, 1e-30)[:, None], 0.0)
+    tl.store(out_ptr + ob, res.to(out_ptr.dtype.element_ty), mask=hm[:, None])
+    lse_new = tl.where(tot > 0, m_run + tl.log(tl.maximum(tot, 1e-30)), float("-inf"))
+    tl.store(lse_out_ptr + row * H + h, lse_new, mask=hm)
+
+
+def _draft_dcp_note(fmt, *args):
+    from vllm.logger import init_logger
+
+    init_logger(__name__).info_once("draft DCP: " + fmt, *args)

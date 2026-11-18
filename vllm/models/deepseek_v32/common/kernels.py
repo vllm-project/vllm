@@ -984,11 +984,11 @@ def fused_q(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
-    Returns ``(index_q_fp8, index_weights_out, mqa_q)``. When ``quantize_mqa``
-    is True (FlashInfer sparse, fp8 query) ``mqa_q`` is a single fp8 tensor
-    packing ``[ql_nope; q_pe]``. When False (FlashMLA sparse, bf16 query) it is
-    the RoPE'd ``q_pe`` in bf16; the caller pairs it with ``ql_nope`` as the
-    ``(ql_nope, q_pe)`` tuple the backend expects.
+    Returns `(index_q_fp8, index_weights_out, mqa_q)`. When `quantize_mqa`
+    is True (FlashInfer sparse, fp8 query) `mqa_q` is a single fp8 tensor
+    packing `[ql_nope; q_pe]`. When False (FlashMLA sparse, bf16 query) it is
+    the RoPE'd `q_pe` in bf16; the caller pairs it with `ql_nope` as the
+    `(ql_nope, q_pe)` tuple the backend expects.
     """
     assert positions.ndim == 1
     assert positions.dtype == torch.int64
@@ -1144,7 +1144,7 @@ def _fused_eh_norm_kernel(
     BLOCK: tl.constexpr,
 ):
     """MTP input fusion: zero embeds at position 0, RMSNorm(embeds) with enorm
-    and RMSNorm(prev_hidden) with hnorm, written side-by-side into ``out``
+    and RMSNorm(prev_hidden) with hnorm, written side-by-side into `out`
     ([N, 2H]) ready for the eh_proj GEMM. Replaces where + 2x RMSNorm + cat."""
     tok = tl.program_id(0)
     off = tl.arange(0, BLOCK)

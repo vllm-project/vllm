@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for GPUModelRunner (V2) CUDA graph memory profiling.
 
-These exercise the orchestration of ``profile_cudagraph_memory`` on CPU by
-building a runner via ``__new__`` and faking the GPU-only helpers, so the
+These exercise the orchestration of `profile_cudagraph_memory` on CPU by
+building a runner via `__new__` and faking the GPU-only helpers, so the
 control flow (bootstrap -> sample FULL graphs into a throwaway pool ->
 extrapolate -> teardown) is covered without a GPU.
 See https://github.com/vllm-project/vllm/issues/49224.
@@ -448,22 +448,14 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 
 
 def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
-    """Profiling-cached Mamba align metadata must be invalidated at teardown.
-
-    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
-    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
-    profiling config's group layout differs from the real (e.g. PP-projected)
-    config, reusing the stale metadata mismatches the real block tables
-    ("expected 3 block tables, got 4" at
-    ``MambaSpecDecodeGPUContext.initialize_from_forward_context``).
-    """
+    """The Mamba align context built for the profiling KVCacheConfig must be
+    dropped at teardown; the real (e.g. PP-projected) config may place Mamba
+    layers into a different group layout."""
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=False,
         _mamba_ctx=object(),
-        _mamba_group_ids=[0, 1],
-        _mamba_spec=object(),
     )
     runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
     runner.kv_caches = []
@@ -479,5 +471,3 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     cgu._teardown_profiling_state(runner)
 
     assert runner.model_state._mamba_ctx is None
-    assert runner.model_state._mamba_group_ids == []
-    assert runner.model_state._mamba_spec is None

@@ -127,8 +127,6 @@ variants:
           VLLM_ENGINE_READY_TIMEOUT_S: "900"
         extra_args:
           - "--trust-remote-code"
-          - "--gpu-memory-utilization"
-          - "0.97"
           - "--max-model-len"
           - "262144"
           - "--max-num-seqs"

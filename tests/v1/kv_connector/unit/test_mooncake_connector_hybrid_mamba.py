@@ -9,7 +9,6 @@ validated by this test module.
 
 import asyncio
 from collections import OrderedDict
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +17,8 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -39,10 +40,10 @@ from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MambaSpec,
 )
@@ -70,7 +71,6 @@ def make_hybrid_gdn_kv_cache_config(
         shapes=((6, 3), (1, 2, 2)),
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode=mamba_cache_mode,
     )
     assert gdn_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
     return KVCacheConfig(
@@ -78,18 +78,19 @@ def make_hybrid_gdn_kv_cache_config(
         hash_block_size=block_size,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.0.self_attn"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.1.linear_attn"],
                 gdn_spec,
+                manager_config=MambaManager.config(mamba_cache_mode=mamba_cache_mode),
             ),
         ],
     )
@@ -255,7 +256,7 @@ def test_lookahead_hashes_follow_truncated_prefill(
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
     kv_config.hash_block_size = hash_block_size
     group = kv_config.kv_cache_groups[1]
-    group.kv_cache_spec = replace(group.kv_cache_spec, mamba_cache_mode="align")
+    group.manager_config = group.manager_config.replace_params(mamba_cache_mode="align")
     scheduler = scheduler_cls(config, "test-engine", kv_config)
     init_none_hash(sha256)
     hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)
@@ -319,8 +320,8 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         worker = connector.connector_worker
 
         num_blocks = kv_cache_config.num_blocks
-        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
+        gdn_spec = uniform_spec(kv_cache_config.kv_cache_groups[1])
         fa_raw = torch.empty(num_blocks * fa_spec.page_size_bytes, dtype=torch.int8)
         gdn_block_stride = gdn_spec.page_size_bytes + 64
         gdn_raw = torch.empty(num_blocks, gdn_block_stride, dtype=torch.int8)
@@ -377,7 +378,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
         factor = 4
         worker._physical_blocks_per_logical_kv_block = factor
 
-        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         physical_page_bytes = fa_spec.page_size_bytes // factor
         fa_cache = torch.empty(
             kv_cache_config.num_blocks * factor,
@@ -410,16 +411,19 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
     worker.use_mla = False
-    worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
+    worker.transfer_backend = SimpleNamespace(
+        register_regions=lambda *_: None,
+        unregister_regions=lambda *_: None,
+    )
     worker.is_kv_consumer = True
     worker.tp_rank = 0
     worker.tp_size = 1
     worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
     worker.kv_cache_config = kv_cache_config
     worker._layer_specs = {
-        layer_name: group.kv_cache_spec
+        layer_name: spec
         for group in kv_cache_config.kv_cache_groups
-        for layer_name in group.layer_names
+        for layer_name, spec in group.kv_cache_specs.items()
     }
     worker._layer_group_indices = {
         layer_name: group_index
@@ -429,7 +433,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
 
     ratio = 4
     worker._physical_blocks_per_logical_kv_block = ratio
-    fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
     physical_page_bytes = fa_spec.page_size_bytes // ratio
     fa_cache = torch.empty(
         kv_cache_config.num_blocks * ratio,
@@ -502,13 +506,15 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
 
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [
-        fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes
-    ]
-    assert dst_ptrs == [
-        remote_base_addr + remote_logical_block * ratio * physical_page_bytes
-    ]
-    assert lengths == [num_kernel_blocks * physical_page_bytes]
+    np.testing.assert_array_equal(
+        src_ptrs,
+        [fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes],
+    )
+    np.testing.assert_array_equal(
+        dst_ptrs,
+        [remote_base_addr + remote_logical_block * ratio * physical_page_bytes],
+    )
+    np.testing.assert_array_equal(lengths, [num_kernel_blocks * physical_page_bytes])
 
     def split_contiguous_blocks(src_ids, dst_ids):
         return np.arange(len(src_ids)), np.ones(len(src_ids), dtype=np.int64)
@@ -542,9 +548,9 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     ]
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == expected_src_ptrs
-    assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * num_kernel_blocks
+    np.testing.assert_array_equal(src_ptrs, expected_src_ptrs)
+    np.testing.assert_array_equal(dst_ptrs, expected_dst_ptrs)
+    np.testing.assert_array_equal(lengths, [physical_page_bytes] * num_kernel_blocks)
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])
@@ -574,7 +580,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         )
         worker = connector.connector_worker
 
-        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         fa_cache_width = (
             fa_spec.page_size_bytes
             // torch.tensor([], dtype=torch.float16).element_size()
@@ -584,8 +590,8 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         gdn_cache = backing[:3]
 
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
-        ) as batch_register_memory:
+            worker.transfer_backend, "register_regions", return_value=None
+        ) as register_regions:
             worker.register_kv_caches(
                 {
                     "model.layers.0.self_attn": fa_cache,
@@ -597,10 +603,11 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             fa_cache.data_ptr(),
             gdn_cache.data_ptr(),
         ]
-        batch_register_memory.assert_called_once()
-        registered_ptrs, registered_lens = batch_register_memory.call_args[0]
-        assert registered_ptrs == [backing.data_ptr()]
-        assert registered_lens == [backing.untyped_storage().nbytes()]
+        register_regions.assert_called_once()
+        regions = register_regions.call_args.args[0]
+        assert [(region.base_addr, region.length) for region in regions] == [
+            (backing.data_ptr(), backing.untyped_storage().nbytes())
+        ]
 
         worker.shutdown()
         worker.shutdown = noop_shutdown
@@ -708,15 +715,21 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
 
         assert err_reqs == []
         assert err_msg is None
-        assert src_ptrs == [
-            0x5000 + 4 * block_len,
-            0x1000 + 10 * block_len,
-        ]
-        assert dst_ptrs == [
-            0x6000 + 7 * block_len,
-            0x2000 + 30 * block_len,
-        ]
-        assert lengths == [block_len, 2 * block_len]
+        np.testing.assert_array_equal(
+            src_ptrs,
+            [
+                0x5000 + 4 * block_len,
+                0x1000 + 10 * block_len,
+            ],
+        )
+        np.testing.assert_array_equal(
+            dst_ptrs,
+            [
+                0x6000 + 7 * block_len,
+                0x2000 + 30 * block_len,
+            ],
+        )
+        np.testing.assert_array_equal(lengths, [block_len, 2 * block_len])
 
         worker.shutdown()
         worker.shutdown = noop_shutdown

@@ -3,12 +3,12 @@
 """Regression tests for the V2 model runner "No free indices" assertion.
 
 The V2 model runner stores per-request state in a fixed-size slab sized to
-``max_num_seqs`` (``RequestState.free_indices`` in
-``vllm/v1/worker/gpu/states.py``). A slot is occupied from the moment a request
-appears in ``scheduled_new_reqs`` (worker ``add_requests``) until it appears in
-``finished_req_ids``/``preempted_req_ids`` (worker ``finish_requests``), with a
-defensive same-id ``_remove_request`` on re-add. If the scheduler ever lets the
-number of slot-holding requests exceed ``max_num_seqs``, ``add_request`` trips::
+`max_num_seqs` (`RequestState.free_indices` in
+`vllm/v1/worker/gpu/states.py`). A slot is occupied from the moment a request
+appears in `scheduled_new_reqs` (worker `add_requests`) until it appears in
+`finished_req_ids`/`preempted_req_ids` (worker `finish_requests`), with a
+defensive same-id `_remove_request` on re-add. If the scheduler ever lets the
+number of slot-holding requests exceed `max_num_seqs`, `add_request` trips::
 
     assert len(self.free_indices) > 0, "No free indices"
 
@@ -32,9 +32,9 @@ pytestmark = pytest.mark.cpu_test
 class WorkerSlots:
     """Faithful model of the V2 model runner's request-slot accounting.
 
-    Mirrors ``GPUModelRunner.finish_requests`` + ``add_requests`` and
-    ``RequestState.add_request``/``remove_request`` (the ``free_indices`` pool).
-    ``apply`` raises ``AssertionError("No free indices")`` exactly where the real
+    Mirrors `GPUModelRunner.finish_requests` + `add_requests` and
+    `RequestState.add_request`/`remove_request` (the `free_indices` pool).
+    `apply` raises `AssertionError("No free indices")` exactly where the real
     worker would, so a scheduler over-admission surfaces as the same failure.
     """
 
@@ -76,7 +76,7 @@ def test_streaming_pause_does_not_over_admit_worker_slot():
     new request must not be admitted on top of it.
 
     Repro of the "No free indices" crash: the session pauses into
-    WAITING_FOR_STREAMING_REQ (removed from ``running`` but never reported as
+    WAITING_FOR_STREAMING_REQ (removed from `running` but never reported as
     finished/preempted, so the worker keeps its slot), then a different request
     is admitted into the single slot.
     """
