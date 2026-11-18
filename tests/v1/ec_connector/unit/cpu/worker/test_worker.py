@@ -3,21 +3,21 @@
 """Tests for ECCPUWorker.
 
 The byte-level tests exercise real accelerator (CUDA/XPU/...) stream/event
-coordination against a real ``ECSharedRegion`` mmap and are skipped on hosts
+coordination against a real `ECSharedRegion` mmap and are skipped on hosts
 without an accelerator. The lifecycle tests don't fire any
-``current_platform.*`` device primitives and run anywhere.
+`current_platform.*` device primitives and run anywhere.
 
 Mocking policy
 --------------
-- ``create_ec_shared_region`` is patched to inject a real ``ECSharedRegion``
+- `create_ec_shared_region` is patched to inject a real `ECSharedRegion`
   (mmap backed) with deterministic small dimensions, so byte assertions
   hit the actual mmap. The real responsibility of the worker — block
   index → mmap byte mapping, stream coordination, dtype/shape — is
   exercised end to end against a real GPU.
-- ``is_pin_memory_available`` is patched per-test so the rank-gating
+- `is_pin_memory_available` is patched per-test so the rank-gating
   path can be probed deterministically without depending on host caps.
-- The shutdown test bypasses ``__init__`` via ``object.__new__`` and
-  injects a ``MagicMock`` region.
+- The shutdown test bypasses `__init__` via `object.__new__` and
+  injects a `MagicMock` region.
 """
 
 import contextlib
@@ -122,7 +122,7 @@ def _load_id(meta: ECCPUConnectorMetadata, mm_hash: str) -> int:
 
 @pytest.fixture
 def make_worker():
-    """Factory that builds an ``ECCPUWorker`` over a real ``ECSharedRegion``.
+    """Factory that builds an `ECCPUWorker` over a real `ECSharedRegion`.
 
     Tracks the workers and regions it creates and tears them down at the
     end of the test, so each test starts from a fresh /dev/shm file.
@@ -176,7 +176,7 @@ def make_worker():
 def _wait_for_completion(
     worker: ECCPUWorker, expected, direction: str, timeout_s: float = 30.0
 ) -> None:
-    """Poll ``build_connector_worker_meta`` until ``expected`` is reported done.
+    """Poll `build_connector_worker_meta` until `expected` is reported done.
 
     Saves are reported by mm_hash, loads by transfer id.
     """
@@ -285,13 +285,13 @@ def test_load_path_delegates_transfer_submission(make_worker):
     ids=["exact-fit", "partial-last-block", "adjacent-blocks", "run-then-gap"],
 )
 def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, block_ids):
-    """``save_caches`` + ``flush_saves`` copies the source GPU tensor's bytes
-    into the block IDs named by ``meta.saves``, in the order they appear,
+    """`save_caches` + `flush_saves` copies the source GPU tensor's bytes
+    into the block IDs named by `meta.saves`, in the order they appear,
     via a single batched GPU→CPU copy.
 
-    When ``total_bytes`` is not a multiple of ``block_size_bytes`` the last
+    When `total_bytes` is not a multiple of `block_size_bytes` the last
     block is partially written; the unwritten tail must remain whatever
-    was there before. Blocks not named in ``meta.saves`` must be untouched.
+    was there before. Blocks not named in `meta.saves` must be untouched.
     Blocks adjacent in the region share one descriptor, which must land the
     same bytes in the same blocks as one descriptor per block does.
     """
@@ -364,8 +364,8 @@ def test_save_caches_coalesces_only_adjacent_blocks(
 
 
 def test_save_caches_noop_when_mm_hash_not_in_saves(make_worker):
-    """When the scheduler hasn't pre-allocated blocks for ``mm_hash``,
-    ``save_caches`` + ``flush_saves`` is a pure no-op."""
+    """When the scheduler hasn't pre-allocated blocks for `mm_hash`,
+    `save_caches` + `flush_saves` is a pure no-op."""
     worker = make_worker()
     sentinel = 0x42
     worker._region.blocks.fill_(sentinel)
@@ -397,7 +397,7 @@ def test_save_caches_noop_for_non_save_rank(make_worker, tp_rank, pcp_rank):
 
 
 def test_save_caches_raises_when_allocated_blocks_too_small(make_worker):
-    """``save_caches`` must raise ``AssertionError`` when the encoder output
+    """`save_caches` must raise `AssertionError` when the encoder output
     is larger than the allocated block space."""
     worker = make_worker()
     src = torch.zeros(3 * _HIDDEN_DIM, dtype=_DTYPE)
@@ -538,7 +538,7 @@ def test_start_load_caches_coalesces_across_entries(make_worker, loads, expected
 
 @_requires_accelerator
 def test_start_load_caches_noop_when_loads_is_empty(make_worker):
-    """When ``meta.loads`` is empty the early-return must fire."""
+    """When `meta.loads` is empty the early-return must fire."""
     worker = make_worker()
     encoder_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(encoder_cache, _meta(loads={}))
@@ -549,8 +549,8 @@ def test_start_load_caches_noop_when_loads_is_empty(make_worker):
 @_requires_swap_blocks_batch
 @_requires_accelerator
 def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
-    """Every hash in ``meta.loads`` is copied from mmap, including one whose
-    key is already resident in ``encoder_cache`` — there is no worker-side
+    """Every hash in `meta.loads` is copied from mmap, including one whose
+    key is already resident in `encoder_cache` — there is no worker-side
     skip."""
     worker = make_worker()
     n_blocks = 3
@@ -639,8 +639,8 @@ def test_save_then_load_round_trips_bytes(make_worker):
 @_requires_swap_blocks_batch
 @_requires_cuda_alike
 def test_save_survives_encoder_cache_free_before_copy_runs(make_worker):
-    """The bytes handed to ``save_caches`` must reach the mmap intact even when
-    the caller drops its ``encoder_cache`` reference before the copy has run.
+    """The bytes handed to `save_caches` must reach the mmap intact even when
+    the caller drops its `encoder_cache` reference before the copy has run.
 
     The model runner pops encoder cache entries on whatever step the scheduler
     asks it to, with no dependency on the save copy having landed. Dropping the
@@ -704,7 +704,7 @@ def test_load_buffer_survives_eviction_while_consumer_read_is_queued(make_worker
     queued on the compute stream, even after the entry is dropped and another
     load is dispatched.
 
-    ``start_load_caches`` allocates its destination inside the load stream's
+    `start_load_caches` allocates its destination inside the load stream's
     context, which ties that memory to the load stream in the caching allocator.
     Dropping the encoder cache entry returns it to the load stream's pool, where
     the next load can claim it — while the model's read of it is still queued on
@@ -814,7 +814,7 @@ def test_buffer_pool_is_reused_across_load_steps(make_worker):
     ids=["available", "unavailable"],
 )
 def test_init_pins_memory_when_available(pin_available, expected_pinned):
-    """Every worker must call ``pin_memory()`` when the platform allows it."""
+    """Every worker must call `pin_memory()` when the platform allows it."""
     region = _make_region()
     region.pin_memory = MagicMock()  # type: ignore[method-assign]
 
@@ -850,7 +850,7 @@ def test_init_pins_memory_when_available(pin_available, expected_pinned):
 
 
 def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm, monkeypatch):
-    """``shutdown`` must always call ``region.cleanup`` — and must never
+    """`shutdown` must always call `region.cleanup` — and must never
     raise."""
     worker = object.__new__(ECCPUWorker)
     mock_region = Mock(spec=ECSharedRegion)

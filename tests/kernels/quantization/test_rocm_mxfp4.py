@@ -10,7 +10,7 @@ This file keeps the ROCm-specific FP4 coverage:
   paths
 
 Generic MXFP4 wrapper/reference checks already live in
-``tests/kernels/quantization/test_quark.py``.
+`tests/kernels/quantization/test_quark.py`.
 """
 
 import importlib
@@ -537,7 +537,7 @@ def test_aiter_hardware_fp4_quant_vs_triton():
     the Triton path.
 
     The packed bytes are not identical on gfx950, but with
-    ``shuffle_scale=False`` the dequantized results match tightly.
+    `shuffle_scale=False` the dequantized results match tightly.
     """
     _assert_aiter_supported()
 

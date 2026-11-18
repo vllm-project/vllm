@@ -67,14 +67,14 @@ def nvfp4_marlin_process_scales(
             permuted for the Marlin kernel layout.
         scale_factor: Optional power-of-2 rescaling factor. If None, the
             factor is computed automatically so that every non-zero scale
-            satisfies ``scale * 2^7 >= 2`` (i.e., the MSB of the S0E5M3
+            satisfies `scale * 2^7 >= 2` (i.e., the MSB of the S0E5M3
             representation is always 1). When provided (e.g., for MoE
             layers where all experts must share the same factor), the
             given value is used directly. The caller is responsible for
-            dividing ``global_scale`` by the returned ``scale_factor`` to
+            dividing `global_scale` by the returned `scale_factor` to
             preserve numerical correctness.
         a_dtype: dtype of the activations the scales will be used with. None
-            keeps the dtype of ``marlin_scales``.
+            keeps the dtype of `marlin_scales`.
 
     Returns:
         A tuple of (processed_scales, scale_factor).

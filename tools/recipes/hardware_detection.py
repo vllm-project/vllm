@@ -21,7 +21,7 @@ from vllm.utils.cpu_resource_utils import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NumaNodeInfo:
     node_id: int
     logical_cpu_ids: tuple[int, ...]
@@ -30,7 +30,7 @@ class NumaNodeInfo:
     available_memory_bytes: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HardwareInfo:
     architecture: str
     socket_count: int | None

@@ -137,7 +137,7 @@ def test_invalid_normalization_rejected():
 def test_fused_routing_matches_reference(
     normalization, num_tokens, num_experts, top_k, multiplier, division_eps
 ):
-    """Kernel and ``_compute_routing`` pick identical experts; weights to fp32 ulp."""
+    """Kernel and `_compute_routing` pick identical experts; weights to fp32 ulp."""
     torch.manual_seed(0)
     logits = torch.randn(num_tokens, num_experts, device="cuda")
     bias = torch.randn(num_experts, device="cuda")

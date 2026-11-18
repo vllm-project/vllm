@@ -32,10 +32,14 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEActivationFormat,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
     convert_flashinfer_moe_output,
 )
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
@@ -55,8 +59,21 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
 )
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PtpcOnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.moe_base import (
+    OnlineMoEMethodBase,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
 )
 from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.models.muse_spark.common.moe import (  # noqa: F401 re-exported
@@ -241,7 +258,7 @@ class MusePostExpertFinalize:
         return workspace
 
     def __call__(self, unfinalized: UnfinalizedMoEOutput, out: torch.Tensor) -> None:
-        """Finalize permuted GEMM2 rows into ``out``."""
+        """Finalize permuted GEMM2 rows into `out`."""
         permuted_idx = unfinalized.expanded_idx_to_permuted_idx
         num_tokens, top_k = permuted_idx.shape
         rows_all = unfinalized.gemm2_permuted
@@ -456,7 +473,8 @@ class MusePostExpertFinalize:
 
 
 def _attach_post_expert_finalize(
-    quant_method: "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE",
+    quant_method: "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE "
+    "| MuseSparkFp8FusedMoE",
 ) -> None:
     """Hand the layer's finalizer to its experts, which exist only now."""
     assert quant_method.moe_kernel is not None
@@ -467,13 +485,13 @@ def _attach_post_expert_finalize(
 
 @dataclass
 class MuseSparkNvFp4MoEQuantConfig(FusedMoEQuantConfig):
-    """``FusedMoEQuantConfig`` that also carries the w3-side GEMM1 scale."""
+    """`FusedMoEQuantConfig` that also carries the w3-side GEMM1 scale."""
 
     g1_scale_c: torch.Tensor | None = None
 
 
 class _MuseSparkNvFp4Scales:
-    """Split w1/w3 GEMM1 global scales (``w13_weight_scale_2`` is [E, 2])."""
+    """Split w1/w3 GEMM1 global scales (`w13_weight_scale_2` is [E, 2])."""
 
     quant_config: FusedMoEQuantConfig
     gemm1_clamp_limit: torch.Tensor | None
@@ -574,7 +592,7 @@ class MuseSparkTrtLlmNvFp4ExpertsModular(
 class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
     """ModelOpt NVFP4 MoE preserving separate w1/w3 global weight scales.
 
-    The name must contain "ModelOpt": ``RoutedExperts.weight_loader`` matches it.
+    The name must contain "ModelOpt": `RoutedExperts.weight_loader` matches it.
     """
 
     muse_post_expert_finalize: MusePostExpertFinalize
@@ -791,8 +809,73 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         _attach_post_expert_finalize(self)
 
 
+def _reject_direct_reload(*args, **kwargs) -> None:
+    raise RuntimeError(
+        "MuseSpark online FP8 experts already hold FP8 weights: reload them "
+        "through the layerwise reload, not a direct load_weights."
+    )
+
+
+class MuseSparkFp8FusedMoE(Fp8PtpcOnlineMoEMethod):
+    """`fp8_per_channel` on Triton experts, which run Muse Spark's
+    post-expert norm as their `post_gemm2_hook`; the FP8 oracle would pick
+    CUTLASS on Hopper, which has no hook."""
+
+    muse_post_expert_finalize: MusePostExpertFinalize
+
+    def __init__(
+        self,
+        quant_method_cls: type,
+        quant_key: str,
+        moe: FusedMoEConfig,
+    ) -> None:
+        if quant_method_cls is not Fp8PtpcOnlineMoEMethod:
+            raise NotImplementedError(
+                "Muse Spark online MoE quantization supports fp8_per_channel "
+                f"only; got {quant_key}."
+            )
+        _validate_route_major_deployment(moe)
+        supported, reason = TritonExperts.is_supported_config(
+            TritonExperts,
+            moe,
+            kFp8StaticChannelSym,
+            kFp8DynamicTokenSym,
+            FusedMoEActivationFormat.Standard,
+        )
+        if not supported:
+            raise NotImplementedError(
+                f"MuseSpark FP8 MoE runs on Triton experts, which reject this "
+                f"deployment: {reason}"
+            )
+        OnlineMoEMethodBase.__init__(self, moe)
+        self.weight_block_size = None
+        self.block_quant = False
+        self.weight_scale_name = "weight_scale"
+        self.fp8_backend = Fp8MoeBackend.TRITON
+        self.experts_cls = TritonExperts
+
+    def _setup_kernel(
+        self,
+        layer: "MuseSparkRoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> None:
+        super()._setup_kernel(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
+        _attach_post_expert_finalize(self)
+        # A later direct load_weights would cast BF16 weights into these
+        # FP8 tensors unscaled; the layerwise reload restores its own loaders.
+        layer.w13_weight.weight_loader = _reject_direct_reload
+        layer.w2_weight.weight_loader = _reject_direct_reload
+
+
 class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
-    """Consolidated-tensor experts with the NVFP4 / BF16 quant methods."""
+    """Consolidated-tensor experts with the NVFP4 / FP8 / BF16 quant methods."""
 
     def _get_quant_method(
         self,
@@ -800,6 +883,11 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         quant_config: QuantizationConfig | None,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
+        if isinstance(quant_config, OnlineQuantizationConfig) and (
+            resolved := quant_config.resolve_quant_method_cls(type(self), prefix)
+        ):
+            _, quant_key, _, _, quant_method_cls = resolved
+            return MuseSparkFp8FusedMoE(quant_method_cls, quant_key, moe_config)
         if isinstance(quant_config, ModelOptNvFp4Config) and not (
             quant_config.is_layer_excluded(prefix)
         ):
@@ -829,7 +917,9 @@ class MuseMoERunner(MoERunner):
             post_expert_norm, self.moe_config, fuse_all_reduce
         )
         quant_method = cast(
-            MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE,
+            MuseSparkModelOptNvFp4FusedMoE
+            | MuseSparkUnquantizedFusedMoE
+            | MuseSparkFp8FusedMoE,
             routed_experts.quant_method,
         )
         quant_method.muse_post_expert_finalize = self.post_expert_finalize
@@ -866,10 +956,10 @@ class MuseMoERunner(MoERunner):
         a1q_scale: torch.Tensor,
         routing: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        """MoE output from NVFP4 input quantized with ``nvfp4_input_global_scale``.
+        """MoE output from NVFP4 input quantized with `nvfp4_input_global_scale`.
 
-        ``routing`` is either router logits (the kernel routes) or prepared
-        ``(topk_ids, topk_weights)``.
+        `routing` is either router logits (the kernel routes) or prepared
+        `(topk_ids, topk_weights)`.
         """
         layer = self.routed_experts
         experts = self._prepared_nvfp4_experts

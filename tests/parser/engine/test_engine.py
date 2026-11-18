@@ -961,7 +961,7 @@ class TestSkipToolParsingFromMessageHeader:
 
 
 def _alias_config() -> ParserEngineConfig:
-    """``TOOL_START`` has a canonical spelling and one corrupted alias."""
+    """`TOOL_START` has a canonical spelling and one corrupted alias."""
     return ParserEngineConfig(
         name="alias_test",
         terminals={"TOOL_START": ("<tc>", "<tcx>"), "TOOL_END": "</tc>"},

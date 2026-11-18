@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One-shot LL all-reduce fused into the gated residual and the next RMSNorm.
 
-Every rank multicasts its full ``[M, H]`` BF16 partial sum into slot
-``[stage, rank]`` of each rank's mailbox. The consumer sums the TP slots in
+Every rank multicasts its full `[M, H]` BF16 partial sum into slot
+`[stage, rank]` of each rank's mailbox. The consumer sums the TP slots in
 rank order (so every rank gets the same FP32 row) and runs the same dual norm
 as FlashInfer's all-gather variant, optionally also writing the unrounded FP32
 result for the router.
@@ -253,7 +253,7 @@ class _AllReduceDualNormKernel:
 
 
 class AllReduceDualNorm(LLColumnGather):
-    """Collective over ``group``; calls must use the same ``m`` on every rank."""
+    """Collective over `group`; calls must use the same `m` on every rank."""
 
     def __init__(
         self,
@@ -359,7 +359,7 @@ class AllReduceDualNorm(LLColumnGather):
         post_weight: torch.Tensor | None,
         router_output: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns ``(norm_output, residual_output)``."""
+        """Returns `(norm_output, residual_output)`."""
         assert constants.has_router == (router_output is not None)
         residual_output = torch.empty_like(residual)
         norm_output = torch.empty_like(partial)

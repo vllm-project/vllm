@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlyDSL decode monokernel for Muse Spark on MI355X (``--monokernel``)."""
+"""FlyDSL decode monokernel for Muse Spark on MI355X (`--monokernel`)."""
 
 import importlib
 import os
@@ -82,7 +82,7 @@ def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
 
 
 def maybe_attach_mono(lm: nn.Module) -> None:
-    """Attach the monokernel to ``lm.model`` after the weights are final.
+    """Attach the monokernel to `lm.model` after the weights are final.
 
     Collective over the TP group: every rank calls it. A deployment that any
     rank cannot run raises on every rank, with every reason of this rank.

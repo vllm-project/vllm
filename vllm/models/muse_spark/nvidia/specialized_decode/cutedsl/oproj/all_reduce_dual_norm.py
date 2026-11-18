@@ -15,8 +15,8 @@
 the attention boundary's dual norm.
 
 The shared-only publisher multicasts this rank's o_proj partial ([b, 8192]
-BF16, -0.0 stored as +0.0) into slot ``rank`` of every rank's Lamport mailbox;
-with ``published`` the partial's producer does that instead (TP8: the o_proj
+BF16, -0.0 stored as +0.0) into slot `rank` of every rank's Lamport mailbox;
+with `published` the partial's producer does that instead (TP8: the o_proj
 GEMM's zero-copy epilogue). The PDL-chained consumer (the dual norm's grid)
 waits for every rank's fragment, sums the ranks in rank order, re-arms the
 slots and runs the dual norm with the standalone kernel's reduction. The
@@ -25,11 +25,11 @@ sum matches the all-reduce vLLM's TP communicator runs for the group
 build), with FP32 adds that flush subnormals (as that all-reduce, built with
 fast math, does):
 
-- ``BF16_ADDS``: from rank 0's value, a BF16 rounding after every add, the
+- `BF16_ADDS`: from rank 0's value, a BF16 rounding after every add, the
   TRT-LLM node-local one-shot (one node only);
-- ``FP32_ADDS``: an FP32 sum from +0.0 rounded to BF16 once, the MNNVL
+- `FP32_ADDS`: an FP32 sum from +0.0 rounded to BF16 once, the MNNVL
   one-shot (vLLM's default on one node, and the only backend across trays);
-  above ``one_shot_rows`` rows that all-reduce runs its two-shot form, which
+  above `one_shot_rows` rows that all-reduce runs its two-shot form, which
   adds the sum to +0.0 once more (-0.0 becomes +0.0).
 
 The result is what the stock all-reduce followed by the stock dual norm
@@ -39,7 +39,7 @@ The mailbox needs NVLink multicast over the group (one NVLink domain);
 construction raises on every rank when it has no multicast mapping, and
 refuses the BF16 order for a group that spans nodes. Every rank must call with
 the same row count, one call at a time; a poll that sees no data for
-``SPIN_TIMEOUT_NS`` traps instead of hanging the group.
+`SPIN_TIMEOUT_NS` traps instead of hanging the group.
 """
 
 from collections.abc import Callable
@@ -98,13 +98,13 @@ MNNVL_ONE_SHOT_BYTES = 1 << 20
 
 
 def one_shot_rows(tp: int) -> int:
-    """The most rows the MNNVL all-reduce of ``tp`` ranks reduces one-shot."""
+    """The most rows the MNNVL all-reduce of `tp` ranks reduces one-shot."""
     return MNNVL_ONE_SHOT_BYTES // (H * tp * 2)
 
 
 def stock_one_shot_rows(sum_order: str, tp: int, capacity: int) -> int:
-    """Rows above which the stock all-reduce of ``sum_order`` runs its
-    two-shot form: the MNNVL one's ``one_shot_rows``; the node-local one never
+    """Rows above which the stock all-reduce of `sum_order` runs its
+    two-shot form: the MNNVL one's `one_shot_rows`; the node-local one never
     does up to the mailbox capacity."""
     return one_shot_rows(tp) if sum_order == FP32_ADDS else capacity
 
@@ -120,13 +120,13 @@ def rank_order_sum(
     one_shot_rows: cutlass.Constexpr[int],
     ptx_round: cutlass.Constexpr[bool],
 ):
-    """The sum of the ``tp`` BF16x8 fragments in ``slots`` ([tp, 4] u32) in
-    rank order, as the stock all-reduce of ``sum_order`` adds them, in an FP32
-    [8] register tensor: ``FP32_ADDS`` from +0.0 and, above ``one_shot_rows``
+    """The sum of the `tp` BF16x8 fragments in `slots` ([tp, 4] u32) in
+    rank order, as the stock all-reduce of `sum_order` adds them, in an FP32
+    [8] register tensor: `FP32_ADDS` from +0.0 and, above `one_shot_rows`
     rows (the grid's), added to +0.0 once more (the MNNVL two-shot);
-    ``BF16_ADDS`` from rank 0's value, rounded to BF16 after every add (with
-    ``round_bf16`` when ``ptx_round``, else the DSL's conversion). Every add
-    flushes subnormals (``add_ftz_f32``)."""
+    `BF16_ADDS` from rank 0's value, rounded to BF16 after every add (with
+    `round_bf16` when `ptx_round`, else the DSL's conversion). Every add
+    flushes subnormals (`add_ftz_f32`)."""
     total = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
     value = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
     if const_expr(sum_order == FP32_ADDS):
@@ -162,10 +162,10 @@ def fused_mailbox(
     capacity: int = MAILBOX_CAPACITY,
 ) -> LamportMailbox:
     """The [3, tp, capacity, H] Lamport mailbox of an all-reduce fused into a
-    boundary over ``group`` (the TP device group), summing in ``sum_order``.
+    boundary over `group` (the TP device group), summing in `sum_order`.
     Refuses an unknown order, a group of one rank and the node-local
-    ``BF16_ADDS`` order on a group that spans nodes (checked over
-    ``cpu_group``, its CPU counterpart). Collective over both groups."""
+    `BF16_ADDS` order on a group that spans nodes (checked over
+    `cpu_group`, its CPU counterpart). Collective over both groups."""
     if sum_order not in SUM_ORDERS:
         raise ValueError(f"unknown sum order {sum_order!r}")
     tp, rank = dist.get_world_size(group), dist.get_rank(group)
@@ -185,8 +185,8 @@ def fused_mailbox(
 class _AllReduceDualNormKernel:
     """Grid (m, CLUSTER_N), cluster (1, CLUSTER_N, 1), THREADS threads.
 
-    Polls the ``tp`` slots of its 8 columns until none holds -0.0, advances the
-    stage (token 0, fragment 0), sums the slots in rank order (``sum_order``),
+    Polls the `tp` slots of its 8 columns until none holds -0.0, advances the
+    stage (token 0, fragment 0), sums the slots in rank order (`sum_order`),
     re-arms them, then runs the dual norm. Dependents are
     released after the last store, as the stock dual norm does.
     """
@@ -439,10 +439,10 @@ def check_rows(
 
 class AllReduceDualNorm:
     """The mailbox and publisher of one TP group, shared by every attention
-    boundary of the model. Construction is collective over ``group`` (the TP
-    device group); ``cpu_group`` is its CPU (non-NCCL) counterpart, used to
-    check that every rank shares this node when ``sum_order`` is
-    ``BF16_ADDS``."""
+    boundary of the model. Construction is collective over `group` (the TP
+    device group); `cpu_group` is its CPU (non-NCCL) counterpart, used to
+    check that every rank shares this node when `sum_order` is
+    `BF16_ADDS`."""
 
     def __init__(
         self,
@@ -474,7 +474,7 @@ class AllReduceDualNorm:
         published: bool = False,
     ) -> "AllReduceDualNormBoundary":
         """One boundary's op, its consumer compiled once per constant set.
-        ``published``: the branch reaches the mailbox from its producer (the
+        `published`: the branch reaches the mailbox from its producer (the
         o_proj GEMM's zero-copy epilogue), so the op runs the consumer only;
         otherwise the publisher is compiled here (before capture) if it is not
         yet."""
@@ -496,8 +496,8 @@ class AllReduceDualNorm:
 
 class AllReduceDualNormBoundary(NamedTuple):
     """One attention boundary: the shared mailbox and its compiled consumer;
-    with ``published``, the branch's producer has already written this rank's
-    slot (zero-copy) and ``run`` launches the consumer alone."""
+    with `published`, the branch's producer has already written this rank's
+    slot (zero-copy) and `run` launches the consumer alone."""
 
     owner: AllReduceDualNorm
     consumer: Callable[..., None]
@@ -515,12 +515,12 @@ class AllReduceDualNormBoundary(NamedTuple):
         out: torch.Tensor,
         router_input: torch.Tensor | None = None,
     ) -> None:
-        """All-reduce ``branch`` (this rank's BF16 [b, H] o_proj partial) over the
-        group, then the dual norm as ``DualNorm.run`` takes it: ``stream``
-        (FP32 [b, H]) updated in place, ``out`` (BF16 [b, H]) and, when bound
-        with ``router``, ``router_input`` (FP32 [b, H], the unrounded pre-norm
-        output). Graph-capturable; allocates nothing. Bound with ``published``,
-        ``branch`` (checked, not read) is what the producer that ran just before
+        """All-reduce `branch` (this rank's BF16 [b, H] o_proj partial) over the
+        group, then the dual norm as `DualNorm.run` takes it: `stream`
+        (FP32 [b, H]) updated in place, `out` (BF16 [b, H]) and, when bound
+        with `router`, `router_input` (FP32 [b, H], the unrounded pre-norm
+        output). Graph-capturable; allocates nothing. Bound with `published`,
+        `branch` (checked, not read) is what the producer that ran just before
         on this stream wrote into the mailbox."""
         owner = self.owner
         if (router_input is not None) != self.router:
