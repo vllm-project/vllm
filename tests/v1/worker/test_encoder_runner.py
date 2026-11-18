@@ -558,6 +558,7 @@ def test_gather_attaches_batch_placement():
     )
 
     masks = get_mm_embedding_modality_masks(mm_embeds, is_mm_embed)
+    assert masks is not None
     batch = ["i"] * 3 + pattern[3:]
     for modality, mask in masks.items():
         assert mask.tolist() == [m == modality[0] for m in batch], modality
