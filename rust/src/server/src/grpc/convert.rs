@@ -120,9 +120,7 @@ pub fn to_text_request(
     }
 
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: response
-            .and_then(|options| options.skip_special_tokens)
-            .unwrap_or(true),
+        skip_special_tokens: response.and_then(|options| options.skip_special_tokens),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
@@ -681,6 +679,42 @@ mod tests {
             let params = engine.sampling_params;
             assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
         }
+    }
+
+    /// An omitted `skip_special_tokens` takes the generation-config default, as
+    /// on the HTTP routes; an explicit value wins.
+    #[test]
+    fn grpc_skip_special_tokens_defaults_to_generation_config() {
+        let mut resolved = Vec::new();
+        for skip_special_tokens in [None, Some(true)] {
+            let request = pb::GenerateRequest {
+                response: Some(pb::ResponseOptions {
+                    skip_special_tokens,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let text = to_text_request(request, false, &served()).unwrap();
+            let prepared = vllm_text::lower_text_request(
+                text,
+                vec![1],
+                SamplingHints {
+                    default_skip_special_tokens: Some(false),
+                    ..Default::default()
+                },
+                SamplingLimits {
+                    max_model_len: 256,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                StructuredOutputBackend::Xgrammar,
+                &TestTokenizer::new(),
+            )
+            .unwrap();
+            resolved.push(prepared.text_request.decode_options.skip_special_tokens);
+        }
+        assert_eq!(resolved, [Some(false), Some(true)]);
     }
 
     /// Clients built before `decoding.structured_output` still set the legacy
