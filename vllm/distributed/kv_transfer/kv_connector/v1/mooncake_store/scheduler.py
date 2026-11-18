@@ -389,7 +389,6 @@ class MooncakeStoreScheduler:
                 block_hashes=request_real.block_hashes,
                 num_prompt_tokens=request_real.num_prompt_tokens,
                 save_partial_tail=self.enable_partial_hash_hits,
-                session_id=request_real.session_id,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -444,7 +443,6 @@ class MooncakeStoreScheduler:
                     block_hashes=unfinished_req.block_hashes,
                     num_prompt_tokens=unfinished_req.num_prompt_tokens,
                     save_partial_tail=self.enable_partial_hash_hits,
-                    session_id=unfinished_req.session_id,
                 )
 
                 if req_meta is not None:
