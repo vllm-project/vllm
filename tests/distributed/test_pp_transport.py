@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The copy-engine PP transport (CUDA copy engines, or SDMA engines on ROCm
-gfx950) carries every step's tensors intact through a PP chain (one per TP
-rank), with varying sizes and stages that take turns lagging behind, and every
-rank makes the same transport choice when one rank cannot set it up.
+gfx950) and the MoRI-IO one (ROCm) carry every step's tensors intact through a
+PP chain (one per TP rank), with varying sizes and stages that take turns
+lagging behind, and every rank makes the same transport choice when one rank
+cannot set it up.
 
 Every scenario runs on one shared set of Ray workers (one per GPU): a worker
 keeps its vLLM import and CUDA context across scenarios and only
@@ -28,13 +29,21 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.pp_transport import create_pp_transport
+from vllm.distributed.pp_transport import create_pp_transport, row_specs
 from vllm.distributed.pp_transport.copy_engine import (
     CopyEngineTransport,
     CopyEngineUnavailable,
 )
+from vllm.distributed.pp_transport.mori_io import (
+    MoriIOTransport,
+    check_available,
+    pack_offsets,
+    row_bytes,
+    slot_bytes,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import has_mori
 
 from ..utils import (
     VLLM_PATH,
@@ -81,7 +90,12 @@ class PPTransportWorker:
         destroy_distributed_environment()
 
     def run_chain(
-        self, pp_size: int, port: int, tp_size: int = 1, fabric: bool = False
+        self,
+        pp_size: int,
+        port: int,
+        tp_size: int = 1,
+        fabric: bool = False,
+        transport_cls: type = CopyEngineTransport,
     ) -> None:
         """Every step's tensors flow through the chain with varying row
         counts and stages that take turns lagging; the last stage checks
@@ -110,7 +124,7 @@ class PPTransportWorker:
                     k: torch.zeros(MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda")
                     for k in KEYS
                 }
-            transport = CopyEngineTransport(_config(tp_size), pp_group, persistent)
+            transport = transport_cls(_config(tp_size), pp_group, persistent)
 
             lag = torch.randn(4096, 4096, device="cuda")
             for step in range(STEPS):
@@ -266,7 +280,9 @@ def _multi_gpu(*, num_gpus: int):
 
 def _run_scenario(method: str, pp_size: int, tp_size: int = 1, **kwargs) -> None:
     # NVML / amdsmi, not CUDA: the test process must not initialize CUDA.
-    if current_platform.is_rocm():
+    if kwargs.get("transport_cls") is MoriIOTransport:
+        supported = current_platform.is_rocm() and has_mori()
+    elif current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx950
 
         supported = on_gfx950()
@@ -275,7 +291,8 @@ def _run_scenario(method: str, pp_size: int, tp_size: int = 1, **kwargs) -> None
     gpus = list(range(pp_size * tp_size))
     if not (supported and current_platform.is_fully_connected(gpus)):
         pytest.skip(
-            "copy engines need NVLink-connected CUDA GPUs or xGMI-connected gfx950"
+            "PP transport needs NVLink-connected CUDA GPUs or xGMI-connected "
+            "gfx950, or MoRI on xGMI-connected ROCm GPUs"
         )
     port = get_open_port()
     refs = [
@@ -331,3 +348,47 @@ def test_copy_engine_fabric_pp4():
     if not imex_channel_available():
         pytest.skip("FABRIC handles need an IMEX channel")
     _run_scenario("run_chain", 4, fabric=True)
+
+
+@_multi_gpu(num_gpus=2)
+def test_mori_io_pp2():
+    _run_scenario("run_chain", 2, transport_cls=MoriIOTransport)
+
+
+@_multi_gpu(num_gpus=4)
+def test_mori_io_pp4():
+    _run_scenario("run_chain", 4, transport_cls=MoriIOTransport)
+
+
+@_multi_gpu(num_gpus=4)
+def test_mori_io_tp2_pp2():
+    _run_scenario("run_chain", 2, tp_size=2, transport_cls=MoriIOTransport)
+
+
+def test_mori_io_slot_holds_every_relayed_tensor():
+    """A MoRI-IO receive slot holds the largest step of every intermediate
+    tensor the stage receives, relayed aux hidden states and positions
+    included, and each tensor of a step starts 256-byte aligned without
+    overlapping the next."""
+    persistent = {
+        key: torch.empty(MAX_ROWS, WIDTH, dtype=torch.bfloat16)
+        for key in ("hidden_states", "residual", "aux_3", "aux_17", "aux_31")
+    }
+    persistent["positions"] = torch.empty(MAX_ROWS, 3, dtype=torch.int64)
+    assert slot_bytes(persistent) == (5 * MAX_ROWS * WIDTH * 2 + MAX_ROWS * 3 * 8)
+
+    sizes = row_bytes(row_specs(persistent))
+    rows = dict.fromkeys(persistent, 1337)
+    offsets, used = pack_offsets(sizes, rows)
+    assert used <= slot_bytes(persistent)
+    ends = [offsets[k] + rows[k] * sizes[k] for k in persistent]
+    assert all(offset % 256 == 0 for offset in offsets.values())
+    assert all(end <= offsets[k] for end, k in zip(ends, list(persistent)[1:]))
+    assert ends[-1] <= used
+
+
+def test_mori_io_unavailable_is_a_clear_error():
+    if current_platform.is_rocm() and has_mori():
+        pytest.skip("MoRI-IO is available here")
+    with pytest.raises(RuntimeError, match="VLLM_PP_TRANSPORT=mori_io needs"):
+        check_available()

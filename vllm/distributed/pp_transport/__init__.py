@@ -5,7 +5,7 @@ stage, selected by `VLLM_PP_TRANSPORT`."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -46,6 +46,9 @@ def check_intermediate_tensors(
 class PPTransport(ABC):
     """One rank's side of its PP stage boundaries."""
 
+    # Its `VLLM_PP_TRANSPORT` value.
+    name: ClassVar[str]
+
     @abstractmethod
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
         """Send this step's outputs to the next stage. The caller may
@@ -61,7 +64,8 @@ def create_pp_transport(
 ) -> PPTransport | None:
     """Collective over the PP group. Returns None (send over NCCL) without PP,
     under "auto" on ROCm, or under "auto" when copy engines are not usable on
-    some rank; every rank makes the same choice.
+    some rank; every rank makes the same choice. "mori_io" is never chosen
+    automatically.
 
     Args:
         vllm_config: The engine config.
@@ -75,6 +79,11 @@ def create_pp_transport(
     if pp_group.world_size == 1:
         return None
     mode = envs.VLLM_PP_TRANSPORT
+    if mode == "mori_io":
+        from vllm.distributed.pp_transport.mori_io import MoriIOTransport
+
+        tensors = None if persistent is None else persistent.tensors
+        return MoriIOTransport(vllm_config, pp_group, tensors)
     assert mode in ("auto", "copy_engine")
     from vllm.distributed.pp_transport.copy_engine import (
         CopyEngineTransport,

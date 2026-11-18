@@ -313,6 +313,8 @@ def _fabric_open(handle: Any, nbytes: int) -> tuple[int, Callable[[], None]]:
 
 
 class CopyEngineTransport(PPTransport):
+    name = "copy_engine"
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

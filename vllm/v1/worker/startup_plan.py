@@ -40,7 +40,7 @@ PLAN_SCHEMA_VERSION = 2
 
 
 def _pp_transport_in_use(worker: "Worker") -> str:
-    return "nccl" if worker._pp_transport is None else "copy_engine"
+    return "nccl" if worker._pp_transport is None else worker._pp_transport.name
 
 
 def compute_plan_fingerprint(
