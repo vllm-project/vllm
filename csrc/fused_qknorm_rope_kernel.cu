@@ -162,6 +162,8 @@ __global__ void fusedQKNormRopeKernel(
     int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
 
     int const num_heads = num_heads_q + num_heads_k + num_heads_v;
+    // 64-bit: the row offset can exceed INT_MAX.
+    qkv += static_cast<int64_t>(tokenIdx) * num_heads * head_dim;
 
     static_assert(head_dim % (32 * 2) == 0,
                   "head_dim must be divisible by 64 (each warp processes one "
@@ -179,13 +181,11 @@ __global__ void fusedQKNormRopeKernel(
 
     int offsetWarp;  // Offset for the warp
     if (isQ) {
-      // Q segment: token offset + head offset within Q segment
-      offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+      // Q segment: head offset within Q segment
+      offsetWarp = headIdx * head_dim;
     } else {
-      // K segment: token offset + entire Q segment + head offset within K
-      // segment
-      offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                   headIdx * head_dim;
+      // K segment: entire Q segment + head offset within K segment
+      offsetWarp = num_heads_q * head_dim + headIdx * head_dim;
     }
     int offsetThread = offsetWarp + laneId * numElemsPerThread;
 
@@ -380,6 +380,8 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             : (total_qk_heads - first_head);
 
     if (tokenIdx >= num_tokens) return;
+    // 64-bit: the row offset can exceed INT_MAX.
+    qkv += static_cast<int64_t>(tokenIdx) * num_heads * head_dim;
 
     static_assert(head_dim % (32 * 2) == 0, "head_dim must be divisible by 64");
     constexpr int numElemsPerThread = head_dim / 32;
@@ -410,10 +412,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
       int offWarp;
       if (isQ) {
-        offWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+        offWarp = headIdx * head_dim;
       } else {
-        offWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                  headIdx * head_dim;
+        offWarp = num_heads_q * head_dim + headIdx * head_dim;
       }
       int const offThread = offWarp + laneId * numElemsPerThread;
       char* smem_dst =
@@ -465,10 +466,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
 
       int offsetWarp;
       if (isQ) {
-        offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+        offsetWarp = headIdx * head_dim;
       } else {
-        offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                     headIdx * head_dim;
+        offsetWarp = num_heads_q * head_dim + headIdx * head_dim;
       }
       int const offsetThread = offsetWarp + laneId * numElemsPerThread;
 
