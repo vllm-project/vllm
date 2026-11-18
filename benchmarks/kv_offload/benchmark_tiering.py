@@ -34,12 +34,10 @@ Compare two session dirs:
 """
 
 import argparse
-import contextlib
 import csv
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -47,15 +45,16 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from urllib.request import urlopen
+
+from utils import GuideLLM, KVCacheCalibration, VLLMServer
 
 """
-Parts of the benchmark are built for the gpt-oss-120b model. 
+Parts of the benchmark are built for the gpt-oss-120b model.
  1. gpt-oss-120b has 2 attention groups FA and SWA.
  2. These attention groups have the same gpu block size (2.3M on H100).
 This fact is exploited in `KVCacheCalibration.from_engine` and
 `Scenario::max_per_request_block_size` functions that are used,
- - to determine the maximum KV cache memory that a benchmark run would 
+ - to determine the maximum KV cache memory that a benchmark run would
    require and subsequently,
  - to design GPU/CPU cache overflow scenarios.
 
@@ -110,114 +109,6 @@ def _cell(v: object) -> str:
     if isinstance(v, float):
         return f"{v:.2f}"
     return str(v)
-
-
-class KVCacheCalibration:
-    """Calibrate the benchmark's per-attention-group block size."""
-
-    @staticmethod
-    @contextlib.contextmanager
-    def _redirect_process_output(log_file):
-        """Redirect stdout/stderr descriptors for this process and children."""
-        saved_stdout_fd = os.dup(1)
-        saved_stderr_fd = os.dup(2)
-        try:
-            os.dup2(log_file.fileno(), 1)
-            os.dup2(log_file.fileno(), 2)
-            yield
-        finally:
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os.dup2(saved_stdout_fd, 1)
-            os.dup2(saved_stderr_fd, 2)
-            os.close(saved_stdout_fd)
-            os.close(saved_stderr_fd)
-
-    @staticmethod
-    @contextlib.contextmanager
-    def _engine_core_in_process():
-        """Keep the V1 engine core in-process for callable worker RPCs."""
-        setting = "VLLM_ENABLE_V1_MULTIPROCESSING"
-        previous_value = os.environ.get(setting)
-        os.environ[setting] = "0"
-        try:
-            yield
-        finally:
-            if previous_value is None:
-                os.environ.pop(setting, None)
-            else:
-                os.environ[setting] = previous_value
-
-    @staticmethod
-    def _worker_kv_group_info(worker) -> tuple[tuple[str, int], ...]:
-        """Return each KV group's kind and rank-local page size."""
-        from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
-        from vllm.v1.kv_cache_interface import AttentionSpec
-
-        config = worker.model_runner.kv_cache_config
-        group_info = []
-        for group in config.kv_cache_groups:
-            assert all(
-                isinstance(spec, AttentionSpec)
-                for spec in group.kv_cache_specs.values()
-            ), f"Unexpected spec type in group: {group.manager_config}"
-            kind = get_kv_cache_kind(
-                group.manager_config, group.kv_cache_specs.values()
-            )
-            group_info.append((kind.value, group.page_size_bytes))
-        return tuple(group_info)
-
-    @staticmethod
-    def from_engine(block_size: int = BLOCK_SIZE) -> int:
-        """Infer the whole-model per-group block size from a dummy engine."""
-        log = Path("block_bytes_calibration.log")
-        print(f"Calibration log: {log}")
-        with (
-            log.open("w") as f,
-            KVCacheCalibration._redirect_process_output(f),
-            KVCacheCalibration._engine_core_in_process(),
-        ):
-            from vllm import LLM
-
-            llm = LLM(
-                model=MODEL,
-                tensor_parallel_size=TP_SIZE,
-                load_format="dummy",
-                max_model_len=8192,
-                disable_log_stats=True,
-                numa_bind=False,
-                enforce_eager=True,
-                block_size=block_size,
-            )
-            rank_group_info = llm.collective_rpc(
-                KVCacheCalibration._worker_kv_group_info, timeout=120
-            )
-            assert len(rank_group_info) == TP_SIZE
-            first_rank_group_info = rank_group_info[0]
-            assert all(
-                group_info == first_rank_group_info for group_info in rank_group_info
-            ), f"TP ranks disagree on KV groups: {rank_group_info}"
-            assert len(first_rank_group_info) == 2, "gptoss has FA and SWA"
-            assert {kind for kind, _ in first_rank_group_info} == {
-                "full_attention",
-                "sliding_window",
-            }, f"expected only full attention and SWA groups: {first_rank_group_info}"
-            rank_local_page_sizes = {
-                page_size for _, page_size in first_rank_group_info
-            }
-            assert len(rank_local_page_sizes) == 1, (
-                f"attention groups disagree on block size: {first_rank_group_info}"
-            )
-            del llm
-        return sum(group_info[0][1] for group_info in rank_group_info)
-
-    @staticmethod
-    def resolve() -> float:
-        """Return the environment override, or calibrate a new value."""
-        if PER_GROUP_BLOCK_BYTES is not None:
-            return float(PER_GROUP_BLOCK_BYTES)
-        print("PER_GROUP_BLOCK_BYTES not set; calibrating with a dummy engine...")
-        return KVCacheCalibration.from_engine()
 
 
 @dataclass
@@ -454,233 +345,6 @@ SCENARIOS = QUICK + [
 ]
 
 
-class VLLMServer:
-    """Lifecycle of a single `vllm serve` process."""
-
-    def __init__(
-        self,
-        config_path: Path | None,
-        log_path: Path,
-        port: int,
-        kv_cache_bytes: int,
-    ) -> None:
-        self.config_path = config_path
-        self.log_path = log_path
-        self.port = port
-        self.kv_cache_bytes = kv_cache_bytes
-        self.proc: subprocess.Popen | None = None
-        self._previous_signal_handlers: dict[int, object] = {}
-
-    def _handle_termination(self, signum: int, _frame: object) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.send_signal(signum)
-        raise SystemExit(128 + signum)
-
-    def _restore_signal_handlers(self) -> None:
-        for signum, handler in self._previous_signal_handlers.items():
-            signal.signal(signum, handler)
-        self._previous_signal_handlers = {}
-
-    def start(self) -> None:
-        env = dict(os.environ, PYTHONHASHSEED="0")
-        cmd = [
-            "vllm",
-            "serve",
-            MODEL,
-            "--tensor-parallel-size",
-            str(TP_SIZE),
-            "--kv-cache-memory-bytes",
-            str(self.kv_cache_bytes),
-        ]
-        if self.config_path is not None:
-            cmd += ["--kv-transfer-config", self.config_path.read_text()]
-        cmd += [
-            "--enable-prefix-caching",
-            "--no-disable-hybrid-kv-cache-manager",
-            "--port",
-            str(self.port),
-        ]
-        try:
-            self._previous_signal_handlers = {
-                signal.SIGINT: signal.getsignal(signal.SIGINT),
-                signal.SIGTERM: signal.getsignal(signal.SIGTERM),
-            }
-            signal.signal(signal.SIGINT, self._handle_termination)
-            signal.signal(signal.SIGTERM, self._handle_termination)
-            with self.log_path.open("w") as log:
-                self.proc = subprocess.Popen(
-                    cmd, stdout=log, stderr=subprocess.STDOUT, env=env
-                )
-        except BaseException:
-            self._restore_signal_handlers()
-            raise
-
-    def wait_ready(self, timeout: int = 1800) -> None:
-        assert self.proc is not None
-        print(f"      Waiting for vLLM on port {self.port}...")
-        deadline = time.monotonic() + timeout
-        url = f"http://127.0.0.1:{self.port}/v1/models"
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError(self._crash_report("crashed during startup"))
-            try:
-                urlopen(url, timeout=5)
-                print("      vLLM is ready!")
-                return
-            except OSError:
-                time.sleep(5)
-        raise RuntimeError(
-            self._crash_report("timed out waiting to accept connections")
-        )
-
-    def stop(self) -> None:
-        """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
-        assert self.proc is not None
-        # Restore signal handlers. We are terminating the vLLM process anyhow.
-        self._restore_signal_handlers()
-        proc = self.proc
-        for attempt in range(1, 6):
-            if proc.poll() is not None:
-                print(f"      vLLM process ({proc.pid}) has exited gracefully.")
-                return
-            print(f"      [Attempt {attempt}/5] Sending SIGINT to PID {proc.pid}...")
-            proc.send_signal(signal.SIGINT)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=10)
-        if proc.poll() is None:
-            print("      vLLM did not exit after 5 attempts. Force killing...")
-            proc.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=5)
-        if proc.poll() is None:
-            raise RuntimeError(
-                f"vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
-                "likely still locked. Aborting to prevent cascading failures."
-            )
-        print("      vLLM successfully terminated.")
-
-    def assert_running(self) -> None:
-        """Raise if the server exited before expected."""
-        assert self.proc is not None
-        return_code = self.proc.poll()
-        if return_code is not None:
-            raise RuntimeError(
-                self._crash_report(f"Exited before expected: return code {return_code}")
-            )
-
-    def _crash_report(self, why: str) -> str:
-        assert self.proc is not None
-        tail = "\n".join(self.log_path.read_text().splitlines()[-20:])
-        return (
-            f"vLLM process (PID {self.proc.pid}) {why}.\n"
-            f"Last 20 lines of {self.log_path}:\n{tail}"
-        )
-
-    def __enter__(self) -> "VLLMServer":
-        self.start()
-        try:
-            self.wait_ready()
-        except BaseException:
-            self.stop()
-            raise
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.stop()
-
-
-class GuideLLM:
-    """Drives the guidellm load against a running server and parses metrics."""
-
-    def __init__(self, port: int, max_seconds: int) -> None:
-        self.port = port
-        self.max_seconds = max_seconds
-
-    def run(self, spec: Scenario, log_path: Path) -> dict:
-        prefix_count = max(4 * spec.concurrency, 256)
-        data = {
-            "kind": "synthetic_text",
-            "prompt_tokens": spec.isl_tokens,
-            "output_tokens": PHASES[spec.phase],
-            "turns": BENCH_TURNS,
-            "prefix_buckets": [
-                {
-                    "bucket_weight": 100,
-                    "prefix_count": prefix_count,
-                    "prefix_tokens": spec.prefix_tokens,
-                }
-            ],
-        }
-        cmd = [
-            "guidellm",
-            "run",
-            "--backend",
-            (
-                "kind=openai_http,"
-                f"target=http://127.0.0.1:{self.port},"
-                "request_format=/v1/completions"
-            ),
-            "--profile",
-            f"kind=concurrent,streams={spec.concurrency}",
-            "--constraint",
-            f"kind=max_duration,seconds={self.max_seconds}",
-            "--seed",
-            f"kind=static,value={BENCH_RANDOM_SEED}",
-            "--data",
-            json.dumps(data),
-            "--output",
-            f"kind=json,path={log_path.parent / 'guidellm.json'}",
-        ]
-        with log_path.open("w") as log:
-            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
-            try:
-                return_code = proc.wait()
-            except BaseException:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                raise
-        if return_code != 0:
-            raise subprocess.CalledProcessError(return_code, cmd)
-        return self._parse_report(log_path.with_name("guidellm.json"))
-
-    def _parse_report(self, json_path: Path) -> dict:
-        """Extract aggregate metrics from the guidellm JSON report.
-
-        guidellm also records per-request stats under `requests`; those are
-        dropped after extraction to keep the report file small.
-        """
-        report = json.loads(json_path.read_text())
-        benchmark = report["benchmarks"][0]
-        metrics = benchmark["metrics"]
-
-        def successful(field: str) -> dict:
-            return metrics.get(field, {}).get("successful") or {}
-
-        def percentile(field: str, p: str) -> float | None:
-            return successful(field).get("percentiles", {}).get(p)
-
-        result = {
-            "request_throughput": successful("requests_per_second").get("mean"),
-            "request_latency_mean": successful("request_latency").get("mean"),
-            "request_latency_p99": percentile("request_latency", "p99"),
-            "output_token_throughput": successful("output_tokens_per_second").get(
-                "mean"
-            ),
-            "total_token_throughput": successful("tokens_per_second").get("mean"),
-            "ttft_mean": successful("time_to_first_token_ms").get("mean"),
-            "ttft_p50": percentile("time_to_first_token_ms", "p50"),
-            "ttft_p95": percentile("time_to_first_token_ms", "p95"),
-            "ttft_p99": percentile("time_to_first_token_ms", "p99"),
-        }
-        benchmark.pop("requests", None)
-        json_path.write_text(json.dumps(report, indent=2))
-        return {k: v for k, v in result.items() if v is not None}
-
-
 class BenchmarkRun:
     """One benchmark run: cleanup, config, server, load, teardown."""
 
@@ -700,7 +364,9 @@ class BenchmarkRun:
         self.mode = mode
         self.run_dir = session_dir / spec.name
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.guidellm = GuideLLM(port, max_seconds)
+        self.guidellm = GuideLLM(
+            port, max_seconds, PHASES, BENCH_TURNS, BENCH_RANDOM_SEED
+        )
 
     def execute(self) -> dict:
         print("=" * 70)
@@ -714,10 +380,12 @@ class BenchmarkRun:
         config_path = self._write_config(self.run_dir / "kv_transfer_config.json")
         print("  [3/5] Starting vLLM server...")
         with VLLMServer(
-            config_path,
-            self.run_dir / "vllm.log",
-            self.port,
+            MODEL,
+            TP_SIZE,
             self.spec.gpu.get_num_bytes() // TP_SIZE,
+            config_path,
+            self.port,
+            self.run_dir / "vllm.log",
         ) as server:
             print("  [4/5] Running guidellm benchmark...")
             guidellm_result = self.guidellm.run(
@@ -982,7 +650,10 @@ def _main() -> None:
         return
 
     if args.command == "calibrate":
-        per_group_block_bytes = KVCacheCalibration.from_engine()
+        calibration = KVCacheCalibration(
+            MODEL, TP_SIZE, BLOCK_SIZE, PER_GROUP_BLOCK_BYTES
+        )
+        per_group_block_bytes = calibration.from_engine()
         print(f"PER_GROUP_BLOCK_BYTES={per_group_block_bytes}")
         return
 
@@ -1018,7 +689,8 @@ def _main() -> None:
         assert args.command == "bench-scenario"
         specs = [by_name[n] for n in args.scenario]
 
-    per_group_block_bytes = KVCacheCalibration.resolve()
+    calibration = KVCacheCalibration(MODEL, TP_SIZE, BLOCK_SIZE, PER_GROUP_BLOCK_BYTES)
+    per_group_block_bytes = calibration.resolve()
     print(f" ===== Using GPU per-group block bytes: {per_group_block_bytes} =====")
     for spec in specs:
         spec.materialize(per_group_block_bytes)
