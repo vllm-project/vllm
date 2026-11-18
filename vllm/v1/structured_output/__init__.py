@@ -18,8 +18,10 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.kimi_k3_protocol import KimiK3ProtocolGrammar
 from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.token_buffer import TokenIdsView
 
@@ -219,9 +221,33 @@ class StructuredOutputManager:
                 if request.sampling_params is not None
                 else None
             )
-            return self.backend.compile_grammar(
+            grammar = self.backend.compile_grammar(
                 request_type, grammar_spec, stop_token_ids=stop_token_ids
             )
+            if self.vllm_config.structured_outputs_config.kimi_k3_protocol:
+                from vllm.v1.structured_output.backend_xgrammar import XgrammarGrammar
+
+                if request_type not in (
+                    StructuredOutputOptions.JSON,
+                    StructuredOutputOptions.JSON_OBJECT,
+                ) or not isinstance(grammar, XgrammarGrammar):
+                    raise ValueError("Kimi protocol supports only xgrammar JSON")
+                kwargs = struct_request.reasoning_parser_kwargs or {}
+                chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+                thinking = bool(
+                    chat_kwargs.get(
+                        "thinking", chat_kwargs.get("enable_thinking", True)
+                    )
+                )
+                grammar = KimiK3ProtocolGrammar(
+                    grammar,
+                    self.tokenizer,
+                    request.prompt_token_ids or [],
+                    thinking,
+                    self.vllm_config.num_speculative_tokens,
+                    stop_token_ids or {self.tokenizer.eos_token_id},
+                )
+            return grammar
         except Exception:
             logger.exception(
                 "Failed to compile grammar for request %s", request.request_id
@@ -298,6 +324,11 @@ class StructuredOutputManager:
         `spec_tokens_committed` is True if spec_tokens is already in
         `request.all_token_ids`.
         """
+        structured_req = request.structured_output_request
+        if structured_req is not None and isinstance(
+            structured_req.grammar, KimiK3ProtocolGrammar
+        ):
+            return _CONSTRAINED_FROM_START
         if self.enable_in_reasoning:
             return _CONSTRAINED_FROM_START
 
@@ -523,6 +554,9 @@ class StructuredOutputManager:
         grammar = structured_req.grammar
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
+
+        if isinstance(grammar, KimiK3ProtocolGrammar):
+            return grammar.accept_tokens(request.request_id, new_token_ids)
 
         grammar_start, _ = self._get_constraint_bounds(
             request, new_token_ids, spec_tokens_committed=True

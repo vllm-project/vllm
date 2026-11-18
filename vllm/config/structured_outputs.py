@@ -41,6 +41,11 @@ class StructuredOutputsConfig:
     reasoning_parser_plugin: str = ""
     """Path to a dynamically reasoning parser plugin that can be dynamically
     loaded and registered."""
+    kimi_k3_protocol: bool = False
+    """Experimental Kimi K3 protocol tracking for xgrammar JSON. Preserves
+    channel headers and allows reasoning to reopen before the JSON body.
+    Disabled by default; repeated-reasoning Chat parsing is not supported.
+    See the experimental Kimi protocol section in structured-output docs."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
@@ -55,6 +60,15 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
+        if self.kimi_k3_protocol and (
+            self.reasoning_parser != "kimi_k3"
+            or self.backend not in ("auto", "xgrammar")
+            or self.enable_in_reasoning
+        ):
+            raise ValueError(
+                "kimi_k3_protocol requires kimi_k3 reasoning, xgrammar, "
+                "and enable_in_reasoning=False"
+            )
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
