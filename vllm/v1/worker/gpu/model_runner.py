@@ -1377,11 +1377,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
-            if num_computed_tokens != num_computed_tokens_np[req_index]:
-                # The scheduler's count moved since its last echo (a
-                # load-failure rollback or a repair commit restoration).
-                # The GPU-side count only advances optimistically, so the
-                # authoritative value must be staged over.
+            if req_id in scheduler_output.rewound_req_ids:
+                # The scheduler moved this request's count other than by
+                # the ordinary step advance (a load-failure rollback, a
+                # repair commit restoration): stage the authoritative
+                # value over the GPU-side count. The ordinary advance is
+                # deliberately NOT staged -- under async scheduling with
+                # speculative decoding the echoed count is an optimistic
+                # upper bound and the on-device post_update rejection
+                # correction is the truth.
                 self.req_states.num_computed_tokens.stage_write_elem(
                     req_index, num_computed_tokens
                 )

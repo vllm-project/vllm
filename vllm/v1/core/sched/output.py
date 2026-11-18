@@ -339,6 +339,15 @@ class SchedulerOutput:
     # scheduler-admitted hole repair (v1: repair steps are exclusive).
     repair_works: dict[str, RepairWork] | None = None
 
+    # Requests whose scheduler-side num_computed_tokens moved other than
+    # by the ordinary step advance (a repair-plan rollback, a commit
+    # restoration, a fallback truncation). The worker stages the echoed
+    # value over its GPU-side count for exactly these rows; the ordinary
+    # advance is deliberately absent -- under async scheduling with
+    # speculative decoding the echoed count is an optimistic upper bound
+    # and the on-device post_update rejection correction is the truth.
+    rewound_req_ids: set[str] = field(default_factory=set)
+
     # Whether any scheduled request consumes KV that the connector loads
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False

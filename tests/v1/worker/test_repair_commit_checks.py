@@ -15,7 +15,14 @@ from typing import Any
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config
+from tests.v1.core.test_final_audit_adversarial import full_fault_evidence
+from tests.v1.core.test_final_validation_fixes import deliver
+from tests.v1.core.test_scheduler_repair_budget import (
+    admit_sync_external_hit,
+    drive_repair_result,
+    make_scheduler,
+)
+from tests.v1.kv_connector.unit.utils import create_request, create_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -732,39 +739,134 @@ def test_rezero_indexes_core_layout_cache():
     assert float(others.abs().min()) == 1.0
 
 
-def test_repair_works_require_eager_dispatch(monkeypatch):
-    """The dispatch guard: a repair step must be forced eager, so the
-    runner never routes the repair batch through a compiled/piecewise
-    graph. This pins the port-side integration contract (the runner
-    raises engine-fatal if a repair step reaches a cudagraph mode)."""
-    import inspect
+def test_rewound_flag_rides_repair_moves_and_drains():
+    """The scheduler-signaled staging contract: the worker may restage a
+    request's GPU-side num_computed_tokens only when the scheduler says
+    so, because under async scheduling with speculative decoding the
+    echoed count is an optimistic upper bound and the on-device
+    rejection correction is the truth. Every repair-policy count move
+    (the plan-synthesis rollback, the commit restoration) flags the
+    request, the flag rides the very SchedulerOutput that schedules it,
+    and the ordinary advance never flags."""
+    scheduler = make_scheduler(kv_load_failure_policy="repair")
+    r1 = create_request(num_tokens=3328)
+    scheduler.add_request(r1)
+    admit_sync_external_hit(scheduler, r1, 3072)
+    out1 = scheduler.schedule()
+    reports, attestations = full_fault_evidence(scheduler, r1)
+    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
+    plan = scheduler.recovery_plans[r1.request_id]
 
-    from vllm.v1.worker.gpu import model_runner as mr
+    # The plan synthesis rolled the count back to the rollback boundary:
+    # the repair step that schedules the request must carry the flag so
+    # the worker stages the rolled-back value over its GPU count.
+    out2 = scheduler.schedule()
+    assert out2.repair_works is not None
+    assert r1.request_id in out2.rewound_req_ids
 
-    src = inspect.getsource(mr.GPUModelRunner.execute_model)
-    assert "repair_works is not None" in src, (
-        "the eager-dispatch guard for repair steps must stay in execute_model"
+    # The commit restores the logical extent: the next step that
+    # schedules the request carries the flag again.
+    drive_repair_result(
+        scheduler, r1, out2, structural_check=True, plan=plan, span=plan.repair_span
     )
-    assert "execute_repair_only" in src, (
-        "the repair-only execution branch must stay in execute_model"
+    assert r1.num_computed_tokens == plan.restored_extent
+    out3 = scheduler.schedule()
+    assert r1.request_id in out3.num_scheduled_tokens
+    assert r1.request_id in out3.rewound_req_ids
+
+    # The ordinary advance never flags: the flag drained with out3 and
+    # no later output carries any rewound row.
+    out4 = scheduler.schedule()
+    assert out4.rewound_req_ids == set()
+
+
+def test_rewound_flag_rides_repair_abort():
+    """The abort truncation (a failed verdict rolls the request back to
+    the repair span start for the recompute fallback) flags the request
+    exactly like the commit does, and the flag drains with the step that
+    stages it."""
+    scheduler = make_scheduler(kv_load_failure_policy="repair")
+    r1 = create_request(num_tokens=3328)
+    scheduler.add_request(r1)
+    admit_sync_external_hit(scheduler, r1, 3072)
+    out1 = scheduler.schedule()
+    reports, attestations = full_fault_evidence(scheduler, r1)
+    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
+
+    out2 = scheduler.schedule()
+    assert r1.request_id in out2.rewound_req_ids
+    plan = scheduler.recovery_plans[r1.request_id]
+    drive_repair_result(
+        scheduler, r1, out2, structural_check=False, plan=plan, span=plan.repair_span
+    )
+    out3 = scheduler.schedule()
+    assert r1.request_id in out3.num_scheduled_tokens
+    assert r1.request_id in out3.rewound_req_ids
+    out4 = scheduler.schedule()
+    assert r1.request_id not in out4.rewound_req_ids
+
+
+def test_repair_dispatch_stays_eager_and_unsplit():
+    """The dispatch contract for a repair-only step, behaviorally:
+    need_eager forces CUDAGraphMode.NONE without consulting the
+    cudagraph manager, and the dp_size==1 all-reduce-overlap re-check
+    cannot split the batch once allow_ubatching is False -- while the
+    same shape with ubatching allowed DOES split, proving the gate
+    blocks a live dispatch path rather than an unreachable one."""
+    from vllm.config import ParallelConfig
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+
+    calls = []
+
+    class _GraphPickingManager:
+        def dispatch(self, *args, **kwargs):
+            calls.append(1)
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=64,
+                num_reqs=2,
+                num_active_loras=0,
+            )
+
+    cfg = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_dbo=True,
+        dbo_schedule="all-reduce-overlap",
+        dbo_prefill_token_threshold=8,
     )
 
-
-def test_scheduler_restores_computed_tokens_via_staged_write():
-    """The worker-side restore seam: update_requests must stage the
-    scheduler-authoritative num_computed_tokens over the GPU buffer
-    when it moved backwards (a repair commit restoration or a
-    load-failure rollback), because the GPU-side count only ever
-    advances optimistically."""
-    import inspect
-
-    from vllm.v1.worker.gpu import model_runner as mr
-
-    src = inspect.getsource(mr.GPUModelRunner.update_requests)
-    assert "stage_write_elem" in src, (
-        "update_requests must stage backwards-moving computed-token "
-        "restores onto the GPU buffer"
+    # The repair shape: eager, no split, manager never consulted.
+    desc, _sync = dispatch_cg_and_sync_dp(
+        _GraphPickingManager(),
+        2,
+        64,
+        None,
+        1,
+        0,
+        need_eager=True,
+        parallel_config=cfg,
+        allow_ubatching=False,
     )
+    assert desc.cg_mode == CUDAGraphMode.NONE
+    assert desc.num_ubatches == 1
+    assert calls == []
+
+    # The control: identical shape with ubatching allowed splits, so the
+    # gate above blocks a real re-check, not a dead branch.
+    desc, _sync = dispatch_cg_and_sync_dp(
+        _GraphPickingManager(),
+        2,
+        64,
+        None,
+        1,
+        0,
+        need_eager=True,
+        parallel_config=cfg,
+        allow_ubatching=True,
+    )
+    assert desc.num_ubatches == 2
 
 
 def test_scheduler_refuses_async_scheduling_under_repair_policy():

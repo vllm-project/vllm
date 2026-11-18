@@ -347,6 +347,11 @@ class Scheduler(SchedulerInterface):
         # Marks the transfer-evidence state above as initialized;
         # bare instances (class-level defaults above) stay inert.
         self._evidence_state_initialized = True
+        # Requests whose num_computed_tokens moved other than by the
+        # ordinary step advance and whose GPU-side count the worker must
+        # restage at their next scheduling; drained into
+        # SchedulerOutput.rewound_req_ids.
+        self._pending_rewound_req_ids: set[str] = set()
         self.defer_block_free = False
         self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
@@ -2374,6 +2379,27 @@ class Scheduler(SchedulerInterface):
                 for req_id, plan in self.recovery_plans.items()
                 if plan.state == "ADMITTED" and req_id in num_scheduled_tokens
             }
+            # A repair-only step never carries speculative drafts: the
+            # replay's span is exact and no drafter runs. The spec
+            # arithmetic already yields none for a rewound request
+            # (num_scheduled_spec_tokens goes non-positive); pin it so a
+            # future accounting change fails here instead of silently
+            # drafting inside a repair.
+            assert not (
+                set(scheduler_output.repair_works) & set(scheduled_spec_decode_tokens)
+            ), "hole repair: a repair-only step must not schedule drafts"
+
+        if self._pending_rewound_req_ids:
+            # Drain the flags of every request scheduled in THIS step:
+            # the worker stages the echoed (moved) count for exactly
+            # these rows. Flags of requests no longer tracked are
+            # dropped -- a preempted or finished request's worker state
+            # is rebuilt by add_request, which stages its own init.
+            scheduler_output.rewound_req_ids = (
+                self._pending_rewound_req_ids & num_scheduled_tokens.keys()
+            )
+            self._pending_rewound_req_ids -= num_scheduled_tokens.keys()
+            self._pending_rewound_req_ids &= self.requests.keys()
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -5813,6 +5839,7 @@ class Scheduler(SchedulerInterface):
                 skip_req_ids.add(report.request_id)
                 continue
             request.num_computed_tokens = rollback
+            self._mark_num_computed_tokens_rewound(request)
             # The async schedule-ahead may have left placeholder accounting
             # for in-flight steps whose outputs are now suppressed.
             request.num_output_placeholders = 0
@@ -5870,6 +5897,13 @@ class Scheduler(SchedulerInterface):
             )
         return skip_req_ids
 
+    def _mark_num_computed_tokens_rewound(self, request: Request) -> None:
+        """Flag a request whose num_computed_tokens just moved other than
+        by the ordinary step advance, so the next SchedulerOutput that
+        schedules it tells the worker to stage the value over its
+        GPU-side count."""
+        self._pending_rewound_req_ids.add(request.request_id)
+
     def _repair_write_set_block_ids(
         self, request: Request, rollback: int, corrupt_end: int
     ) -> list[int]:
@@ -5920,6 +5954,7 @@ class Scheduler(SchedulerInterface):
         blocks_to_evict = set(req_block_ids[start_idx:])
         self.kv_cache_manager.evict_blocks(blocks_to_evict)
         request.num_computed_tokens = report.rollback_boundary
+        self._mark_num_computed_tokens_rewound(request)
         # The shared/published write set may already be attached to
         # other requests (ref_cnt > 1 blocks the eviction above only
         # clears hash entries for); rewind every consumer below the
@@ -6180,6 +6215,7 @@ class Scheduler(SchedulerInterface):
         blocks_to_evict = set(req_block_ids[evict_from:])
         self.kv_cache_manager.evict_blocks(blocks_to_evict)
         request.num_computed_tokens = rollback
+        self._mark_num_computed_tokens_rewound(request)
         # The failed blocks may already be attached to OTHER requests
         # (the claim was published, or the blocks shared, before this
         # evidence was judged). evict_blocks only clears hash entries; a
@@ -6341,6 +6377,7 @@ class Scheduler(SchedulerInterface):
                 self._abort_repair_plan(plan, request, result)
                 return "aborted"
             request.num_computed_tokens = restored
+            self._mark_num_computed_tokens_rewound(request)
             logger.info(
                 "Repair committed: req=%s plan_id=%d restored=%d",
                 result.request_id,
@@ -6372,6 +6409,7 @@ class Scheduler(SchedulerInterface):
         else:
             blocks_to_evict = set()
         request.num_computed_tokens = plan.repair_span[0]
+        self._mark_num_computed_tokens_rewound(request)
         logger.warning(
             "Repair aborted: req=%s plan_id=%d span=%s "
             "executed_layers=%d evicted=%d -> recompute fallback",
@@ -6421,6 +6459,7 @@ class Scheduler(SchedulerInterface):
                                 req_id,
                             )
                     request.num_computed_tokens = 0
+                    self._mark_num_computed_tokens_rewound(request)
                     self.failed_recving_kv_req_ids.add(req_id)
         return (
             set()
