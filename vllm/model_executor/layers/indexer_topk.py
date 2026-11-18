@@ -379,9 +379,6 @@ class SparseIndexerTopk(torch.nn.Module):
         aiter not auto-resolved as it does not outperform the per-row on every shape,
         hence we delegate to the caller to decide when to use it.
         """
-        if envs.VLLM_BATCH_INVARIANT:
-            # Avoid batch-dependent algorithms and tie-breaking.
-            return "per_row"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):

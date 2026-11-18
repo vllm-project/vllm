@@ -213,8 +213,11 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
-        # SM90 selects a bf16 kernel variant by batch size.
-        return current_platform.is_device_capability_family(100)
+        # SM90 selects a bf16 kernel variant by batch size; subclasses opt in.
+        return (
+            cls is FlashMLASparseBackend
+            and current_platform.is_device_capability_family(100)
+        )
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -1528,6 +1531,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     q[..., self.kv_lora_rank :].zero_()
             else:
                 ops.concat_mla_q(ql_nope, q_pe, q)
+            if envs.VLLM_BATCH_INVARIANT and q.shape[1] > actual_num_heads:
+                # Padded heads hold workspace leftovers, and their values can
+                # change the bf16 kernel's output for the real heads.
+                q[:, actual_num_heads:].zero_()
         else:
             actual_num_heads = q.shape[1]
             if q.shape[-1] < self.q_head_size:

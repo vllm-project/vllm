@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import itertools
 import os
 import random
 
@@ -1072,20 +1073,25 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
 
 def _assert_logprobs_with_long_prefill(llm):
     sp = SamplingParams(temperature=0, max_tokens=16, logprobs=5)
-    needle = "The capital of France is a city that"
-    filler = "word " * 2500
+    # Sparse MLA (GLM-5.3 via VLLM_TEST_MODEL, not the CI model) runs "short" as
+    # decode rows and "medium" as a prefill below index_topk (2048); only "long"
+    # has more candidates than index_topk.
+    prompts = {
+        "short": "The capital of France is a city that",
+        "medium": "token " * 600,
+        "long": "word " * 2500,
+    }
 
-    def generate(prompts):
+    def generate(*names):
         llm.sleep(level=0)
-        llm.enqueue(prompts, sp, use_tqdm=False)
+        llm.enqueue([prompts[name] for name in names], sp, use_tqdm=False)
         llm.wake_up(tags=["scheduling"])
-        return llm.wait_for_completion(use_tqdm=False)
+        outputs = [o.outputs[0] for o in llm.wait_for_completion(use_tqdm=False)]
+        return {n: (o.token_ids, o.logprobs) for n, o in zip(names, outputs)}
 
-    reference = generate([needle])[0].outputs[0]
-    for prompts, index in (([needle, filler], 0), ([filler, needle], 1)):
-        batched = generate(prompts)[index].outputs[0]
-        assert reference.token_ids == batched.token_ids
-        assert reference.logprobs == batched.logprobs
+    alone = {name: generate(name)[name] for name in prompts}
+    for names in itertools.permutations(prompts, 2):
+        assert generate(*names) == {name: alone[name] for name in names}, names
 
 
 @skip_if_not_cuda

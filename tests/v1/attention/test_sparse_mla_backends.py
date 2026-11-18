@@ -1748,6 +1748,49 @@ def test_flashmla_bf16_preserves_unused_output_heads(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Batch-invariant FlashMLA sparse requires SM100",
+)
+@pytest.mark.parametrize("num_heads", [8, 16])
+def test_flashmla_batch_invariant_ignores_padded_query_heads(
+    workspace_init, monkeypatch, num_heads
+):
+    """Workspace leftovers in the padded heads must not reach the bf16 kernel."""
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    device = torch.device("cuda")
+    gen = torch.Generator(device=device).manual_seed(0)
+    q = torch.randn(256, num_heads, 576, generator=gen, device=device).bfloat16()
+    kv = torch.randn(512, 1, 576, generator=gen, device=device).bfloat16()
+    topk = torch.arange(512, dtype=torch.int32, device=device).expand(256, 1, -1)
+    lengths = torch.arange(257, 513, dtype=torch.int32, device=device)
+    specs = [((256, 64, 576), torch.bfloat16)]
+
+    def kernel(q, kv, *_):
+        out = flashmla.flash_mla_sparse_fwd(q, kv, topk, 0.05, topk_length=lengths)[0]
+        return out[:, :num_heads].clone(), None
+
+    impl = SimpleNamespace(
+        num_heads=num_heads,
+        workspace_specs=specs,
+        topk_indices_buffer=topk,
+        kv_cache_dtype="bfloat16",
+        need_to_return_lse_for_decode=False,
+        _forward_bf16_kv=kernel,
+    )
+
+    def run(leftover_scale):
+        (buffer,) = current_workspace_manager().get_simultaneous(*specs)
+        buffer.copy_(leftover_scale * torch.randn_like(buffer))
+        query = (q[..., :512], q[..., 512:])
+        metadata = SimpleNamespace(topk_start=0)
+        return FlashMLASparseImpl.forward_mqa(impl, query, kv, metadata, None)[0]
+
+    torch.testing.assert_close(run(1e3), run(0.0), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
     current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )

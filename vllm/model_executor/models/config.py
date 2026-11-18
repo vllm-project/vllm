@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 
 from pydantic import Field
 
+import vllm.envs as envs
 from vllm.config import utils as config_utils
 from vllm.config.diffusion import DiffusionConfig, DiffusionModelOptions
 from vllm.logger import init_logger
@@ -193,6 +194,8 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         if (
             cache_config.cache_dtype == "auto"
+            # Batch-invariant sparse MLA needs an unquantized KV cache.
+            and not envs.VLLM_BATCH_INVARIANT
             and current_platform.is_cuda()
             and current_platform.is_device_capability_family(100)
         ):

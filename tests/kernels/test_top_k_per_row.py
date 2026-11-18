@@ -3228,26 +3228,29 @@ def test_top_k_per_row_batch_invariant(device, values, topk, monkeypatch):
         cols = torch.argsort(logits[i, :end], descending=True, stable=True)[:topk]
         expected[i, : cols.numel()] = cols.sort().values.to(torch.int32)
     for rows in (1, 64, 65, 100):
-        output = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
-        indexer_topk.top_k_per_row_batch_invariant(
-            logits[:rows], ends[:rows], output, topk
-        )
-        torch.testing.assert_close(output, expected[:rows], rtol=0, atol=0)
+        # Decode narrows the logits to the longest row in the batch.
+        for width in (logits.shape[1], int(ends[:rows].max())):
+            output = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+            indexer_topk.top_k_per_row_batch_invariant(
+                logits[:rows, :width], ends[:rows], output, topk
+            )
+            torch.testing.assert_close(output, expected[:rows], rtol=0, atol=0)
 
 
 def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
-    """BI pins FP32 per-row selection and rejects quantized sparse MLA caches."""
+    """BI pins FP32 decode logits and rejects quantized sparse MLA caches."""
     if not current_platform.is_cuda():
         pytest.skip("requires CUDA")
 
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla import indexer
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 
     bf16 = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    assert SparseIndexerTopk("auto").resolve_backend(bf16, 2048, 8) == "per_row"
     assert not SparseIndexerTopk("auto").takes_bf16_logits(bf16, 2048, 8)
+    assert not indexer.DeepseekV4IndexerBackend.supports_batch_invariance()
 
     def combination(kv_dtype):
         return FlashMLASparseBackend.supports_combination(
@@ -3264,6 +3267,7 @@ def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
 
     if current_platform.is_device_capability_family(100):
         assert FlashMLASparseBackend.supports_batch_invariance()
+        assert indexer.DeepseekV32IndexerBackend.supports_batch_invariance()
         assert combination("fp8_ds_mla") is not None
         assert combination("bfloat16") is None
     monkeypatch.delenv("VLLM_BATCH_INVARIANT")

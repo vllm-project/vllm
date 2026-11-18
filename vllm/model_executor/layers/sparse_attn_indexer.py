@@ -1242,10 +1242,13 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         if bi:
-            row_ends = SparseIndexerTopk._row_ends(
-                seq_lens, next_n, logits.shape[0]
-            ).contiguous()
-            top_k_per_row_batch_invariant(logits, row_ends, topk_indices, topk_tokens)
+            # Rank the batch's context width, not all max_model_len columns.
+            top_k_per_row_batch_invariant(
+                logits[:, : attn_metadata_narrowed.max_seq_len],
+                SparseIndexerTopk._row_ends(seq_lens, next_n, num_rows).contiguous(),
+                topk_indices,
+                topk_tokens,
+            )
         else:
             # Dispatch the layer's chosen backend.
             get_indexer_topk(topk_backend)(
