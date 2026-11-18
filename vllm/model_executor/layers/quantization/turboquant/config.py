@@ -41,7 +41,7 @@ TQ_PRESETS: dict[str, dict] = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class TurboQuantConfig:
     """Configuration for TurboQuant KV-cache quantization.
 

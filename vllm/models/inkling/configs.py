@@ -378,19 +378,19 @@ class InklingMMConfig(PreTrainedConfig):
         return self.text_config.mamba2_cache_params
 
 
-@dataclass(kw_only=True, frozen=True)
+@dataclass(kw_only=True, frozen=True, slots=True)
 class TMLConvStateShape:
     conv: list[tuple[int, int]]
     temporal: tuple[int, int, int]
 
 
-@dataclass(kw_only=True, frozen=True)
+@dataclass(kw_only=True, frozen=True, slots=True)
 class TMLStateDType:
     conv: torch.dtype = torch.bfloat16
     temporal: torch.dtype = torch.bfloat16
 
 
-@dataclass(kw_only=True, frozen=True)
+@dataclass(kw_only=True, frozen=True, slots=True)
 class TMLConvCacheParams:
     shape: TMLConvStateShape
     layers: list[int]

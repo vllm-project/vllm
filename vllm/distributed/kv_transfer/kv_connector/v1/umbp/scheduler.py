@@ -113,7 +113,7 @@ def _free_to_cached_front(pool: BlockPool, block_ids: Sequence[int]) -> None:
     queue.prepend_n(front)
 
 
-@dataclass
+@dataclass(slots=True)
 class _StoreEvent:
     plan_groups: tuple[Sequence[BlockTransferPlan], ...]
     result: StoreEventResult = field(default_factory=StoreEventResult)
@@ -142,7 +142,7 @@ class _StoreEvent:
                 yield from (plan.block_id for plan in plans)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _LookupContext:
     request: Request
     local_tokens: int
@@ -152,20 +152,20 @@ class _LookupContext:
     keys: list[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _PendingLookup:
     context: _LookupContext
     future: Future[Sequence[bool | None]]
 
 
-@dataclass
+@dataclass(slots=True)
 class _EventObject:
     serial: int
     plan: BlockTransferPlan | None
     published: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _EventLookup:
     objects: tuple[tuple[tuple[int, bytes], int], ...]
     future: Future[Sequence[bool | None]]
