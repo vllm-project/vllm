@@ -72,7 +72,10 @@ def _stats(model):
     return model.llm.collective_rpc("ffn_test_stats")[0]
 
 
-@pytest.mark.parametrize("model_name", ["Qwen/Qwen3-4B", "Qwen/Qwen2.5-7B-Instruct"])
+@pytest.mark.parametrize(
+    "model_name",
+    ["Qwen/Qwen3-4B", "Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-3.2-1B-Instruct"],
+)
 @pytest.mark.parametrize("mode", ["eager", "graph", "prefix", "chunked"])
 def test_pruning_preserves_generation_and_fallbacks(
     vllm_runner, monkeypatch, mode, model_name
