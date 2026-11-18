@@ -7,11 +7,21 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .methods import SequencePoolingMethodOutput
+
+
+def _apply_rowwise_if_batch_invariant(
+    fn: ProjectorFn | ClassifierFn, x: torch.Tensor
+) -> torch.Tensor:
+    if not envs.VLLM_BATCH_INVARIANT or x.shape[0] <= 1:
+        return fn(x)
+    return torch.cat([fn(row) for row in x.split(1)])
+
 
 SequencePoolerHeadOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
@@ -77,7 +87,7 @@ class EmbeddingPoolerHead(SequencePoolerHead):
 
         # Apply ST projector
         if self.projector is not None:
-            embeddings = self.projector(pooled_data)
+            embeddings = _apply_rowwise_if_batch_invariant(self.projector, pooled_data)
         else:
             embeddings = pooled_data
         # embeddings shape: [batchsize, embedding_size]
@@ -171,7 +181,9 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
-            logits: SequencePoolerHeadOutput = self.classifier(pooled_data)
+            logits: SequencePoolerHeadOutput = _apply_rowwise_if_batch_invariant(
+                self.classifier, pooled_data
+            )
         else:
             logits = pooled_data
 

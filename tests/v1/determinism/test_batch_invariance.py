@@ -12,6 +12,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    skip_if_not_cuda,
     skip_if_not_cuda_alike,
     skip_unsupported,
 )
@@ -1067,6 +1068,37 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
             f"Prompt {i}: logprobs differ alone vs batched; "
             f"max abs diff {(lp1 - lpN).abs().max():.3e}"
         )
+
+
+@skip_if_not_cuda
+@pytest.mark.timeout(600)
+def test_cross_encoder_scores_bitwise_alone_vs_batch():
+    """A cross-encoder pair must score the same bits alone and in a batch."""
+    rng = random.Random(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    words = ["gpu", "kernel", "batch", "cache", "matmul", "tile", "warp", "token"]
+    query = "why does the result of a matrix multiply change with batch size"
+    docs = [" ".join(rng.choices(words, k=rng.randint(8, 400))) for _ in range(50)]
+    llm = LLM(
+        model="ibm-granite/granite-embedding-reranker-english-r2",
+        runner="pooling",
+        dtype="bfloat16",
+        max_model_len=2048,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        alone = [llm.score(query, [d], use_tqdm=False)[0] for d in docs]
+        batched = llm.score(query, docs, use_tqdm=False)
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    mismatched = [
+        i
+        for i, (a, b) in enumerate(zip(alone, batched))
+        if a.outputs.score != b.outputs.score
+    ]
+    assert not mismatched, f"Scores differ alone vs batched for docs {mismatched}"
 
 
 def LLM_with_max_seqs(
