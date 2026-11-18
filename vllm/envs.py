@@ -640,9 +640,9 @@ removed_environment_variables: dict[str, str] = {
 }
 
 environment_variables: dict[str, Callable[[], Any]] = {
-    # Opt in to last-layer FFN row pruning for unquantized dense Qwen2/Qwen3 complete
-    # prefills on a single NVIDIA GPU. Disabled by default. Unsupported requests
-    # retain the ordinary model path; supports eager and breakable CUDA graphs.
+    # Opt in to last-layer FFN row pruning for unquantized dense Qwen2/Qwen3/Llama
+    # prefills on NVIDIA GPUs, including cached/chunked inputs, LoRA, and TP/PP.
+    # Disabled by default; supports eager and breakable CUDA graphs.
     "VLLM_ENABLE_LAST_LAYER_FFN_PRUNING": lambda: (
         os.getenv("VLLM_ENABLE_LAST_LAYER_FFN_PRUNING", "0") == "1"
     ),

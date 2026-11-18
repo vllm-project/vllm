@@ -73,10 +73,12 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Last-layer FFN pruning"
   key: last-layer-ffn-pruning
   device: h200_35gb
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   source_file_dependencies:
   - tests/v1/cudagraph/test_last_layer_ffn.py
   - vllm/envs.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/lora/
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/llama.py
   - vllm/model_executor/models/transformers/
@@ -86,4 +88,24 @@ steps:
   - vllm/compilation/
   - vllm/config/
   commands:
-    - pytest -v -s v1/cudagraph/test_last_layer_ffn.py
+    - pytest -v -s v1/cudagraph/test_last_layer_ffn.py -m "not distributed"
+
+- label: ":nvidia: (H100) Last-layer FFN pruning TP/PP"
+  key: last-layer-ffn-pruning-parallel
+  device: h100
+  num_devices: 2
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - tests/v1/cudagraph/test_last_layer_ffn.py
+  - vllm/envs.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/model_executor/models/llama.py
+  - vllm/model_executor/models/qwen3.py
+  - vllm/model_executor/models/transformers/
+  - vllm/v1/worker/gpu/
+  - vllm/lora/
+  - vllm/distributed/
+  - vllm/compilation/
+  - vllm/config/
+  commands:
+    - pytest -v -s v1/cudagraph/test_last_layer_ffn.py -m distributed

@@ -48,6 +48,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import use_output_lora_mapping
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -308,7 +309,11 @@ class Qwen3DecoderLayer(nn.Module):
             residual = residual.index_select(0, last_layer_token_indices)
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if last_layer_token_indices is None:
+            hidden_states = self.mlp(hidden_states)
+        else:
+            with use_output_lora_mapping(self.mlp):
+                hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -396,6 +401,8 @@ class Qwen3Model(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         last_layer_token_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if not get_pp_group().is_last_rank:
+            last_layer_token_indices = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds

@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 import vllm.envs as envs
+from vllm.model_executor.layers.utils import use_output_lora_mapping
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
@@ -136,15 +137,18 @@ class TransformersForCausalLM(CausalMixin):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self._ffn_token_indices: torch.Tensor | None = None
         self._ffn_pruning_supported = False
+        self._ffn_lora_mapping = None
         if (
             envs.VLLM_ENABLE_LAST_LAYER_FFN_PRUNING
             and self.text_config.model_type == "qwen2"
-            and self.pp_group.world_size == 1
+            and self.pp_group.is_last_rank
         ):
             layers = self._decoder_layers
             if layers is not None and hasattr(layers[-1], "mlp"):
                 layers[-1].mlp.register_forward_pre_hook(self._select_final_ffn_rows)
-                layers[-1].mlp.register_forward_hook(self._restore_final_ffn_rows)
+                layers[-1].mlp.register_forward_hook(
+                    self._restore_final_ffn_rows, always_call=True
+                )
                 self._ffn_pruning_supported = True
 
     @property
@@ -156,9 +160,17 @@ class TransformersForCausalLM(CausalMixin):
             return None
         (hidden_states,) = args
         self._ffn_input_shape = hidden_states.shape
-        return (hidden_states.index_select(-2, self._ffn_token_indices),)
+        selected = hidden_states.index_select(-2, self._ffn_token_indices)
+        self._ffn_lora_mapping = use_output_lora_mapping(module)
+        self._ffn_lora_mapping.__enter__()
+        return (selected,)
 
     def _restore_final_ffn_rows(self, module, args, output):
+        if self._ffn_lora_mapping is not None:
+            self._ffn_lora_mapping.__exit__(None, None, None)
+            self._ffn_lora_mapping = None
+        if output is None:
+            return None
         if self._ffn_token_indices is None:
             return output
         return output.new_zeros(self._ffn_input_shape).index_copy_(
