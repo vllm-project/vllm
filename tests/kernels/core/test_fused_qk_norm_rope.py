@@ -56,7 +56,7 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("is_neox", IS_NEOX)
 @pytest.mark.parametrize("eps", EPS_VALUES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
+@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.375, 0.25])
 @pytest.mark.parametrize("token_heads_per_warp", [1, 4])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(

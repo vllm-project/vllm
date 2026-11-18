@@ -274,7 +274,10 @@ __global__ void fusedQKNormRopeKernel(
         // cos/sin values.
 #pragma unroll
         for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+          elements2[i] = __shfl_sync(
+              FINAL_MASK, elements[i],
+              laneId < pairOffset ? laneId + pairOffset : laneId - pairOffset,
+              32);
 
           if (laneId < pairOffset) {
             elements2[i] = -elements2[i];
@@ -526,7 +529,10 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
           int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
           for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+            elements2[i] = __shfl_sync(
+                FINAL_MASK, elements[i],
+                laneId < pairOffset ? laneId + pairOffset : laneId - pairOffset,
+                32);
             if (laneId < pairOffset) elements2[i] = -elements2[i];
             int dim_idx = laneId * numElemsPerThread + i;
             dim_idx = (dim_idx * 2) % rotary_dim;
