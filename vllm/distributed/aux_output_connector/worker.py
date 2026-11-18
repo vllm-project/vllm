@@ -722,12 +722,6 @@ class AuxOutputWorkerConnector:
         if self._buffer is None or metadata is None:
             return
         self._object_size = metadata.session_object_size
-        for request_id, keys in metadata.session_orphans.items():
-            assert self._object_writer is not None
-            if request_id in self._requests:
-                self._requests[request_id].orphans.extend(keys)
-            else:
-                self._object_writer.remove(keys)
         assert not metadata.requests.keys() & metadata.finished_requests, (
             "auxiliary output request cannot run and finish in one step"
         )
@@ -735,6 +729,12 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
+            for request_id, keys in metadata.session_orphans.items():
+                assert self._object_writer is not None
+                if request_id in self._requests:
+                    self._requests[request_id].orphans.extend(keys)
+                else:
+                    self._object_writer.remove(keys)
             namespace = self._get_namespace(self._generation)
             hashes = metadata.retained_block_hashes or ()
             retained_keys = aux_output_keys(hashes, namespace)
@@ -779,6 +779,10 @@ class AuxOutputWorkerConnector:
                     [(self._requests[r], []) for r in carried + flushed]
                 )
                 self._teardown(carried + preempted)
+                for state in self._requests.values():
+                    if state.orphans:
+                        assert self._object_writer is not None
+                        self._object_writer.remove(state.orphans)
                 release_keys.extend(
                     key
                     for state in self._requests.values()

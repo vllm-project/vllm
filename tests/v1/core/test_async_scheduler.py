@@ -1261,6 +1261,21 @@ def test_session_request_aborted_before_its_output_leaves_no_objects():
     assert set(engine.client.objects) == set(engine.keys["second"])
 
 
+def test_session_request_aborted_after_a_reset_leaves_no_objects():
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    scheduler = engine.scheduler
+    (request,) = _session_requests(["r"], 40, 20, hash_block_size=4)
+    scheduler.add_request(request)
+    for _ in range(4):
+        engine.step(engine.schedule(), {"r": [0]})
+    engine.worker._object_writer.drain(timeout_s=10)
+    assert engine.client.objects
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.finish_requests("r", RequestStatus.FINISHED_ABORTED)
+    engine.pause()
+    assert not engine.client.objects
+
+
 def _plan_rows(engine, plan):
     engine.pause()
     rows = read_aux_rows(engine.store, plan, "routed_experts", timeout_s=0)
