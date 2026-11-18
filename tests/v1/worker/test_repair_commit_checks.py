@@ -9,6 +9,7 @@ comparison silently passes), the pre-write ownership fence, abort
 containment, and the live-getenv sync-profile gate.
 """
 
+from dataclasses import replace as dataclasses_replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -238,9 +239,12 @@ def _single_work_setup():
 
 def _run_repair(model, works, tokens, positions, input_ids, meta):
     sub = _sub_output(works, tokens)
-    with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
-    ):
+    # Every replayed layer's name carries an entry, as in production
+    # (build_attn_metadata maps every layer of the group to the one
+    # metadata object the fence validates).
+    n = len(model.model.layers)
+    ctx = {f"model.layers.{i}": meta for i in range(n)}
+    with set_forward_context(ctx, create_vllm_config(model="facebook/opt-125m")):
         return execute_repair_only(model, sub, input_ids, positions, list(works))
 
 
@@ -1324,3 +1328,293 @@ def test_mm_request_repairs_fall_back_to_recompute():
     assert scheduler.recovery_plans == {}, (
         "no repair plan may be installed for a multimodal request"
     )
+
+
+# ---- The pre-execution preflight consensus (A3: TP safety before native
+# ---- execution) ----
+
+
+def test_preflight_refusal_keeps_commit_check_contract():
+    """A refused preflight (here: a foreign slot mapping the fence
+    refuses) reports every fence flag False AND the two new preflight
+    keys (preflight_agree, capability_ok) with exact boolean values,
+    zero layers executed, and an error naming the preflight -- the
+    single-rank contract the multi-rank divergence tests build on."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    bad_slots = meta.slot_mapping.clone()
+    bad_slots[:] = 999 * BS + torch.arange(BS)
+    meta_bad = _cpu_meta([torch.tensor([2])], bad_slots)
+
+    results = _run_repair(
+        _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta_bad
+    )
+
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert ra.commit_check["preflight_agree"] is False
+    assert ra.commit_check["capability_ok"] is True
+    assert ra.commit_check["pre_write_geometry"] is False
+    assert not ra.structural_check
+    assert "preflight" in (ra.error_detail or "").lower()
+
+
+def test_preflight_divergence_detail_names_peer_reasons():
+    """A green local preflight that a PEER refuses reports the peer's
+    reason: the local rank executed nothing and the error names both the
+    local and the peer codes (single-rank reduction of the divergence
+    path; the multi-rank behavior is test_repair_tp_consensus's)."""
+    from vllm.v1.worker.gpu.repair_executor import (
+        _REPAIR_PF_FENCE,
+        _preflight_divergence_detail,
+        _ranks_repair_preflight_agree,
+        _repair_preflight,
+    )
+
+    pf = _repair_preflight(
+        _REPAIR_PF_FENCE,
+        plan_id=3,
+        epoch=9,
+        span=(0, BS),
+        layer_end=2,
+        auth_fingerprint=1234,
+    )
+    assert not _ranks_repair_preflight_agree(pf)
+    detail = _preflight_divergence_detail(pf)
+    assert "local_reason=4" in detail
+    assert "peer_reasons" in detail
+    assert str(_REPAIR_PF_FENCE) in detail
+
+
+def test_preflight_ok_summary_roundtrips_identity():
+    """The all-gatherable summary tensor carries the full operation
+    identity: an OK preflight's summary must equal the same fields
+    repacked, so consensus compares identity, not a boolean."""
+    from vllm.v1.worker.gpu.repair_executor import (
+        _REPAIR_PF_OK,
+        _RepairPreflight,
+    )
+
+    pf = _RepairPreflight(
+        authorized=True,
+        reason=_REPAIR_PF_OK,
+        plan_id=7,
+        epoch=12,
+        span=(128, 256),
+        layer_end=4,
+        auth_fingerprint=987654321,
+        capability=0,
+    )
+    summary = pf.summary()
+    assert summary.tolist() == [1, 0, 7, 12, 128, 256, 4, 987654321, 0]
+    # Any single identity field diverging produces a different tensor.
+    for mutate in ("plan_id", "epoch", "layer_end", "auth_fingerprint", "capability"):
+        other = dataclasses_replace(pf, **{mutate: getattr(pf, mutate) + 1})
+        assert not torch.equal(other.summary(), summary), mutate
+
+
+def test_preflight_refused_work_reports_fence_reason_in_error():
+    """A refused fence inside the preflight surfaces the ordered fence
+    failure in the verdict's error detail (not just a bare abort): the
+    diagnosis must distinguish a fence refusal from a consensus
+    divergence."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    # Layer stack shorter than the work's layer_end: the geometry checks
+    # refuse inside the preflight.
+    results = _run_repair(
+        _FakeModel(n_layers=1),  # work.layer_end == 1 is still fine; use 2
+        works,
+        tokens,
+        positions,
+        input_ids,
+        meta,
+    )
+    works["req-a"].layer_end = 2
+    results = _run_repair(
+        _FakeModel(n_layers=1), works, tokens, positions, input_ids, meta
+    )
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert "layer_end" in (ra.error_detail or "")
+    assert ra.commit_check["preflight_agree"] is False
+
+
+# ---- A2: per-layer attention-metadata identity over the replayed layers ----
+
+
+class _NamedLayer(_FakeLayer):
+    """A layer whose attention wrapper carries a layer_name, like the
+    production Attention (llama: layer.self_attn.attn.layer_name)."""
+
+    def __init__(self, layer_name: str):
+        super().__init__(layer_name)
+        self.self_attn.attn.layer_name = layer_name
+
+
+def _named_model(n_layers: int) -> _FakeModel:
+    model = _FakeModel(n_layers)
+    model.model.layers = [_NamedLayer(f"model.layers.{i}") for i in range(n_layers)]
+    return model
+
+
+def test_replayed_layers_must_share_the_fenced_metadata_object():
+    """Every replayed layer resolves its OWN metadata from the forward
+    context (attn_metadata[layer_name]); the fence validates ONE object.
+    A layer whose entry is a DIFFERENT metadata object would write
+    through an unfenced geometry -- the preflight must refuse before any
+    layer executes."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    works["req-a"].layer_end = 2
+    model = _named_model(4)
+    # Layer 1 resolves a DIFFERENT metadata object: a foreign slot
+    # window pointing at block 999 (outside every authorized region).
+    foreign_meta = _cpu_meta(
+        [torch.tensor([2])],
+        torch.arange(999 * BS, 999 * BS + BS),
+    )
+    results = _run_repair_ctx(
+        model,
+        works,
+        tokens,
+        positions,
+        input_ids,
+        {"model.layers.0": meta, "model.layers.1": foreign_meta},
+    )
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert ra.commit_check["preflight_agree"] is False
+    assert "DIFFERENT attention metadata" in (ra.error_detail or "")
+
+
+def test_replayed_layer_missing_metadata_entry_refused():
+    """A replayed layer with NO metadata entry would raise inside its
+    metadata lookup mid-execution -- the preflight must refuse it up
+    front."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    works["req-a"].layer_end = 2
+    model = _named_model(4)
+    results = _run_repair_ctx(
+        model,
+        works,
+        tokens,
+        positions,
+        input_ids,
+        {"model.layers.0": meta},  # layer 1 has no entry
+    )
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert "no attention metadata entry" in (ra.error_detail or "")
+
+
+def test_replayed_layer_missing_slot_mapping_refused():
+    """A replayed layer whose per-layer slot_mapping entry is absent
+    would have its KV cache update silently SKIPPED (the unified op
+    guards on layer_slot_mapping is None) -- a partial repair under a
+    green verdict. The preflight must refuse it."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    works["req-a"].layer_end = 2
+    model = _named_model(4)
+    with set_forward_context(
+        {"model.layers.0": meta, "model.layers.1": meta},
+        create_vllm_config(model="facebook/opt-125m"),
+        slot_mapping={"model.layers.0": meta.slot_mapping},  # layer 1 absent
+    ):
+        sub = _sub_output(works, tokens)
+        results = execute_repair_only(model, sub, input_ids, positions, list(works))
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert "no slot_mapping entry" in (ra.error_detail or "")
+
+
+def test_named_layers_with_shared_metadata_still_commit():
+    """The control: named layers sharing the fenced metadata object (the
+    single-group construction invariant) still execute and commit."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    works["req-a"].layer_end = 2
+    model = _named_model(4)
+    with set_forward_context(
+        {"model.layers.0": meta, "model.layers.1": meta},
+        create_vllm_config(model="facebook/opt-125m"),
+        slot_mapping={
+            "model.layers.0": meta.slot_mapping,
+            "model.layers.1": meta.slot_mapping,
+        },
+    ):
+        sub = _sub_output(works, tokens)
+        results = execute_repair_only(model, sub, input_ids, positions, list(works))
+    ra = results[0]
+    assert ra.executed_layers == 2
+    assert not ra.aborted
+    assert ra.structural_check
+
+
+def _run_repair_ctx(model, works, tokens, positions, input_ids, attn_meta):
+    """_run_repair with an explicit attn_metadata dict (no per-layer
+    slot_mapping entries: the identity check only requires presence when
+    the forward context carries a dict)."""
+    sub = _sub_output(works, tokens)
+    with set_forward_context(attn_meta, create_vllm_config(model="facebook/opt-125m")):
+        return execute_repair_only(model, sub, input_ids, positions, list(works))
+
+
+def test_replayed_layer_divergent_cache_layout_refused():
+    """A replayed layer whose cache geometry implies a DIFFERENT block
+    size than the fenced layer 0 (an unexpected attention layout): the
+    same slot numbers would split into different block/offset pairs and
+    write outside the authorized rows. The preflight must refuse before
+    any layer executes."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    works["req-a"].layer_end = 2
+    model = _named_model(4)
+    # Layer 1's cache carries a doubled block size: dim-1 = 2*BS.
+    model.model.layers[1].self_attn.attn.kv_cache = [
+        torch.zeros(4, 2 * BS, 8),
+        torch.zeros(4, 2 * BS, 8),
+    ]
+    results = _run_repair(model, works, tokens, positions, input_ids, meta)
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert "layout divergence" in (ra.error_detail or "")
+    assert ra.commit_check["preflight_agree"] is False
+
+
+def test_single_kv_group_guard_refuses_multi_group_at_init():
+    """The construction invariant the per-layer metadata identity relies
+    on: with more than one KV cache group, different replayed layers
+    could legitimately carry DIFFERENT slot mappings and block sizes, so
+    the single-metadata fence could not cover the write set. The
+    scheduler must refuse the repair policy at init for multi-group
+    configurations (making per-layer slot-mapping divergence unreachable
+    by construction)."""
+    from tests.v1.core.utils import new_kv_cache_group
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="repair",
+    )
+    vllm_config.scheduler_config.async_scheduling = False
+    block_size = vllm_config.cache_config.block_size
+    spec = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    two_groups = KVCacheConfig(
+        num_blocks=10000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["layers.0-7"], spec),
+            new_kv_cache_group(["layers.8-15"], spec),
+        ],
+    )
+    with pytest.raises(RuntimeError, match="single KV cache group"):
+        create_scheduler(vllm_config, kv_cache_config=two_groups)

@@ -7,9 +7,13 @@ based on the db9527a4 stack) onto the current PR-#68140 scheduler
 lifecycle. The scheduler admits RepairWork descriptors on exclusive
 repair-only steps; this module executes them: a native layer replay over
 each work item's span for layers [0, layer_end) only, guarded by a pre-write
-ownership fence against the scheduler-authorized physical write set, with
-abort containment (re-zero of partial writes) and a fail-closed TP consensus
-on every verdict.
+ownership fence against the scheduler-authorized physical write set, a
+distributed PRE-EXECUTION preflight consensus (every TP rank all-gathers the
+repair operation identity -- capability reason, plan_id, epoch, span, layer
+range, and authorized write geometry -- BEFORE any rank enters native layer
+execution, so a rank-local refusal can never strand a peer inside a native
+TP collective), abort containment (re-zero of partial writes), and a
+fail-closed TP consensus on every verdict.
 
 Known limitation: kernel-block-split cache groups (AttentionGroup
 kernel_block_size below the manager block size) bind layer views whose
@@ -23,6 +27,7 @@ kv_connector_model_runner_mixin module no longer exists upstream: its
 connector plumbing was absorbed into vllm/v1/worker/gpu/kv_connector.py.
 """
 
+import dataclasses
 import os
 import time
 from collections import Counter
@@ -49,6 +54,21 @@ def _format_repair_exception(exc: BaseException) -> str:
     side sees the original failure even when worker logs are lost."""
     text = type(exc).__name__ + ": " + str(exc)
     return text if len(text) <= 300 else text[:297] + "..."
+
+
+# Repair preflight reason codes (the pre-execution consensus' capability
+# field). Stable across processes: the code rides the all-gathered preflight
+# summary tensor, so every rank sees not just THAT a peer refused but WHY.
+# 0 is the only "locally authorized" value; the seam accepts external
+# capability probes (a model-capability verdict computed off-process) as
+# distinct nonzero codes.
+_REPAIR_PF_OK = 0
+_REPAIR_PF_STEP_INVALID = 1
+_REPAIR_PF_WORK_LOOKUP = 2
+_REPAIR_PF_GEOMETRY = 3
+_REPAIR_PF_FENCE = 4
+_REPAIR_PF_METADATA = 5
+_REPAIR_PF_CAPABILITY = 6
 
 
 class _ReplayProbeAbort(BaseException):
@@ -155,6 +175,417 @@ def verify_replay_compatibility(model: Any) -> None:
         )
 
 
+# The authorized-write-geometry fingerprint carried by the preflight
+# summary: a stable hash of the sorted authorized block ids (the exact
+# physical region the scheduler authorized). Distinct authorizations
+# produce distinct fingerprints with overwhelming probability; a
+# fingerprint COLLISION would need two different block-id tuples hashing
+# equal, which the (sorted ids, count, span bounds) packing already
+# separates.
+_AUTH_FINGERPRINT_REFUSED = -1
+
+
+def _auth_fingerprint(auth_blocks: tuple[int, ...]) -> int:
+    """Stable cross-process fingerprint of the authorized write set."""
+    if not auth_blocks:
+        return _AUTH_FINGERPRINT_REFUSED
+    h = 2166136261
+    for block_id in auth_blocks:
+        h = ((h ^ (block_id & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+@dataclasses.dataclass
+class _RepairPreflight:
+    """One rank's pre-execution repair preflight summary.
+
+    Attributes:
+        authorized: this rank completed every local preflight check and
+            is willing to enter native layer execution for this work.
+        reason: machine-readable refusal code (_REPAIR_PF_*). 0 (OK) is
+            the only value that may carry authorized=True.
+        plan_id/epoch/span/layer_end: the RepairWork identity this rank
+            derived -- divergent identities abort on every rank.
+        auth_fingerprint: fingerprint of the authorized write geometry.
+        capability: the model-capability code (0 = the replay seam is
+            present; divergent capabilities abort on every rank).
+        error_detail: the contained local failure's diagnostic record.
+        pre_write_ownership/pre_write_coverage/auth_present/auth_slots_ok/
+            auth_table_ok/auth_distinct_ok/pre_write_ok: the pre-write
+            fence flags (the commit check reuses them verbatim).
+        peer_reasons: all-gathered refusal codes (filled by the
+            consensus helper; None before it).
+
+    """
+
+    authorized: bool
+    reason: int
+    plan_id: int
+    epoch: int
+    span: tuple[int, int]
+    layer_end: int
+    auth_fingerprint: int
+    capability: int = 0
+    error_detail: str | None = None
+    pre_write_ownership: bool = False
+    pre_write_coverage: bool = False
+    auth_present: bool = False
+    auth_slots_ok: bool = False
+    auth_table_ok: bool = False
+    auth_distinct_ok: bool = False
+    pre_write_ok: bool = False
+    peer_reasons: list[int] | None = None
+
+    def summary(self) -> torch.Tensor:
+        """The all-gatherable int64 identity summary."""
+        return torch.tensor(
+            [
+                int(self.authorized),
+                int(self.reason),
+                int(self.plan_id),
+                int(self.epoch),
+                int(self.span[0]),
+                int(self.span[1]),
+                int(self.layer_end),
+                int(self.auth_fingerprint),
+                int(self.capability),
+            ],
+            dtype=torch.int64,
+        )
+
+
+def _repair_preflight(
+    reason: int,
+    plan_id: int,
+    epoch: int,
+    span: tuple[int, int],
+    layer_end: int,
+    auth_fingerprint: int,
+    capability: int = 0,
+    error_detail: str | None = None,
+) -> _RepairPreflight:
+    """A refused preflight summary (never authorized)."""
+    return _RepairPreflight(
+        authorized=False,
+        reason=reason,
+        plan_id=plan_id,
+        epoch=epoch,
+        span=span,
+        layer_end=layer_end,
+        auth_fingerprint=auth_fingerprint,
+        capability=capability,
+        error_detail=error_detail,
+    )
+
+
+def _preflight_divergence_detail(pf: _RepairPreflight) -> str:
+    """A human-readable record of a refused preflight consensus."""
+    peers = pf.peer_reasons if pf.peer_reasons is not None else [pf.reason]
+    return (
+        "Repair preflight consensus refused ("
+        f"local_reason={pf.reason}, peer_reasons={peers}, "
+        f"plan_id={pf.plan_id}, epoch={pf.epoch}, span={pf.span}, "
+        f"layer_end={pf.layer_end}, capability={pf.capability}) -- the "
+        "repair aborted before any native layer execution"
+    )
+
+
+def _ranks_repair_preflight_agree(pf: _RepairPreflight) -> bool:
+    """The PRE-EXECUTION consensus over the repair operation identity.
+
+    Every rank packs its preflight summary (authorization, refusal
+    reason, plan_id, epoch, span, layer range, authorized-write
+    fingerprint) and all-gathers it BEFORE any rank enters native layer
+    execution. The step is authorized only when every rank's summary is
+    IDENTICAL to the local one and every rank is authorized with reason
+    0. Any divergence -- a rank-local refusal, a stale or foreign work
+    identity, a different authorized geometry -- aborts on EVERY rank
+    before the first layer call, so no rank can be left blocked inside
+    a native TP collective a peer never enters.
+
+    Single-rank semantics reduce to the local summary being authorized,
+    uniform with the multi-rank predicate.
+    """
+    ws = _tp_world_size()
+    if ws <= 1:
+        return pf.authorized and pf.reason == _REPAIR_PF_OK
+    summary = pf.summary()
+    device_type = current_platform.device_type
+    if device_type:
+        summary = summary.to(device_type)
+    world = [torch.empty_like(summary) for _ in range(ws)]
+    torch.distributed.all_gather(world, summary)
+    reasons = [int(t[1].item()) for t in world]
+    pf.peer_reasons = reasons
+    for remote in world:
+        if not torch.equal(remote, summary):
+            return False
+    return all(r == _REPAIR_PF_OK for r in reasons)
+
+
+def _repair_capability(model: Any) -> int:
+    """The cheap per-step model-capability code for the preflight.
+
+    0 (OK) when the model exposes the replay seam the executor drives
+    (a non-empty layer stack and `embed_input_ids`); the nonzero codes
+    mirror the init-time canary's structural refusals. The full
+    replay-faithfulness probe (`verify_replay_compatibility`) stays at
+    init: a canary failure there aborts the engine on every rank, so
+    mid-flight capability DIVERGENCE through the canary is unreachable
+    by construction -- this structural check is what the per-step
+    preflight can afford, and a divergent code still aborts the step
+    on every rank through the consensus below.
+    """
+    inner = getattr(model, "model", None)
+    layers = getattr(inner, "layers", None)
+    if not layers:
+        return 1
+    if getattr(inner, "embed_input_ids", None) is None:
+        return 2
+    return 0
+
+
+def _execute_preflight(
+    model: Any,
+    scheduler_output: "SchedulerOutput",
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    req_id: str,
+    work: RepairWork,
+    lo: int,
+    hi: int,
+    work_row: int,
+) -> _RepairPreflight:
+    """The rank-local pre-execution checks, WITHOUT side effects.
+
+    Completes every check that decides whether this rank may enter
+    native layer execution -- the zero-width window, the ordered
+    positions and input-shape checks, the layer-stack bound, the
+    attention metadata access, the cache-geometry derivation, and the
+    FULL pre-write ownership fence (the same ordered slot and
+    authorization battery the executor's commit check reports) -- and
+    returns the summary for the pre-execution consensus. Any failure is
+    CONTAINED here as a refused summary (never an exception), so every
+    rank reaches the consensus collective on every path. This function
+    must not write anything (no re-zero, no embed): an aborted
+    preflight leaves the caches exactly as they were.
+    """
+    plan_id = work.plan_id
+    epoch = work.epoch
+    span = work.repair_span
+    layer_end = work.layer_end
+    span_start, span_end = span
+    auth_blocks = tuple(work.expected_write_block_ids)
+    auth_fingerprint = _auth_fingerprint(auth_blocks)
+    capability = _repair_capability(model)
+
+    try:
+        assert hi > lo, (
+            f"hole repair: zero-width repair window for {req_id} "
+            f"(num_scheduled_tokens="
+            f"{scheduler_output.num_scheduled_tokens.get(req_id, 0)})"
+        )
+        expected_positions = torch.arange(
+            span_start, span_end, dtype=positions.dtype, device=positions.device
+        )
+        # ORDER matters, not just the endpoints: a metadata bug that
+        # permutes the span's rows inside the authorized block would
+        # write each token's KV into a neighboring row while the
+        # boundary pair still matches.
+        assert torch.equal(positions[lo:hi], expected_positions), (
+            f"hole repair: the work's physical positions do not match "
+            f"the repair span [{span_start}, {span_end}) of {req_id} "
+            "in order"
+        )
+        assert input_ids.shape[0] >= hi, (
+            f"hole repair: input_ids carries {input_ids.shape[0]} rows, "
+            f"fewer than the work's window [{lo}, {hi})"
+        )
+
+        layers = model.model.layers
+        assert work.layer_end <= len(layers), (
+            f"hole repair: layer_end {work.layer_end} exceeds the stack "
+            f"({len(layers)} layers)"
+        )
+
+        attn_metadata = get_forward_context().attn_metadata
+        assert isinstance(attn_metadata, dict) and attn_metadata
+        meta = next(iter(attn_metadata.values()))
+        block_size = _repair_block_size(layers[0])
+
+        # Per-layer metadata identity: every replayed layer resolves its
+        # OWN metadata from the forward context (attn_metadata[layer_name]),
+        # and the KV write path resolves its own per-layer slot mapping
+        # (slot_mapping[layer_name]). A repair step is single-KV-group by
+        # the scheduler's init guard, so every layer of a group shares ONE
+        # metadata object by construction (build_attn_metadata assigns the
+        # same builder product to every layer_name of the group) -- but the
+        # fence must not TRUST that: a backend (or a corrupted context)
+        # serving one replayed layer a DIFFERENT metadata object than the
+        # one the fence validated would write that layer through an
+        # unfenced geometry. Every replayed layer's metadata object must be
+        # the same object the fence validated, and every replayed layer's
+        # name must be present (a missing name would raise inside the
+        # layer's lookup, mid-execution).
+        # Per-layer metadata identity: every replayed layer resolves its
+        # OWN metadata from the forward context (attn_metadata[layer_name]),
+        # and the KV write path resolves its own per-layer slot mapping
+        # (slot_mapping[layer_name]). A repair step is single-KV-group by
+        # the scheduler's init guard, so every layer of a group shares ONE
+        # metadata object by construction (build_attn_metadata assigns the
+        # same builder product to every layer_name of the group) -- but the
+        # fence must not TRUST that: a backend (or a corrupted context)
+        # serving one replayed layer a DIFFERENT metadata object than the
+        # one the fence validated would write that layer through an
+        # unfenced geometry. Every replayed layer's metadata object must be
+        # the same object the fence validated, and every replayed layer's
+        # name must be present (a missing name would raise inside the
+        # layer's lookup, mid-execution).
+        slot_mappings = get_forward_context().slot_mapping
+        layer_slot_mappings = (
+            slot_mappings if isinstance(slot_mappings, dict) and slot_mappings else None
+        )
+        for layer in layers[: work.layer_end]:
+            attn = getattr(layer, "self_attn", None)
+            layer_name = getattr(getattr(attn, "attn", None), "layer_name", None)
+            if layer_name is None:
+                # Fallback: a layer that does not expose the attention
+                # wrapper's layer_name seam cannot be identity-checked
+                # per layer; the fenced first-layer metadata remains the
+                # write fence (the single-group construction invariant
+                # makes every group layer share it).
+                break
+            assert layer_name in attn_metadata, (
+                "hole repair: replayed layer "
+                f"{layer_name} has no attention metadata entry "
+                "(the replay would raise inside its metadata lookup)"
+            )
+            assert attn_metadata[layer_name] is meta, (
+                "hole repair: replayed layer "
+                f"{layer_name} resolves a DIFFERENT attention metadata "
+                "object than the fenced one (per-layer metadata "
+                "divergence); the repair write set cannot be fenced"
+            )
+            if layer_slot_mappings is not None:
+                assert layer_slot_mappings.get(layer_name) is not None, (
+                    "hole repair: replayed layer "
+                    f"{layer_name} has no slot_mapping entry (its KV "
+                    "cache update would be silently skipped)"
+                )
+
+        # Per-layer cache-layout agreement: the fence derives the block
+        # size from layer 0 and validates every slot against it, but each
+        # layer writes through its OWN cache view. A layer whose cache
+        # geometry implies a different block size (an unexpected attention
+        # layout: the single-group scheduler guard makes this unreachable
+        # in production, the fence must not trust it) would interpret the
+        # SAME slot numbers with a different block/offset split and write
+        # outside the authorized rows.
+        for layer in layers[: work.layer_end]:
+            layer_bs = _repair_block_size(layer)
+            assert layer_bs == block_size, (
+                "hole repair: a replayed layer derives block size "
+                f"{layer_bs}, but the fence validated the span with block "
+                f"size {block_size} (per-layer cache layout divergence); "
+                "the repair write set cannot be fenced"
+            )
+
+        slots_host = _tolist_timed(
+            meta.slot_mapping[lo:hi], "pre_write.slot_mapping.tolist"
+        )
+        block_table_host = _tolist_timed(
+            _repair_block_table_row(meta, work_row),
+            "pre_write.block_tables.tolist",
+        )
+        auth_present = bool(auth_blocks)
+        first_blk = span_start // block_size
+        span_blocks = -(-span_end // block_size) - first_blk
+        auth_len_ok = len(auth_blocks) == span_blocks
+        auth_distinct_ok = len(set(auth_blocks)) == len(auth_blocks)
+        expected_slots: list[int] = []
+        if auth_present and auth_len_ok:
+            for tok in range(span_start, span_end):
+                block_id = auth_blocks[(tok // block_size) - first_blk]
+                expected_slots.append(block_id * block_size + tok % block_size)
+        auth_slots_ok = (
+            auth_present
+            and auth_len_ok
+            and auth_distinct_ok
+            and slots_host == expected_slots
+        )
+        table_span = block_table_host[
+            span_start // block_size : -(-span_end // block_size)
+        ]
+        auth_table_ok = auth_present and list(table_span) == list(auth_blocks)
+        ownership = _slots_owned_by_request_list(
+            slots_host, block_table_host, block_size
+        )
+        coverage = _slots_cover_span_list(
+            slots_host, block_table_host, span_start, span_end, block_size
+        )
+        pre_write_ok = (
+            ownership and coverage and auth_present and auth_slots_ok and auth_table_ok
+        )
+        pf = _RepairPreflight(
+            authorized=pre_write_ok and capability == 0,
+            reason=_REPAIR_PF_OK if pre_write_ok else _REPAIR_PF_FENCE,
+            plan_id=plan_id,
+            epoch=epoch,
+            span=span,
+            layer_end=layer_end,
+            auth_fingerprint=auth_fingerprint,
+            capability=capability,
+            pre_write_ownership=ownership,
+            pre_write_coverage=coverage,
+            auth_present=auth_present,
+            auth_slots_ok=auth_slots_ok,
+            auth_table_ok=auth_table_ok,
+            auth_distinct_ok=auth_distinct_ok,
+            pre_write_ok=pre_write_ok,
+        )
+        if capability != 0:
+            pf.reason = _REPAIR_PF_CAPABILITY
+            pf.authorized = False
+        if not pre_write_ok:
+            logger.error(
+                "Repair preflight fence refused plan_id=%d span=[%d,%d) "
+                "ownership=%s coverage=%s auth_present=%s auth_slots=%s "
+                "auth_table=%s auth_distinct=%s",
+                plan_id,
+                span_start,
+                span_end,
+                ownership,
+                coverage,
+                auth_present,
+                auth_slots_ok,
+                auth_table_ok,
+                auth_distinct_ok,
+            )
+        return pf
+    except Exception as exc:
+        error_detail = _format_repair_exception(exc)
+        logger.exception(
+            "Repair preflight failed plan_id=%d span=%s -> local refusal",
+            plan_id,
+            span,
+        )
+        text = error_detail
+        if "block_tables" in text or "block_table" in text:
+            reason = _REPAIR_PF_METADATA
+        else:
+            reason = _REPAIR_PF_GEOMETRY
+        return _repair_preflight(
+            reason,
+            plan_id,
+            epoch,
+            span,
+            layer_end,
+            auth_fingerprint,
+            capability=capability,
+            error_detail=error_detail,
+        )
+
+
 def execute_repair_only(
     model: Any,
     scheduler_output: "SchedulerOutput",
@@ -187,12 +618,12 @@ def execute_repair_only(
         # Repair steps are exclusive: no ordinary request rides the batch.
         # The works and the scheduling counts are broadcast data (identical
         # on every rank); only batch_req_ids is worker-local. A step-level
-        # violation on ONE rank converges to failed verdicts on every rank,
-        # but NOT promptly: the failing rank skips ahead to its verdict
-        # collective while peers already inside a layer collective block
-        # there until the backend timeout (the process-group timeout, the
-        # NCCL watchdog, or the executor RPC bound), and only then do the
-        # failed verdicts and their collectives proceed.
+        # violation fails identically on every rank for the broadcast
+        # conditions; a worker-local batch violation fails on one rank,
+        # whose STEP_INVALID preflight summary below diverges the
+        # pre-execution consensus on every rank BEFORE any native layer
+        # collective is entered -- no rank is stranded inside a layer's
+        # MLP/o-proj all-reduce waiting for a peer that skipped it.
         assert len(works) == 1, (
             "hole repair: a v1 repair-only step carries exactly one work "
             "(the scheduler admits one repair per step); per-work "
@@ -218,6 +649,25 @@ def execute_repair_only(
             "for every work",
             len(works),
         )
+        # The step-shape failure rides the SAME pre-execution consensus
+        # the per-work path uses, so a rank failing only the worker-local
+        # batch assert still pairs its collective sequence with the
+        # peers' per-work preflight (a single-work step issues exactly
+        # one preflight collective on every path).
+        first = next(iter(works.values()), None)
+        pf = _repair_preflight(
+            _REPAIR_PF_STEP_INVALID,
+            plan_id=first.plan_id if first is not None else -1,
+            epoch=first.epoch if first is not None else -1,
+            span=first.repair_span if first is not None else (-1, -1),
+            layer_end=first.layer_end if first is not None else -1,
+            auth_fingerprint=_AUTH_FINGERPRINT_REFUSED,
+            error_detail=step_error,
+        )
+        try:
+            _ranks_repair_preflight_agree(pf)
+        except Exception:
+            logger.exception("Repair preflight consensus failed (step shape) -> abort")
         step_results: list[RepairResultReport] = []
         for step_work in works.values():
             try:
@@ -271,17 +721,21 @@ def execute_repair_only(
 
     results: list[RepairResultReport] = []
     for work_row, req_id in enumerate(batch_req_ids):
-        # Failure envelope: a rank-local recoverable exception anywhere
-        # between the work lookup and the verdict construction (positions
-        # fetch, metadata access, the host-side fence, embedding, the layer
-        # stream, the re-zero, or the verdict collective itself) must not
-        # ESCAPE this function: it is captured here, preserved as
-        # error_detail, and converged into a consistent failed verdict that
-        # still participates in consensus. The VERDICT collective is
-        # never skipped; peers already blocked inside an inner LAYER
-        # collective at the moment of the exception still wait for that
-        # collective's backend timeout -- containment is fail-closed, not
-        # latency-free.
+        # PRE-EXECUTION PREFLIGHT CONSENSUS: the work lookup and every
+        # pre-layer check (positions and input shapes, layer bound,
+        # attention metadata, cache geometry, the full ownership fence,
+        # and the model capability) run inside _execute_preflight with
+        # their exceptions CONTAINED, and the all-gathered operation
+        # identity decides -- BEFORE the embedding or any layer call --
+        # whether this rank enters native execution. Either every TP
+        # rank is authorized to enter native repair execution for the
+        # same work, or every rank aborts before entering it: a
+        # rank-local refusal can never strand a peer inside a layer's
+        # native TP collectives (the pre-fix behavior: the fence was
+        # rank-local and the consensus post-execution, so a refusing
+        # rank skipped the layer collectives its passing peer entered,
+        # and the passing peer blocked inside the MLP/o-proj all-reduce
+        # until the process-group timeout).
         work: RepairWork | None = None
         span_start, span_end = -1, -1
         lo = row_starts.get(req_id, 0)
@@ -302,151 +756,119 @@ def execute_repair_only(
         try:
             work = works[req_id]
             span_start, span_end = work.repair_span
-            # A zero-width window is malformed (and positions[hi - 1]
-            # with hi == 0 would read the whole batch's LAST row via
-            # negative indexing).
-            assert hi > lo, (
-                f"hole repair: zero-width repair window for {req_id} "
-                f"(num_scheduled_tokens="
-                f"{scheduler_output.num_scheduled_tokens.get(req_id, 0)})"
-            )
-            expected_positions = torch.arange(
-                span_start, span_end, dtype=positions.dtype, device=positions.device
-            )
-            # ORDER matters, not just the endpoints: a metadata bug that
-            # permutes the span's rows inside the authorized block would
-            # write each token's KV into a neighboring row while the
-            # boundary pair still matches.
-            assert torch.equal(positions[lo:hi], expected_positions), (
-                f"hole repair: the work's physical positions do not match "
-                f"the repair span [{span_start}, {span_end}) of {req_id} "
-                "in order"
+        except Exception as exc:
+            error_detail = _format_repair_exception(exc)
+            logger.exception(
+                "Repair work lookup failed req=%s -> placeholder preflight",
+                req_id,
             )
 
-            layers = model.model.layers
-            assert work.layer_end <= len(layers), (
-                f"hole repair: layer_end {work.layer_end} exceeds the stack "
-                f"({len(layers)} layers)"
+        if work is None:
+            # No geometry, no identity: a placeholder-identity preflight
+            # still enters the collective -- the peers carry the real
+            # identity, the summaries diverge, and the step aborts on
+            # every rank BEFORE any native execution (the pre-fix code
+            # kept the peers inside their layer collectives here).
+            pf = _repair_preflight(
+                _REPAIR_PF_WORK_LOOKUP,
+                -1,
+                -1,
+                (-1, -1),
+                0,
+                _AUTH_FINGERPRINT_REFUSED,
+                error_detail=error_detail,
+            )
+        else:
+            pf = _execute_preflight(
+                model,
+                scheduler_output,
+                input_ids,
+                positions,
+                req_id,
+                work,
+                lo,
+                hi,
+                work_row,
+            )
+        # The fence flags the commit check reports come from the
+        # preflight verbatim: the same ordered battery the loop used to
+        # derive inline (identical strength), now also converged across
+        # ranks before any write can execute.
+        pre_write_ok = pf.pre_write_ok
+        auth_present = pf.auth_present
+        auth_slots_ok = pf.auth_slots_ok
+        auth_table_ok = pf.auth_table_ok
+        auth_distinct_ok = pf.auth_distinct_ok
+        pre_write_ownership = pf.pre_write_ownership
+        pre_write_coverage = pf.pre_write_coverage
+        if error_detail is None:
+            error_detail = pf.error_detail
+
+        try:
+            preflight_agree = _ranks_repair_preflight_agree(pf)
+        except Exception as exc:
+            # The collective itself failed (process-group error or a
+            # backend timeout): authorization is unachievable -- fail
+            # closed, no native execution on this rank.
+            preflight_agree = False
+            if error_detail is None:
+                error_detail = _format_repair_exception(exc)
+            logger.exception(
+                "Repair preflight consensus failed req=%s -> abort", req_id
+            )
+        if not preflight_agree:
+            if error_detail is None:
+                error_detail = _preflight_divergence_detail(pf)
+            logger.error(
+                "Repair preflight refused req=%s plan_id=%d reason=%s "
+                "peer_reasons=%s -- no native layer execution",
+                req_id,
+                pf.plan_id,
+                pf.reason,
+                pf.peer_reasons,
             )
 
-            attn_metadata = get_forward_context().attn_metadata
-            assert isinstance(attn_metadata, dict) and attn_metadata
-            meta = next(iter(attn_metadata.values()))
-            block_size = _repair_block_size(layers[0])
-
-            # Pre-write safety gate: the slot window and the block-table row
-            # are fetched once to the host (two D2H copies per work item --
-            # the same lists feed the post-write attestation) and the geometry is
-            # validated BEFORE the first cache-writing kernel, so a malformed
-            # slot mapping can never write into another request's KV.
-            slots_host = _tolist_timed(
-                meta.slot_mapping[lo:hi], "pre_write.slot_mapping.tolist"
-            )
-            block_table_host = _tolist_timed(
-                _repair_block_table_row(meta, work_row),
-                "pre_write.block_tables.tolist",
-            )
-            # Ownership fence: the expected physical blocks come from the WORK
-            # (the scheduler snapshotted them from KVCacheManager at the
-            # admission), NOT from this worker's metadata. The expected
-            # physical slots are reconstructed from the authorization and
-            # compared against the ACTUAL slot mapping: two
-            # consistently-corrupted worker structures (the block table and
-            # the slot mapping both pointing at a foreign request's blocks)
-            # cannot reproduce the authorized slot multiset, so the foreign
-            # write is refused.
-            auth_blocks = tuple(work.expected_write_block_ids)
-            auth_present = bool(auth_blocks)
-            # Grid range, matching the scheduler's
-            # _repair_write_set_block_ids slice
-            # (req_block_ids[rollback // bs : ceil(corrupt_end / bs)]): a
-            # span starting mid-block covers one block more than its
-            # rounded-up length.
-            first_blk = span_start // block_size
-            span_blocks = -(-span_end // block_size) - first_blk
-            # The authorization must cover exactly the span's blocks: a
-            # partial or over-long snapshot is malformed -- refused, never a
-            # crash.
-            auth_len_ok = len(auth_blocks) == span_blocks
-            # An aliased authorization (one block named twice) would alias
-            # two span tokens onto one cache row while every multiset
-            # derived from it carries the same alias: the blocks must be
-            # distinct.
-            auth_distinct_ok = len(set(auth_blocks)) == len(auth_blocks)
-            expected_slots: list[int] = []
-            if auth_present and auth_len_ok:
-                for tok in range(span_start, span_end):
-                    block_id = auth_blocks[(tok // block_size) - first_blk]
-                    expected_slots.append(block_id * block_size + tok % block_size)
-            # ORDER matters here too: the slot rows must match the span's
-            # token order exactly, so a permuted mapping (each token
-            # writing a neighbor's row) cannot reproduce the window.
-            auth_slots_ok = (
-                auth_present
-                and auth_len_ok
-                and auth_distinct_ok
-                and slots_host == expected_slots
-            )
-            # The worker block table's span slice must AGREE with the
-            # authorization (an independent check of the row itself).
-            table_span = block_table_host[
-                span_start // block_size : -(-span_end // block_size)
-            ]
-            auth_table_ok = auth_present and list(table_span) == list(auth_blocks)
-            pre_write_ownership = _slots_owned_by_request_list(
-                slots_host, block_table_host, block_size
-            )
-            pre_write_coverage = _slots_cover_span_list(
-                slots_host, block_table_host, span_start, span_end, block_size
-            )
-            pre_write_ok = (
-                pre_write_ownership
-                and pre_write_coverage
-                and auth_present
-                and auth_slots_ok
-                and auth_table_ok
-            )
-            if not pre_write_ok:
-                logger.error(
-                    "Repair pre-write fence refused req=%s plan_id=%d "
-                    "span=[%d,%d) ownership=%s coverage=%s auth_present=%s "
-                    "auth_slots=%s auth_table=%s auth_distinct=%s -- no "
-                    "cache write executed",
-                    work.request_id,
-                    work.plan_id,
-                    span_start,
-                    span_end,
-                    pre_write_ownership,
-                    pre_write_coverage,
-                    auth_present,
-                    auth_slots_ok,
-                    auth_table_ok,
-                    auth_distinct_ok,
-                )
-
-            hidden_states = model.model.embed_input_ids(input_ids[lo:hi])
-            residual = None
-            if pre_write_ok:
+        if work is not None and pf.authorized and preflight_agree:
+            # Execution envelope: native replay over the authorized work.
+            # A rank-local recoverable failure anywhere between the
+            # metadata access and the verdict construction (metadata
+            # access, embedding, the layer stream, the re-zero, or the
+            # verdict collective itself) must not ESCAPE this function:
+            # it is captured here, preserved as error_detail, and
+            # converged into a consistent failed verdict that still
+            # participates in consensus. The VERDICT collective is never
+            # skipped; peers already blocked inside an inner LAYER
+            # collective at the moment of the exception still wait for
+            # that collective's backend timeout -- containment is
+            # fail-closed, not latency-free.
+            try:
+                layers = model.model.layers
+                attn_metadata = get_forward_context().attn_metadata
+                assert isinstance(attn_metadata, dict) and attn_metadata
+                meta = next(iter(attn_metadata.values()))
+                hidden_states = model.model.embed_input_ids(input_ids[lo:hi])
+                residual = None
                 for idx, layer in enumerate(layers[: work.layer_end]):
                     try:
                         hidden_states, residual = layer(
                             positions[lo:hi], hidden_states, residual
                         )
                     except Exception as exc:
-                        # Exception containment: a failure inside the repair
-                        # stream is request-local. Stop the stream here,
-                        # re-zero the partial writes INCLUDING this raising
-                        # layer's rows (it may have written some KV rows
-                        # before raising), report the failure, and let the
-                        # scheduler's recompute fallback own the request. A
-                        # poisoned device context fails loudly at the next
-                        # step; a successful transaction is never fabricated.
+                        # Exception containment: a failure inside the
+                        # repair stream is request-local. Stop the stream
+                        # here, re-zero the partial writes INCLUDING this
+                        # raising layer's rows (it may have written some
+                        # KV rows before raising), report the failure,
+                        # and let the scheduler's recompute fallback own
+                        # the request. A poisoned device context fails
+                        # loudly at the next step; a successful
+                        # transaction is never fabricated.
                         layer_failed_at = idx
                         backend_ok = False
                         error_detail = _format_repair_exception(exc)
                         logger.exception(
-                            "Repair layer exception req=%s idx=%d span=[%d,%d) "
-                            "-> contained as abort",
+                            "Repair layer exception req=%s idx=%d "
+                            "span=[%d,%d) -> contained as abort",
                             work.request_id,
                             idx,
                             span_start,
@@ -454,24 +876,24 @@ def execute_repair_only(
                         )
                         break
                     executed_layers += 1
-            del hidden_states, residual
-        except Exception as exc:
-            # The envelope: any rank-local recoverable failure OUTSIDE the
-            # per-layer containment (the work lookup itself, position
-            # fetch, metadata access, host fence, embedding, re-zero)
-            # converges to the failed verdict below instead of escaping and
-            # stranding the TP ranks in consensus.
-            backend_ok = False
-            if error_detail is None:
-                error_detail = _format_repair_exception(exc)
-            logger.exception(
-                "Repair pre-verdict exception req=%s plan_id=%s span=[%d,%d) "
-                "-> contained as abort",
-                req_id,
-                work.plan_id if work is not None else "unknown",
-                span_start,
-                span_end,
-            )
+                del hidden_states, residual
+            except Exception as exc:
+                # The envelope: any rank-local recoverable failure
+                # OUTSIDE the per-layer containment (metadata access,
+                # embedding) converges to the failed verdict below
+                # instead of escaping and stranding the TP ranks in
+                # consensus.
+                backend_ok = False
+                if error_detail is None:
+                    error_detail = _format_repair_exception(exc)
+                logger.exception(
+                    "Repair pre-verdict exception req=%s plan_id=%s "
+                    "span=[%d,%d) -> contained as abort",
+                    req_id,
+                    work.plan_id,
+                    span_start,
+                    span_end,
+                )
 
         if work is None:
             # The work lookup itself failed on this rank: no geometry, no
@@ -612,6 +1034,12 @@ def execute_repair_only(
             "backend_ok": backend_ok,
             "ranks_agree": ranks_agree,
             "identity_ok": work.plan_id >= 0 and work.epoch >= 0,
+            # The pre-execution consensus: every TP rank all-gathered the
+            # same authorized operation identity (capability, plan_id,
+            # epoch, span, layer range, write-geometry fingerprint)
+            # BEFORE any native layer execution.
+            "preflight_agree": preflight_agree,
+            "capability_ok": pf.capability == 0,
         }
         structural_check = all(commit_check.values())
         result = RepairResultReport(
