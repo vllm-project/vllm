@@ -211,6 +211,10 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
         for name, p in model.named_parameters(remove_duplicate=False)
         if hasattr(p, "_ckpt")
     )
+    # the modules post-load processing runs over; a rerun leaves out modules
+    # added after cold start (LoRA wrappers forward their base layer's
+    # `quant_method`, which would process it twice)
+    model._ckpt_modules = list(model.named_modules())
 
 
 def _check_params_kept(model: torch.nn.Module) -> None:
