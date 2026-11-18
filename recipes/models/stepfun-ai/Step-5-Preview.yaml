@@ -21,7 +21,7 @@ model:
   model_id: "stepfun-ai/Step-5-Preview"
   docker_image:
     nvidia: "vllm/vllm-openai:step-5-preview"
-    amd: "vllm/vllm-openai-rocm:nightly-rocm100-a2bcb5657a881a002e79d0adab3c6b5e39436121"
+    amd: "vllm/vllm-openai-rocm:nightly"
   install:
     docker:
       note: "Use the dedicated Step-5 image for these launch commands."
