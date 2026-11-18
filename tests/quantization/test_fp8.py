@@ -149,9 +149,11 @@ def test_humming_fp8_matches_checkpoint_forward(
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 def test_deepseek_v41_mxfp8_scale_loading(
-    dist_init, default_vllm_config, monkeypatch, tp_rank, scale_dtype
+    dist_init, default_vllm_config, monkeypatch, tmp_path, tp_rank, scale_dtype
 ):
     """Expand linear scales before TP slicing, including padded shared experts."""
+    from transformers import LlamaConfig
+
     from vllm.model_executor.layers import linear as linear_module
     from vllm.model_executor.layers.linear import (
         ColumnParallelLinear,
@@ -161,7 +163,10 @@ def test_deepseek_v41_mxfp8_scale_loading(
     from vllm.models.deepseek_v41 import quant_config as quant_module
     from vllm.models.deepseek_v41.nvidia import model as model_module
 
-    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    default_vllm_config.model_config = ModelConfig(
+        model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+    )
     quant_config = quant_module.DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True, weight_block_size=[32, 32]
     )
@@ -475,9 +480,9 @@ def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
         "get_current_vllm_config",
         lambda: SimpleNamespace(model_config=model_config),
     )
-    monkeypatch.setattr(
-        dsv41_qc, "Mxfp4MoEMethod", lambda moe_config, **kwargs: "mxfp4"
-    )
+    # The MXFP4 experts' method is built by `_mxfp4_moe_method`, which picks
+    # the platform's class; stub the builder rather than one class.
+    monkeypatch.setattr(dsv41_qc, "_mxfp4_moe_method", lambda moe_config: "mxfp4")
     monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
 
     config = dsv41_qc.DeepseekV4FP8Config.from_config(
