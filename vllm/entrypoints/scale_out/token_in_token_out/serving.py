@@ -434,13 +434,13 @@ class ServingTokens(GenerateBaseServing):
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
-        if sampling_params.min_tokens > sampling_params.max_tokens:
-            return self.create_error_response(
-                f"min_tokens must be less than or equal to "
-                f"max_tokens={sampling_params.max_tokens}, got "
-                f"{sampling_params.min_tokens}.",
-                param="min_tokens",
-            )
+            if sampling_params.min_tokens > sampling_params.max_tokens:
+                return self.create_error_response(
+                    f"min_tokens must be less than or equal to "
+                    f"max_tokens={sampling_params.max_tokens}, got "
+                    f"{sampling_params.min_tokens}.",
+                    param="min_tokens",
+                )
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
