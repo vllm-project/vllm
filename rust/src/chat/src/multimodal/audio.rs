@@ -5,11 +5,12 @@
 
 use std::sync::Arc;
 
-use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
+use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptReplacement};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
+use super::cache::OptionalMmProcessorCache;
 use super::timing::MM_STAGE_TARGET;
-use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
+use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
@@ -17,6 +18,9 @@ pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
 
 impl MultimodalModelInfo {
     /// Preprocess fetched audio clips as one batch and build per-item features.
+    ///
+    /// Cache hits after fetch/decode skip preprocessing; misses are
+    /// preprocessed here as one batch.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -25,12 +29,35 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_audios(
         &self,
-        clips: Vec<Arc<AudioClip>>,
-        uuids: Vec<Option<String>>,
+        sources: Vec<(Arc<AudioClip>, Option<String>)>,
     ) -> Result<PreparedMedia> {
         let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Audio.to_string(),
         })?;
+
+        let (replacements, items) = self
+            .mm_cache_for(Modality::Audio)
+            .prepare_cached(sources, async |misses| {
+                self.preprocess_audio_batch(support, misses).await
+            })
+            .await?;
+
+        Ok(PreparedMedia {
+            modality: Modality::Audio,
+            placeholder: support.placeholder.clone(),
+            replacements,
+            items,
+        })
+    }
+
+    /// Preprocess fetched audio clips as one batch and build per-item
+    /// replacements and engine kwargs.
+    async fn preprocess_audio_batch(
+        &self,
+        support: &AudioModalitySupport,
+        misses: Vec<(Arc<AudioClip>, Option<String>)>,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+        let (clips, uuids): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
         let preprocessed = self.preprocess_audios(support, &clips).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
@@ -49,13 +76,7 @@ impl MultimodalModelInfo {
             uuids,
             ModelDtype::Float32,
         )?;
-
-        Ok(PreparedMedia {
-            modality: Modality::Audio,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+        Ok((replacements, items))
     }
 
     /// Run CPU-heavy audio preprocessing in a blocking task.
@@ -326,7 +347,8 @@ mod tests {
             .await
             .unwrap();
 
-        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+        let sources = fetched.audios.into_iter().zip(fetched.audio_uuids).collect();
+        let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert!(
@@ -369,7 +391,8 @@ mod tests {
             .await
             .unwrap();
 
-        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+        let sources = fetched.audios.into_iter().zip(fetched.audio_uuids).collect();
+        let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         // Every replacement token is the soft placeholder; the typed

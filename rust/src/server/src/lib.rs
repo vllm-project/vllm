@@ -143,6 +143,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
                 .clone()
                 .unwrap_or_default(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_cache: config.mm_processor_cache.clone(),
         },
     )
     .await
@@ -171,6 +172,15 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let system_fingerprint = config
         .fingerprint_mode
         .fingerprint(&client.ready_responses(), client.data_parallel_size());
+
+    // The handshake is complete, so the engine world size (TP * PP) is known:
+    // teach the shm cache its reader count before serving traffic. Until this
+    // runs, all cache operations safely fall back to sending items inline.
+    if let Some(cache) = &config.mm_processor_cache {
+        let n_readers = client.world_size() as u32;
+        info!(shm_name = %cache.shm_name(), n_readers, "shm mm processor cache reader count set");
+        cache.set_n_readers(n_readers);
+    }
 
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
@@ -204,7 +214,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
             .with_profiler(config.profiler.clone())
-            .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
+            .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect())
+            .with_mm_processor_cache(config.mm_processor_cache.clone()),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing

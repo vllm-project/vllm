@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use itertools::izip;
 use llm_multimodal::{
-    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, VideoClip, VideoClipOptions,
+    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, PromptReplacement, VideoClip,
+    VideoClipOptions,
 };
 use thiserror_ext::AsReport as _;
 use tracing::warn;
@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
+use super::cache::OptionalMmProcessorCache;
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -35,6 +36,9 @@ impl MultimodalModelInfo {
     /// Unlike images, each clip runs through the preprocessor independently
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
+    ///
+    /// Cache hits after fetch/decode skip preprocessing; misses are
+    /// preprocessed here per clip.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -43,47 +47,24 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_videos(
         &self,
-        clips: Vec<Arc<VideoClip>>,
-        uuids: Vec<Option<String>>,
+        sources: Vec<(Arc<VideoClip>, Option<String>)>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Video.to_string(),
         })?;
-        let mut replacements = Vec::with_capacity(clips.len());
-        let mut items = Vec::with_capacity(clips.len());
 
-        for (clip, uuid) in izip!(&clips, uuids) {
-            let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
-            // Hand the replacement hook the clip's decoder-side sampling so
-            // temporal groups are stamped with the actually-sampled frames'
-            // times. A clip whose decoder reported no sampling (`None`)
-            // keeps the spec's per-grid synthetic stamps, and a spec without
-            // a media-aware hook ignores this entirely.
-            let media = [MediaItemInfo {
-                video_sampling: clip.sampling.clone(),
-            }];
-            let mut clip_replacements = support.spec.prompt_replacements_with_media(
-                &self.context,
-                &preprocessed,
-                &media,
-                &support.config,
-            )?;
-            if clip_replacements.len() != 1 {
-                bail_multimodal!(
-                    "expected exactly one prompt replacement per video clip, got {}",
-                    clip_replacements.len()
-                );
-            }
-            replacements.push(clip_replacements.pop().unwrap());
-            items.push(build_video_item(
-                support,
-                preprocessed,
-                clip.hash.clone(),
-                uuid,
-                model_dtype,
-            )?);
-        }
+        let (replacements, items) = self
+            .mm_cache_for(Modality::Video)
+            .prepare_cached(sources, async |misses| {
+                let mut computed = Vec::with_capacity(misses.len());
+                for (clip, uuid) in misses {
+                    computed
+                        .push(self.preprocess_video_item(support, clip, uuid, model_dtype).await?);
+                }
+                Ok(computed.into_iter().unzip())
+            })
+            .await?;
 
         Ok(PreparedMedia {
             modality: Modality::Video,
@@ -91,6 +72,39 @@ impl MultimodalModelInfo {
             replacements,
             items,
         })
+    }
+
+    /// Preprocess one video clip and build its replacement and engine kwargs.
+    async fn preprocess_video_item(
+        &self,
+        support: &VisionModalitySupport,
+        clip: Arc<VideoClip>,
+        uuid: Option<String>,
+        model_dtype: ModelDtype,
+    ) -> Result<(PromptReplacement, PreparedItem)> {
+        let preprocessed = self.preprocess_video_clip(support, Arc::clone(&clip)).await?;
+        // Hand the replacement hook the clip's decoder-side sampling so
+        // temporal groups are stamped with the actually-sampled frames'
+        // times. A clip whose decoder reported no sampling (`None`)
+        // keeps the spec's per-grid synthetic stamps, and a spec without
+        // a media-aware hook ignores this entirely.
+        let media = [MediaItemInfo {
+            video_sampling: clip.sampling.clone(),
+        }];
+        let mut clip_replacements = support.spec.prompt_replacements_with_media(
+            &self.context,
+            &preprocessed,
+            &media,
+            &support.config,
+        )?;
+        if clip_replacements.len() != 1 {
+            bail_multimodal!(
+                "expected exactly one prompt replacement per video clip, got {}",
+                clip_replacements.len()
+            );
+        }
+        let item = build_video_item(support, preprocessed, clip.hash.clone(), uuid, model_dtype)?;
+        Ok((clip_replacements.pop().unwrap(), item))
     }
 
     /// Preprocess one decoded video clip with the model's resolved vision
@@ -376,17 +390,19 @@ mod tests {
         // groups of two start at frames 0, 17, 35, 53.
         let sampled = info
             .prepare_videos(
-                vec![clip(Some(VideoSamplingInfo {
-                    source_fps: 30.0,
-                    frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
-                }))],
-                vec![None],
+                vec![(
+                    clip(Some(VideoSamplingInfo {
+                        source_fps: 30.0,
+                        frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
+                    })),
+                    None,
+                )],
                 ModelDtype::Float32,
             )
             .await
             .unwrap();
         let fallback = info
-            .prepare_videos(vec![clip(None)], vec![None], ModelDtype::Float32)
+            .prepare_videos(vec![(clip(None), None)], ModelDtype::Float32)
             .await
             .unwrap();
 

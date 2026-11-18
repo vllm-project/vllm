@@ -73,6 +73,10 @@ impl ManagedEngineConfig {
 
     /// Build the concrete Python command line for the managed headless engine.
     pub fn to_command(&self) -> StdCommand {
+        self.to_command_with_envs(&[])
+    }
+
+    fn to_command_with_envs(&self, envs: &[(String, String)]) -> StdCommand {
         let mut command = StdCommand::new(&self.python);
         command
             .arg("-m")
@@ -91,6 +95,7 @@ impl ManagedEngineConfig {
         }
         command.args(&self.python_args);
         command.envs(Self::rust_frontend_envs());
+        command.envs(envs.iter().map(|(key, value)| (key, value)));
         command
     }
 }
@@ -131,7 +136,15 @@ impl ManagedEngineHandle {
     /// Spawn one managed Python headless engine and return a handle for
     /// monitoring it.
     pub async fn spawn(config: ManagedEngineConfig) -> Result<Self> {
-        let command = config.to_command();
+        Self::spawn_with_envs(config, &[]).await
+    }
+
+    /// Spawn a managed engine with additional environment variables.
+    pub async fn spawn_with_envs(
+        config: ManagedEngineConfig,
+        envs: &[(String, String)],
+    ) -> Result<Self> {
+        let command = config.to_command_with_envs(envs);
         info!(
             handshake_address = %config.handshake_address(),
             command = ?redacted_for_log(&command),
@@ -296,7 +309,10 @@ mod tests {
                 "512".to_string(),
             ],
         };
-        let command = config.to_command();
+        let command = config.to_command_with_envs(&[(
+            "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME".to_string(),
+            "vllm-mm-shm-test".to_string(),
+        )]);
         let args = command.get_args().collect::<Vec<_>>();
 
         expect![[r#"
@@ -327,6 +343,12 @@ mod tests {
         let envs = command.get_envs().collect::<Vec<_>>();
         expect![[r#"
             [
+                (
+                    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+                    Some(
+                        "vllm-mm-shm-test",
+                    ),
+                ),
                 (
                     "VLLM_USE_RUST_FRONTEND",
                     Some(

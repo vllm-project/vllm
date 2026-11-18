@@ -69,6 +69,7 @@ impl HfChatBackend {
                 tokenizer.clone(),
                 options.limit_mm_per_prompt.clone(),
             )?
+            .map(|info| info.with_mm_processor_cache(options.mm_processor_cache.clone()))
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
         let response_template = load_response_template(&files)?;
@@ -329,6 +330,7 @@ mod tests {
                 limit_mm_per_prompt: HashMap::new(),
                 skip_tokenizer_init: false,
                 hf_token: None,
+                mm_processor_cache: None,
             },
             test_tokenizer(),
         )

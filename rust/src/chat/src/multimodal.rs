@@ -30,6 +30,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
@@ -38,6 +39,7 @@ use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
+pub(crate) mod cache;
 mod expand;
 mod image;
 mod input;
@@ -48,6 +50,7 @@ mod tensor;
 mod timing;
 mod video;
 
+use self::cache::MmProcessorCache;
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
 use self::timing::MM_STAGE_TARGET;
@@ -65,6 +68,9 @@ pub struct MultimodalModelInfo {
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
+    /// SHM multimodal processor cache (P0 sender side), enabled by
+    /// `--mm-processor-cache-type shm`.
+    mm_processor_cache: Option<MmProcessorCache>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -371,7 +377,7 @@ struct PreparedMedia {
 }
 
 /// One media item's complete engine kwargs plus identity metadata.
-struct PreparedItem {
+pub(super) struct PreparedItem {
     data: MmKwargsItem,
     hash: String,
     uuid: Option<String>,
@@ -487,6 +493,7 @@ impl MultimodalModelInfo {
             audio,
             media_connector,
             limit_mm_per_prompt,
+            mm_processor_cache: None,
         }))
     }
 
@@ -597,6 +604,34 @@ impl MultimodalModelInfo {
         }))
     }
 
+    /// Attach (or detach) the SHM multimodal processor cache.
+    ///
+    /// With the cache set, repeated media skips preprocessing and ships its
+    /// shm address to the engine instead of the full tensor payload.
+    pub fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorShmCache>>) -> Self {
+        self.mm_processor_cache = cache.map(MmProcessorCache::new);
+        self
+    }
+
+    /// The SHM processor cache for one modality, or `None` when the cache is
+    /// disabled or the modality bypasses it.
+    ///
+    /// Budget-sensitive image processors (see
+    /// [`cache::BUDGET_SENSITIVE_PROCESSORS`]) bypass the cache entirely:
+    /// their output depends on the per-request token budget, so cache hits
+    /// would be rare. Their items are always fetched and preprocessed inline.
+    /// Video and audio preprocessors take no request context and always use
+    /// the cache when enabled.
+    fn mm_cache_for(&self, modality: Modality) -> Option<&MmProcessorCache> {
+        let cache = self.mm_processor_cache.as_ref()?;
+        if modality == Modality::Image
+            && self.image.as_ref().is_some_and(cache::is_budget_sensitive)
+        {
+            return None;
+        }
+        Some(cache)
+    }
+
     /// Return the template-visible placeholder token for one modality, when
     /// this model supports it.
     ///
@@ -631,6 +666,9 @@ impl MultimodalModelInfo {
 /// Text-only requests pass through unchanged as `Prompt::Text`. Multimodal
 /// requests are tokenized in chat, their media placeholders are expanded, and
 /// preprocessed media features are attached for engine-core transport.
+///
+/// `info` selects the multimodal pipeline: the tokenize path passes a
+/// cacheless copy so it never touches the SHM processor cache.
 pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
@@ -830,6 +868,9 @@ impl MultimodalModelInfo {
     /// this model's supported modalities and item-count limits.
     ///
     /// `prompt_len` must include all expanded multimodal placeholders.
+    ///
+    /// TODO: SHM processor-cache support for preprocessed inputs is future
+    /// work; this path always carries inline feature data.
     pub(crate) fn prepare_preprocessed(
         &self,
         mut features: MmFeatures,
@@ -915,6 +956,12 @@ impl MultimodalModelInfo {
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
     ///
+    /// The SHM processor cache engagement is a property of `self`: paths that
+    /// never submit to the engine (`/tokenize`) run on a cacheless copy of
+    /// the model info, because no worker would read the shm chunks and cached
+    /// puts would leak writer references (Python uses a separate
+    /// processor-only cache for tokenize).
+    ///
     /// `max_model_len`, when known, is the token budget image processors may
     /// size the prompt's images by, less its text tokens. The expanded
     /// prompt's length is validated against `max_model_len` downstream, when
@@ -955,22 +1002,16 @@ impl MultimodalModelInfo {
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared.push(
-                self.prepare_images(
-                    fetched.images,
-                    fetched.image_uuids,
-                    model_dtype,
-                    vision_context,
-                )
-                .await?,
-            );
+            let sources = izip!(fetched.images, fetched.image_uuids).collect();
+            prepared.push(self.prepare_images(sources, model_dtype, vision_context).await?);
         }
         if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+            let sources = izip!(fetched.videos, fetched.video_uuids).collect();
+            prepared.push(self.prepare_videos(sources, model_dtype).await?);
         }
         if !fetched.audios.is_empty() {
-            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
+            let sources = izip!(fetched.audios, fetched.audio_uuids).collect();
+            prepared.push(self.prepare_audios(sources).await?);
         }
 
         let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
@@ -1166,7 +1207,7 @@ impl TokenResolver for TokenizerResolver {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use vllm_tokenizer::test_utils::TestTokenizer;
@@ -1180,7 +1221,7 @@ mod tests {
     pub(super) const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
     pub(super) const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
 
-    pub(super) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
+    pub(crate) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
     pub(super) const QWEN3_VIDEO_PAD_ID: u32 = 151656;
 
     pub(super) const STEP3_IM_PATCH_ID: u32 = 151680;
@@ -1272,7 +1313,7 @@ mod tests {
         })
     }
 
-    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
+    pub(crate) fn qwen3_vl_info() -> MultimodalModelInfo {
         test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
     }
 
@@ -1859,7 +1900,7 @@ mod tests {
             AudioSource::InlineBytes,
             "audio".to_owned(),
         ));
-        let prepared = info.prepare_audios(vec![audio], vec![None]).await.unwrap();
+        let prepared = info.prepare_audios(vec![(audio, None)]).await.unwrap();
         assert_eq!(prepared.replacements[0].tokens, [201463, 200038, 201464]);
 
         let frame_len = 3 * 28 * 28;
@@ -1881,8 +1922,7 @@ mod tests {
             "video".to_owned(),
             2.0,
         ));
-        let prepared =
-            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+        let prepared = info.prepare_videos(vec![(clip, None)], ModelDtype::Float32).await.unwrap();
         let token_ids =
             prepared.replacements[0].tokens.iter().map(|&id| id as u32).collect::<Vec<_>>();
         // Two frames uniformly sampled at 2 fps with temporal_patch_size=2

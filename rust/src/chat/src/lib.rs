@@ -77,6 +77,11 @@ use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
     backend: DynChatBackend,
+    /// Multimodal pipeline without the SHM processor cache, used by the
+    /// /tokenize path: tokenization never submits to the engine, so no worker
+    /// would read the shm chunks and cached puts would leak writer references
+    /// (Python uses a separate processor-only cache for tokenize).
+    tokenize_mm_model_info: Option<multimodal::MultimodalModelInfo>,
     /// Effective model dtype that media tensors are encoded in; multimodal
     /// requests are rejected without one.
     model_dtype: Option<ModelDtype>,
@@ -108,8 +113,12 @@ impl ChatRequestProcessor {
         model_dtype: Option<ModelDtype>,
         max_model_len: Option<u32>,
     ) -> Self {
+        let tokenize_mm_model_info = backend
+            .multimodal_model_info()
+            .map(|info| info.clone().with_mm_processor_cache(None));
         Self {
             backend,
+            tokenize_mm_model_info,
             model_dtype,
             max_model_len: max_model_len.map(|len| len as usize),
             tool_call_parser: ParserSelection::Auto,
@@ -167,6 +176,7 @@ impl ChatRequestProcessor {
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
+        mm_info: Option<&multimodal::MultimodalModelInfo>,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
         let media_is_empty = match &rendered.media_order {
             Some(media_order) => media_order.is_empty(),
@@ -177,7 +187,7 @@ impl ChatRequestProcessor {
                 multimodal::finalize_rendered_prompt(
                     request,
                     rendered,
-                    self.backend.multimodal_model_info(),
+                    mm_info,
                     model_dtype,
                     self.max_model_len,
                 )
@@ -223,6 +233,7 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(
         &self,
         mut request: ChatRequest,
+        mm_info: Option<&multimodal::MultimodalModelInfo>,
     ) -> Result<(TextRequest, Option<String>)> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
@@ -243,7 +254,8 @@ impl ChatRequestProcessor {
         // Taken before media placeholders are expanded, like Python.
         let prompt_text =
             request.return_prompt_text.then(|| rendered.prompt.as_text().cloned()).flatten();
-        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
+        let (prompt, mm_features) =
+            self.finalize_rendered_prompt(&request, rendered, mm_info).await?;
         let text_request = TextRequest {
             request_id: request.request_id,
             prompt,
@@ -269,10 +281,14 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
+    ///
+    /// Runs on the cacheless multimodal pipeline
+    /// (`Self::tokenize_mm_model_info`); see its doc comment.
     pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
-        let (text_request, _) = self.prepare_text_request(request).await?;
+        let (text_request, _) =
+            self.prepare_text_request(request, self.tokenize_mm_model_info.as_ref()).await?;
         Ok(text_request)
     }
 
@@ -304,7 +320,8 @@ impl ChatRequestProcessor {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
+        let (mut text_request, prompt_text) =
+            self.prepare_text_request(request, self.backend.multimodal_model_info()).await?;
 
         // Initialize the output processors from the final prompt token IDs and
         // apply the output grammar to the request, if any. The processors of
@@ -544,10 +561,21 @@ impl ChatLlm {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use thiserror_ext::AsReport;
+    use vllm_engine_core_client::protocol::dtype::ModelDtype;
+    use vllm_text::Prompt;
 
     use super::{ParserSelection, validate_parser_overrides};
+    use crate::backend::{ChatBackend, NewChatOutputProcessorOptions};
+    use crate::multimodal::MultimodalModelInfo;
+    use crate::output::DynChatOutputProcessor;
     use crate::parser::reasoning::names;
+    use crate::renderer::{ChatRenderer, DynChatRenderer, RenderedPrompt};
+    use crate::request::{ChatMessage, ChatRequest};
+    use crate::{ChatContentPart, ChatRequestProcessor, Error, Result};
 
     #[test]
     fn validate_parser_overrides_accepts_registered_names() {
@@ -595,5 +623,95 @@ mod tests {
         .unwrap_err();
 
         expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
+    }
+
+    /// Renderer producing one `<|image_pad|>` placeholder for the request's
+    /// single image part.
+    struct PadRenderer;
+
+    impl ChatRenderer for PadRenderer {
+        fn render(&self, _request: &ChatRequest) -> Result<RenderedPrompt> {
+            Ok(RenderedPrompt {
+                prompt: Prompt::Text("a<|image_pad|>b".to_string()),
+                media_order: None,
+                effective_template_kwargs: HashMap::new(),
+            })
+        }
+    }
+
+    struct MmTestBackend {
+        info: MultimodalModelInfo,
+    }
+
+    impl ChatBackend for MmTestBackend {
+        fn chat_renderer(&self) -> DynChatRenderer {
+            Arc::new(PadRenderer)
+        }
+
+        fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+            Some(&self.info)
+        }
+
+        fn new_chat_output_processor(
+            &self,
+            _request: &mut ChatRequest,
+            _options: NewChatOutputProcessorOptions<'_>,
+        ) -> Result<DynChatOutputProcessor> {
+            Err(Error::ChatTemplate(
+                "test backend has no output processor".to_string(),
+            ))
+        }
+    }
+
+    /// `/tokenize` never submits to the engine, so it must bypass the SHM
+    /// processor cache completely: no put (nothing would ever read the shm
+    /// chunks) and inline feature data, while the prompt still expands.
+    #[tokio::test]
+    async fn prepare_for_tokenization_bypasses_mm_processor_cache() {
+        use crate::multimodal::cache::tests::{TEST_PNG_BASE64, is_address_item, test_shm_cache};
+        use crate::multimodal::tests::qwen3_vl_info;
+
+        let cache = test_shm_cache();
+        let info = qwen3_vl_info().with_mm_processor_cache(Some(Arc::clone(&cache)));
+        let processor = ChatRequestProcessor::new(
+            Arc::new(MmTestBackend { info }),
+            Some(ModelDtype::Float32),
+            Some(4096),
+        );
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user(vec![
+                ChatContentPart::text("describe"),
+                ChatContentPart::ImageUrl {
+                    image_url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
+                    detail: None,
+                    uuid: None,
+                },
+            ])],
+            ..ChatRequest::for_test()
+        };
+
+        let text_request = processor
+            .prepare_for_tokenization(request)
+            .await
+            .expect("tokenize preparation should succeed");
+        let Prompt::TokenIds(token_ids) = &text_request.prompt else {
+            panic!("multimodal prompts are tokenized in chat");
+        };
+        assert_eq!(token_ids[0], u32::from(b'a'));
+        assert!(
+            token_ids.len() > 3,
+            "the image placeholder should be expanded"
+        );
+        let features = text_request.mm_features.as_ref().expect("mm features");
+        assert_eq!(features.len(), 1);
+        assert!(
+            !is_address_item(features[0].data.as_ref().expect("feature data")),
+            "tokenize must send inline feature data"
+        );
+        assert_eq!(
+            cache.cached_len(),
+            0,
+            "tokenize must not put into the shm cache"
+        );
     }
 }

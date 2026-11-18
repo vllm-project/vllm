@@ -36,6 +36,7 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
+use vllm_mm_cache::MmShmCacheConfig;
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
@@ -331,6 +332,44 @@ impl DtypeArg {
 #[serde(transparent)]
 pub struct JsonStringList(pub Vec<String>);
 
+/// Type of cache to use for the multi-modal preprocessor/mapper.
+///
+/// Python vLLM accepts `lru` (mirrored LRU cache) and `shm` (shared memory
+/// FIFO cache); only `shm` is implemented in the Rust frontend.
+///
+/// Original Python definition (`MMCacheType`):
+/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/config/multimodal.py>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmProcessorCacheType {
+    /// Shared memory FIFO cache: the frontend writes processed items into a
+    /// POSIX shm ring buffer and sends only the address to the engine.
+    Shm,
+}
+
+impl FromStr for MmProcessorCacheType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "shm" => Ok(Self::Shm),
+            _ => Err(format!(
+                "unsupported multi-modal processor cache type `{value}`: \
+                 only `shm` is implemented in the Rust frontend"
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MmProcessorCacheType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Runtime arguments shared by both paths of the Rust frontend:
 ///
 /// - External-engine mode: Python-supervised bootstrap, `vllm serve` -> `vllm-rs frontend`.
@@ -338,7 +377,7 @@ pub struct JsonStringList(pub Vec<String>);
 /// - Managed-engine mode: Rust-managed Python engine, `vllm-rs serve`.
 ///   Arguments are parsed from CLI flags and defaults follow `clap` attrs.
 #[serde_as]
-#[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
+#[derive(Educe, Clone, Args, PartialEq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
     /// The model and the sources of its tokenizer and config files.
@@ -488,6 +527,28 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// Type of cache to use for the multi-modal preprocessor/mapper. Only
+    /// `shm` (shared memory FIFO cache) is implemented in the Rust frontend.
+    #[arg(long, value_name = "TYPE")]
+    #[serde(default)]
+    pub mm_processor_cache_type: Option<MmProcessorCacheType>,
+
+    /// The size (in GiB) of the multi-modal processor cache.
+    ///
+    /// With `--mm-processor-cache-type shm` this is the exact size of the
+    /// POSIX shared-memory ring buffer shared with the engine workers. Set to
+    /// `0` to disable the cache completely (not recommended).
+    #[arg(long, default_value_t = 4.0, allow_negative_numbers = true)]
+    #[serde(default = "default_mm_processor_cache_gb")]
+    pub mm_processor_cache_gb: f64,
+
+    /// Size limit (in MiB) for each object stored in the multi-modal
+    /// processor shared memory cache. Only effective when
+    /// `--mm-processor-cache-type` is `shm`.
+    #[arg(long, default_value_t = 128)]
+    #[serde(default = "default_mm_shm_cache_max_object_size_mb")]
+    pub mm_shm_cache_max_object_size_mb: u64,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
@@ -963,6 +1024,26 @@ impl SharedRuntimeArgs {
         })
     }
 
+    /// Whether the shm multi-modal processor cache is enabled.
+    ///
+    /// Mirrors the disable check in Python's `_get_cache_type`
+    /// (vllm/multimodal/cache/factories.py): a non-positive
+    /// `mm_processor_cache_gb` disables the cache entirely.
+    pub fn mm_shm_cache_enabled(&self) -> bool {
+        self.mm_processor_cache_type == Some(MmProcessorCacheType::Shm)
+            && self.mm_processor_cache_gb > 0.0
+    }
+
+    /// Build the shm cache configuration with a fresh unique segment name, or
+    /// `None` when the shm cache is disabled.
+    pub fn mm_shm_cache_config(&self) -> Option<MmShmCacheConfig> {
+        self.mm_shm_cache_enabled().then(|| MmShmCacheConfig {
+            shm_name: MmShmCacheConfig::unique_shm_name(),
+            data_buffer_size: gib_to_bytes(self.mm_processor_cache_gb),
+            max_object_size: (self.mm_shm_cache_max_object_size_mb as usize) << 20,
+        })
+    }
+
     /// Apply fallback logic for configuration from env variables, using
     /// `lookup` to read the environment.
     fn apply_env_fallbacks(
@@ -1102,6 +1183,9 @@ impl SharedRuntimeArgs {
             manages_engine: false,
             keep_alive_timeout,
             profiler,
+            // The Python-supervised frontend path cannot create the shm cache;
+            // rejected in `parse_runtime_args_json`.
+            mm_processor_cache: None,
         }
     }
 
@@ -1194,6 +1278,8 @@ impl SharedRuntimeArgs {
             manages_engine,
             keep_alive_timeout,
             profiler,
+            // Filled in by `vllm-rs serve` after the shm segment is created.
+            mm_processor_cache: None,
         }
     }
 
@@ -1297,6 +1383,21 @@ fn default_stream_interval() -> NonZeroU32 {
 
 fn default_cors_wildcard() -> JsonStringList {
     JsonStringList(vec!["*".to_string()])
+}
+
+/// Python default: `mm_processor_cache_gb: float = Field(default=4, ge=0)`.
+fn default_mm_processor_cache_gb() -> f64 {
+    4.0
+}
+
+/// Python default: `mm_shm_cache_max_object_size_mb: int = Field(default=128,
+/// ge=0)`.
+fn default_mm_shm_cache_max_object_size_mb() -> u64 {
+    128
+}
+
+fn gib_to_bytes(gib: f64) -> usize {
+    (gib * (1u64 << 30) as f64) as usize
 }
 
 fn default_cors_origins() -> JsonStringList {
@@ -1411,11 +1512,18 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     // the Python-supervised frontend path.
     args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
     args.unsupported.check()?;
+    if args.mm_processor_cache_type.is_some() {
+        return Err(
+            "`mm_processor_cache_type` is only supported by managed `vllm-rs serve` mode; \
+             the Python-supervised frontend cannot create the shm object-storage buffer"
+                .to_string(),
+        );
+    }
     Ok(args)
 }
 
 /// Arguments for running the Rust frontend as a Python-bootstrapped worker.
-#[derive(Educe, Clone, Args, PartialEq, Eq)]
+#[derive(Educe, Clone, Args, PartialEq)]
 #[educe(Debug)]
 pub struct FrontendArgs {
     /// Inherited listening socket file descriptor passed by the Python
@@ -1472,7 +1580,7 @@ impl FrontendArgs {
 
 /// Arguments for the managed-engine mode that spawns Python on behalf of the
 /// user.
-#[derive(Educe, Clone, Args, PartialEq, Eq)]
+#[derive(Educe, Clone, Args, PartialEq)]
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
 pub struct ServeArgs {
@@ -1513,6 +1621,44 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
+    /// Validate that the requested shm multi-modal processor cache is
+    /// compatible with the managed-engine topology.
+    ///
+    /// Mirrors Python's IPC-support check in `_get_cache_type`
+    /// (vllm/multimodal/cache/factories.py): shm caching requires a single
+    /// API process colocated with the engine. `--data-parallel-external-lb`
+    /// is not supported by the Rust frontend yet, so `data_parallel_size`
+    /// must be 1.
+    pub fn check_mm_shm_cache_support(&self) -> Result<(), String> {
+        if self.runtime.mm_processor_cache_type != Some(MmProcessorCacheType::Shm) {
+            return Ok(());
+        }
+        if self.headless {
+            return Err(
+                "`--mm-processor-cache-type shm` requires the Rust frontend, which is \
+                 disabled by `--headless`"
+                    .to_string(),
+            );
+        }
+        if self.managed_engine.data_parallel_size_local == Some(0) {
+            return Err(
+                "`--mm-processor-cache-type shm` requires a colocated managed engine, which \
+                 is disabled by `--data-parallel-size-local 0`"
+                    .to_string(),
+            );
+        }
+        if self.managed_engine.data_parallel_size > 1 {
+            return Err(format!(
+                "`--mm-processor-cache-type shm` requires IPC between the frontend and \
+                 engine processes, which is only supported with `--data-parallel-size 1` \
+                 (got {}); `--data-parallel-external-lb` is not supported by the Rust \
+                 frontend yet",
+                self.managed_engine.data_parallel_size
+            ));
+        }
+        Ok(())
+    }
+
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
     pub fn to_frontend_config(
@@ -1593,7 +1739,7 @@ impl ServeArgs {
                 .python_args
                 .extend(["--default-mm-loras".to_string(), default_mm_loras]);
         }
-        managed_engine.into_config(
+        let mut config = managed_engine.into_config(
             self.runtime.model.id.clone(),
             self.runtime.max_logprobs,
             profiler_config,
@@ -1608,7 +1754,18 @@ impl ServeArgs {
             self.runtime.structured_outputs_config_json(),
             topology,
             client_handshake_address,
-        )
+        );
+        if self.runtime.mm_processor_cache_type == Some(MmProcessorCacheType::Shm) {
+            config.python_args.extend([
+                "--mm-processor-cache-type".to_string(),
+                "shm".to_string(),
+                "--mm-processor-cache-gb".to_string(),
+                self.runtime.mm_processor_cache_gb.to_string(),
+                "--mm-shm-cache-max-object-size-mb".to_string(),
+                self.runtime.mm_shm_cache_max_object_size_mb.to_string(),
+            ]);
+        }
+        config
     }
 }
 
