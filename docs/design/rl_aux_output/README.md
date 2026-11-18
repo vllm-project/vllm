@@ -67,9 +67,16 @@ Later:
 | [Design space](design_space.md) | The alternatives for each decision and why this one |
 | [Scenarios](scenarios.md) | Sizing: bytes per position, KV tier capacity, object pool, object counts |
 | [Experiments](experiments.md) | Validation results, open items, and earlier measurements |
+| [Request-wise design](request_wise.md) | An alternative where objects belong to the request that wrote them: names without versions, the `held` rule, release by reference count, and a comparison with this design |
 
 ## Status
 
 All six layers are on the branch. Requests without `aux_session` keep the inline behavior: routed experts and indexer selections returned in the response. Validation of the full stack is tracked in [experiments](experiments.md); the runs on the current branch are pending.
 
 RFC #64380 described an earlier protocol (manifests, per-trajectory copies, a writer-side version ledger). This folder replaces it.
+
+## Branches
+
+- `rl/aux-output`: this branch, the integration branch with these documents.
+- `rl/aux-output-session-wise`: the session design, the five layers of the PR stack.
+- `rl/aux-output-request-wise`: the request-wise prototype on top of the session stack ([request-wise design](request_wise.md)).
