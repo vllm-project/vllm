@@ -509,12 +509,12 @@ def _shuffle_mxfp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Preprocess MXFP8 weights and scales for the FlashInfer TRT-LLM kernel.
 
-    All three transforms (gate/up row reorder, ``shuffle_matrix_a`` weight
-    shuffle, ``shuffle_matrix_sf_a`` scale shuffle) are fixed row/index
+    All three transforms (gate/up row reorder, `shuffle_matrix_a` weight
+    shuffle, `shuffle_matrix_sf_a` scale shuffle) are fixed row/index
     permutations that depend only on the per-expert matrix shape, so the
     permutation is computed once and applied to every expert in a single
-    gather instead of once per expert. ``block_scale_interleave`` accepts a
-    batched ``(E, M, K)`` scale tensor directly. Output is bit-identical to
+    gather instead of once per expert. `block_scale_interleave` accepts a
+    batched `(E, M, K)` scale tensor directly. Output is bit-identical to
     the per-expert loop but ~20x faster (a 288-expert MoE otherwise costs
     seconds per layer at load).
     """

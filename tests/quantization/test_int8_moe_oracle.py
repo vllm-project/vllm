@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for INT8 (W8A8) fused-MoE oracle backend selection.
 
-These exercise ``select_int8_moe_backend`` only (no MoE kernels are launched),
+These exercise `select_int8_moe_backend` only (no MoE kernels are launched),
 so they run on any platform where the Triton INT8 MoE kernel is available —
 CUDA (SM >= 7.5), ROCm, or XPU — not just gfx950.
 """
@@ -94,8 +94,8 @@ def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
 def test_scaled_int8_quant_is_available_on_xpu():
     """The per-tensor scheme's activation quantization works on XPU.
 
-    ``_int8_quantize`` sends per-tensor activations through
-    ``ops.scaled_int8_quant``, which has an XPU branch. This is what lets the
+    `_int8_quantize` sends per-tensor activations through
+    `ops.scaled_int8_quant`, which has an XPU branch. This is what lets the
     per-tensor scheme be enabled here alongside CUDA and ROCm; pin it so a
     future change cannot silently remove that branch.
     """

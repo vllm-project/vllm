@@ -20,7 +20,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -103,7 +103,7 @@ class WorkerBase:
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
@@ -150,7 +150,7 @@ class WorkerBase:
 
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
-        ``torch.accelerator`` must override with their own wait."""
+        `torch.accelerator` must override with their own wait."""
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
@@ -304,8 +304,8 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
-        # Let the platform replace core Triton kernels (e.g. CPU fallback
-        # implementations) before any worker or model code can launch them.
+        # Let the platform replace core Triton kernels before any worker or
+        # model code can launch them.
         from vllm.platforms import current_platform
 
         current_platform.register_triton_kernel_overrides()

@@ -98,7 +98,7 @@ SSN = 257  # ss partial slots a pick (CTAs covering one virtual expert, at most 
 REGION = {"a": 31, "z": 32, "ss": 33, "rs": 34}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BuildM:
     S: int = 32  # rows (32 / 64 / 96 / 128)
 

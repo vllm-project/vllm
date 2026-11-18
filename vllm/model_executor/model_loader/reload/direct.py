@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload (``VLLM_RELOAD_MODE=direct``).
+"""Direct weight reload (`VLLM_RELOAD_MODE=direct`).
 
 Cold start records each tensor's checkpoint layout before post-load processing
-(PWAL). ``begin`` views re-laid-out tensors back to that layout on their
-storage, the loaders write the checkpoint in place, and ``finish`` reruns PWAL,
+(PWAL). `begin` views re-laid-out tensors back to that layout on their
+storage, the loaders write the checkpoint in place, and `finish` reruns PWAL,
 which must keep addresses (captured CUDA graphs) and refill derived tensors.
-Between ``begin`` and a successful ``finish`` the model must not run; there is
+Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+tensor of each module whose PWAL changes its layout or is not idempotent, and
+of every parameter flagged `fill_on_reload`. `begin` zero-fills each such
+tensor this model owns whole, as its checkpoint-layout view (padding the
+loaders skip or fill, and a load plan skips loader fills); a tensor shared
+with another model (draft and target) is zeroed only by its owner's `begin`.
 """
 
 from collections.abc import Iterator
@@ -30,8 +34,10 @@ logger = init_logger(__name__)
 
 __all__ = [
     "begin_direct_reload",
+    "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "loadable_tensors",
     "record_checkpoint_layout",
 ]
 
@@ -53,15 +59,20 @@ _LOADER_ATTRS = (
 
 
 def direct_reload_enabled() -> bool:
-    """Whether weight updates reload in place (``VLLM_RELOAD_MODE=direct``)."""
+    """Whether weight updates reload in place (`VLLM_RELOAD_MODE=direct`)."""
     return envs.VLLM_RELOAD_MODE == "direct"
+
+
+def direct_reload_active(model: torch.nn.Module) -> bool:
+    """Whether `model` is between `begin_direct_reload` and its finish."""
+    return getattr(model, "_direct_reload_begun", False)
 
 
 def _layout(t: torch.Tensor) -> tuple:
     return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
 
 
-def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """Parameters and persistent buffers, each object once."""
     seen: set[int] = set()
     for module_name, module in model.named_modules():
@@ -117,7 +128,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
-    for _, t in _loadable_tensors(model):
+    for _, t in loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt"):
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
             storage = t.untyped_storage().data_ptr()
@@ -159,7 +170,7 @@ def _checkpoint_views(
     tensor post-load processing re-laid out; raises if a storage cannot
     hold its checkpoint layout."""
     views: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for name, t in _loadable_tensors(model):
+    for name, t in loadable_tensors(model):
         ckpt = getattr(t, "_ckpt", None)
         if ckpt is None:
             continue  # no layout: created by post-load processing, derived
@@ -203,12 +214,16 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
-    for _, t in _loadable_tensors(model):
+    for _, t in loadable_tensors(model):
         if not _owned(model, t):
             continue
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+        if getattr(t, "fill_on_reload", False):
+            # Reset padding: loaders skip it or fill it, and a load plan skips
+            # loader fills. Erases the checkpoint region too.
+            t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

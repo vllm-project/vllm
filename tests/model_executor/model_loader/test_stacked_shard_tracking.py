@@ -14,6 +14,7 @@ from torch import nn
 from vllm.config import LoadConfig
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    MinimaxM3QKVParallelLinearWithIndexer,
     QKVParallelLinear,
 )
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -94,6 +95,62 @@ def test_merged_column_tuple_shard_is_one_span():
     load(
         layer, ("weight", shard((8, HIDDEN), (0, 1))), ("weight", shard((4, HIDDEN), 2))
     )
+    assert layer.pop_missing_shards() == []
+
+
+@pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
+@pytest.mark.parametrize("shard_id", [None, (0, 1)])
+def test_merged_fused_checkpoint_excludes_output_padding(loader_name, shard_id):
+    layer = MergedColumnParallelLinear(HIDDEN, [4, 4], bias=False, padding_size=3)
+    expected = torch.arange(8 * HIDDEN, dtype=layer.weight.dtype).reshape(8, HIDDEN)
+    with torch.no_grad():
+        layer.weight.fill_(float("nan"))
+
+    getattr(layer, loader_name)(layer.weight, expected, shard_id)
+
+    torch.testing.assert_close(layer.weight[:8], expected, rtol=0, atol=0)
+    assert not layer.weight[8:].any()
+    assert layer.pop_missing_shards() == []
+
+
+def test_merged_padding_does_not_hide_a_missing_checkpoint_shard():
+    layer = MergedColumnParallelLinear(HIDDEN, [4, 4], bias=False, padding_size=3)
+    load(layer, ("weight", shard((4, HIDDEN), 0)))
+    assert layer.pop_missing_shards() == ["weight.1"]
+    with pytest.raises(ValueError, match="should be one of"):
+        layer.validate_shard_id(2)
+
+
+@pytest.mark.parametrize("padding_size", [0, 3])
+def test_merged_checkpoint_bias_keeps_output_padding_zero(padding_size):
+    layer = MergedColumnParallelLinear(HIDDEN, [4, 4], padding_size=padding_size)
+    weight = torch.arange(8 * HIDDEN, dtype=layer.weight.dtype).reshape(8, HIDDEN)
+    bias = torch.arange(8, dtype=layer.bias.dtype)
+    with torch.no_grad():
+        layer.weight.fill_(float("nan"))
+        layer.bias.fill_(float("nan"))
+
+    load(layer, ("weight", weight), ("bias", bias))
+
+    torch.testing.assert_close(layer.weight[:8], weight, rtol=0, atol=0)
+    torch.testing.assert_close(layer.bias[:8], bias, rtol=0, atol=0)
+    assert not layer.weight[8:].any()
+    assert not layer.bias[8:].any()
+    assert layer.pop_missing_shards() == []
+
+
+def test_minimax_m3_qkv_with_indexer_loads_all_shards():
+    layer = MinimaxM3QKVParallelLinearWithIndexer(
+        HIDDEN,
+        HEAD,
+        total_num_heads=2,
+        total_num_kv_heads=1,
+        total_num_index_heads=1,
+        index_head_size=HEAD,
+    )
+    index_q = ("weight", shard((HEAD, HIDDEN), "index_q"))
+    index_k = ("weight", shard((HEAD, HIDDEN), "index_k"))
+    load(layer, Q, K, V, index_q, index_k)
     assert layer.pop_missing_shards() == []
 
 

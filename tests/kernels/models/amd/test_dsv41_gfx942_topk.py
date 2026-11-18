@@ -52,7 +52,7 @@ def gfx942_decode(monkeypatch):
 
 
 def _lengths(length: int, reqs: int) -> list[int]:
-    """The requests' lengths: the first is ``length`` and the others are
+    """The requests' lengths: the first is `length` and the others are
     shorter by a few hundred tokens each, so the rows end at different
     places."""
     return [max(0, length - 397 * i) for i in range(reqs)]
@@ -109,7 +109,7 @@ def _assert_same_top512(x, ref, got, ends, name):
 
 
 def _logits(ends: list[int], masked: bool, gen) -> torch.Tensor:
-    """Random logits. ``masked`` keeps 2047 random blocks of 8 and the newest
+    """Random logits. `masked` keeps 2047 random blocks of 8 and the newest
     block of each row and sets the rest of the row to -inf, as layers 24 to
     36 see their logits after the DSpark candidate mask."""
     x = torch.randn(len(ends), WIDTH, device="cuda", generator=gen) * 4.0

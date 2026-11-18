@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the AITER biased_grouped_topk expert-group count.
 
-The AITER kernel is only instantiated for ``NUM_GRP`` in {1, 2, 4, 8}, so the
-group count derived from ``num_experts`` has to be rounded to a supported
-value that still divides ``num_experts``. Grouping is a no-op on this path
-(``topk_group == num_expert_group``), so any such value routes identically;
+The AITER kernel is only instantiated for `NUM_GRP` in {1, 2, 4, 8}, so the
+group count derived from `num_experts` has to be rounded to a supported
+value that still divides `num_experts`. Grouping is a no-op on this path
+(`topk_group == num_expert_group`), so any such value routes identically;
 the constraint is purely about which kernel exists.
 """
 
@@ -82,7 +82,7 @@ def test_group_count_and_guard(num_experts, expected):
     ],
 )
 def test_rounded_group_count_routes_like_the_reference(num_experts):
-    """The rounded group count must route identically to ``grouped_topk``.
+    """The rounded group count must route identically to `grouped_topk`.
 
     Gating is continuous random, so exact score ties -- the one place the two
     may legitimately differ -- have measure zero.

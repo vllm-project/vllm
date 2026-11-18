@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import hashlib
 import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 
 ECProducer = Literal["ec_producer", "ec_both"]
 ECConsumer = Literal["ec_consumer", "ec_both"]
@@ -19,11 +18,11 @@ class ECTransferConfig:
     ec_connector: str | None = None
     """The EC connector for vLLM to transmit EC caches between vLLM instances.
 
-    Built-in options include ``ECExampleConnector`` (shared filesystem via
-    safetensors) and ``ECMooncakeConnector`` (Mooncake TransferEngine RDMA;
-    requires ``mooncake-transfer-engine`` and matching producer/consumer
-    ``ec_connector_extra_config``; see ``mooncake_ec_connector`` module docstring).
-    Set ``cross_encoder_cache`` in Mooncake extra config to reuse shared
+    Built-in options include `ECExampleConnector` (shared filesystem via
+    safetensors) and `ECMooncakeConnector` (Mooncake TransferEngine RDMA;
+    requires `mooncake-transfer-engine` and matching producer/consumer
+    `ec_connector_extra_config`; see `mooncake_ec_connector` module docstring).
+    Set `cross_encoder_cache` in Mooncake extra config to reuse shared
     Encoder outputs from Store before encoding, retaining P2P delivery.
     """
 
@@ -60,22 +59,14 @@ class ECTransferConfig:
     producers at startup. It can exceed the LM embedding width (e.g. DeepStack).
     """
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:
@@ -109,7 +100,7 @@ class ECTransferConfig:
     def is_encode_only(self) -> bool:
         """Whether this instance encodes but does not run the language model.
 
-        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_spec`
+        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_layer_configs`
         returns {} for it -- so it is the one role that can spend accelerator
         time and memory on frontend work.
         """

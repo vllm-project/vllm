@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import signal
+import threading
 import time
 from collections import defaultdict
 
@@ -103,9 +105,9 @@ def build_actor_name(
     if tp_size > 1:
         name += f"_TP{rank % tp_size}"
     if pp_size > 1:
-        name += f"_PP{(rank // tp_size) % pp_size}"
+        name += f"_PP{(rank // (tp_size * pcp_size)) % pp_size}"
     if pcp_size > 1:
-        name += f"_PCP{rank // (tp_size * pp_size)}"
+        name += f"_PCP{(rank // tp_size) % pcp_size}"
     return name
 
 
@@ -301,6 +303,16 @@ def initialize_ray_cluster(
                 parallel_config.world_size,
             )
 
+    # ray.init() replaces the SIGTERM handler with sys.exit() and Ray's C++
+    # failure handler, which aborts the process 3 s after SIGTERM. Restore the
+    # caller's handler so its graceful shutdown can kill the Ray workers.
+    sigterm_handler = (
+        signal.getsignal(signal.SIGTERM)
+        if not ray.is_initialized()
+        and threading.current_thread() is threading.main_thread()
+        else None
+    )
+
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
     elif current_platform.is_rocm() or current_platform.is_xpu():
@@ -319,6 +331,9 @@ def initialize_ray_cluster(
             )
     else:
         ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
+
+    if callable(sigterm_handler):
+        signal.signal(signal.SIGTERM, sigterm_handler)
 
     device_str = current_platform.ray_device_key
     if not device_str:
