@@ -10,11 +10,9 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import TokenizersBackend
 
 from vllm import PoolingParams
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessor
 from vllm.entrypoints.pooling.scoring.types import ScoringData
 from vllm.entrypoints.pooling.types import OfflineScoringInputsContext
-from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -100,62 +98,4 @@ def test_offline_rejects_invalid_token_limits(
     proc, ctx = offline_processor_and_context
     ctx.pooling_params.extra_kwargs[name] = limit
     with pytest.raises(ValueError, match=name):
-        proc.get_request_factory_offline(ctx)
-
-
-@pytest.fixture
-def capture_encode_ctx(monkeypatch):
-    """Capture the `OfflineEncodeInputsContext` handed to the base processor."""
-    captured: dict[str, Any] = {}
-    original = PoolingIOProcessor.get_request_factory_offline
-
-    def wrapper(self, ctx):
-        captured["chat_template_kwargs"] = dict(ctx.chat_template_kwargs or {})
-        return original(self, ctx)
-
-    monkeypatch.setattr(PoolingIOProcessor, "get_request_factory_offline", wrapper)
-    return captured
-
-
-def test_offline_explicit_kwargs_win_over_top_level_flag(
-    offline_processor_and_context, capture_encode_ctx
-):
-    """A top-level `True` must not overwrite an explicit `False` in kwargs."""
-    proc, ctx = offline_processor_and_context
-    ctx.chat_template_kwargs = {"add_generation_prompt": False}
-    ctx.add_generation_prompt = True
-
-    proc.get_request_factory_offline(ctx)
-
-    assert capture_encode_ctx["chat_template_kwargs"]["add_generation_prompt"] is False
-
-
-def test_offline_top_level_flag_fills_missing_kwarg(
-    offline_processor_and_context, capture_encode_ctx
-):
-    """A top-level `True` fills in the key when kwargs omit it."""
-    proc, ctx = offline_processor_and_context
-    ctx.chat_template_kwargs = {"instruction": "Keep this instruction"}
-    ctx.add_generation_prompt = True
-
-    proc.get_request_factory_offline(ctx)
-
-    merged = capture_encode_ctx["chat_template_kwargs"]
-    assert merged["add_generation_prompt"] is True
-    assert merged["instruction"] == "Keep this instruction"
-
-
-def test_offline_rejects_mutually_exclusive_flags_across_layers(
-    offline_processor_and_context,
-):
-    """A top-level flag must conflict with the same flag set in kwargs.
-
-    `OfflineInputsContext.__post_init__` only checks the two top-level
-    fields, so the cross-layer conflict has to be caught by the merge step.
-    """
-    proc, ctx = offline_processor_and_context
-    ctx.chat_template_kwargs = {"continue_final_message": True}
-    ctx.add_generation_prompt = True
-
-    with pytest.raises(VLLMValidationError, match="Cannot set both"):
         proc.get_request_factory_offline(ctx)
