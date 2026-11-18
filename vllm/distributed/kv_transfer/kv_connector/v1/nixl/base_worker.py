@@ -231,31 +231,24 @@ class DeferredBlockRelease:
     otherwise race with kernels of the step that finished the request, e.g. the
     MTP drafter, which may still write into those blocks; the cuda_copy staging
     used for device memory made that ordering implicit. The guard is an event
-    recorded two steps after the request finished, so a drafter launched at the
-    start of the following step is covered as well. Nothing blocks: readiness is
-    polled with Event.query()."""
-
-    GUARD_AGE = 2
+    recorded when the release reaches the worker: by then the forward and the
+    drafter of every step that still held the request are already enqueued on
+    the current stream (post_forward runs before the drafter of its own step).
+    It only fences that stream, so a drafter moved to its own stream would need
+    its own guard. Nothing blocks: readiness is polled with Event.query()."""
 
     def __init__(self) -> None:
-        self._pending: list[tuple[ReqId, int, torch.cuda.Event | None]] = []
+        self._pending: list[tuple[ReqId, torch.cuda.Event]] = []
 
     def on_step(self, finished: list[ReqId]) -> None:
-        event = None
-        for i, (req_id, age, guard) in enumerate(self._pending):
-            if guard is None and age + 1 >= self.GUARD_AGE:
-                if event is None:
-                    event = torch.cuda.Event()
-                    event.record()
-                self._pending[i] = (req_id, age + 1, event)
-            elif guard is None:
-                self._pending[i] = (req_id, age + 1, None)
-        self._pending.extend((req_id, 0, None) for req_id in finished)
+        if not finished:
+            return
+        event = torch.cuda.Event()
+        event.record()
+        self._pending.extend((req_id, event) for req_id in finished)
 
     def ready(self) -> set[ReqId]:
-        done = {
-            r for r, _, guard in self._pending if guard is not None and guard.query()
-        }
+        done = {req_id for req_id, event in self._pending if event.query()}
         if done:
             self._pending = [p for p in self._pending if p[0] not in done]
         return done
