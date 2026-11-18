@@ -271,9 +271,7 @@ def _checkpoint_views(
 
 
 def _undo_parameter_renames(model: torch.nn.Module) -> None:
-    """Undo `move_parameter` and `retire_parameter`, whose names and flags
-    post-load processing reads: the rerun then sees each parameter under its
-    checkpoint name and live, as cold start did."""
+    """Undo move_parameter/retire_parameter: the rerun sees cold-start names."""
     for module in model.modules():
         for name in module.__dict__.pop("_runtime_aliases", ()):
             del module._parameters[name]
