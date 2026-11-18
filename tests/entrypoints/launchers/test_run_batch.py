@@ -1633,6 +1633,18 @@ def test_unwritable_output_file_is_rejected_before_engine_start(tmp_path):
     validate_run_batch_args(args("HTTPS://example.com/out.jsonl"))
 
 
+def test_prompt_token_ids_flag_is_available_to_batch_frontend():
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["-i", "in.jsonl", "-o", "out.jsonl"]
+    )
+    assert args.enable_prompt_token_ids is False
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["-i", "in.jsonl", "-o", "out.jsonl", "--enable-prompt-token-ids"]
+    )
+    assert args.enable_prompt_token_ids is True
+
+
 def test_admission_limits_are_ignored(caplog_vllm):
     """The engine must not answer batch requests with 503 rows."""
     args = make_arg_parser(FlexibleArgumentParser()).parse_args(
