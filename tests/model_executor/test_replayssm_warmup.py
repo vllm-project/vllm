@@ -166,6 +166,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         torch.nn.Module.__init__(mixer)
         mixer.use_replayssm = True
         mixer.use_flashinfer_replayssm = True
+        mixer.ssm_state_quantized = False
         mixer.replayssm_buffer_len = 16
         mixer.get_state_shape = lambda: spec.shapes
         mixer.get_state_dtype = lambda: spec.dtypes

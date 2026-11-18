@@ -1001,6 +1001,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
         mamba_config=MambaConfig(),
+        ssm_state_quantized=False,
     )
     spec = MambaSpec(
         block_size=128,
