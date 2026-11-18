@@ -862,6 +862,9 @@ def test_online_block_fp8_requantization_removes_source_scales(
             prefix="model.layers.0.self_attn.o_proj",
             disable_tp=True,
         )
+        # The serialized weights start on the meta device: without materializing
+        # them, the fills below are no-ops and kernels (deep_gemm) see meta tensors.
+        _materialize_requantization_source(layer)
         with torch.no_grad():
             layer.weight.fill_(1)
             layer.weight_scale.fill_(127)  # E8M0 encoding of scale 1.
