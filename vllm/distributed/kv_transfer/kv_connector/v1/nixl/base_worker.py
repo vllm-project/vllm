@@ -193,6 +193,7 @@ class NixlBaseConnectorWorker:
         pairs: tuple[Sequence[int], Sequence[int]],
         region_num_blocks: list[int] | None = None,
         ssm_regions: Sequence[int] | None = None,
+        ple_region: int | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs.
 
@@ -201,7 +202,8 @@ class NixlBaseConnectorWorker:
         region-mapped transfers).
 
         `ssm_regions` lists this side's SSM regions in the order its SSM
-        descriptors are built; it defaults to the local ones.
+        descriptors are built, and `ple_region` is its PLE region; both default
+        to the local ones.
         """
         num_ssm_regions = 0
         if self._has_mamba:
@@ -255,6 +257,7 @@ class NixlBaseConnectorWorker:
             ssm_regions = self._ssm_region_indices or range(
                 len(self.block_len_per_layer)
             )
+            ple_region = self._ple_region_index
         ssm_slot = {region: slot for slot, region in enumerate(ssm_regions)}
         # NOTE (NickLucche) SSM and Attention block regions can be exchanged
         # arbitrarily by manager. Therefore, descs are laid out as:
@@ -275,15 +278,17 @@ class NixlBaseConnectorWorker:
             if _is_attention_spec(spec_type):
                 desc_ids = region_offsets[group_regions][:, None] + blocks[None, :]
             elif _is_ssm_spec(spec_type):
-                if i == self._ple_group_index:
-                    ssm_desc_ids = np.array([num_ssm_descs], dtype=np.int64)
-                else:
-                    # Each SSM region owns ssm_regions_per_layer consecutive
-                    # descs, in ssm_regions order.
-                    slots = np.array([ssm_slot[r] for r in group_regions.tolist()])
-                    ssm_desc_ids = (
-                        slots[:, None] * ssm_regions_per_layer + sub_descs
-                    ).ravel()
+                # Each SSM region owns ssm_regions_per_layer consecutive descs,
+                # in ssm_regions order, and the PLE region the one after them.
+                # The PLE group can hold SSM state too (Qwen4Exp's GDN).
+                ssm_desc_ids = np.concatenate(
+                    [
+                        np.array([num_ssm_descs], dtype=np.int64)
+                        if i == self._ple_group_index and region == ple_region
+                        else ssm_slot[region] * ssm_regions_per_layer + sub_descs
+                        for region in group_regions.tolist()
+                    ]
+                )
                 desc_ids = (
                     ssm_desc_ids[:, None] * logical_blocks
                     + blocks[None, :]
@@ -646,7 +651,7 @@ class NixlBaseConnectorWorker:
         ssm_pairs: list[tuple[int, int]] = []
         ple_regions: set[int] = set()
         for remote, local, group in zip(pairs.remote, pairs.local, pairs.group):
-            if group == self._ple_group_index:
+            if group == self._ple_group_index and local == self._ple_region_index:
                 ple_regions.add(remote)
             elif _is_ssm_spec(self._group_spec_types[group]):
                 ssm_pairs.append((ssm_slot[local], remote))
@@ -766,22 +771,19 @@ class NixlBaseConnectorWorker:
         )
         self._ple_group_index: int | None = None
         if self._is_csa_linear:
+            # The group holding the TP-replicated PLE state, alone or with SSM
+            # state.
             ple_groups = [
-                (index, group)
+                index
                 for index, group in enumerate(kv_cache_config.kv_cache_groups)
-                if group.layer_names
-                and all(
-                    isinstance(spec, MambaSpec) and spec.tp_replicated
-                    for spec in group.kv_cache_specs.values()
-                )
+                for spec in group.kv_cache_specs.values()
+                if isinstance(spec, MambaSpec) and spec.tp_replicated
             ]
-            if len(ple_groups) > 1 or any(
-                len(group.layer_names) != 1 for _, group in ple_groups
-            ):
+            if len(ple_groups) > 1:
                 raise ValueError(
                     "CSA-linear NIXL requires at most one PLE cache owner."
                 )
-            self._ple_group_index = ple_groups[0][0] if ple_groups else None
+            self._ple_group_index = ple_groups[0] if ple_groups else None
 
         if self._has_mamba:
             assert self._is_hma_required

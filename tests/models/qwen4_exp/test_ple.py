@@ -23,6 +23,7 @@ import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
 import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.core.utils import full_layer, mamba_layer
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
@@ -66,12 +67,18 @@ from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.torch_utils import weak_ref_tensor
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
     PleShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.kv_cache_planning import (
+    _get_kv_cache_bytes_per_block,
+    get_kv_cache_groups,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -2832,3 +2839,72 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVIDIA model class")
+@pytest.mark.parametrize("compressed_key_size", [128, 4])
+def test_ple_state_shares_a_gdn_group(compressed_key_size):
+    """The PLE layer's small conv state fills a GDN group's block instead of a
+    block-sized group of its own. Where the block has no room left (tiny
+    compressed keys), it still joins and widens the block by its page, so the
+    grouping does not depend on page sizes (or the TP size behind them)."""
+    from vllm.models.qwen4_exp.nvidia.model import Qwen4ExpKVCacheGrouping
+
+    block_size = 16
+    attn = AttentionSpec(
+        block_size=block_size, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
+    )
+    compressed_key = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=compressed_key_size,
+        dtype=torch.uint8,
+    )
+    page = attn.page_size_bytes
+    gdn = MambaSpec(
+        block_size=block_size,
+        shapes=((3, 96), (4, 16, 16)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=page,
+    )
+    ple = MambaSpec(
+        block_size=block_size,
+        shapes=((9, 64),),
+        dtypes=(torch.bfloat16,),
+        page_size_padded=page,
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        tp_replicated=True,
+    )
+    # Qwen3.8's pattern: 3 GDN layers per QSA layer (KV and compressed keys),
+    # PLE on layer 1. The mixed page sizes pack every block.
+    specs = {}
+    for i in range(48):
+        if i % 4 == 3:
+            specs[f"model.layers.{i}.attn"] = full_layer(attn)
+            specs[f"model.layers.{i}.indexer"] = full_layer(compressed_key)
+        else:
+            specs[f"model.layers.{i}.gdn"] = mamba_layer(gdn, mamba_cache_mode="align")
+    specs["model.layers.1.ple"] = mamba_layer(ple, mamba_cache_mode="align")
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+
+    default = get_kv_cache_groups(vllm_config, specs)
+    groups = Qwen4ExpKVCacheGrouping.get_kv_cache_groups(vllm_config, specs)
+
+    # QSA, then 3 GDN groups of 12 with the PLE state in one, instead of a fifth.
+    assert sorted(len(g.layer_names) for g in default) == [1, 12, 12, 12, 24]
+    assert sorted(len(g.layer_names) for g in groups) == [12, 12, 13, 24]
+    ple_group = next(g for g in groups if "model.layers.1.ple" in g.layer_names)
+    assert ple_group.kv_cache_specs["model.layers.1.ple"].page_size_bytes == (
+        ple.real_page_size_bytes
+    )
+    widened = _get_kv_cache_bytes_per_block(
+        groups, KVCacheLayout.BLHNC
+    ) - _get_kv_cache_bytes_per_block(default, KVCacheLayout.BLHNC)
+    assert 0 <= widened <= ple.real_page_size_bytes
+    assert (widened == 0) == (compressed_key_size == 128)

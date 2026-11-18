@@ -3,6 +3,7 @@
 """Inference-only Qwen4Exp model."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 from itertools import islice
 
 import torch
@@ -37,6 +38,7 @@ from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsHCSP,
+    SupportsKVCacheGrouping,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
@@ -80,7 +82,12 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
@@ -715,6 +722,68 @@ class Qwen4ExpModel(nn.Module):
         return loaded
 
 
+def _is_ple_state(spec: KVCacheSpec) -> bool:
+    return (
+        isinstance(spec, MambaSpec)
+        and spec.mamba_type == MambaAttentionBackendEnum.SHORT_CONV
+    )
+
+
+class Qwen4ExpKVCacheGrouping(SupportsKVCacheGrouping):
+    """The default KV cache grouping, with the PLE layers' short-conv states
+    folded into the narrowest GDN group.
+
+    By default the PLE layer gets a group of its own. Every block is as large
+    as the widest group's (the QSA layers' KV), so each PLE block holds one
+    small conv state and wastes the rest: 9-13% of a 32k request's KV cache.
+    The GDN groups have the PLE layer's block table and usually room for it;
+    at worst it widens every block by its page, a small fraction of one.
+    Folding regardless of room keeps the grouping the same for every TP size,
+    which disaggregated P/D needs.
+    """
+
+    @classmethod
+    def get_kv_cache_groups(
+        cls,
+        vllm_config: VllmConfig,
+        layer_configs: dict[str, KVCacheLayerConfig],
+    ) -> list[KVCacheGroup]:
+        from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+
+        groups = get_kv_cache_groups(vllm_config, layer_configs)
+        ple_groups = [
+            group
+            for group in groups
+            if all(map(_is_ple_state, group.kv_cache_specs.values()))
+        ]
+        if len(ple_groups) != 1:
+            return groups
+        ple = ple_groups[0]
+        gdn_groups = [
+            group
+            for group in groups
+            if group is not ple
+            and group.manager_config == ple.manager_config
+            and group.block_size == ple.block_size
+        ]
+        if not gdn_groups:
+            return groups
+        gdn = min(gdn_groups, key=lambda group: group.page_size_bytes)
+        # Unpadded: the page was padded only to fill a block on its own.
+        ple_specs = {
+            name: replace(spec, page_size_padded=None)
+            for name, spec in ple.kv_cache_specs.items()
+            if isinstance(spec, MambaSpec)
+        }
+        return [
+            replace(group, kv_cache_specs=group.kv_cache_specs | ple_specs)
+            if group is gdn
+            else group
+            for group in groups
+            if group is not ple
+        ]
+
+
 class Qwen4ExpForCausalLM(
     nn.Module,
     HasInnerState,
@@ -724,6 +793,7 @@ class Qwen4ExpForCausalLM(
     SupportsPP,
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
+    Qwen4ExpKVCacheGrouping,
 ):
     # The QSA indexer is not listed: quant configs read this mapping before the
     # model is built, and `Qwen4ExpQSAAttention` fuses `indexer.index_qk_proj`
@@ -972,6 +1042,7 @@ class Qwen4ExpForConditionalGeneration(
     HasInnerState,
     SupportsHCSP,
     Qwen4ExpMixtureOfExperts,
+    Qwen4ExpKVCacheGrouping,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
 
