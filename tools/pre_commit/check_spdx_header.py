@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HeaderStyle:
     """Comment syntax and preamble handling for an SPDX header."""
 

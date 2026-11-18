@@ -145,7 +145,6 @@ guide: |
   SAFETENSORS_FAST_GPU=1 \
   vllm serve zai-org/GLM-4.7 \
       --tensor-parallel-size 8 \
-      --gpu-memory-utilization 0.9 \
       --no-enable-prefix-caching \
       --trust-remote-code
   ```
@@ -154,7 +153,6 @@ guide: |
 
   - `--max-model-len=65536` is a sensible default; max is 128K.
   - `--max-num-batched-tokens=32768` for prompt-heavy workloads; reduce to 8K-16K for latency-sensitive.
-  - Use `--gpu-memory-utilization=0.95` to maximize KV cache.
 
   ## Client Usage
 

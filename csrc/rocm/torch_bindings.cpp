@@ -52,6 +52,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+
+  rocm_ops.def(
+      "swmmacGEMM(Tensor in_a, Tensor in_b, "
+      "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
+  rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
 #endif  // VLLM_SKIP_SKINNY_GEMMS
 
 #ifdef VLLM_ROCM_GFX1100
