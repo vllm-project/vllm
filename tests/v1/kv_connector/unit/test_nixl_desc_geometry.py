@@ -395,7 +395,7 @@ def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
 def test_local_descriptors_follow_each_region_pool_capacity():
     descs, starts, _ = bw.NixlBaseConnectorWorker._byte_range_descs(
         [(0, 0, 16, 1), (1, 0, 16, 1), (0, 0, 16, 1)],
-        [(100, 16, 2), (1000, 16, 3)],
+        [(100, 16, 16, 2), (1000, 16, 16, 3)],
         device_id=0,
     )
 
@@ -569,6 +569,7 @@ def _region_blocks(worker) -> np.ndarray:
     regions = list(
         zip(
             worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank],
+            worker.block_len_per_layer,
             worker.block_stride_per_layer,
             worker.region_num_blocks,
         )
@@ -1682,7 +1683,7 @@ def test_csa_linear_ple_moves_whole_from_one_rank(ple_page_size):
     pairs = worker._pair_regions(metadata)
     regions = list(zip(pairs.local, pairs.group, pairs.remote))
     ranges = dict(
-        zip(pairs.group, worker._tp_byte_ranges(metadata, regions, 2, 1, 1, True))
+        zip(pairs.group, worker._tp_byte_ranges(metadata, regions, 2, 1, True))
     )
 
     assert worker.block_len_per_layer[_region_of(worker, "mamba.ple")] == (

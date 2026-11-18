@@ -120,12 +120,15 @@ def _worker(
     worker.source_ranks = {}
     worker._remote_block_splits = {}
     worker.kv_cache_layout = "LBHNC"
+    worker.use_host_buffer = False
     worker._layer_views = {}
     worker._test_layers = layers
     return worker
 
 
-def _remote_meta(worker: NixlConnectorWorker, remote_tp_size: int) -> NixlAgentMetadata:
+def _remote_meta(
+    worker: NixlConnectorWorker, remote_tp_size: int, block_size: int = 4
+) -> NixlAgentMetadata:
     """Metadata of a remote at `remote_tp_size` holding the worker's layers.
     Its views come from `fake_remote_layer_meta_tensors`."""
     heads = {
@@ -138,6 +141,8 @@ def _remote_meta(worker: NixlConnectorWorker, remote_tp_size: int) -> NixlAgentM
         remote_layer_spec(
             spec, worker.transfer_tp_size, remote_tp_size, heads.get(name)
         ).page_size_bytes
+        * block_size
+        // 4
         for name, spec in worker._layer_specs.items()
     ]
     return NixlAgentMetadata(
@@ -149,7 +154,7 @@ def _remote_meta(worker: NixlConnectorWorker, remote_tp_size: int) -> NixlAgentM
         block_lens=block_lens,
         block_strides=block_lens,
         kv_cache_layout="LBHNC",
-        block_size=4,
+        block_size=block_size,
         attn_backend_name="",
         physical_blocks_per_group=[1] * len(block_lens),
         region_members=worker.region_members,
@@ -168,11 +173,10 @@ def _map(
     pairs = region_pairs_by_index(num_layers, range(num_layers))
     worker._dst_pairs[_ENGINE] = pairs
     ranges = worker._tp_byte_ranges(
-        _remote_meta(worker, remote_tp_size),
+        _remote_meta(worker, remote_tp_size, 4 // block_size_ratio),
         list(zip(pairs.local, pairs.group, pairs.remote)),
         remote_tp_size,
         remote_dcp_size,
-        block_size_ratio,
         receiving=worker._TRANSFER_MODE == "pull",
     )
     worker._byte_ranges[_ENGINE] = ranges
@@ -401,21 +405,22 @@ def test_shards_one_remote_rank_holds_together_move_as_one_range():
     ]
 
 
-def test_smaller_remote_blocks_cannot_be_read_by_head():
-    """Remote blocks smaller than ours move as whole sub-blocks, so blocks
-    split across TP ranks cannot also split by block size."""
+def test_smaller_remote_blocks_are_read_by_head():
+    """Each remote rank fills its heads of every smaller block of ours."""
     worker = _worker(0, 1, _GQA)
-    with pytest.raises(NotImplementedError, match="remote blocks are smaller"):
-        _map(worker, 2, block_size_ratio=2)
+    assert _map(worker, 2, block_size_ratio=2) == (0, 1)
+    shard = worker.block_len_per_layer[0] // 4
+    assert worker._byte_ranges[_ENGINE] == [
+        {0: [(0, 0, shard)], 1: [(shard, 0, shard)]}
+    ]
 
 
 def test_smaller_remote_blocks_fill_a_rank_with_fewer_heads():
     """A rank holding half the remote's heads reads them into whole
     sub-blocks of its own, as on main."""
     worker = _worker(1, 2, _GQA)
-    meta = _remote_meta(worker, 1)
-    meta.block_lens = [block_len // 2 for block_len in meta.block_lens]
-    ranges = worker._tp_byte_ranges(meta, [(0, 0, 0)], 1, 1, 2, receiving=True)
+    meta = _remote_meta(worker, 1, block_size=2)
+    ranges = worker._tp_byte_ranges(meta, [(0, 0, 0)], 1, 1, receiving=True)
     sub_block = worker.block_len_per_layer[0] // 2
     assert ranges == [{0: [(0, sub_block, sub_block)]}]
 

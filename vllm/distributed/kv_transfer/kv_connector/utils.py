@@ -488,6 +488,24 @@ def view_end(view: torch.Tensor) -> int:
     return view.storage_offset() + extent + 1
 
 
+def view_block_size_ratio(
+    views: dict[str, torch.Tensor], other_views: dict[str, torch.Tensor]
+) -> int:
+    """How many blocks of the other side a block of ours holds, from the
+    tokens (dim 2) of both sides' `KVCacheSpec.slice_for_tp_transfer` views
+    of a layer."""
+    for name, view in views.items():
+        if name in other_views:
+            tokens = other_views[name].shape[2]
+            if view.shape[2] % tokens:
+                raise NotImplementedError(
+                    f"A block of {name!r} holds {view.shape[2]} tokens here, "
+                    f"which is not a multiple of the other side's {tokens}."
+                )
+            return view.shape[2] // tokens
+    return 1
+
+
 def serialize_layer_meta_tensors(
     views: dict[str, torch.Tensor],
 ) -> SerializedLayerMetaTensors:
@@ -629,8 +647,14 @@ def coalesce_byte_ranges(
     """
 
     def layout(views: dict[str, torch.Tensor]) -> dict[str, tuple]:
+        # A dim of one entry is stored the same at any stride.
         return {
-            name: (view.storage_offset(), view.shape, view.stride())
+            name: (
+                view.storage_offset(),
+                view.shape,
+                view.stride(0),
+                [s for size, s in zip(view.shape[1:], view.stride()[1:]) if size > 1],
+            )
             for name, view in views.items()
         }
 

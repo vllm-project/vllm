@@ -941,33 +941,37 @@ def remote_layer_spec(
     return spec
 
 
-def fake_remote_layer_meta_tensors(
-    worker, meta, regions, remote_tp_size: int, block_size_ratio: int
-) -> None:
+def fake_remote_layer_meta_tensors(worker, meta, regions, remote_tp_size: int) -> None:
     """Give `meta` the views a remote would advertise, where it has none:
-    those of the same model at `remote_tp_size`, with
-    `worker._fake_remote_kv_heads` KV heads if set."""
+    those of the same model at `remote_tp_size` in blocks of the remote's
+    size, with `worker._fake_remote_kv_heads` KV heads if set. A worker that
+    registered no caches gets its own views too."""
+    from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _is_ssm_spec,
     )
     from vllm.v1.kv_cache_interface import KVCacheLayout
 
     tp_size = worker.transfer_tp_size
-    group_by_layer = worker.kv_cache_config.transfer_group_index_by_layer
     layout = KVCacheLayout[meta.kv_cache_layout].layer_view_order
+    # Remote tokens per block, as a fraction of ours.
+    num, den = 1, 1
+    if isinstance(worker.transfer_topo, TransferTopology):
+        den = worker.transfer_topo.block_size_ratio(meta.block_size)
     heads = getattr(worker, "_fake_remote_kv_heads", {}).get(meta.engine_id, {})
     for local, group, _ in regions:
-        name = next(
-            name
-            for name in worker.region_members[local]
-            if group_by_layer.get(name) == group and name in worker._layer_specs
-        )
-        spec = remote_layer_spec(
-            worker._layer_specs[name], tp_size, remote_tp_size, heads.get(name)
-        )
-        ratio = 1 if _is_ssm_spec(worker._group_spec_types[group]) else block_size_ratio
-        block_len = worker.block_len_per_layer[local] // ratio
-        block = worker._transfer_block(spec, group, block_len, ratio, layout)
+        name = worker.region_members[local][0]
+        own_spec = worker._layer_specs[name]
+        block_len = worker.block_len_per_layer[local]
+        if name not in worker._layer_views:
+            own = KVCacheLayout[worker.kv_cache_layout].layer_view_order
+            block = worker._transfer_block(own_spec, group, block_len, own)
+            worker._layer_views[name] = (own_spec.slice_for_tp_transfer(block), True)
+        spec = remote_layer_spec(own_spec, tp_size, remote_tp_size, heads.get(name))
+        if not _is_ssm_spec(worker._group_spec_types[group]):
+            spec = replace(spec, block_size=spec.block_size * num // den)
+            block_len = block_len * num // den
+        block = worker._transfer_block(spec, group, block_len, layout)
         meta.layer_meta_tensors.setdefault(
             name, serialize_layer_meta_tensors(spec.slice_for_tp_transfer(block))
         )

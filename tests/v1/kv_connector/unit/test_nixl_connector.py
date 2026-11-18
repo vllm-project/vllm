@@ -701,6 +701,7 @@ def _whole_block_descs(worker) -> np.ndarray:
     regions = list(
         zip(
             worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank],
+            worker.block_len_per_layer,
             worker.block_stride_per_layer,
             worker.region_num_blocks,
         )
@@ -1410,7 +1411,7 @@ class TestNixlHandshake:
 
         # TP 2 rank 1 reads the second half of the TP 1 rank's heads.
         regions = [(0, 0, 0)]
-        assert worker._tp_byte_ranges(meta, regions, 1, 1, 1, receiving=True) == [
+        assert worker._tp_byte_ranges(meta, regions, 1, 1, receiving=True) == [
             {0: [(0, local_block_len, local_block_len)]}
         ]
 
@@ -2463,7 +2464,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     worker.tp_rank = 0
     worker.device_id = 3
     worker.kv_caches_base_addr = {"local": {0: [100, 200]}}
-    worker.block_stride_per_layer = [10, 10]
+    worker.block_len_per_layer = worker.block_stride_per_layer = [10, 10]
     worker.region_num_blocks = [2, 2]
     worker._mixed_mem_types = True
     worker._skip_dram_xfer = False
@@ -2484,6 +2485,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     remote = SimpleNamespace(
         engine_id="P",
         kv_caches_base_addr=[500, 600],
+        block_lens=[10, 10],
         block_strides=[10, 10],
         device_id=0,
     )

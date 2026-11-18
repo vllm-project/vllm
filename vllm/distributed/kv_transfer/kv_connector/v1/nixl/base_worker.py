@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_blksize_on_receive,
     pair_shards,
     serialize_layer_meta_tensors,
+    view_block_size_ratio,
     view_end,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -217,17 +218,21 @@ class NixlBaseConnectorWorker:
         spec: KVCacheSpec,
         group: int,
         block_len: int,
-        ratio: int,
         layout: Sequence[int],
+        block_size_ratio: int = 1,
     ) -> torch.Tensor:
         """One `[1, H, N, C]` block of bytes of a layer on the meta device, or
-        `block_len` opaque bytes."""
+        `block_len` opaque bytes. A block in the layout of a remote with
+        blocks `block_size_ratio` times smaller is one of its blocks."""
         if not spec.has_layer_views:
             shape: tuple[int, ...] = (1, 1, 1, block_len)
         else:
-            tokens = spec.block_size // (self._physical_blocks_per_group[group] * ratio)
+            tokens = spec.block_size // (
+                self._physical_blocks_per_group[group] * block_size_ratio
+            )
             shape = (1, *compute_layer_kv_cache_shape_bytes(spec, 1, tokens)[1:])
-        return torch.empty_permuted(shape, layout, dtype=torch.int8, device="meta")
+        block = torch.empty_permuted(shape, layout, dtype=torch.int8, device="meta")
+        return block.as_strided(shape, (block_len, *block.stride()[1:]))
 
     def _tp_byte_ranges(
         self,
@@ -235,18 +240,17 @@ class NixlBaseConnectorWorker:
         regions: list[tuple[int, int, int | None]],
         remote_tp_size: int,
         remote_dcp_size: int,
-        block_size_ratio: int,
         receiving: bool,
     ) -> list[dict[int, list[tuple[int, int, int]]]]:
         """For each `(local region, cache group, remote region)`, the
-        `(local_offset, remote_offset, num_bytes)` byte ranges of a block
-        moved with each remote rank that moves any, from both sides'
-        `slice_for_tp_transfer` views. Token blocks move as
-        `block_size_ratio` smaller remote blocks; state blocks move whole.
-        The remote region, if given, is checked against the remote's spec."""
+        `(local_offset, remote_offset, num_bytes)` byte ranges moved with each
+        remote rank that moves any, from both sides' `slice_for_tp_transfer`
+        views. Blocks move in the transfer layout: ours, unless we receive
+        from a remote of another layout or block size, when they move in the
+        remote's. The remote region, if given, is checked against the
+        remote's views."""
         tp_size, tp_rank = self.transfer_tp_size, self.transfer_tp_rank
-        layout = KVCacheLayout[nixl_agent_meta.kv_cache_layout].layer_view_order
-        remote_split = self._remote_block_splits.get(nixl_agent_meta.engine_id, 1)
+        layout = nixl_agent_meta.kv_cache_layout
         remote_views_by_layer = {
             name: deserialize_layer_meta_tensors(views)
             for name, views in nixl_agent_meta.layer_meta_tensors.items()
@@ -256,38 +260,54 @@ class NixlBaseConnectorWorker:
             # A region's layers view the same blocks: any one stands for all.
             name = self.region_members[local][0]
             spec = self._layer_specs[name]
-            # Recurrent state blocks move whole; token blocks move as the
-            # smaller blocks both sides can address.
-            ssm = _is_ssm_spec(self._group_spec_types[group])
-            ratio, split = (1, 1) if ssm else (block_size_ratio, remote_split)
-            block_len = self.block_len_per_layer[local] // ratio
             if name not in remote_views_by_layer:
                 raise ValueError(f"The remote advertised no views of {name!r}.")
-            # Both sides lay out every block alike: pair the first of each.
-            remote_views = {
-                component: view[:1]
-                for component, view in remote_views_by_layer[name].items()
-            }
-            views, contiguous = self._layer_views.get(name, (None, True))
-            # Blocks of our layout and block size land where they belong.
-            # Others land in the remote's byte order, in a contiguous block,
-            # and are reordered after the transfer.
-            if (
-                views is None
-                or ratio != 1
-                or split != 1
-                or nixl_agent_meta.kv_cache_layout != self.transfer_kv_cache_layout
-            ):
+            views, contiguous = self._layer_views[name]
+            remote_views = remote_views_by_layer[name]
+            if remote is not None and contiguous:
+                # `_split_remote_blocks` cuts the remote's token blocks.
+                split = (
+                    1
+                    if isinstance(spec, MambaSpec)
+                    else self._remote_block_splits.get(nixl_agent_meta.engine_id, 1)
+                )
+                remote_len = nixl_agent_meta.block_lens[remote] // split
+                remote_end = max(view_end(view[:1]) for view in remote_views.values())
+                if remote_len < remote_end or (
+                    remote_len > remote_end and spec.page_size_padded is None
+                ):
+                    raise ValueError(
+                        f"Layer {name!r} has blocks of {remote_len} bytes on "
+                        f"the remote, which do not hold its shards there."
+                    )
+            # The receiver decides where bytes land; a sender pairs the views
+            # of its cache with the receiver's. Blocks of our layout and block
+            # size land where they belong. Others land as the remote stores
+            # them, `ratio` to a contiguous block of ours, and are reordered
+            # after the transfer.
+            ratio = view_block_size_ratio(views, remote_views)
+            block_len = self.block_len_per_layer[local] // ratio
+            if ratio != 1 or layout != self.transfer_kv_cache_layout:
+                if not receiving:
+                    raise NotImplementedError(
+                        f"Sending {name!r} to a remote of another KV cache "
+                        "layout or block size is not supported."
+                    )
                 if not contiguous:
                     raise NotImplementedError(
                         f"The blocks of {name!r} are not contiguous, so the "
                         "remote's cannot land in them: use the same KV cache "
                         "layout and block size on both sides."
                     )
+                order = KVCacheLayout[layout].layer_view_order
                 views = spec.slice_for_tp_transfer(
-                    self._transfer_block(spec, group, block_len, ratio, layout)
+                    self._transfer_block(spec, group, block_len, order, ratio)
                 )
+            # Both sides lay out every block alike: pair the first of each.
             views = {component: view[:1] for component, view in views.items()}
+            remote_views = {
+                component: view[:1] for component, view in remote_views.items()
+            }
             # Pair our shards with those of each remote rank.
             pairs_by_rank = pair_shards(
                 views,
@@ -297,40 +317,12 @@ class NixlBaseConnectorWorker:
                 remote_tp_size,
                 receiving=receiving,
             )
-            num_bytes = sum(view.numel() for view in views.values())
-            remote_num_bytes = sum(view.numel() for view in remote_views.values())
-            paired = [
-                sum(shard.numel() for shard, _ in pairs)
-                for pairs in pairs_by_rank.values()
-            ]
-            if ratio > 1 and any(
-                size != num_bytes or (split > 1 and size != remote_num_bytes)
-                for size in paired
-            ):
-                # Smaller remote blocks land as whole sub-blocks of ours.
-                raise NotImplementedError(
-                    f"Layer {name!r} cannot be re-sharded across TP {tp_size} and "
-                    f"{remote_tp_size}: the remote blocks are smaller."
-                )
-            remote_len = block_len
-            if remote is not None:
-                remote_len = nixl_agent_meta.block_lens[remote] // split
-                remote_end = max(map(view_end, remote_views.values()))
-                if contiguous and (
-                    remote_len < remote_end
-                    or (remote_len > remote_end and spec.page_size_padded is None)
-                ):
-                    raise ValueError(
-                        f"Layer {name!r} has blocks of {remote_len} bytes on "
-                        f"the remote, which do not hold its shards there."
-                    )
-
             # The bytes of each pair that are contiguous on both sides.
             ranges_by_rank = {
                 rank: contiguous_byte_ranges(pairs)
                 for rank, pairs in pairs_by_rank.items()
             }
-            # Merge the ranges that touch. A block both sides hold alike moves
+            # Merge the ranges that touch. A unit both sides hold alike moves
             # whole, padding included; as on main, recurrent state sharded
             # across TP leaves its padding behind.
             sharded_state = isinstance(spec, MambaSpec) and not spec.tp_replicated
@@ -360,16 +352,16 @@ class NixlBaseConnectorWorker:
     def _byte_range_descs(
         cls,
         byte_ranges: list[tuple[int, int, int, int]],
-        regions: Sequence[tuple[int, int, int]],
+        regions: Sequence[tuple[int, int, int, int]],
         device_id: int,
     ) -> tuple[np.ndarray, dict[tuple[int, int, int, int], int], list[int]]:
         """Nx5 strided descs of each distinct `(region, offset, num_bytes,
         block_size_ratio)` byte range of a region's blocks, the first desc id
         of each, and the region of each desc row.
 
-        `regions[i]` is `(base_addr, block_stride, num_blocks)`; a range
-        moves `num_bytes` from `offset` of every block, `block_size_ratio`
-        times per block.
+        `regions[i]` is `(base_addr, block_len, block_stride, num_blocks)`; a
+        range moves `num_bytes` from `offset` of each of the
+        `block_size_ratio` units of every block.
         """
         starts: dict[tuple[int, int, int, int], int] = {}
         parts = [np.empty((0, 5), dtype=np.uint64)]
@@ -379,9 +371,15 @@ class NixlBaseConnectorWorker:
             if byte_range in starts:
                 continue
             region, offset, num_bytes, ratio = byte_range
-            base_addr, stride, num_blocks = regions[region]
+            base_addr, block_len, stride, num_blocks = regions[region]
             descs = cls._block_strided_descs(
-                base_addr + offset, num_bytes, stride, num_blocks, ratio, device_id
+                base_addr + offset,
+                num_bytes,
+                block_len // ratio,
+                stride,
+                num_blocks,
+                ratio,
+                device_id,
             )
             starts[byte_range] = num_descs
             num_descs += int(descs[:, 4].sum())
@@ -1173,7 +1171,7 @@ class NixlBaseConnectorWorker:
         }
         senders = set[int]().union(
             *self._tp_byte_ranges(
-                metadata, list(regions), remote_tp_size, 1, 1, receiving=True
+                metadata, list(regions), remote_tp_size, 1, receiving=True
             )
         )
         self._push_senders[metadata.engine_id][remote_pp_rank] = len(senders)
@@ -1565,7 +1563,7 @@ class NixlBaseConnectorWorker:
                 block = byte_view(cache)
                 contiguous = view_end(block[:1]) == block[:1].numel()
             else:
-                block = self._transfer_block(layer_spec, group_id, block_len, 1, layout)
+                block = self._transfer_block(layer_spec, group_id, block_len, layout)
                 contiguous = True
             self._layer_views[layer_name] = (
                 layer_spec.slice_for_tp_transfer(block),
@@ -1687,32 +1685,33 @@ class NixlBaseConnectorWorker:
     @staticmethod
     def _block_strided_descs(
         base_addr: int,
-        block_len: int,
+        num_bytes: int,
+        unit_len: int,
         block_stride: int,
         num_blocks: int,
         block_size_ratio: int,
         device_id: int,
     ) -> np.ndarray:
-        """Nx5 strided descs for `num_blocks` blocks, each split into
-        `block_size_ratio` sub-blocks of `block_len` bytes.
+        """Nx5 strided descs of `num_bytes` in each of the `block_size_ratio`
+        units of `unit_len` bytes that `num_blocks` blocks split into.
 
-        Evenly spaced sub-blocks collapse into one strided desc. In a padded
-        block the sub-blocks abut only within the block, so each block gets
-        its own.
+        Evenly spaced units collapse into one strided desc. In a padded
+        block the units abut only within the block, so each block gets its
+        own.
         """
-        if block_size_ratio == 1 or block_stride == block_size_ratio * block_len:
+        if block_size_ratio == 1 or block_stride == block_size_ratio * unit_len:
             stride = block_stride // block_size_ratio
             count = num_blocks * block_size_ratio
             return np.array(
-                [[base_addr, block_len, device_id, stride, count]], dtype=np.uint64
+                [[base_addr, num_bytes, device_id, stride, count]], dtype=np.uint64
             )
         strided_descs = np.empty((num_blocks, 5), dtype=np.uint64)
         strided_descs[:, 0] = (
             base_addr + np.arange(num_blocks, dtype=np.uint64) * block_stride
         )
-        strided_descs[:, 1] = block_len
+        strided_descs[:, 1] = num_bytes
         strided_descs[:, 2] = device_id
-        strided_descs[:, 3] = block_len
+        strided_descs[:, 3] = unit_len
         strided_descs[:, 4] = block_size_ratio
         return strided_descs
 
@@ -1726,14 +1725,14 @@ class NixlBaseConnectorWorker:
     def _continues(
         byte_range: tuple[int, int, int, int],
         last: tuple[int, int, int, int],
-        regions: Sequence[tuple[int, int, int]],
+        regions: Sequence[tuple[int, int, int, int]],
         mem_types: Sequence[str],
     ) -> bool:
         """Whether `byte_range` starts where `last` ends in every block."""
         region, offset, _, ratio = byte_range
         last_region, last_offset, last_num_bytes, last_ratio = last
-        base_addr, *blocks = regions[region]
-        last_base_addr, *last_blocks = regions[last_region]
+        base_addr, _, *blocks = regions[region]
+        last_base_addr, _, *last_blocks = regions[last_region]
         return (
             ratio == last_ratio == 1
             and blocks == last_blocks
@@ -1761,6 +1760,7 @@ class NixlBaseConnectorWorker:
         local_regions = list(
             zip(
                 self.kv_caches_base_addr[self.engine_id][self.tp_rank],
+                self.block_len_per_layer,
                 self.block_stride_per_layer,
                 self.region_num_blocks,
             )
@@ -1769,6 +1769,7 @@ class NixlBaseConnectorWorker:
         remote_regions = list(
             zip(
                 nixl_agent_meta.kv_caches_base_addr,
+                nixl_agent_meta.block_lens,
                 nixl_agent_meta.block_strides,
                 stage.region_num_blocks
                 if stage is not None
@@ -1938,6 +1939,21 @@ class NixlBaseConnectorWorker:
             num * (1 if _is_ssm_spec(self._group_spec_types[group]) else split)
             for group, num in enumerate(meta.physical_blocks_per_group)
         ]
+        # An MLA block has one head, so a cut in its tokens is contiguous.
+        for name, views in meta.layer_meta_tensors.items():
+            if not isinstance(self._layer_specs.get(name), MambaSpec):
+                meta.layer_meta_tensors[name] = {
+                    component: (
+                        offset // split,
+                        (blocks, heads, tokens // split, channels),
+                        (stride // split, *strides),
+                    )
+                    for component, (
+                        offset,
+                        (blocks, heads, tokens, channels),
+                        (stride, *strides),
+                    ) in views.items()
+                }
         self._remote_block_splits[meta.engine_id] = split
 
     def add_remote_agent(
@@ -2103,7 +2119,6 @@ class NixlBaseConnectorWorker:
                 list(zip(pairs.local, pairs.group, pairs.remote)),
                 remote_tp_size,
                 remote_dcp_size,
-                block_size_ratio,
                 receiving=self._TRANSFER_MODE == "pull",
             )
             # Engine-level maps mirror the PP=1 stage (or the first stage that
