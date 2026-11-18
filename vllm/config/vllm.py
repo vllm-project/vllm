@@ -150,10 +150,14 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # recipe can start.
         # HYV4 also runs without torch.compile, preserving runtime-shape
         # kernel selection during graph capture.
-        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+        # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
+        return (
+            frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+            | _QWEN3_5_ARCHITECTURES
+        )
     if current_platform.is_cuda():
-        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
-        # platforms keep the torch.compile path.
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA and ROCm;
+        # other platforms keep the torch.compile path.
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
@@ -1296,10 +1300,6 @@ class VllmConfig:
             # its load_weights runs a layerwise reload, and its post-load
             # processing replaces the weight parameter
             raise ValueError("Direct reload does not support torchao quantization.")
-        if self.lora_config is not None:
-            # LoRA wraps layers after cold start; their wrappers forward
-            # `quant_method`, so a rerun would process each base layer twice
-            raise ValueError("Direct reload does not support LoRA.")
         spec = self.speculative_config
         if spec is not None and spec.draft_lm_head_quantization is not None:
             # after `begin` the draft's quantized lm_head is a view of the target
@@ -1573,6 +1573,7 @@ class VllmConfig:
             self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
             return
 
+        self._resolve_specialized_decode_switch()
         self._resolve_mm_encoder_only()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
@@ -1632,7 +1633,7 @@ class VllmConfig:
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
         ):
             dcp_size = self.parallel_config.decode_context_parallel_size
             transfer_tp_size = max(
@@ -3097,6 +3098,25 @@ class VllmConfig:
             "omit the embedding tensor."
         )
 
+    def _resolve_specialized_decode_switch(self) -> None:
+        """`kernel_config.monokernel` and
+        `additional_config={"decode_backend": "latency_specialized"}` are one
+        switch: setting either sets both, whichever one a model reads."""
+        extra = self.additional_config
+        if not isinstance(extra, dict):
+            return
+        backend = extra.get("decode_backend")
+        if backend == "latency_specialized":
+            self.kernel_config.monokernel = True
+        elif self.kernel_config.monokernel:
+            if backend is not None:
+                raise ValueError(
+                    "--monokernel conflicts with additional_config "
+                    f"decode_backend={backend!r}; it means "
+                    "decode_backend=latency_specialized."
+                )
+            self.additional_config = {**extra, "decode_backend": "latency_specialized"}
+
     def _resolve_mm_encoder_only(self) -> None:
         """Enable encoder-only mode for a dedicated EC producer."""
         ec_config = self.ec_transfer_config
@@ -3630,7 +3650,7 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if not self.kv_transfer_config.has_connector("NixlConnector"):
+        if not self.kv_transfer_config.has_connector("NixlPullConnector"):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
@@ -3659,13 +3679,9 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is finalized from the global KV cache groups.
-        nixl_pd_active = (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
-        )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        # Runs after adjust_dcp_kv_cache_interleave_size, so an auto-resolved NIXL
+        # interleave is already the local block size here.
+        if self.parallel_config.decode_context_parallel_size > 1:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0

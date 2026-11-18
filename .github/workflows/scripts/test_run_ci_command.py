@@ -1697,6 +1697,7 @@ class RocmCacheTest(unittest.TestCase):
         return amd
 
     def test_commands_are_rocm_ci_commands_on_amd_ci(self) -> None:
+        # AMD CI is searched for the source build; the cache build runs in CI.
         for command in (COMMAND_ROCM_CACHE, COMMAND_ROCM_NOCACHE):
             self.assertEqual(parse_command(command), command)
             self.assertEqual(pipeline_for_command(command), "amd-ci")
@@ -1721,7 +1722,9 @@ class RocmCacheTest(unittest.TestCase):
 
         amd = self.comment(github, ci_builds=builds)
 
-        (build,) = amd.created_builds
+        # One CI build that runs only the cache step, not a build in AMD CI.
+        self.assertEqual(amd.created_builds, [])
+        (build,) = self.ci.created_builds
         self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
         self.assertEqual(
             build["env"],
@@ -1729,6 +1732,7 @@ class RocmCacheTest(unittest.TestCase):
                 "ROCM_PROMOTE_PR": "42",
                 "ROCM_PROMOTE_SHA": "fedcba9876543210",
                 "ROCM_PROMOTE_IMAGES": "s@d1 w@d2",
+                "VLLM_CI_ONLY_STEP_KEYS": '["rocm-base-image-cache"]',
             },
         )
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
@@ -1736,13 +1740,39 @@ class RocmCacheTest(unittest.TestCase):
         self.assertIn("`fedcba987654`", github.comments[0])
         self.assertEqual(self.ci.list_requests[0]["branch"], "contributor:feature")
 
+    def test_cache_copies_the_runtime_and_test_deps_the_source_pushed(self) -> None:
+        meta_data = {
+            **STACK_BUILT,
+            "rocm-rocm-runtime-built": "r@d3",
+            "rocm-rocm-test-deps-built": "t@d4",
+        }
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        self.comment(github, ci_builds=[ci_build(meta_data=meta_data)])
+
+        (build,) = self.ci.created_builds
+        self.assertEqual(build["env"]["ROCM_PROMOTE_IMAGES"], "s@d1 w@d2 r@d3 t@d4")
+
+    def test_cache_skips_children_the_source_did_not_build_on_its_stack(self) -> None:
+        meta_data = {
+            **STACK_BUILT,
+            "rocm-rocm-runtime-built": "none",
+            "rocm-rocm-test-deps-built": "none",
+        }
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        self.comment(github, ci_builds=[ci_build(meta_data=meta_data)])
+
+        (build,) = self.ci.created_builds
+        self.assertEqual(build["env"]["ROCM_PROMOTE_IMAGES"], "s@d1 w@d2")
+
     def test_cache_finds_the_source_on_a_later_page(self) -> None:
         reused = ci_build(meta_data={"rocm-rocm-stack": "s@d3"})
         github = FakeGitHub(files=STACK_PR_FILES)
 
-        amd = self.comment(github, ci_pages=[[reused] * 100, [ci_build()], []])
+        self.comment(github, ci_pages=[[reused] * 100, [ci_build()], []])
 
-        self.assertEqual(len(amd.created_builds), 1)
+        self.assertEqual(len(self.ci.created_builds), 1)
         self.assertEqual(
             [(r["branch"], r["page"]) for r in self.ci.list_requests],
             [("contributor:feature", 1), ("contributor:feature", 2), ("feature", 1)],
@@ -1755,9 +1785,9 @@ class RocmCacheTest(unittest.TestCase):
         pr["head"]["ref"] = "main"
         github = FakeGitHub(files=STACK_PR_FILES, pr=pr)
 
-        amd = self.comment(github, ci_pages=[[ci_build()]])
+        self.comment(github, ci_pages=[[ci_build()]])
 
-        self.assertEqual(len(amd.created_builds), 1)
+        self.assertEqual(len(self.ci.created_builds), 1)
         self.assertEqual(
             [(r["branch"], r["created_from"]) for r in self.ci.list_requests],
             [("contributor:main", "2026-01-01T00:00:00Z")],
@@ -1772,9 +1802,9 @@ class RocmCacheTest(unittest.TestCase):
     def test_cache_finds_a_source_created_under_the_bare_ref(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
 
-        amd = self.comment(github, ci_pages=[[], [ci_build()]])
+        self.comment(github, ci_pages=[[], [ci_build()]])
 
-        (build,) = amd.created_builds
+        (build,) = self.ci.created_builds
         self.assertEqual(build["env"]["ROCM_PROMOTE_SHA"], "fedcba9876543210")
 
     def test_nocache_records_the_decision_without_a_build(self) -> None:
@@ -1782,7 +1812,7 @@ class RocmCacheTest(unittest.TestCase):
 
         amd = self.comment(github, COMMAND_ROCM_NOCACHE)
 
-        self.assertEqual(amd.created_builds, [])
+        self.assertEqual(amd.created_builds + self.ci.created_builds, [])
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
         self.assertIn("@reviewer chose not to cache", github.comments[0])
 
@@ -1819,7 +1849,7 @@ class RocmCacheTest(unittest.TestCase):
             with self.subTest(text=text):
                 amd = self.comment(github, ci_builds=builds, actor=actor)
 
-                self.assertEqual(amd.created_builds, [])
+                self.assertEqual(amd.created_builds + self.ci.created_builds, [])
                 self.assertIn(text, github.comments[0])
                 self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
@@ -1828,7 +1858,7 @@ class RocmCacheTest(unittest.TestCase):
 
         amd = self.comment(github)
 
-        self.assertEqual(amd.created_builds, [])
+        self.assertEqual(amd.created_builds + self.ci.created_builds, [])
         self.assertIn("nothing to do", github.comments[0])
         self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
