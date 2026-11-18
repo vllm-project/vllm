@@ -33,6 +33,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
@@ -446,17 +447,17 @@ class NemotronLabsDiffusionRequestStates:
 
     def init_canvas(self, slot_indices) -> None:
         """Reset the canvas to all-mask for the given slots."""
-        self.canvas[slot_indices] = self.mask_token_id
+        self.canvas.index_fill_(0, slot_indices, self.mask_token_id)
 
     def add_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = True
+        self.is_encoder_phase[slot_idx].fill_(True)
         self.canvas[slot_idx] = self.mask_token_id
-        self.step[slot_idx] = 0
+        self.step[slot_idx].fill_(0)
         self.unmask_logprobs[slot_idx] = 0.0
         self.unmask_ranks[slot_idx] = 0
 
     def remove_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = False
+        self.is_encoder_phase[slot_idx].fill_(False)
 
 
 class NemotronLabsDiffusionModelState(ModelState):
@@ -884,18 +885,19 @@ class MaskedDiffusionSampler:
         if max_num_logprobs > 0 and num_decode > 0:
             converged_mask = states.is_encoder_phase[decode_slots]
             just_converged = converged_mask & ~is_committing
-            if just_converged.any():
+            with gpu_sync_allowed():
+                just_converged_np = just_converged.cpu().numpy()
+            if just_converged_np.any():
                 flat_logits = logits_3d.reshape(-1, logits_3d.shape[-1])
                 final_canvas = states.canvas[decode_slots]
-                for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                    li = int(local_idx.item())
-                    slot = int(decode_slots[local_idx].item())
+                for li in np.flatnonzero(just_converged_np).tolist():
+                    slot = int(decode_slots_np[li])
                     k_i = int(valid_canvas_len_np[li])
                     row = li * CL
                     self._pending_logprobs[slot] = compute_topk_scores(
                         flat_logits[row : row + k_i],
                         max_num_logprobs,
-                        final_canvas[local_idx][:k_i],
+                        final_canvas[li][:k_i],
                     )
 
         # Commit steps: emit logprobs for the committed block. The sampled
@@ -903,7 +905,10 @@ class MaskedDiffusionSampler:
         # they are needed (logprobs==0); top-k rows come from the stash.
         logprobs_tensors = None
         emit = max_num_logprobs >= 0 and num_decode > 0
-        committing_np = is_committing.cpu().numpy() if emit else None
+        committing_np = None
+        if emit:
+            with gpu_sync_allowed():
+                committing_np = is_committing.cpu().numpy()
         if emit and committing_np is not None and committing_np.any():
             decode_row_of_req = {
                 int(decode_indices_np[li]): li for li in range(num_decode)
