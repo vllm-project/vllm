@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer autotune cache helpers."""
 
-import hashlib
 import os
 import tempfile
 from contextlib import suppress
@@ -10,12 +9,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, VllmConfig, replace
+from vllm.config import CacheConfig, MultiModalConfig, VllmConfig, replace
+from vllm.config.utils import hash_config, hash_factors, normalize_value
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -29,13 +29,68 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
     return normalized
 
 
+def _flashinfer_mm_encoder_autotune_hash(
+    mm_config: MultiModalConfig, *, enable_chunked_prefill: bool
+) -> str:
+    return hash_factors(
+        {
+            "encoder_config": hash_config(mm_config),
+            "enable_chunked_prefill": enable_chunked_prefill,
+            "video_pruning_rate": mm_config.video_pruning_rate,
+            "video_pruning_method": mm_config.video_pruning_method,
+            "mm_processor_kwargs": normalize_value(mm_config.mm_processor_kwargs),
+            "limit_per_prompt": normalize_value(mm_config.limit_per_prompt),
+        }
+    )
+
+
+def get_flashinfer_mm_encoder_autotune_config(
+    vllm_config: VllmConfig,
+) -> MultiModalConfig | None:
+    """Return the multimodal config when encoder autotuning is enabled."""
+    model_config = vllm_config.model_config
+    if (
+        model_config is None
+        or not model_config.supports_multimodal_inputs
+        or not vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
+    ):
+        return None
+    mm_config = model_config.multimodal_config
+    if mm_config is None or mm_config.skip_mm_profiling:
+        return None
+    return mm_config
+
+
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
     vllm_config: VllmConfig = runner.vllm_config
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
-    config_hash = vllm_config.compute_hash(include_version=False)
-    return hashlib.sha256(config_hash.encode()).hexdigest()
+    factors = vllm_config.compile_factors(include_version=False)
+    mm_config = get_flashinfer_mm_encoder_autotune_config(vllm_config)
+    if mm_config is not None:
+        factors["flashinfer_mm_encoder_autotune"] = (
+            _flashinfer_mm_encoder_autotune_hash(
+                mm_config,
+                enable_chunked_prefill=vllm_config.scheduler_config.enable_chunked_prefill,
+            )
+        )
+    # DP runs with padding skip tune TRT-LLM MoE's precomputed-routing ops
+    # instead of the logits ops; a cache from before lacks them, and a hit
+    # skips all tuning.
+    if (
+        vllm_config.parallel_config.data_parallel_size > 1
+        and envs.VLLM_MOE_SKIP_PADDING
+        and not envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        and any(
+            isinstance(m, RoutedExperts) and m.supports_precomputed_routing
+            for m in runner.get_model().modules()
+        )
+    ):
+        factors = {**factors, "moe_routed": True}
+    return hash_factors(factors)
 
 
 def flashinfer_autotune_root() -> Path:
@@ -66,7 +121,7 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
-    """The per-rank variant of :func:`resolve_flashinfer_autotune_file`."""
+    """The per-rank variant of `resolve_flashinfer_autotune_file`."""
     from vllm.distributed.parallel_state import get_world_group
 
     path = resolve_flashinfer_autotune_file(runner)
@@ -114,10 +169,10 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
 def resolve_flashinfer_autotune_v2_root() -> Path | None:
     """Placement root for FlashInfer's managed autotune store.
 
-    Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
+    Unlike `resolve_flashinfer_autotune_file`, no vLLM-side identity
     (config hash, flashinfer version, arch) is folded into the path: the
     managed store keys entries per op and hashes the software/hardware
-    environment itself. ``None`` selects FlashInfer's default root.
+    environment itself. `None` selects FlashInfer's default root.
     """
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     return Path(override_dir).expanduser() if override_dir else None

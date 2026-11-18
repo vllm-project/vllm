@@ -58,8 +58,8 @@ def _is_oink_stride_compatible_2d(x_2d: Tensor) -> bool:
     return (x_2d.stride(0) % divby) == 0
 
 
-oink_rms_supported = (
-    lambda x, weight, epsilon, variance_size=None: variance_size is None
+oink_rms_supported = lambda x, weight, epsilon, variance_size=None: (
+    variance_size is None
     and weight is not None
     and x.dim() >= 2
     and x.dtype == weight.dtype
@@ -87,8 +87,8 @@ def rms_norm(
     return torch.ops.oink.rmsnorm(x_2d, weight, epsilon).view_as(x)
 
 
-oink_add_rms_supported = (
-    lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+oink_add_rms_supported = lambda x, x_residual, weight, epsilon, variance_size=None: (
+    variance_size is None
     and weight is not None
     and x.dim() >= 2
     and x.dtype == weight.dtype

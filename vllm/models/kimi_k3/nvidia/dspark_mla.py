@@ -3,6 +3,7 @@
 """K3 dense MLA draft model for DSpark speculative decoding."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -27,9 +28,10 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig, is_quantized_kv_cache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -60,6 +62,15 @@ def _duplicate_context_kv_weights(
         yield f"context_kv_proj.{param_name}", fused_weight
 
 
+class K3DSparkAttention(MultiHeadLatentAttention):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        # DFlash derives the slots of every draft KV write from the block table.
+        layer_config = super().get_kv_cache_config(vllm_config)
+        return replace(
+            layer_config, spec=SelfAddressedMLASpec.from_spec(layer_config.spec)
+        )
+
+
 class K3DSparkDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -72,7 +83,7 @@ class K3DSparkDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         quant_config = get_draft_quant_config(vllm_config)
-        self.self_attn = MultiHeadLatentAttention(
+        self.self_attn = K3DSparkAttention(
             config=config,
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -224,8 +235,6 @@ class K3DSparkModel(nn.Module):
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         """Project target-derived context into each draft layer's latent cache."""
-        if not hasattr(self, "_num_context_layers"):
-            self._build_fused_context_kv_metadata()
         self._precompute_fused_context_kv(
             context_states, context_positions, context_slot_mapping
         )

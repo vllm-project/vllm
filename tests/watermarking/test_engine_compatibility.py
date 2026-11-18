@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 
-MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 MAX_NUM_BATCHED_TOKENS = 32
 
 pytestmark = pytest.mark.skipif(

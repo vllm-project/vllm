@@ -8,7 +8,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
 use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::reasoning::ReasoningControl;
@@ -131,21 +131,33 @@ impl InklingChatRenderer {
     /// Multimodal preprocessing later expands the marker into per-patch
     /// image placeholder tokens once the patch count is known, mirroring the
     /// Python `InklingMultiModalProcessor` marker-anchored prompt updates.
-    fn write_image_block(&self, out: &mut Vec<u32>, role_token_id: u32) {
-        out.push(role_token_id);
+    fn write_image_block(
+        &self,
+        out: &mut Vec<u32>,
+        role_token_id: u32,
+        author_name: Option<&str>,
+    ) -> Result<()> {
+        self.write_message_start(out, role_token_id, author_name)?;
         out.push(self.special.content_image);
         out.push(self.special.end_message);
+        Ok(())
     }
 
     /// Write one audio block holding the `<|content_audio_input|>` marker
     /// followed by the `<|audio_end|>` terminator. Multimodal preprocessing
     /// later expands the marker into per-frame audio placeholder tokens
     /// (landing before `<|audio_end|>`) once the clip length is known.
-    fn write_audio_block(&self, out: &mut Vec<u32>, role_token_id: u32) {
-        out.push(role_token_id);
+    fn write_audio_block(
+        &self,
+        out: &mut Vec<u32>,
+        role_token_id: u32,
+        author_name: Option<&str>,
+    ) -> Result<()> {
+        self.write_message_start(out, role_token_id, author_name)?;
         out.push(self.special.content_audio_input);
         out.push(self.special.audio_end);
         out.push(self.special.end_message);
+        Ok(())
     }
 
     fn write_reasoning_block(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {
@@ -212,25 +224,39 @@ impl InklingChatRenderer {
             }
             ChatContent::Parts(parts) => {
                 for part in parts {
-                    match part {
-                        ChatContentPart::Text { text } => {
-                            self.write_text_block(out, role_token_id, None, text)?;
-                        }
-                        ChatContentPart::ImageUrl { .. } => {
-                            self.write_image_block(out, role_token_id);
-                        }
-                        ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
-                            self.write_audio_block(out, role_token_id);
-                        }
-                        // Inkling has no video modality.
-                        ChatContentPart::VideoUrl { .. } => {
-                            return Err(Error::UnsupportedMultimodalContent("video_url"));
-                        }
-                    }
+                    self.write_part_block(out, role_token_id, None, part)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Write one content part as its own block.
+    fn write_part_block(
+        &self,
+        out: &mut Vec<u32>,
+        role_token_id: u32,
+        author_name: Option<&str>,
+        part: &ChatContentPart,
+    ) -> Result<()> {
+        match part {
+            ChatContentPart::Text { text } => {
+                self.write_text_block(out, role_token_id, author_name, text)
+            }
+            ChatContentPart::ImageUrl { .. } => {
+                self.write_image_block(out, role_token_id, author_name)
+            }
+            ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                self.write_audio_block(out, role_token_id, author_name)
+            }
+            // Inkling has no video modality.
+            ChatContentPart::VideoUrl { .. } => {
+                Err(Error::UnsupportedMultimodalContent("video_url"))
+            }
+            ChatContentPart::ToolReference { .. } => {
+                Err(Error::UnsupportedContentPart("tool_reference"))
+            }
+        }
     }
 
     fn write_assistant_tool_call(
@@ -282,9 +308,35 @@ impl InklingChatRenderer {
         tool_call_id: &str,
         tool_call_id_to_name: &HashMap<String, String>,
     ) -> Result<()> {
-        let text = content.try_flatten_to_text()?;
+        let role_token_id = self.special.message_tool;
         let tool_name = tool_call_id_to_name.get(tool_call_id).map(String::as_str).unwrap_or("");
-        self.write_text_block(out, self.special.message_tool, Some(tool_name), &text)
+        let parts = match content {
+            ChatContent::Text(text) => {
+                return self.write_text_block(out, role_token_id, Some(tool_name), text);
+            }
+            ChatContent::Parts(parts) => parts,
+        };
+
+        // Tool results may carry media, such as screenshots: each media part
+        // gets its own block, while adjacent text parts share one, so a
+        // text-only result keeps the single-block framing.
+        let mut text = None::<String>;
+        for part in parts {
+            if let ChatContentPart::Text { text: part_text } = part {
+                text.get_or_insert_default().push_str(part_text);
+                continue;
+            }
+            if let Some(text) = text.take() {
+                self.write_text_block(out, role_token_id, Some(tool_name), &text)?;
+            }
+            self.write_part_block(out, role_token_id, Some(tool_name), part)?;
+        }
+        // An empty result still writes a block, so its tool call is answered.
+        if text.is_some() || parts.is_empty() {
+            let text = text.unwrap_or_default();
+            self.write_text_block(out, role_token_id, Some(tool_name), &text)?;
+        }
+        Ok(())
     }
 }
 
@@ -416,20 +468,7 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
     let name_json = serde_json::to_string(&tool_call.name)
         .map_err(|error| Error::ChatTemplate(error.as_report().to_string()))?;
-    let arguments = if tool_call.arguments.trim().is_empty() {
-        Value::Object(Map::new())
-    } else {
-        serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::ChatTemplate(format!(
-                "Inkling tool call arguments must decode to a JSON object: {error}"
-            ))
-        })?
-    };
-    let Value::Object(_) = arguments else {
-        return Err(Error::ChatTemplate(
-            "Inkling tool call arguments must decode to a JSON object".to_string(),
-        ));
-    };
+    let arguments = Value::Object(tool_call_arguments_or_empty(&tool_call.arguments));
     let args_json = compact_json(&sort_json(&arguments))?;
     Ok(format!("{{\"name\":{name_json},\"args\":{args_json}}}"))
 }

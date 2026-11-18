@@ -382,9 +382,9 @@ def test_parse_delta_keeps_reasoning_open_after_closed_think_prompt(
 
     Regression: reasoning system prompts end the prompt with a closed
     `[THINK]...[/THINK]` block. With a parser-injected grammar the generation's
-    reasoning must still be captured as ``reasoning_content`` rather than
-    leaking into ``content`` (the prompt-based reasoning-end heuristic must be
-    skipped). This exercises ``DelegatingParser.parse_delta``'s prompt check,
+    reasoning must still be captured as `reasoning_content` rather than
+    leaking into `content` (the prompt-based reasoning-end heuristic must be
+    skipped). This exercises `DelegatingParser.parse_delta`'s prompt check,
     which the isolated reasoning-parser tests do not cover.
     """
     parser_cls = ParserManager.get_parser(

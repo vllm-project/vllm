@@ -43,7 +43,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
+                ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
             )
 
     if keywords is None:
@@ -144,11 +144,11 @@ def test_custom_compile_config(
     run_model(compilation_config, model, **model_kwargs)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_depyf_integration(disable_vllm_compile_cache):
     """Compile with depyf's debugging hooks installed.
 
-    ``disable_vllm_compile_cache`` is what makes this a test rather than a
+    `disable_vllm_compile_cache` is what makes this a test rather than a
     formality: depyf only ever sees a compilation that actually runs, so served
     from a warm cache this exercises none of its hooks.
     """

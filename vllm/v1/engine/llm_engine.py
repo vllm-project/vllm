@@ -19,7 +19,7 @@ from vllm.config.profiler import (
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.exceptions import ProfilerAlreadyActiveError
+from vllm.exceptions import ProfilerAlreadyActiveError, VLLMValidationError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
@@ -99,6 +99,8 @@ class LLMEngine:
 
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
+        # lora_int_id -> (lora_name, lora_path) of every adapter seen so far.
+        self._lora_adapters: dict[int, tuple[str, str]] = {}
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
@@ -283,6 +285,8 @@ class LLMEngine:
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
+        if request.lora_request is not None:
+            self._register_lora(request.lora_request)
         self.input_processor.assign_request_id(request)
 
         req_id = request.request_id
@@ -423,17 +427,19 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
+        self.engine_core.sleep(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         self.renderer.clear_mm_cache()
-        self.engine_core.release_kv_cache_memory()
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
@@ -476,11 +482,31 @@ class LLMEngine:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
+        self._register_lora(lora_request)
         return self.engine_core.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         """Remove an already loaded LoRA adapter."""
-        return self.engine_core.remove_lora(lora_id)
+        removed = self.engine_core.remove_lora(lora_id)
+        if removed:
+            self._lora_adapters.pop(lora_id, None)
+        return removed
+
+    def _register_lora(self, lora_request: LoRARequest) -> None:
+        """Rejects a `lora_int_id` already used by a different adapter, since
+        the workers would serve it with the other adapter's weights.
+        `load_inplace` replaces the adapter behind the id. The online server
+        assigns ids itself, so only offline callers can collide."""
+        adapter = (lora_request.lora_name, lora_request.lora_path)
+        known = self._lora_adapters.get(lora_request.lora_int_id)
+        if known is not None and known != adapter and not lora_request.load_inplace:
+            raise VLLMValidationError(
+                f"lora_int_id {lora_request.lora_int_id} is already used by "
+                f"adapter '{known[0]}' from '{known[1]}', so it can't be used "
+                f"for '{adapter[0]}' from '{adapter[1]}'. Give each adapter its "
+                "own lora_int_id."
+            )
+        self._lora_adapters[lora_request.lora_int_id] = adapter
 
     def list_loras(self) -> set[int]:
         """List all registered adapters."""
@@ -517,14 +543,11 @@ class LLMEngine:
     @staticmethod
     def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
-        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+        from vllm.compilation.wrapper import remove_bytecode_hooks
 
         model = model_ref()
-        if model is None:
-            return
-        for module in model.modules():
-            if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                module.cleanup()
+        if model is not None:
+            remove_bytecode_hooks(model)
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
