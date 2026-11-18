@@ -1120,6 +1120,8 @@ class MoRIIOConnectorScheduler:
                     if "remote_engine_id" in params:
                         adjusted_remote_block_ids = remote_block_ids
                         if num_external_tokens > 0:
+                            # Not a full local prefix cache hit. Need to pull blocks
+                            # from remote prefill
                             if self._has_mamba:
                                 # READ is synchronous, so allocate_slots may hash
                                 # destination blocks before this hook runs. Pair
@@ -1209,10 +1211,9 @@ class MoRIIOConnectorScheduler:
                                     adjusted_remote_block_ids.append(aligned_remote)
                                 local_block_ids = aligned_local_block_ids
                         else:
+                            # Attention was a full local cache hit, but any non-cached
+                            # groups still need to be pulled (recurrent state, ring).
                             if self._has_mamba or self._has_state_attn_groups:
-                                # Attention can be a complete local hit, but
-                                # recurrent state and ring groups are never
-                                # prefix-cacheable, so they still need pulling.
                                 attn_block_groups, mamba_block_groups = (
                                     self.split_block_groups(blocks.get_block_ids())
                                 )
@@ -1580,12 +1581,13 @@ class MoRIIOConnectorScheduler:
     ) -> tuple[list[list[int]], list[list[int]]]:
         """Select transferable attention and Mamba block groups.
 
-        The wire payload stores every attention group first, followed by every
-        Mamba group, each in transfer-group order. Sliding-window groups keep
-        only their window; Mamba groups only their running-state slot.
-        Circular-buffer (ring) groups sit in the attention half and keep their
-        single block, which `get_exchange_clipped_blocks` leaves untouched
-        because a ring carries no sliding window.
+        - The wire payload stores every attention group first, followed by every
+        Mamba group, each in transfer-group order.
+        - Sliding-window groups keep only their window
+        - Mamba groups keep only their running-state slot.
+        - Circular buffer groups sit in the attention half and keep their single block
+
+        Returns: attention groups (incl circular buffers), mamba groups
         """
         if not block_ids:
             return [], []
