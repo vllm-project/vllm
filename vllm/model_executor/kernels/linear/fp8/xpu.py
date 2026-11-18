@@ -21,7 +21,7 @@ from .base import Fp8LinearKernel, Fp8LinearLayerConfig
 from .block_base import Fp8BlockLinearKernel
 
 
-class XPUW8A8FP8LinearKernel(Fp8LinearKernel):
+class XPUW8A8Fp8LinearKernel(Fp8LinearKernel):
     _SUPPORTED_ACT_QUANT_KEYS = {
         kFp8DynamicTensorSym,
         kFp8DynamicTokenSym,
@@ -122,7 +122,7 @@ class XPUW8A8FP8LinearKernel(Fp8LinearKernel):
         return output.view(*output_shape)
 
 
-class XPUW8A16FP8LinearKernel(Fp8LinearKernel):
+class XPUW8A16Fp8LinearKernel(Fp8LinearKernel):
     @classmethod
     def executed_activation_key(
         cls, activation_quant_key: QuantKey | None

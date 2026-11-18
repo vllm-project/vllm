@@ -30,8 +30,8 @@ from .base import (
     Fp8LinearLayerConfig,
 )
 from .block_base import (
+    Fp8BlockDynamicLinearKernel,
     Fp8BlockLinearKernel,
-    Fp8BlockScaledDynamicMMLinearKernel,
 )
 from .deep_gemm import DeepGemmFp8BlockLinearKernel, fp8_gemm_nt
 
@@ -148,9 +148,7 @@ class FlashInferFp8BlockLinearKernel(Fp8BlockLinearKernel):
         )
 
 
-class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
-    Fp8BlockScaledDynamicMMLinearKernel
-):
+class FlashInferFp8DeepGemmDynamicBlockLinearKernel(Fp8BlockDynamicLinearKernel):
     """Conditional FlashInfer / DeepGEMM FP8 block-scaled GEMM.
 
     Dispatches between two kernels based on input batch size:

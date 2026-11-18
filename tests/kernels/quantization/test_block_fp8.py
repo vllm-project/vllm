@@ -15,11 +15,13 @@ from tests.kernels.quant_utils import (
 from tests.kernels.utils import fp8_ulp_distance
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+from vllm.model_executor.kernels.linear.fp8.b12x import (
     B12xFp8BlockLinearKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
+    cutlass_scaled_mm,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
@@ -218,7 +220,7 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
     # BlockWiseTorchFp8LinearKernel: 1x128 activation + 128x128 weight
     # block scaling routed through torch._scaled_mm. M=83 is not a multiple of
     # 4 so this also exercises the M-padding path.
-    from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    from vllm.model_executor.kernels.linear.fp8.pytorch import (
         BlockWiseTorchFp8LinearKernel,
     )
 

@@ -20,7 +20,7 @@ from tests.kernels.quantization.nvfp4_utils import get_nvfp4_global_scale
 from tests.utils import TestFP8Layer, requires_fp8
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear import fp8_scaled_mm_is_batch_invariant
-from vllm.model_executor.kernels.linear.scaled_mm import (
+from vllm.model_executor.kernels.linear.fp8 import (
     CutlassFp8LinearKernel,
     TritonFp8LinearKernel,
 )

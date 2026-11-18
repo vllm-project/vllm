@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 from .layer_utils import replace_parameter
 
 if TYPE_CHECKING:
-    from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    from vllm.model_executor.kernels.linear.int8.base import (
         Int8LinearLayerConfig,
     )
 

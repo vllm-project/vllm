@@ -1,15 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""This module re-exports linear kernel implementations to provide a
-stable import interface during an ongoing reorganization. Upcoming
-PRs will remove the scaled_mm and mixed_precision subdirectories
-and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.)
-rather than by precision type. By centralizing exports here, we
-minimize the need to update imports across other modules when the
-internal structure changes. If you are adding a new kernel selector
-or kernel implementation, add it to this __init__.py to maintain
-import stability.
+"""Linear kernels, grouped by quantization scheme (`fp8`, `int8`, `mxfp4`, ...),
+and their selectors. Import kernels from here rather than from the scheme
+subpackages; add new kernels and selectors here too.
 """
 
 from collections.abc import Callable
@@ -23,6 +17,86 @@ from vllm.model_executor.kernels.linear.base import (
     LinearKernel,
     LinearKernelOracle,
     MMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.fp8 import (
+    Fp8BlockLinearKernel,
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.fp8.aiter import (
+    AiterFp8BlockLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
+    AiterTritonPerTensorFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.b12x import (
+    B12xFp8BlockLinearKernel,
+    B12xTensorFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.cpu import (
+    CPUFp8BlockLinearKernel,
+    CPUFp8ChannelWiseLinearKernel,
+    CPUFp8PerTensorLinearKernel,
+    CPUFp8W8A8BlockLinearKernel,
+    CPUFp8W8A8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
+    CutlassFp8BlockLinearKernel,
+    CutlassFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.deep_gemm import (
+    DeepGemmFp8BlockLinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.flashinfer import (
+    FlashInferFp8DeepGemmDynamicBlockLinearKernel,
+    FlashInferFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.humming import (
+    HummingFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.marlin import (
+    MarlinFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.pytorch import (
+    BlockWiseTorchFp8LinearKernel,
+    ChannelWiseTorchFp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
+    RowWiseTorchFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.rocm import (
+    ROCmFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.triton import (
+    TritonFp8BlockLinearKernel,
+    TritonFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.xpu import (
+    XPUFp8BlockLinearKernel,
+    XPUW8A8Fp8LinearKernel,
+    XPUW8A16Fp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8 import (
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.int8.aiter import (
+    AiterInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.cpu import (
+    CPUInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.cutlass import (
+    CutlassInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.humming import (
+    HummingInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.triton import (
+    TritonInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.zentorch import (
+    ZentorchInt8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
@@ -186,74 +260,6 @@ from vllm.model_executor.kernels.linear.requantization_source import (
     FakeMxFp8LinearKernel,
     FakeNvFp4LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    Fp8BlockLinearKernel,
-    Fp8LinearKernel,
-    Fp8LinearLayerConfig,
-    Int8LinearKernel,
-    Int8LinearLayerConfig,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterFp8BlockLinearKernel,
-    AiterHipbMMPerTokenFp8LinearKernel,
-    AiterInt8LinearKernel,
-    AiterPerTokenFp8LinearKernel,
-    AiterPreshuffledPerTokenFp8LinearKernel,
-    AiterTritonPerTensorFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
-    B12xFp8BlockLinearKernel,
-    B12xTensorFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
-    CPUFp8BlockLinearKernel,
-    CPUFp8ChannelWiseLinearKernel,
-    CPUFp8PerTensorLinearKernel,
-    CPUFp8W8A8BlockLinearKernel,
-    CPUFp8W8A8LinearKernel,
-    CPUInt8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFp8BlockLinearKernel,
-    CutlassFp8LinearKernel,
-    CutlassInt8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
-    DeepGemmFp8BlockLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
-    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
-    FlashInferFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.humming import (
-    HummingFp8LinearKernel,
-    HummingInt8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
-    MarlinFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-    BlockWiseTorchFp8LinearKernel,
-    ChannelWiseTorchFp8LinearKernel,
-    PerTensorTorchFp8LinearKernel,
-    RowWiseTorchFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-    ROCmFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.triton import (
-    TritonFp8BlockLinearKernel,
-    TritonFp8LinearKernel,
-    TritonInt8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
-    XPUFp8BlockLinearKernel,
-    XPUW8A8FP8LinearKernel,
-    XPUW8A16FP8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
-    ZentorchInt8LinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.humming import (
     prefers_humming,
     prioritize_humming,
@@ -323,7 +329,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     },
     "flashinfer_cutlass": {
         FlashInferFp8LinearKernel,
-        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferFp8DeepGemmDynamicBlockLinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
         FlashInferMxFp4LinearKernel,
@@ -404,11 +410,11 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     },
     "xpu": {
-        XPUW8A8FP8LinearKernel,
+        XPUW8A8Fp8LinearKernel,
         XPUFp8BlockLinearKernel,
     },
     "xpu_woq": {
-        XPUW8A16FP8LinearKernel,
+        XPUW8A16Fp8LinearKernel,
     },
 }
 
@@ -506,8 +512,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[Fp8LinearKernel]]] = {
         ChannelWiseTorchFp8LinearKernel,
     ],
     PlatformEnum.XPU: [
-        XPUW8A16FP8LinearKernel,
-        XPUW8A8FP8LinearKernel,
+        XPUW8A16Fp8LinearKernel,
+        XPUW8A8Fp8LinearKernel,
         PerTensorTorchFp8LinearKernel,
         ChannelWiseTorchFp8LinearKernel,
     ],
@@ -519,7 +525,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockLinearKernel | Fp8LinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
-        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferFp8DeepGemmDynamicBlockLinearKernel,
         DeepGemmFp8BlockLinearKernel,
         CutlassFp8BlockLinearKernel,
         B12xFp8BlockLinearKernel,
@@ -555,7 +561,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[Fp8LinearKernel]]] = {
         # To be added
     ],
     PlatformEnum.XPU: [
-        XPUW8A16FP8LinearKernel,
+        XPUW8A16Fp8LinearKernel,
     ],
 }
 
@@ -1561,7 +1567,7 @@ __all__ = [
     "TorchNvFp4LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockLinearKernel",
-    "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
+    "FlashInferFp8DeepGemmDynamicBlockLinearKernel",
     "B12xFp8BlockLinearKernel",
     "B12xTensorFp8LinearKernel",
 ]

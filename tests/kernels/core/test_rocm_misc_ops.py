@@ -209,7 +209,7 @@ def test_shuffle_kv_cache_env_propagates_to_rocm_aiter_ops(enabled, monkeypatch)
 def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(enabled, monkeypatch):
     """VLLM_ROCM_USE_SKINNY_GEMM gates ROCm FP8 scaled-mm kernel eligibility."""
     import vllm.envs as envs
-    from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    from vllm.model_executor.kernels.linear.fp8.rocm import (
         ROCmFp8LinearKernel,
     )
 

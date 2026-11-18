@@ -30,7 +30,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
     CutlassFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.attention import MLAAttention

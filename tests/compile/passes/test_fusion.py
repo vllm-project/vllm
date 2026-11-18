@@ -38,14 +38,14 @@ from vllm.model_executor.kernels.linear import (
     CutlassFp8BlockLinearKernel,
     CutlassFp8LinearKernel,
     DeepGemmFp8BlockLinearKernel,
-    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+    FlashInferFp8DeepGemmDynamicBlockLinearKernel,
     FlashInferFp8LinearKernel,
     PerTensorTorchFp8LinearKernel,
     ROCmFp8LinearKernel,
     RowWiseTorchFp8LinearKernel,
     TritonFp8BlockLinearKernel,
     XPUFp8BlockLinearKernel,
-    XPUW8A8FP8LinearKernel,
+    XPUW8A8Fp8LinearKernel,
     _KernelT,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
@@ -75,7 +75,7 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # ChannelWiseTorchFp8LinearKernel only supports per-token
     (ChannelWiseTorchFp8LinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes
-    (FlashInferFp8DeepGEMMDynamicBlockScaledKernel, GroupShape(1, 128)),
+    (FlashInferFp8DeepGemmDynamicBlockLinearKernel, GroupShape(1, 128)),
     (CutlassFp8BlockLinearKernel, GroupShape(1, 128)),
     (DeepGemmFp8BlockLinearKernel, GroupShape(1, 128)),
     (TritonFp8BlockLinearKernel, GroupShape(1, 128)),
@@ -97,8 +97,8 @@ ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
 
 # XPU kernels
 XPU_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # XPUW8A8FP8LinearKernel: per-token weights are not supported
-    (XPUW8A8FP8LinearKernel, GroupShape.PER_TENSOR),
+    # XPUW8A8Fp8LinearKernel: per-token weights are not supported
+    (XPUW8A8Fp8LinearKernel, GroupShape.PER_TENSOR),
     # PerTensorTorchFp8LinearKernel only supports per-tensor
     (PerTensorTorchFp8LinearKernel, GroupShape.PER_TENSOR),
     # ChannelWiseTorchFp8LinearKernel only supports per-token
@@ -385,7 +385,7 @@ def test_fusion_rmsnorm_quant(
     # and extend the fusion pattern to rewrite the packed activation quant.
     deepgemm_kernels = (
         DeepGemmFp8BlockLinearKernel,
-        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferFp8DeepGemmDynamicBlockLinearKernel,
     )
     if (
         dtype == torch.bfloat16

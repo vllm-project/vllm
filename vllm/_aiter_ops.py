@@ -1033,7 +1033,7 @@ def _rocm_aiter_triton_per_tensor_fp8_gemm_impl(
             A, B.t(), x_scale_vec, w_scale_vec, dtype=out_dtype, backend="triton"
         )
 
-    from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    from vllm.model_executor.kernels.linear.fp8.rocm import (
         rocm_per_tensor_float_w8a8_scaled_mm_impl,
     )
 

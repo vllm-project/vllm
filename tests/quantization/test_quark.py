@@ -26,12 +26,12 @@ from vllm.config.cache import CacheConfig, CacheDType
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
-from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+from vllm.model_executor.kernels.linear.fp8.aiter import (
     AiterHipbMMPerTokenFp8LinearKernel,
     AiterPerTokenFp8LinearKernel,
     AiterPreshuffledPerTokenFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.base import (
+from vllm.model_executor.kernels.linear.fp8.base import (
     Fp8LinearLayerConfig,
 )
 from vllm.model_executor.layers.attention import Attention

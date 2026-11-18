@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+from vllm.model_executor.kernels.linear.fp8.deep_gemm import (
     DeepGemmFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (

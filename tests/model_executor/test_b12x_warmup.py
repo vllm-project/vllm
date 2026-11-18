@@ -106,7 +106,7 @@ def test_b12x_block_quant_warmup_covers_each_layers_plans(monkeypatch, is_embedd
         ),
         (
             B12xFp8BlockLinearKernel,
-            "vllm.model_executor.kernels.linear.scaled_mm.b12x",
+            "vllm.model_executor.kernels.linear.fp8.b12x",
             "_run_b12x_fp8_block_scaled_mm",
             SimpleNamespace(
                 weight=torch.empty((256, 128), dtype=torch.float8_e4m3fn),
@@ -173,7 +173,7 @@ def test_b12x_mxfp8_warmup_unit(monkeypatch) -> None:
 
 
 def test_b12x_tensor_fp8_warmup_unit(monkeypatch) -> None:
-    import vllm.model_executor.kernels.linear.scaled_mm.b12x as b12x_mod
+    import vllm.model_executor.kernels.linear.fp8.b12x as b12x_mod
 
     calls = []
     monkeypatch.setattr(

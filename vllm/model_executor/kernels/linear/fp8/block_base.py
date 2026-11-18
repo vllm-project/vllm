@@ -148,7 +148,7 @@ class Fp8BlockLinearKernel(MMLinearKernel[Fp8LinearLayerConfig, FP8BlockParams],
         raise NotImplementedError
 
 
-class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockLinearKernel, ABC):
+class Fp8BlockDynamicLinearKernel(Fp8BlockLinearKernel, ABC):
     """Dynamic FP8 block-scaled kernel that dispatches at runtime.
 
     Extends Fp8BlockLinearKernel to inherit apply_weights and overrides

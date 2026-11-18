@@ -13,10 +13,10 @@ import pytest
 import torch
 
 from vllm import _cpu_ops as ops
-from vllm.model_executor.kernels.linear.scaled_mm.base import (
+from vllm.model_executor.kernels.linear.fp8.base import (
     Fp8LinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+from vllm.model_executor.kernels.linear.fp8.cpu import (
     CPUFp8ChannelWiseLinearKernel,
     CPUFp8PerTensorLinearKernel,
 )

@@ -17,7 +17,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
-from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+from vllm.model_executor.kernels.linear.fp8.deep_gemm import (
     DeepGemmFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner

@@ -11,10 +11,10 @@ import torch
 
 from tests.utils import TestFP8Layer
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+from vllm.model_executor.kernels.linear.fp8.aiter import (
     AiterHipbMMPerTokenFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.base import (
+from vllm.model_executor.kernels.linear.fp8.base import (
     Fp8LinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

@@ -20,10 +20,10 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import (
+from vllm.model_executor.kernels.linear.fp8 import (
     CutlassFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
     CutlassFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention, MLAAttention

@@ -186,7 +186,7 @@ def test_cutlass_fp8_gemm_padded(
     inputs to satisfy CUTLASS alignment requirements — the path taken by
     models like Qwen2.5-VL whose vision MLP has non-16-aligned dims.
     """
-    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    from vllm.model_executor.kernels.linear.fp8.cutlass import (
         CutlassFp8LinearKernel,
     )
 

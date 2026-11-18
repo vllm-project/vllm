@@ -174,7 +174,7 @@ def test_b12x_tensor_fp8_can_implement_supported_config() -> None:
 
 
 def test_b12x_block_fp8_checks_runtime_support(monkeypatch) -> None:
-    import vllm.model_executor.kernels.linear.scaled_mm.b12x as b12x_mod
+    import vllm.model_executor.kernels.linear.fp8.b12x as b12x_mod
 
     platform = types.SimpleNamespace(
         is_cuda=lambda: True,
@@ -247,7 +247,7 @@ def test_b12x_block_fp8_requires_aligned_features() -> None:
 def test_b12x_tensor_fp8_process_weights_packs_modelopt_layout(
     monkeypatch,
 ) -> None:
-    import vllm.model_executor.kernels.linear.scaled_mm.b12x as b12x_mod
+    import vllm.model_executor.kernels.linear.fp8.b12x as b12x_mod
 
     calls = []
     packed = types.SimpleNamespace(out_features=64)
@@ -300,7 +300,7 @@ def test_b12x_tensor_fp8_process_weights_packs_modelopt_layout(
 def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(
     monkeypatch,
 ) -> None:
-    import vllm.model_executor.kernels.linear.scaled_mm.b12x as b12x_mod
+    import vllm.model_executor.kernels.linear.fp8.b12x as b12x_mod
 
     calls = []
 
@@ -640,7 +640,7 @@ def test_b12x_mxfp8_apply_uses_packed_weight(monkeypatch) -> None:
 
 
 def test_b12x_block_fp8_apply_uses_b12x_recipe_api(monkeypatch) -> None:
-    import vllm.model_executor.kernels.linear.scaled_mm.b12x as b12x_mod
+    import vllm.model_executor.kernels.linear.fp8.b12x as b12x_mod
 
     calls = []
 

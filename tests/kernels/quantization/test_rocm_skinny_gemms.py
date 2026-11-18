@@ -8,7 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+from vllm.model_executor.kernels.linear.fp8.rocm import (
     ROCmFp8LinearKernel,
 )
 from vllm.platforms import current_platform

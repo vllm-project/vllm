@@ -12,7 +12,7 @@ from vllm.model_executor.kernels.linear import (
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import (
+from vllm.model_executor.kernels.linear.fp8 import (
     MarlinFp8LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention

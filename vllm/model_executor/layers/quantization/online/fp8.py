@@ -20,14 +20,14 @@ from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
     init_wfp8_a16_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import (
+from vllm.model_executor.kernels.linear.fp8 import (
     CutlassFp8LinearKernel,
     MarlinFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
     CutlassFp8BlockLinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+from vllm.model_executor.kernels.linear.fp8.humming import (
     HummingFp8LinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import RoutedExperts

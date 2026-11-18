@@ -39,6 +39,9 @@ from vllm.config.vllm import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels import linear as linear_kernels
 from vllm.model_executor.kernels.linear import LinearKernelOracle
+from vllm.model_executor.kernels.linear.fp8 import (
+    MarlinFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
@@ -49,9 +52,6 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
 from vllm.model_executor.kernels.linear.requantization_source import (
     FakeFp8LinearKernel,
     FakeMxFp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    MarlinFp8LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
