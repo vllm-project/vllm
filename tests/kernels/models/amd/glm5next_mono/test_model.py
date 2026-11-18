@@ -427,10 +427,16 @@ def _engine(vllm_runner, model_dir, tp, mono, graphs=False, kv="auto"):
 
 @pytest.fixture(scope="module", autouse=True)
 def _env():
+    from vllm._aiter_ops import rocm_aiter_ops
+
     with pytest.MonkeyPatch.context() as mp:
         for name, value in ENV.items():
             mp.setenv(name, value)
+        # rocm_aiter_ops read its switches at import, before ENV: without this
+        # the first engine alone still sees AITER linear on (+quant_fp8)
+        rocm_aiter_ops.refresh_env_variables()
         yield
+    rocm_aiter_ops.refresh_env_variables()
 
 
 _NATIVE: dict = {}
