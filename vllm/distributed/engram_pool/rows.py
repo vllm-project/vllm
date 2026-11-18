@@ -21,6 +21,7 @@ READY_WORLD: tl.constexpr = tl.constexpr(3)
 READY_QPS: tl.constexpr = tl.constexpr(4)
 READY_TIMEOUT: tl.constexpr = tl.constexpr(5)
 READY_LANDED: tl.constexpr = tl.constexpr(6)
+READY_FAILED: tl.constexpr = tl.constexpr(7)
 
 
 @triton.jit
@@ -59,6 +60,8 @@ def wait_landed(ready, table):
         flags = tl.load(ready + READY_FLAGS).to(tl.pointer_type(tl.int64))
         world, qps = tl.load(ready + READY_WORLD), tl.load(ready + READY_QPS)
         deadline = tl.extra.cuda.globaltimer() + tl.load(ready + READY_TIMEOUT)
+        # Set by the host once a request failed or the proxy exited.
+        failed = tl.load(ready + READY_FAILED).to(tl.pointer_type(tl.int64))
         q = tl.arange(0, 16)[None, :]
         # Eight gatherers' flags (QPs per peer <= 16) per load.
         for first in range(0, world, 8):
@@ -67,13 +70,17 @@ def wait_landed(ready, table):
             count = tl.load(used + group, mask=peer < world, other=0)
             at = flags + group[:, None] * qps + q
             waiting = 1
-            while (waiting > 0) & (tl.extra.cuda.globaltimer() < deadline):
+            while (
+                (waiting > 0)
+                & (tl.extra.cuda.globaltimer() < deadline)
+                & (tl.load(failed, volatile=True) == 0)
+            ):
                 flag = tl.load(at, mask=q < count[:, None], other=seq, volatile=True)
                 waiting = tl.sum(tl.sum((flag != seq).to(tl.int32), 1))
         if waiting == 0:
             tl.atomic_xchg(landed, seq, sem="release")
     if waiting > 0:
-        tl.device_print("Engram pool RDMA fetch timed out, seq", seq)
+        tl.device_print("Engram pool RDMA fetch failed (see log) or timed out", seq)
         tl.inline_asm_elementwise(
             "trap;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )

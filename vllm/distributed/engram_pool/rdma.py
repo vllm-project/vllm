@@ -45,6 +45,7 @@ from vllm.distributed.engram_pool.memory import (
 )
 from vllm.distributed.engram_pool.rows import (
     GATHERERS,
+    READY_FAILED,
     READY_FLAGS,
     READY_LANDED,
     READY_QPS,
@@ -552,8 +553,18 @@ class RdmaTransport:
         )
         theirs.close()
         self.sock = ours
-        # Sets returncode when it exits, so fetches check without a syscall.
-        threading.Thread(target=self.proc.wait, daemon=True).start()
+        # Set once a request fails or the proxy exits, so every wait fails then:
+        # `start` reads the host copy, kernels the HBM one.
+        gpu = torch.device("cuda", torch.accelerator.current_device_index())
+        self.failed = torch.zeros(1, dtype=torch.int64, pin_memory=True)
+        self.failed_gpu = torch.zeros(1, dtype=torch.int64, device=gpu)
+        self._fail_stream = torch.cuda.Stream(gpu)
+
+        def proxy_exited() -> None:
+            self.proc.wait()
+            self._fail()
+
+        threading.Thread(target=proxy_exited, daemon=True).start()
         device = pick_device()
         info = self._call(
             "init",
@@ -566,7 +577,7 @@ class RdmaTransport:
         )
         # This GPU posts its requests itself, on one QP per gatherer.
         self.verbs = verbs.Device(device)
-        cq, _ = self.verbs.create_cq(self.world * REQUEST_DEPTH)
+        cq, channel = self.verbs.create_cq(self.world * REQUEST_DEPTH, wakeable=True)
         made = [
             self.verbs.create_qp(cq, cq, REQUEST_DEPTH, 2) for _ in range(self.world)
         ]
@@ -617,7 +628,10 @@ class RdmaTransport:
         )
         for (qp, _), e in zip(made, everyone):
             self.verbs.connect(qp, e[4][self.rank], (bytes.fromhex(e[0][0]), e[0][1]))
-        gpu = torch.device("cuda", torch.accelerator.current_device_index())
+        peers = {qpn: peer for peer, (_, qpn) in enumerate(made)}
+        threading.Thread(
+            target=self._watch, args=(cq, channel, peers), daemon=True
+        ).start()
         from cuda.bindings import driver as cu
 
         _, ordering = cu.cuDeviceGetAttribute(
@@ -696,6 +710,7 @@ class RdmaTransport:
             READY_QPS.value: self.qps_per_peer,
             READY_TIMEOUT.value: TIMEOUT_NS,
             READY_LANDED.value: self.landed_seq.data_ptr(),
+            READY_FAILED.value: self.failed_gpu.data_ptr(),
         }
         self.ready = torch.tensor(
             [ready[i] for i in range(len(ready))], dtype=torch.int64, device=gpu
@@ -705,6 +720,34 @@ class RdmaTransport:
         self.keys = torch.empty(total, dtype=torch.int32, device=gpu)
         # Each row's slot in the landing buffer, -1 if dead.
         self.slots = torch.empty(total, dtype=torch.int32, device=gpu)
+
+    def _watch(self, cq: int, channel: int, peers: dict[int, int]) -> None:
+        """Flag the first failed request. Requests are unsignaled: only failed
+        ones complete, as when a peer's engine is gone."""
+        wc = (verbs.ibv_wc * 16)()
+        while True:
+            self.verbs.notify_cq(cq)
+            if not (count := self.verbs.poll_cq(cq, wc, 16)):
+                self.verbs.cq_event(channel)
+                continue
+            for c in wc[:count]:
+                if c.status:
+                    logger.error(
+                        "Engram pool RDMA request to GPU %d failed (ibv_wc status "
+                        "%d, vendor error %#x); is its engine gone?",
+                        peers.get(c.qp_num, -1),
+                        c.status,
+                        c.vendor_err,
+                    )
+                    self._fail()
+                    return
+
+    def _fail(self) -> None:
+        """Fail every wait. A copy engine copies the flag in, so it lands even
+        while waiting kernels hold every SM."""
+        self.failed.fill_(1)
+        with torch.cuda.stream(self._fail_stream):
+            self.failed_gpu.copy_(self.failed, non_blocking=True)
 
     @staticmethod
     def _map_queues(qps: list[tuple[int, int]]) -> list[list[int]]:
@@ -811,8 +854,8 @@ class RdmaTransport:
         n, tables, k = ids.numel(), meta.shape[0], ids.shape[-1]
         if n > self.max_items * self.max_tables or tables > self.max_tables:
             raise ValueError(f"{tables} tables of {n} rows exceed the pool's capacity")
-        if self.proc.returncode is not None:
-            raise RuntimeError("Engram pool RDMA proxy exited")
+        if self.failed.item():
+            raise RuntimeError("Engram pool RDMA failed: a request or proxy failed")
         if not n:
             return []
         words = fetch.row_stride // 8
