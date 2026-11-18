@@ -14,6 +14,7 @@ from vllm.config import (
     ParallelConfig,
     SpeculativeConfig,
     VllmConfig,
+    get_current_vllm_config,
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode
@@ -202,7 +203,7 @@ def test_eagle_mistral_large3_preserves_target_config(tmp_path: Path):
     target_path, draft_path = tmp_path / "target", tmp_path / "draft"
     Mistral3Config(
         architectures=["Mistral3ForConditionalGeneration"],
-        text_config=text_config.to_dict(),
+        text_config={**text_config.to_dict(), "num_hidden_layers": 4},
     ).save_pretrained(target_path)
     text_config.save_pretrained(draft_path)
     target = ModelConfig(
@@ -223,7 +224,9 @@ def test_eagle_mistral_large3_preserves_target_config(tmp_path: Path):
     assert target.is_multimodal_model
     with set_current_vllm_config(config):
         model = eagle_mod.EagleMistralLarge3ForCausalLM(vllm_config=config)
+        assert get_current_vllm_config() is config
     assert config.model_config is target
     assert config.model_config.is_multimodal_model
     assert config.quant_config is quant_config
     assert model.config is speculative.draft_model_config.hf_config
+    assert model.model.config.first_k_dense_replace == 4

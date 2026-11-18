@@ -29,6 +29,13 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+## Mistral Large 3 Drafts
+
+For Mistral Large 3, keep the multimodal target checkpoint in `model` and set
+the text-only EAGLE checkpoint in `speculative_config.model`, with `method="eagle"`.
+The target and draft use their own model and quantization configurations, so
+loading the draft preserves the target configuration used for memory profiling.
+
 ## Eagle3 Drafter Example
 
 ```python
