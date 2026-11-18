@@ -96,7 +96,7 @@ class FakeState:
         self.index_kpool = 4
         self.max_valid = 2051
 
-    def plan(self, num_tokens, kv_lens, cam, req_id_per_token):
+    def plan(self, num_tokens, kv_lens, cam, req_id_per_token, row_offset=0):
         self.plan_calls.append((num_tokens, kv_lens))
 
     def pack_indices(self, slots):
@@ -151,7 +151,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     state.kv_indptr[5:] = 17
     meta = make_batch(rows, topk_rows, [3])
     meta.state = state
-    meta.chunk_states = None
+    meta.chunk_states = [(0, rows, state)]
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
     dtype = torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16
@@ -184,6 +184,8 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     assert q_pe.shape == (rows, impl.num_heads, qk_rope)
     assert ckv.shape == ((8 - 1) * 2 * BLOCK_SIZE + BLOCK_SIZE, 1, HEAD)
     assert kpe.shape[-1] == qk_rope
+    # The chunked path writes into the caller's out= buffer.
+    assert kwargs.pop("out", None) is not None
     if impl.use_fp8_kv_cache:
         assert kwargs["ckv_scale"] == 0.5 and kwargs["kpe_scale"] == 1.0
     else:
@@ -198,6 +200,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decod
     builder._adaptive_verification = False
     state = FakeState(TOPK)
     builder.state = state
+    builder._chunk_states = [state]
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
     metadata.prefill = SimpleNamespace(route=route)
     metadata.state = None
@@ -226,8 +229,12 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decod
     expected_lens = [1402] if num_decodes else []
     if route is SparseMLAPrefillRoute.SPARSE_MQA:
         expected_lens += [1, 2, 3, 4, 5]
-    assert state.plan_calls[0][0] == len(expected_lens)
-    assert state.plan_calls[0][1].tolist() == expected_lens
+    if expected_lens:
+        assert state.plan_calls[0][0] == len(expected_lens)
+        assert state.plan_calls[0][1].tolist() == expected_lens
+    else:
+        # A batch with no MQA rows has no chunk to plan or run.
+        assert state.plan_calls == []
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
@@ -654,7 +661,7 @@ def test_chunked_plan_matches_exact_and_replays(
         assert meta.state is not None
         impl = layer.impl
         assert isinstance(impl, FlashInferMLASparseSM90Impl)
-        chunks = meta.chunk_states or [(0, rows, meta.state)]
+        chunks = meta.chunk_states
         assert len(chunks) == (3 if rows > 16384 else 1)
         assert all(state.workspace is builder.state.workspace for _, _, state in chunks)
         assert builder.get_varlen_cudagraph_max_query_len(config, spec) == 3
