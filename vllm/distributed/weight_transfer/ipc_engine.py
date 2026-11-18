@@ -26,8 +26,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-    PackedBufferImporter,
     PackedIpcConsumer,
+    _local_rebuild_args,
     chunk_capacity,
     packed_ipc_producer,
 )
@@ -35,25 +35,16 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 
 @dataclass
 class IPCWeightTransferInitInfo(WeightTransferInitInfo):
-    """Worker-side init info for IPC weight transfer. No rendezvous needed.
-
-    `packed` is a must-agree wire param: the trainer ships it here at the init
-    handshake so the worker decodes with the same setting the trainer encoded
-    with. The buffer size is producer-only: the consumer reads the shared
-    buffer's size."""
+    """Worker-side init info for IPC weight transfer; the trainer ships
+    `packed` here at the handshake."""
 
     packed: bool = False
 
 
 @dataclass
 class IPCTrainerInitInfo(TrainerInitInfo):
-    """Trainer-side init info for IPC weight transfer. No rendezvous needed;
-    `rank` (from `TrainerInitInfo`) identifies this trainer process — rank 0
-    ships the merged IPC handles. All ranks still join the handle all-gather.
-
-    `packed` / `packed_buffer_size_bytes` are the transfer's wire params. The
-    trainer propagates `packed` to the worker at `trainer_init` so the two sides
-    cannot disagree. `backend` is the factory dispatch key."""
+    """Trainer-side init info for IPC weight transfer. Rank 0 ships the
+    merged IPC handles; the worker reads the chunk size from the shared buffer."""
 
     backend: ClassVar[str] = "ipc"
     packed: bool = False
@@ -75,7 +66,8 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple] | None = None
     """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args.
     For non-packed mode: list of per-parameter handle dicts.
-    For packed mode: single handle dict for the packed buffer."""
+    For packed mode: the packed buffer's handle dict, empty after the first
+    chunk."""
     ipc_handles_pickled: str | None = None
     """Base64-encoded pickled IPC handles, used for HTTP transport."""
 
@@ -142,14 +134,19 @@ class IPCWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        # Set from the trainer-supplied init info at the handshake; defaults are
-        # only for the (unreachable) receive-before-init case.
+        # Set from the trainer-supplied init info at the handshake.
         self.packed = False
-        # Shared across all chunks of every packed transfer this engine
-        # receives; see PackedBufferImporter for the refcount contract.
-        self._packed_importer = PackedBufferImporter()
-        # The current packed transfer: split tensors persist across chunks.
-        self._packed_consumer = PackedIpcConsumer(self._packed_importer)
+        self._gpu_uuid: str | None = None
+        # The current packed transfer, between start and finish.
+        self._packed_consumer: PackedIpcConsumer | None = None
+
+    def _local_gpu(self) -> tuple[str, int]:
+        """This worker's GPU UUID and device index, for rebuilding handles."""
+        device_index = self.device.index
+        if self._gpu_uuid is None:
+            props = torch.cuda.get_device_properties(device_index)
+            self._gpu_uuid = str(props.uuid)
+        return self._gpu_uuid, device_index
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """Initialize the weight transfer mechanism. No data-plane rendezvous is
@@ -167,20 +164,18 @@ class IPCWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import start_reload
 
         start_reload(self.model)
-        self._packed_consumer = PackedIpcConsumer(self._packed_importer)
+        if self.packed:
+            gpu_uuid, device_index = self._local_gpu()
+            self._packed_consumer = PackedIpcConsumer(device_index, gpu_uuid)
 
     def finish_weight_update(self) -> None:
         """Finish reloading after all weights have been received."""
         from vllm.model_executor.model_loader.reload import finish_reload
 
+        consumer, self._packed_consumer = self._packed_consumer, None
+        if consumer is not None:
+            consumer.close()  # raises if the transfer was cut short
         finish_reload(self.model, self.model_config, self.device)
-        # Every reduce_tensor call is a fresh export with its own refcount
-        # slot, so releasing once per update always balances this update's
-        # export and lets the trainer reclaim its staging buffer. Callers
-        # that skip finish are still covered by the replace-on-next-export
-        # path inside the importer.
-        self._packed_importer.close()
-        self._packed_consumer = PackedIpcConsumer(self._packed_importer)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via CUDA IPC handles and load them.
@@ -195,51 +190,37 @@ class IPCWeightTransferEngine(
                         GPU UUID and the rebuild_cuda_tensor args tuple.
 
         """
-        # Use the worker's assigned device rather than the ambient current
-        # device: the receive path is no longer wrapped in
-        # `with torch.device(self.device)` by the caller, so the current device
-        # is not guaranteed to match self.device. The IPC tensors must be
-        # rebuilt on the device the model lives on.
-        device_index = self.device.index
-
         if self.packed:
+            if self._packed_consumer is None:
+                raise RuntimeError(
+                    "packed IPC receive_weights called outside "
+                    "start_weight_update / finish_weight_update"
+                )
             assert isinstance(update_info.ipc_handles, dict)
             weights = self._packed_consumer.receive(
                 ipc_handle=update_info.ipc_handles,
                 names=update_info.names,
                 shapes=update_info.shapes,
                 dtype_names=update_info.dtype_names,
-                device_index=device_index,
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
-            weights = []
-            for name, ipc_handle in zip(
-                update_info.names,
-                update_info.ipc_handles,
-            ):
-                props = torch.cuda.get_device_properties(device_index)
-                physical_gpu_id = str(props.uuid)
-
-                if physical_gpu_id not in ipc_handle:
-                    raise ValueError(
-                        f"IPC handle not found for GPU UUID "
-                        f"{physical_gpu_id}. "
-                        f"Available UUIDs: {list(ipc_handle.keys())}"
-                    )
-
-                args = ipc_handle[physical_gpu_id]
-                list_args = list(args)
-                # Index 6 of the args from reduce_tensor is the device_index.
-                # We need to overwrite it with the receiver's device index.
-                list_args[6] = device_index
-                weight = rebuild_cuda_tensor(*list_args)
-                weights.append((name, weight))
-
-        self.model.load_weights(weights)
+            # Rebuild on the model's device, not the ambient current one.
+            gpu_uuid, device_index = self._local_gpu()
+            weights = [
+                (
+                    name,
+                    rebuild_cuda_tensor(
+                        *_local_rebuild_args(h, gpu_uuid, device_index)
+                    ),
+                )
+                for name, h in zip(update_info.names, update_info.ipc_handles)
+            ]
+        if weights:
+            self.model.load_weights(weights)
 
     def shutdown(self) -> None:
-        self._packed_importer.close()
+        self._packed_consumer = None
 
 
 class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):
@@ -336,10 +317,12 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     ) -> list[dict[str, tuple]]:
         """All-gather and merge IPC handle dicts across ranks in one call.
 
-        Each rank contributes a list of {gpu_uuid: ipc_args} dicts (one
-        per parameter or one per chunk). A single all_gather_object
+        Each rank contributes a list of {gpu_uuid: ipc_args} dicts (one per
+        parameter, or one for the packed buffer). A single all_gather_object
         collects every rank's full list, then the sender merges per-index so
-        each dict maps every GPU UUID to its args.
+        each dict maps every GPU UUID to its args. Callers make their exported
+        memory ready before the call, so the gather also orders it before the
+        send.
 
         The all-gather runs over the *default* process group; this assumes the
         default group is exactly the set of colocated trainer ranks and that the
@@ -355,8 +338,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         world_size = torch.distributed.get_world_size()
         gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
         torch.distributed.all_gather_object(gathered, handles)
-        torch.distributed.barrier()
-        torch.accelerator.synchronize()
 
         if self.is_sender:
             merged: list[dict[str, tuple]] = []
@@ -370,13 +351,18 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         return [{} for _ in handles]
 
     @staticmethod
-    def _post_send_sync() -> None:
-        """Barrier + ipc_collect after a send; no-op if single-GPU."""
+    def _barrier() -> None:
+        """Barrier over the trainer ranks; no-op if single-GPU."""
         if (
             torch.distributed.is_initialized()
             and torch.distributed.get_world_size() > 1
         ):
             torch.distributed.barrier()
+
+    @classmethod
+    def _post_send_sync(cls) -> None:
+        """Barrier + ipc_collect after a send."""
+        cls._barrier()
         torch.cuda.ipc_collect()
 
     def _send_unpacked(self, source: WeightSource) -> list[torch.Tensor]:
@@ -405,6 +391,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             _, ipc_args = reduce_tensor(weight)
             ipc_handles.append({self.gpu_uuid: ipc_args})
 
+        torch.accelerator.synchronize()  # the copies land before the send
         ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
         self._do_send(
             names=names,
@@ -415,26 +402,30 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         return weight_refs
 
     def _send_packed(self, source: WeightSource) -> None:
-        """Send weights in bounded-memory chunks (packed mode)."""
+        """Send weights in bounded-memory chunks (packed mode).
+
+        The buffer's handle goes with the first chunk only. Each rank's chunk is
+        written before the send (the handle gather, then a barrier) and is read
+        before any rank refills its buffer (a barrier after the send, since only
+        the sender waits for the workers)."""
         for chunk in packed_ipc_producer(
             iterator=source.iter_full(),
             gpu_uuid=self.gpu_uuid,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
-            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
+            if chunk.ipc_handle is not None:
+                handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
+            else:
+                self._barrier()
+                handle = {}
             self._do_send(
                 names=chunk.names,
                 dtype_names=chunk.dtype_names,
                 shapes=chunk.shapes,
-                ipc_handles=ipc_handle,
+                ipc_handles=handle,
             )
-            # Per-chunk barrier: the producer reuses a single IPC buffer across
-            # chunks, but only the sender waits for the consumers (via _do_send).
-            # Without syncing every rank here, non-sender ranks race ahead and
-            # overwrite their buffer while their colocated worker is still
-            # reading the current chunk, silently corrupting the transfer.
-            self._post_send_sync()
+            self._barrier()
 
     def _do_send(
         self,

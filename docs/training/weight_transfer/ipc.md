@@ -74,7 +74,7 @@ identical either way.
 | ----- | ------- | ----------- |
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
 | `packed` | `False` | Chunked, bounded-memory transfer (see below) |
-| `packed_buffer_size_bytes` | 1 GiB | Chunk size when `packed=True` |
+| `packed_buffer_size_bytes` | 1 GiB | Chunk size when `packed=True`, at least 16 bytes |
 
 `packed` is a must-agree wire param: `trainer_init` ships it to the worker, which
 records it and decodes accordingly. It is not a `WeightTransferConfig` field and
@@ -125,7 +125,7 @@ the first `/update_weights` returns 500. Reference:
 | Field | Meaning |
 | ----- | ------- |
 | `names`, `dtype_names`, `shapes` | Checkpoint names, `torch` dtype attribute names (`"bfloat16"`), full shapes. Packed: only the tensors whose first bytes are in this chunk |
-| `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer |
+| `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer in the first chunk, `{}` in the rest |
 
 - A handle dict is `{gpu_uuid: reduce_tensor(t)[1]}` with one entry per GPU the
   server uses (`torch.multiprocessing.reductions.reduce_tensor`).
@@ -134,8 +134,9 @@ the first `/update_weights` returns 500. Reference:
   (device index) with its own.
 - `ipc_handles` (unpickled) is not JSON-serializable; over HTTP use
   `ipc_handles_pickled`.
-- Packed: export one `uint8` buffer once, its size a multiple of 16 (the chunk
-  size), and reuse it for every chunk. Lay the tensors'
+- Packed: export one `uint8` buffer once per transfer, its size a multiple of
+  16 (the chunk size), send its handle with the first chunk only, and reuse it
+  for every chunk. Lay the tensors'
   `t.contiguous().view(-1).view(torch.uint8)` bytes out as one stream, each
   tensor starting at a multiple of 16, and send a chunk each time the buffer is
   full (or only alignment padding would fit), then the rest; a tensor crossing

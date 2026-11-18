@@ -102,7 +102,8 @@ def send_unpacked(weights: Weights, names: list[str]) -> list[torch.Tensor]:
 
 
 def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tensor]:
-    """One /update_weights call per chunk; one {uuid: args} dict per chunk.
+    """One /update_weights call per chunk; the first carries the buffer's
+    {uuid: args} dict, the rest an empty dict.
 
     Tensors are 16-byte aligned in one byte stream cut at the buffer size."""
     cap -= cap % 16  # the server takes the chunk size from the buffer's size
@@ -111,13 +112,15 @@ def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tens
         for u, w in weights.items()
     }
     handle = {u: reduce_tensor(b)[1] for u, b in buffers.items()}  # export once
+    first = [True]
     started: list[str] = []  # the tensors starting in the current chunk
     used = 0  # bytes of the current chunk taken
 
     def flush() -> None:
         for b in buffers.values():
             torch.accelerator.synchronize(b.device)  # copies must land before the read
-        update_weights(weights, started, handle)
+        update_weights(weights, started, handle if first[0] else {})
+        first[0] = False
         started.clear()
 
     for n in names:
