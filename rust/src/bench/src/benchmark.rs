@@ -13,7 +13,9 @@ use crate::backends::{RequestFuncInput, RequestFuncOutput, get_backend};
 use crate::cli::{BackendKind, DatasetName, LoraAssignment};
 use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
-use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics};
+use crate::metrics::calculator::{
+    attach_client_queue_metrics, calculate_embedding_metrics, calculate_metrics,
+};
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
@@ -96,6 +98,7 @@ pub(crate) struct SpecDecodeMetrics {
     num_draft_tokens: u64,
     num_accepted_tokens: u64,
     accepted_per_pos: HashMap<u64, u64>,
+    num_verified_tokens: u64,
 }
 
 /// Computed speculative decoding statistics (delta between before/after benchmark).
@@ -104,6 +107,7 @@ pub struct SpecDecodeStats {
     pub num_drafts: u64,
     pub draft_tokens: u64,
     pub accepted_tokens: u64,
+    pub verified_tokens: u64,
     pub acceptance_rate: f64,
     pub acceptance_length: f64,
     pub per_position_acceptance_rates: Vec<f64>,
@@ -153,6 +157,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
     let mut accepted_per_pos: HashMap<u64, u64> = HashMap::new();
+    let mut num_verified_tokens: u64 = 0;
     let mut found_spec_decode = false;
 
     for line in text.lines() {
@@ -190,6 +195,8 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
             }
         } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
+        } else if metric_name.contains("num_verified_tokens_total") {
+            num_verified_tokens += val;
         }
     }
 
@@ -202,6 +209,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
         num_draft_tokens,
         num_accepted_tokens,
         accepted_per_pos,
+        num_verified_tokens,
     })
 }
 
@@ -213,6 +221,7 @@ pub(crate) fn compute_spec_decode_stats(
     let delta_drafts = after.num_drafts.saturating_sub(before.num_drafts);
     let delta_draft_tokens = after.num_draft_tokens.saturating_sub(before.num_draft_tokens);
     let delta_accepted = after.num_accepted_tokens.saturating_sub(before.num_accepted_tokens);
+    let delta_verified = after.num_verified_tokens.saturating_sub(before.num_verified_tokens);
 
     if delta_draft_tokens == 0 {
         return None;
@@ -249,6 +258,7 @@ pub(crate) fn compute_spec_decode_stats(
         num_drafts: delta_drafts,
         draft_tokens: delta_draft_tokens,
         accepted_tokens: delta_accepted,
+        verified_tokens: delta_verified,
         acceptance_rate,
         acceptance_length,
         per_position_acceptance_rates: per_pos_rates,
@@ -986,6 +996,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     tokio::time::sleep(target - now).await;
                 }
 
+                let arrival = Instant::now();
+
                 // Acquire semaphore permit
                 let _permit = if let Some(ref s) = sem {
                     Some(s.acquire().await.unwrap())
@@ -1022,7 +1034,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 // for both start_time and ttft/itl, keeping them on the
                 // same clock. We do the same with Instant.
                 let request_instant = Instant::now();
-                let output = match backend.send_request(&input, &client).await {
+                let mut output = match backend.send_request(&input, &client).await {
                     Ok(mut output) => {
                         // Override SystemTime-based start_time with monotonic offset
                         output.start_time =
@@ -1042,6 +1054,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     pb.inc(1);
                 }
 
+                output.client_queue_time = request_instant.duration_since(arrival).as_secs_f64();
                 output
             }),
         ));
@@ -1097,6 +1110,14 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         )
     };
 
+    attach_client_queue_metrics(
+        &mut metrics,
+        &outputs,
+        config.max_concurrency,
+        config.request_rate,
+        &config.selected_percentiles,
+    );
+
     // Attach steady-state metrics when the closed-loop scope gate passes.
     // Trace replay is open-loop: an in-flight plateau there reflects a burst
     // in the trace, not a saturated server, so it is out of scope.
@@ -1149,15 +1170,15 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     }
 
     // Build result JSON
-    let date_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let dt_filename = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let current_dt = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut result_json = build_result_json(
         config,
+        &model_id,
         &metrics,
         &actual_output_lens,
         &outputs,
         benchmark_duration,
-        &date_iso,
+        &current_dt,
         spec_decode_stats.as_ref(),
     );
     if let Some(ramp_up) = &config.ramp_up {
@@ -1179,8 +1200,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
 
     // Save if requested
     if config.save_result || config.append_result {
-        let model_for_filename = config.model.as_deref().unwrap_or(&model_id);
-        let file_name = compute_result_filename(config, model_for_filename, &dt_filename);
+        let file_name = compute_result_filename(config, &model_id, &current_dt);
 
         // Create result directory if needed
         if let Some(ref dir) = config.result_dir {
@@ -2092,6 +2112,7 @@ vllm:num_requests_running{engine=\"1\"} 16
             num_draft_tokens: draft_tokens,
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
+            num_verified_tokens: 0,
         }
     }
 
@@ -2105,12 +2126,15 @@ vllm:spec_decode_num_draft_tokens_total{model_name=\"m\",engine=\"0\"} 700.0
 vllm:spec_decode_num_accepted_tokens_total{model_name=\"m\",engine=\"0\"} 300.0
 vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 80.0
 vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
+vllm:spec_decode_num_verified_tokens_total{model_name=\"m\",engine=\"0\"} 500.0
+vllm:spec_decode_num_verified_tokens_per_pos_total{position=\"0\",engine=\"0\"} 150.0
 vllm:num_requests_running{model_name=\"m\"} 0
 ";
         let m = parse_spec_decode_metrics(text).unwrap();
         assert_eq!(m.num_drafts, 150);
         assert_eq!(m.num_draft_tokens, 700);
         assert_eq!(m.num_accepted_tokens, 300);
+        assert_eq!(m.num_verified_tokens, 500);
         assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
     }
 
@@ -2143,14 +2167,21 @@ vllm:prefix_cache_queries_total{model_name=\"m\"} 0
 
     #[test]
     fn test_compute_spec_decode_stats_basic() {
-        let before = make_metrics(100, 300, 200, &[(0, 90), (1, 70), (2, 50)]);
-        let after = make_metrics(200, 600, 440, &[(0, 180), (1, 150), (2, 120)]);
+        let before = SpecDecodeMetrics {
+            num_verified_tokens: 250,
+            ..make_metrics(100, 300, 200, &[(0, 90), (1, 70), (2, 50)])
+        };
+        let after = SpecDecodeMetrics {
+            num_verified_tokens: 520,
+            ..make_metrics(200, 600, 440, &[(0, 180), (1, 150), (2, 120)])
+        };
 
         let stats = compute_spec_decode_stats(&before, &after).unwrap();
 
         assert_eq!(stats.num_drafts, 100);
         assert_eq!(stats.draft_tokens, 300);
         assert_eq!(stats.accepted_tokens, 240);
+        assert_eq!(stats.verified_tokens, 270);
         assert!((stats.acceptance_rate - 80.0).abs() < 0.01);
         assert!((stats.acceptance_length - 3.4).abs() < 0.01);
         assert_eq!(stats.per_position_acceptance_rates.len(), 3);

@@ -398,6 +398,7 @@ async fn harmony_assistant_event_stream(
             DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
+                ..
             } => {
                 y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
@@ -411,6 +412,7 @@ async fn harmony_assistant_event_stream(
                     SampledDelta {
                         token_ids,
                         logprobs,
+                        ..
                     },
                 finished,
             } => {

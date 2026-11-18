@@ -5,14 +5,15 @@
 import copy
 import gc
 from bisect import bisect_right
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import replace
 from itertools import pairwise
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -25,6 +26,10 @@ from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import device_memory_info, format_gib
+from vllm.utils.vmm_driver import (
+    MEM_HANDLE_TYPE_FABRIC,
+    MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+)
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -43,8 +48,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Headroom left after sizing from measured memory, beyond the measured transient
-# peak, for what the allocated peak does not show: the caching allocator's
-# rounding and fragmentation around it, real steps combining shapes warmup
+# peak, for what the measurement does not show: the caching allocator's
+# rounding, fragmentation the sizing steps do not reproduce, real steps
+# combining shapes warmup
 # exercises separately (a prompt-logprobs chunk alongside a live decode, the
 # rejection sampler over a full spec-decode batch), and inputs profiling only
 # approximates (a multimodal encoder batch of a modality other than the one
@@ -85,6 +91,7 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
+        export_handle_types: int = 0,
     ):
         tensors = [
             tensor
@@ -105,6 +112,9 @@ class ExtensibleKVCache:
         # Memory to keep free while committing before the final sizing, e.g.
         # the profiled activation peak the warmup steps are about to hit.
         self.reserved_headroom_bytes = 0
+        # Largest growth of torch's reservation over a sizing step, which
+        # includes fragmentation the allocated peak does not show.
+        self.torch_reserve_growth_bytes = 0
         # Blocks warmup may commit: the minimum of `committable_blocks()` over
         # ranks when the cache is created.
         self.warmup_committable_blocks = 0
@@ -118,6 +128,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
+            export_handle_types=export_handle_types,
         )
 
     def _segments(
@@ -169,15 +180,16 @@ class ExtensibleKVCache:
             raise ValueError("KV cache tensors do not tile the allocation.")
         return offsets, strides
 
-    def allocate(self, size: int) -> torch.Tensor:
-        """Allocator hook for allocate_kv_cache; commits the null block.
+    @property
+    def min_committed_blocks(self) -> int:
+        """The null block, plus one under block-outermost layouts, whose views
+        start inside block 0 and read past it (see `pad_kv_cache_segments`)."""
+        return 2 if self._is_block_outermost else 1
 
-        Under block-outermost layouts layers' views start inside block 0, so a
-        second block keeps at least half a granule mapped past each view's start
-        (see `pad_kv_cache_segments` for what reads it).
-        """
+    def allocate(self, size: int) -> torch.Tensor:
+        """Allocator hook for allocate_kv_cache; commits the minimum."""
         assert size == self.size, f"Expected {self.size} bytes, got {size}."
-        self.commit(2 if self._is_block_outermost else 1)
+        self.commit(self.min_committed_blocks)
         return self.buffer.full_view()
 
     def commit(
@@ -252,6 +264,18 @@ class ExtensibleKVCache:
                 )
                 kv_caches[layer_name] = view
         return kv_caches
+
+    def record_transient_peak(self) -> dict[str, Any]:
+        """Fold the allocated transient since peak tracking last restarted
+        into reserved_headroom_bytes; returns the allocator stats."""
+        torch.accelerator.synchronize()
+        stats = torch.accelerator.memory_stats(self.buffer.device)
+        self.reserved_headroom_bytes = max(
+            self.reserved_headroom_bytes,
+            stats.get("allocated_bytes.all.peak", 0)
+            - stats.get("allocated_bytes.all.current", 0),
+        )
+        return stats
 
     def committable_blocks(self) -> int:
         """Blocks that can be committed now without eating into the headroom.
@@ -376,6 +400,21 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
         kv_transfer_config is not None
         and kv_transfer_config.registers_kv_cache_memory()
     )
+
+
+def kv_cache_export_handle_types(vllm_config: "VllmConfig") -> int:
+    """Handle types other processes import the KV cache through, for
+    `VmmDriver.create`."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return 0
+    access = kv_transfer_config.kv_cache_access()
+    handle_types = 0
+    if KVCacheAccess.EXPORTS_FD in access:
+        handle_types |= MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    if KVCacheAccess.EXPORTS_FABRIC in access:
+        handle_types |= MEM_HANDLE_TYPE_FABRIC
+    return handle_types
 
 
 def pad_kv_cache_segments(
@@ -557,6 +596,7 @@ def measure_kv_cache_bytes(
     committed_bytes: int,
     requested_memory: int,
     transient_peak_bytes: int = 0,
+    torch_reserve_growth_bytes: int = 0,
     margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
     margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
 ) -> int:
@@ -566,15 +606,15 @@ def measure_kv_cache_bytes(
     the cache gets the rest of the budget, capped by the device headroom (free
     memory plus the committed prefix) less a margin of
     `max(margin_floor_bytes, margin_fraction * transient_peak_bytes)`. The
-    measured transient_peak_bytes are then kept free in full. The margin
-    guards physical memory, so it never reduces an explicit budget that already
-    leaves that much free.
+    larger of transient_peak_bytes and torch_reserve_growth_bytes is then kept
+    free in full. The margin guards physical memory, so it never reduces an
+    explicit budget that already leaves that much free.
     """
     non_kv_used = init_free_memory - free_memory - committed_bytes
     headroom = free_memory + committed_bytes
     margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
     available = min(requested_memory - non_kv_used, headroom - margin)
-    available -= transient_peak_bytes
+    available -= max(transient_peak_bytes, torch_reserve_growth_bytes)
     return max(available, 0)
 
 
@@ -588,8 +628,8 @@ def measure_kv_cache_blocks(
 ) -> int:
     """Size an extensible KV cache from the memory free after warmup.
 
-    Keeps free reserved_headroom_bytes, the larger of the profiled peak and
-    warmup's allocated (not reserved) transient peak. Torch's cache is emptied
+    Keeps free the larger of reserved_headroom_bytes (the profiled or warmup
+    allocated peak) and torch_reserve_growth_bytes. Torch's cache is emptied
     first: its blocks may not fit the large workspaces the first real steps
     allocate. Then caps torch's caching allocator to leave
     KV_CACHE_NON_TORCH_RESERVE_BYTES free for allocations outside it.
@@ -599,13 +639,41 @@ def measure_kv_cache_blocks(
     torch.accelerator.empty_cache()
     free_memory = current_platform.free_device_memory(device)
     transient_peak = kv_cache.reserved_headroom_bytes
-    available = measure_kv_cache_bytes(
+    measured = dict(
         init_free_memory=init_free_memory,
         free_memory=free_memory,
         committed_bytes=kv_cache.physical_bytes,
-        requested_memory=requested_memory,
         transient_peak_bytes=transient_peak,
+        torch_reserve_growth_bytes=kv_cache.torch_reserve_growth_bytes,
     )
+    available = measure_kv_cache_bytes(requested_memory=requested_memory, **measured)
+    utilization = vllm_config.cache_config.gpu_memory_utilization
+    # Explicit values just under 1.0 are mostly habits from estimate-based
+    # sizing, which needed that headroom; this sizing measures it instead. Some
+    # still leave room for memory this sizing cannot see, which the message
+    # lists so that those users can keep their setting.
+    if utilization is not None and 0.7 < utilization < 1.0:
+        # A budget of all memory free at startup is bound by the device alone.
+        withheld = (
+            measure_kv_cache_bytes(requested_memory=init_free_memory, **measured)
+            - available
+        )
+        if withheld >= 1 << 30:
+            logger.warning_once(
+                "gpu_memory_utilization=%s caps this instance at %s GiB, keeping "
+                "%s GiB of free device memory out of the KV cache. The "
+                "extensible KV cache is sized from the memory measured after "
+                "warmup and CUDA graph capture, so vLLM's own use needs no "
+                "headroom below 1.0. Leave gpu_memory_utilization unset unless "
+                "it leaves room for memory vLLM does not measure: other "
+                "processes sharing the GPU (including ones that allocate on it "
+                "later), the CPU on a unified-memory device, weight transfer "
+                "buffers for weight updates, or a KV connector's own device "
+                "buffers.",
+                utilization,
+                format_gib(requested_memory),
+                format_gib(withheld),
+            )
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
         vllm_config.model_config.multimodal_config,
@@ -624,11 +692,14 @@ def measure_kv_cache_blocks(
     kv_cache.set_torch_memory_limit(torch_memory_limit)
     logger.info(
         "Memory after warmup: %s GiB free, %s GiB committed to the KV cache, "
-        "%s GiB kept for transient activations; %d KV cache blocks (%s GiB) "
+        "%s GiB kept for transient activations (%s GiB allocated at peak, "
+        "%s GiB of torch reservation growth); %d KV cache blocks (%s GiB) "
         "fit within the requested %s GiB. Torch may reserve up to %s GiB.",
         format_gib(free_memory),
         format_gib(kv_cache.physical_bytes),
+        format_gib(max(transient_peak, kv_cache.torch_reserve_growth_bytes)),
         format_gib(transient_peak),
+        format_gib(kv_cache.torch_reserve_growth_bytes),
         num_blocks,
         format_gib(num_blocks * kv_cache.bytes_per_block),
         format_gib(requested_memory),
@@ -650,7 +721,7 @@ def kv_cache_lent_for_weight_update(
     *,
     reclaimable: bool,
     fail_if_short: bool,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Make room for a layerwise weight update of model within the context.
 
     Only an extensible KV cache (kv_cache, None for a standard one) leaves

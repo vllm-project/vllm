@@ -78,7 +78,7 @@ def get_lmcache_chunk_size(
     return chunk_size
 
 
-@dataclass
+@dataclass(slots=True)
 class ParallelStrategy:
     use_mla: bool
     """Whether to use the MLA."""
@@ -111,7 +111,7 @@ class ParallelStrategy:
     """The pipeline parallel size."""
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadStoreOp:
     block_ids: list[int]
     """Block ids for the load/store operation"""
