@@ -512,9 +512,14 @@ class RoutedExpertFront:
     routes image sentinel tokens with `bias_vl`; `max_rows`: 8, 16, 32,
     64, 128 or 192, the most rows of a call."""
 
-    def __init__(self, image: bool, max_rows: int = 8) -> None:
+    def __init__(
+        self, image: bool, max_rows: int = 8, *, build_routing_record: bool = True
+    ) -> None:
         assert max_rows in (8, 16, 32, 64, 128, 192)
         self.image = image
+        # EP ownership and row order are only known after dispatch. Reuse the
+        # top-k/quantization without building a discarded TP record.
+        self.build_routing_record = build_routing_record
         self.max_rows = max_rows
         self.selecting = SELECT_CTAS  # CTAs, one cluster
         self.select_rows = max_rows // self.selecting  # 1-8, 16 at 128 rows, 24 at 192
@@ -585,7 +590,7 @@ class RoutedExpertFront:
             block=[FRONT_THREADS, 1, 1],
             stream=stream,
             use_pdl=True,
-            cluster=[selecting, 1, 1],
+            cluster=[selecting if self.build_routing_record else 1, 1, 1],
         )
 
     @cute.kernel
@@ -662,9 +667,11 @@ class RoutedExpertFront:
         """Selecting CTA `rank`: top-k of its rows; then CTA 0 builds the
         routing record from every row's ids."""
         selecting, levels = self.selecting, self.levels
-        bitmap_words = present_words(levels)
-        mask_size = MAX_EXPERTS * mask_words_for(levels)
-        selected = self.max_rows * TOP_K
+        bitmap_words = present_words(levels) if self.build_routing_record else 1
+        mask_size = (
+            MAX_EXPERTS * mask_words_for(levels) if self.build_routing_record else 1
+        )
+        selected = self.max_rows * TOP_K if self.build_routing_record else 1
         parts, per_lane, candidates = self.parts, self.per_lane, self.candidates
         held = self.select_rows * candidates
 
@@ -690,9 +697,10 @@ class RoutedExpertFront:
         candidate_score = view(shared.candidate_score, held)
         # Every CTA of the cluster must have started before the stores to CTA
         # 0's shared memory; this phase completes during the top-k.
-        cute.arch.cluster_arrive_relaxed()
-        if rank == 0:
-            clear_scratch(present, rows_of, thread, FRONT_THREADS, levels)
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_arrive_relaxed()
+            if rank == 0:
+                clear_scratch(present, rows_of, thread, FRONT_THREADS, levels)
         warp = thread >> 5
         lane = thread & 31
         local_row = warp // parts
@@ -707,8 +715,9 @@ class RoutedExpertFront:
                 if cutlass.const_expr(self.image):
                     row_bias_vl[j] = bias_vl[base + lane + 32 * j]
         cute.arch.griddepcontrol_wait()
-        if rank == 0:
-            zero_record(record, rows, TOP_K, EXPERTS, thread, FRONT_THREADS)
+        if cutlass.const_expr(self.build_routing_record):  # noqa: SIM102
+            if rank == 0:
+                zero_record(record, rows, TOP_K, EXPERTS, thread, FRONT_THREADS)
         if row < rows:
             logit = cute.make_rmem_tensor((per_lane,), Float32)
             for j in cutlass.range_constexpr(per_lane):
@@ -729,7 +738,8 @@ class RoutedExpertFront:
                 candidate_id[slot] = expert
                 candidate_score[slot] = score
         cute.arch.sync_threads()
-        cute.arch.cluster_wait()
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_wait()
         slot_id = Int32(-1)
         slot_weight = Float32(0.0)
         if row < rows and part == 0:
@@ -744,27 +754,30 @@ class RoutedExpertFront:
             if has_padding != 0:
                 padding = Int32(is_padding[row])
             slot_id, slot_weight = merge_row(key, expert, score, scale, lane, padding)
-            if lane < TOP_K:
-                store_cta0_shared(ids_shared.iterator + row * TOP_K + lane, slot_id)
+            if cutlass.const_expr(self.build_routing_record):  # noqa: SIM102
+                if lane < TOP_K:
+                    store_cta0_shared(ids_shared.iterator + row * TOP_K + lane, slot_id)
         # Release the stores to CTA 0; CTA 0 acquires them. The release orders
         # every earlier store of the thread, so the global stores follow it
         # rather than delay it by their round trip to L2 (about 0.2-0.4 us).
-        cute.arch.cluster_arrive()
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_arrive()
         if row < rows and part == 0 and lane < TOP_K:
             topk_ids[row * TOP_K + lane] = slot_id
             topk_weights[row * TOP_K + lane] = slot_weight
-        cute.arch.cluster_wait()
-        if rank == 0:
-            build_record(
-                present,
-                rows_of,
-                ids_shared,
-                permuted,
-                record,
-                rows,
-                Int32(TOP_K),
-                Int32(EXPERTS),
-                thread,
-                FRONT_THREADS,
-                levels,
-            )
+        if cutlass.const_expr(self.build_routing_record):
+            cute.arch.cluster_wait()
+            if rank == 0:
+                build_record(
+                    present,
+                    rows_of,
+                    ids_shared,
+                    permuted,
+                    record,
+                    rows,
+                    Int32(TOP_K),
+                    Int32(EXPERTS),
+                    thread,
+                    FRONT_THREADS,
+                    levels,
+                )

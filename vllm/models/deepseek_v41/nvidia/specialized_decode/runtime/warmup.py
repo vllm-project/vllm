@@ -11,6 +11,7 @@ order.
 
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager, nullcontext
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -36,15 +37,22 @@ from ..moe.step import deferred_finalize
 from .decode import SpecializedDecode
 from .draft import DraftDecode
 
+if TYPE_CHECKING:
+    from ..dep2.runtime import DEP2Decode
+
 
 def warm_up(
-    decode: SpecializedDecode,
+    decode: "SpecializedDecode | DEP2Decode",
     vllm_config: VllmConfig,
-    drafts: Sequence[DraftDecode] = (),
+    drafts: "Sequence[DraftDecode | DEP2Decode]" = (),
 ) -> None:
     """Tune (unless FlashInfer autotuning is off) and compile the GEMMs of the
     executor and of the DSpark draft's (`drafts`) for every row count they
     run them at."""
+    if getattr(decode, "is_dep2", False):
+        cast("DEP2Decode", decode).warm_up(vllm_config, drafts)
+        return
+    decode = cast(SpecializedDecode, decode)
     steps = [plan.attention for plan in decode.plans]
     steps += [plan.attention for draft in drafts for plan in draft.plans]
     linears = shape_representatives(

@@ -78,6 +78,7 @@ from .specialized_decode.ampere import is_ampere
 from .specialized_decode.hopper import is_hopper
 
 if TYPE_CHECKING:
+    from .specialized_decode.dep2.runtime import DEP2Decode
     from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
     from .specialized_decode.runtime.draft import DraftDecode
     from .specialized_decode.sampling.sharded_markov import ShardedMarkovSampling
@@ -380,8 +381,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         specialized_decode_requested = (
             decode_backend(vllm_config) == "latency_specialized"
         )
-        self.specialized_decode: DraftDecode | None = None
-        if specialized_decode_requested:
+        self.specialized_decode: DraftDecode | DEP2Decode | None = None
+        if specialized_decode_requested or (
+            decode_backend(vllm_config) == "latency_specialized_dep2"
+        ):
             register_draft(self)
         # additional_config={"dspark_fused_markov": true}, implied by the
         # specialized decode, replaces the speculator's loop when it would
@@ -425,7 +428,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             moe_type=DeepseekV4MoE,
         )
 
-    def build_specialized_decode(self, target: "SpecializedDecode") -> "DraftDecode":
+    def build_specialized_decode(
+        self, target: "SpecializedDecode | DEP2Decode"
+    ) -> "DraftDecode | DEP2Decode":
         """Build this model's decode executor on `target`, the target
         model's, compute logits with the low-batch LM head and, at small
         batches, sample on the vocabulary-sharded Markov chain. Every TP rank
@@ -434,6 +439,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
 
         self.specialized_decode = target.for_draft(self.model)
         self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        if getattr(target, "is_dep2", False):
+            return self.specialized_decode
         fused = getattr(self, "sample_sequential", None)
         if isinstance(fused, FusedMarkovSampler):
             from .specialized_decode.sampling.sharded_markov import (

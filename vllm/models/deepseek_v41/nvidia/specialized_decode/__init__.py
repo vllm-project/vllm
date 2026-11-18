@@ -138,11 +138,14 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
 
 def decode_backend(vllm_config: VllmConfig) -> str:
     """`additional_config["decode_backend"]`: `auto` (the default, the stock
-    decode) or `latency_specialized`."""
+    decode), `latency_specialized` (TP4), or `latency_specialized_dep2`."""
     extra = vllm_config.additional_config
     backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
-    if backend not in ("auto", "latency_specialized"):
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    if backend not in ("auto", "latency_specialized", "latency_specialized_dep2"):
+        raise ValueError(
+            "Supported decode_backend values are auto/latency_specialized/"
+            "latency_specialized_dep2"
+        )
     return backend
 
 
@@ -154,6 +157,10 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     """
     if decode_backend(vllm_config) == "auto":
         return None
+    if decode_backend(vllm_config) == "latency_specialized_dep2":
+        from .dep2.config import dep2_config
+
+        return dep2_config(vllm_config)
     missing = unsupported(vllm_config)
     supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
     # The NVLink multicast check is rank-local (the custom all-reduce catches a
