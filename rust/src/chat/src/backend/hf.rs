@@ -23,7 +23,7 @@ use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
 use crate::parser::unified::{HfTemplateError, ResponseTemplate};
-use crate::renderer::hf::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
+use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
     Glm5NextChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
@@ -80,19 +80,11 @@ impl HfChatBackend {
         }
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
-            RendererSelection::Hf => {
-                let default_content_format = default_template_content_format(
-                    options.chat_template_content_format,
-                    model_type,
-                    model_config.has_vision_config(),
-                );
-                Arc::new(HfChatRenderer::load(
-                    &files,
-                    options,
-                    multimodal_render_info,
-                    default_content_format,
-                )?)
-            }
+            RendererSelection::Hf => Arc::new(HfChatRenderer::load(
+                &files,
+                options,
+                multimodal_render_info,
+            )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new(
                 options.default_chat_template_kwargs,
             )),
@@ -136,31 +128,6 @@ impl HfChatBackend {
             multimodal_model_info,
             response_template,
         })
-    }
-}
-
-/// The content format for compiling the model's default chat template.
-///
-/// Mirrors Python's `HYV4Renderer` (`vllm/renderers/hy_v4.py`), which forces
-/// string content for the default template under `auto` on the HY4 VL
-/// architectures. A `hy_v4_flash` config with a `vision_config` loads as
-/// `HYV4FlashVLConfig` and takes that renderer too. String content joins the
-/// message parts with newlines (`<image>\nquestion`). An explicit
-/// `--chat-template-content-format` applies as given, as in Python.
-fn default_template_content_format(
-    configured: ChatTemplateContentFormatOption,
-    model_type: &str,
-    has_vision_config: bool,
-) -> ChatTemplateContentFormatOption {
-    let hy4_vl = match model_type {
-        "hy_v4_vl" | "hy_v4_flash_vl" => true,
-        "hy_v4_flash" => has_vision_config,
-        _ => false,
-    };
-    if configured == ChatTemplateContentFormatOption::Auto && hy4_vl {
-        ChatTemplateContentFormatOption::String
-    } else {
-        configured
     }
 }
 
@@ -288,9 +255,7 @@ mod tests {
 
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
-    use crate::request::{
-        ChatContent, ChatContentPart, ChatMessage, ChatRequest, ResolvedToolContext,
-    };
+    use crate::request::{ChatContent, ChatMessage, ChatRequest, ResolvedToolContext};
     use crate::{ChatTool, EffortValue, ParserSelection, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
@@ -617,51 +582,6 @@ mod tests {
             error.to_report_string(),
             "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
         );
-    }
-
-    /// Python's `HYV4Renderer` renders HY4 VL default templates with string
-    /// content, joining message parts with newlines (`<image>\nquestion`).
-    /// The HY4 Flash template renders typed parts natively, so the probe alone
-    /// would pick OpenAI parts and drop the newline.
-    #[test]
-    fn hy_v4_vl_default_template_uses_string_content() {
-        let template = r#"{%- for message in messages -%}
-{%- if message.content is string -%}{{- message.content -}}
-{%- else -%}{%- for item in message.content -%}{{- item.text -}}{%- endfor -%}
-{%- endif -%}{%- endfor -%}"#;
-        let tokenizer_config = serde_json::json!({ "chat_template": template }).to_string();
-        let request = ChatRequest {
-            messages: vec![ChatMessage::User {
-                content: ChatContent::Parts(vec![
-                    ChatContentPart::text("first"),
-                    ChatContentPart::text("second"),
-                ]),
-            }],
-            ..ChatRequest::for_test()
-        };
-        let render = |config: &str| {
-            backend_for_selection(RendererSelection::Auto, config, &tokenizer_config)
-                .chat_renderer()
-                .render(&request)
-                .unwrap()
-                .prompt
-                .into_text()
-                .unwrap()
-        };
-
-        for config in [
-            r#"{"model_type":"hy_v4_vl"}"#,
-            r#"{"model_type":"hy_v4_flash_vl"}"#,
-            r#"{"model_type":"hy_v4_flash","vision_config":{}}"#,
-        ] {
-            assert_eq!(render(config), "first\nsecond", "{config}");
-        }
-        for config in [
-            r#"{"model_type":"hy_v4_flash"}"#,
-            r#"{"model_type":"hy_v4"}"#,
-        ] {
-            assert_eq!(render(config), "firstsecond", "{config}");
-        }
     }
 
     #[test]

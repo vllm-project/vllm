@@ -93,40 +93,17 @@ impl HfChatRenderer {
     /// Templates are probed for their content format when compiled, rendering
     /// with `special_tokens` and `default_template_kwargs`, so both are given
     /// here.
-    #[cfg(test)]
     pub fn new(
         template: Option<String>,
         default_template_kwargs: HashMap<String, JsonValue>,
         special_tokens: Option<HfSpecialTokens>,
         content_format: ContentFormatOption,
     ) -> Result<Self> {
-        Self::with_default_content_format(
-            template,
-            default_template_kwargs,
-            special_tokens,
-            content_format,
-            content_format,
-        )
-    }
-
-    /// Like [`Self::new`], but compiles the model's default template with
-    /// `default_content_format` while request-supplied template overrides
-    /// keep `content_format`. Model families whose default template needs a
-    /// fixed content format under `auto` (mirroring their Python renderer
-    /// overrides, e.g. `HYV4Renderer`) select it through
-    /// [`HfChatBackend`](crate::HfChatBackend) loading.
-    pub fn with_default_content_format(
-        template: Option<String>,
-        default_template_kwargs: HashMap<String, JsonValue>,
-        special_tokens: Option<HfSpecialTokens>,
-        content_format: ContentFormatOption,
-        default_content_format: ContentFormatOption,
-    ) -> Result<Self> {
         let mut renderer = Self {
             default_template: None,
             tool_use_template: None,
             default_template_kwargs,
-            content_format: default_content_format,
+            content_format,
             special_tokens,
             multimodal: None,
             trust_request_chat_template: false,
@@ -137,7 +114,6 @@ impl HfChatRenderer {
         };
         renderer.default_template =
             template.map(|template| renderer.compile_template(template, None)).transpose()?;
-        renderer.content_format = content_format;
         Ok(renderer)
     }
 
@@ -177,14 +153,10 @@ impl HfChatRenderer {
     }
 
     /// Create a renderer from the given model files and loading options.
-    ///
-    /// `default_content_format` compiles the model's default template; see
-    /// [`Self::with_default_content_format`].
     pub fn load(
         files: &ResolvedModelFiles,
         options: LoadModelBackendsOptions,
         multimodal: Option<MultimodalRenderInfo>,
-        default_content_format: ContentFormatOption,
     ) -> Result<Self> {
         let HfTokenizerConfig {
             special_tokens,
@@ -231,12 +203,11 @@ impl HfChatRenderer {
             }
         }
 
-        Ok(Self::with_default_content_format(
+        Ok(Self::new(
             template,
             options.default_chat_template_kwargs,
             special_tokens,
             options.chat_template_content_format,
-            default_content_format,
         )?
         .with_tool_use_template(tool_use_template)?
         .with_multimodal(multimodal)
