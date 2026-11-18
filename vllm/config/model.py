@@ -1176,13 +1176,12 @@ class ModelConfig:
         # Linear attention models are attention free, or hybrid if they also have
         # attention ("hybrid" and "hybrid_sliding" layers have both)
         layer_types = set(getattr(self.hf_text_config, "layer_types", None) or ())
-        linear_attention = ""
         if layer_types & {"linear_attention", "hybrid", "hybrid_sliding"}:
             has_attention = any(
                 t.startswith("hybrid") or t.endswith("attention")
                 for t in layer_types - {"linear_attention"}
             )
-            linear_attention = "Hybrid" if has_attention else "AttentionFree"
+            cls += "Hybrid" if has_attention else "AttentionFree"
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
@@ -1211,7 +1210,7 @@ class ModelConfig:
         ):
             cls += "ForTranscription"
         else:
-            cls += linear_attention + "ForCausalLM"
+            cls += "ForCausalLM"
         return cls
 
     def using_transformers_backend(self) -> bool:

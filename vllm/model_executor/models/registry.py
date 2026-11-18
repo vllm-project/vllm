@@ -1429,7 +1429,13 @@ class _ModelRegistry:
                 "is not compatible with vLLM."
             )
 
-        return model_config._get_transformers_backend_cls()
+        backend_cls = model_config._get_transformers_backend_cls()
+        if backend_cls not in self.models:
+            raise ValueError(
+                f"The Transformers modeling backend does not support "
+                f"{architecture!r} yet, because it has no {backend_cls!r} class."
+            )
+        return backend_cls
 
     def _normalize_arch(
         self,
