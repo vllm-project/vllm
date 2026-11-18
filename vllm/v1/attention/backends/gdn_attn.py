@@ -126,10 +126,14 @@ class GDNAttentionMetadata:
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
     uniform_spec_sequence_length: int | None = None  # None for ragged batches
 
-    # Per-decode-row ring write position and flush flag for the cached decode
-    # kernel. shape: [num_decodes]; None unless use_replayssm is enabled.
+    # ReplaySSM standard decode: per-row ring cursor and flush flag. The first
+    # layer of each cache group fills them on the GPU from per-slot ring
+    # counters (see plan_replayssm_decode); align mode also reads the rows'
+    # sequence lengths. None unless use_replayssm is enabled.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
+    replayssm_seq_lens_d: torch.Tensor | None = None
+    replayssm_align_block_size: int = 0
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -272,9 +276,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
 
-        # Cached decode kernel: persistent per-decode-row write position and
-        # flush flag. write_pos is derived per request each step so recycled
-        # paged blocks need no zero-init.
         self.use_replayssm: bool = (
             vllm_config.cache_config.use_replayssm
             and not vllm_config.cache_config.use_kda_recoverssm
@@ -295,15 +296,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if self.use_replayssm:
             if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("GDN ReplaySSM requires --mamba-backend triton")
-            self.decode_write_pos_d: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
+            # Filled on the GPU each step by plan_replayssm_decode; persistent
+            # so full CUDA graphs keep reading the same addresses.
+            replayssm_max_bs = max(
+                self.decode_cudagraph_max_bs,
+                self.vllm_config.scheduler_config.max_num_seqs,
             )
-            self.decode_is_flush_d: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int8,
-                device=device,
+            self.decode_write_pos_d: torch.Tensor = torch.zeros(
+                (replayssm_max_bs,), dtype=torch.int32, device=device
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.zeros(
+                (replayssm_max_bs,), dtype=torch.int8, device=device
             )
 
     @staticmethod
@@ -680,74 +683,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        # Cached decode kernel: write_pos = decode steps since the ring's last
-        # full-state write, mod replayssm_buffer_len. decode_base re-anchors after
-        # preemption; in align mode it also re-anchors at each block start so the
-        # ring restarts empty per block. is_flush is a kernel input, not derived.
         write_pos_d = None
         is_flush_d = None
+        replayssm_seq_lens_d = None
+        replayssm_align_block_size = 0
         if self.use_replayssm and spec_sequence_masks is None and num_decodes > 0:
-            decode_base_cpu = m.replayssm_decode_base_cpu
-            seq_lens_cpu = m.seq_lens_cpu_upper_bound
-            async_spec_decode = (
-                self.vllm_config.scheduler_config.async_scheduling
-                and self.speculative_config is not None
-            )
-            if decode_base_cpu is None or seq_lens_cpu is None or async_spec_decode:
-                raise ValueError(
-                    "--use-replayssm requires exact CPU sequence lengths and "
-                    "decode-base counts to derive decode write positions"
-                )
-            query_lens_cpu = (
-                query_start_loc_cpu[1 : num_decodes + 1]
-                - query_start_loc_cpu[:num_decodes]
-            )
-            num_computed_d = seq_lens_cpu[:num_decodes] - query_lens_cpu
-            decode_base_d = decode_base_cpu[:num_decodes]
-            align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
-            block_size = self.kv_cache_spec.block_size
-            if align_mode:
-                # A prefill chunk may end mid-block, so the block start does not
-                # always hold a checkpoint; decode_base wins until decode itself
-                # crosses the boundary and flushes it below.
-                effective_base = torch.maximum(
-                    decode_base_d, (num_computed_d // block_size) * block_size
-                )
-            else:
-                effective_base = decode_base_d
-            decode_steps_cpu = num_computed_d - effective_base
-            valid_decode_rows = query_lens_cpu > 0
-            # A single-token prefill row replayed as decode has decode_steps < 0;
-            # force a one-token flush (write_pos=0, is_flush=1) off the checkpoint.
-            leftover_prompt = valid_decode_rows & (decode_steps_cpu < 0)
-            decode_steps_cpu = torch.where(
-                valid_decode_rows & ~leftover_prompt,
-                decode_steps_cpu,
-                torch.zeros_like(decode_steps_cpu),
-            )
-            assert self.replayssm_buffer_len is not None
-            write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
-            is_flush_cpu = (
-                write_pos_cpu == self.replayssm_buffer_len - 1
-            ) | leftover_prompt
-            if align_mode:
-                # Force a flush on the step completing a block so the boundary
-                # state is materialized for prefix caching.
-                is_flush_cpu = is_flush_cpu | (
-                    valid_decode_rows
-                    & ((num_computed_d + query_lens_cpu) % block_size == 0)
-                )
-            is_flush_cpu = is_flush_cpu.to(torch.int8)
-            write_pos_d = async_tensor_h2d(
-                write_pos_cpu.to(torch.int32).tolist(),
-                dtype=torch.int32,
-                device=query_start_loc.device,
-            )
-            is_flush_d = async_tensor_h2d(
-                is_flush_cpu.tolist(),
-                dtype=torch.int8,
-                device=query_start_loc.device,
-            )
+            # All rows: a padded full-CUDA-graph batch plans its NULL_BLOCK_ID
+            # rows as no-ops.
+            write_pos_d = self.decode_write_pos_d[: m.num_reqs]
+            is_flush_d = self.decode_is_flush_d[: m.num_reqs]
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+                replayssm_seq_lens_d = m.seq_lens[: m.num_reqs]
+                replayssm_align_block_size = self.kv_cache_spec.block_size
 
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted
@@ -812,21 +759,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
-            if self.use_replayssm:
-                assert write_pos_d is not None and is_flush_d is not None
-                self.decode_write_pos_d[:num_decodes].copy_(
-                    write_pos_d, non_blocking=True
-                )
-                self.decode_is_flush_d[:num_decodes].copy_(
-                    is_flush_d, non_blocking=True
-                )
-                write_pos_d = self.decode_write_pos_d[:batch_size]
-                is_flush_d = self.decode_is_flush_d[:batch_size]
-                # Padded rows map to NULL_BLOCK_ID and hit the kernel's early
-                # return, so their values are never read; zero is fine.
-                write_pos_d[num_decodes:].fill_(0)
-                is_flush_d[num_decodes:].fill_(0)
-
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -856,6 +788,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             uniform_spec_sequence_length=uniform_spec_sequence_length,
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
+            replayssm_seq_lens_d=replayssm_seq_lens_d,
+            replayssm_align_block_size=replayssm_align_block_size,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
