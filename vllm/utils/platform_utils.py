@@ -10,6 +10,8 @@ from typing import Any
 import regex as re
 import torch
 
+import vllm.envs as envs
+
 
 def cuda_is_initialized() -> bool:
     """Check if CUDA is initialized."""
@@ -54,6 +56,8 @@ def is_uva_available() -> bool:
 
     if current_platform.is_cpu():
         return True
+    if envs.VLLM_DISABLE_UVA:
+        return False
     # UVA requires pinned memory. Under NVIDIA Confidential Computing the
     # device-side view of pinned host memory is not coherent (the GPU reads a
     # stale snapshot), so treat UVA as unavailable and fall back to explicit
