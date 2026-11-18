@@ -39,13 +39,7 @@ PREFIX_PROMPT = "You are a helpful assistant. " * 230 + " Now answer: what is 2+
 
 
 def _make_llm(**overrides) -> LLM:
-    base = dict(
-        model=MODEL,
-        dtype="bfloat16",
-        max_model_len=2048,
-        enforce_eager=True,
-        trust_remote_code=True,
-    )
+    base = dict(model=MODEL, dtype="bfloat16", max_model_len=2048, enforce_eager=True)
     base.update(overrides)
     return LLM(**base)
 

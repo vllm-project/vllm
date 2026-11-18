@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
-from openai_harmony import HarmonyError, Message, Role, StreamState
+from openai_harmony import HarmonyError, Message, Role
 from xgrammar import StructuralTag
 from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
 from xgrammar.structural_tag import (
@@ -53,6 +53,8 @@ from vllm.tool_parsers.structural_tag_registry import (
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
 
+    from vllm.logprobs import LogprobsOnePosition
+
 
 logger = init_logger(__name__)
 
@@ -81,10 +83,15 @@ class Segment(NamedTuple):
     recipient: str | None
     delta: str
     completed_message: Message | None = None
+    # Index into the token_ids passed to process_chunk of the token that
+    # produced this segment. None for segments created by flush().
     token_index: int | None = None
+    # (token_id, logprobs) of an output text token. Set by HarmonyContext
+    # only when logprobs are requested.
+    token_logprobs: tuple[int, LogprobsOnePosition] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ChunkResult:
     segments: list[Segment]
     reasoning_token_count: int
@@ -147,7 +154,9 @@ class HarmonyParser(DelegatingParser):
                 if delta := text[self._current_message_text_len :]:
                     segments.append(
                         Segment(
-                            msg.channel, self._normalize_recipient(msg.recipient), delta
+                            msg.channel,
+                            self._normalize_recipient(msg.recipient),
+                            delta,
                         )
                     )
         except HarmonyError:
@@ -198,7 +207,7 @@ class HarmonyParser(DelegatingParser):
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse Harmony output from token IDs.
 
-        Tool calls are always extracted regardless of ``enable_auto_tools``.
+        Tool calls are always extracted regardless of `enable_auto_tools`.
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
@@ -341,9 +350,7 @@ class HarmonyParser(DelegatingParser):
 
         return delta_message
 
-    def process_chunk(
-        self, token_ids: Sequence[int], *, track_token_positions: bool = False
-    ) -> ChunkResult:
+    def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
         if not token_ids:
             return ChunkResult(segments=[], reasoning_token_count=0)
 
@@ -390,13 +397,7 @@ class HarmonyParser(DelegatingParser):
                     recipient=recipient,
                     delta=delta,
                     completed_message=completed_message,
-                    token_index=(
-                        token_index
-                        if track_token_positions
-                        and self._harmony_parser.state == StreamState.CONTENT
-                        and not get_encoding().is_special_token(token_id)
-                        else None
-                    ),
+                    token_index=token_index,
                 )
             )
 
