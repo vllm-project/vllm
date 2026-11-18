@@ -326,6 +326,25 @@ def test_flashinfer_cutedsl_sm90_moe_router_weight_on_input():
     torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
 
 
+@torch.inference_mode()
+def test_flashinfer_cutedsl_sm90_moe_is_deterministic():
+    """Repeated runs on the same inputs give bitwise-identical outputs: the
+    top-k routes are combined in a fixed order."""
+    set_random_seed(5)
+    m, n, k, e, topk = 512, 256, 1024, 8, 4
+    a, w13, w2, topk_weights, topk_ids = _random_moe_inputs(
+        m, n, k, e, topk, MoEActivation.SILU
+    )
+    moe_config = _make_moe_config(e, topk, k, n)
+    quant_config = FusedMoEQuantConfig.make()
+    outputs = [
+        _run_kernel(moe_config, quant_config, a, w13, w2, topk_weights, topk_ids)
+        for _ in range(5)
+    ]
+    for output in outputs[1:]:
+        assert torch.equal(output, outputs[0])
+
+
 @pytest.mark.parametrize("strategy", ["linear", "round_robin"])
 def test_flashinfer_cutedsl_sm90_requires_linear_expert_placement(strategy: str):
     """The kernel addresses a contiguous expert shard, whose offset comes from
