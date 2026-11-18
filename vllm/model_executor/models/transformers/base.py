@@ -584,6 +584,12 @@ class Base(
             )
         # Decoder layers are detected as they are built, after their pre-replace hook
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
+        # Towers were built on `meta`, so `_mark_tower_model` could not offload them
+        towers = (
+            tuple(self._pre_trained_model_classes.encoders.values())
+            if offloader.supports_tower_offload
+            else ()
+        )
 
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
             """Build this rank's decoder layers one at a time and offload each as
@@ -623,6 +629,11 @@ class Base(
                 return
             for child_name, child_module in module.named_children():
                 _replace_child(module, child_name, child_module, prefix)
+            # Offload each tower as soon as it is built, as `_mark_tower_model` does
+            if isinstance(module, towers):
+                self.init_parameters(module)
+                self.keep_in_fp32(module, prefix.removeprefix("model."))
+                offloader.wrap_modules(iter([module]), prefix=prefix)
 
         def _replace_child(
             module: nn.Module, child_name: str, child_module: nn.Module, prefix: str

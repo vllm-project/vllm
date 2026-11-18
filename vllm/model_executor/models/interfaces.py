@@ -434,11 +434,15 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         # Towers are constructed directly, so `make_layers` never routes them
         # through the offloader. Do it here, at the same construction stage,
         # so offloaded tower weights are never allocated on the device.
+        # Towers still on `meta` have nothing to offload yet, so whatever materialises
+        # them offloads them (e.g. `recursive_replace` in the Transformers backend).
         offloader = get_offloader()
         if offloader.supports_tower_offload:
             for name in children_names:
-                modules = (module for module in [attrgetter(name)(self)])
-                offloader.wrap_modules(modules, prefix=name)
+                tower = attrgetter(name)(self)
+                if all(p.is_meta for p in tower.parameters()):
+                    continue
+                offloader.wrap_modules(iter([tower]), prefix=name)
 
     @contextmanager
     def _mark_composite_model(
