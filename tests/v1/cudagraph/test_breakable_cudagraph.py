@@ -106,9 +106,9 @@ def _reset_breakable_tls():
 def cuda_capture_stream():
     """A non-default CUDA stream suitable for cudagraph capture.
 
-    ``CUDAGraph.capture_begin`` refuses to capture from the default
+    `CUDAGraph.capture_begin` refuses to capture from the default
     stream, so all capture-using tests need to run under
-    ``torch.cuda.stream(...)`` for a separate stream.
+    `torch.cuda.stream(...)` for a separate stream.
     """
     if not HAS_DEVICE_GRAPH:
         pytest.skip("CUDA or XPU graph required")
@@ -195,6 +195,54 @@ def test_decorator_breaks_when_enabled_after_decoration(
     BreakableCUDAGraphCapture._tls.active = capture
     assert op(1) == 2
     assert len(capture.eager) == 1
+
+
+def test_mla_pcp_gather_replays_with_step_split(monkeypatch, cuda_capture_stream):
+    """The PCP cache-input gather depends on each step's decode/prefill split,
+    so it replays eagerly with that step's metadata, filling fixed-size buffers
+    padded with PAD_SLOT_ID so the cache write after it stays in the graph."""
+    from types import SimpleNamespace
+
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.model_executor.layers.attention import mla_attention
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+    from vllm.v1.attention.ops import pcp as attention_pcp
+
+    layer = object.__new__(mla_attention.MLAAttention)
+    layer.layer_name = "layer"
+    layer.use_pcp = True
+    layer.pcp_shard_decode_requests = False
+    step = {"metadata": SimpleNamespace(num_decode_tokens=2)}
+    monkeypatch.setattr(
+        mla_attention,
+        "get_attention_context",
+        lambda _: (step["metadata"], None, None, None),
+    )
+    # Rank 1's rows are rank 0's plus 10; its copy of the decode is not written.
+    pcp_group = SimpleNamespace(
+        world_size=2, all_gather=lambda t, dim: torch.cat((t, t + 10), dim=dim)
+    )
+    monkeypatch.setattr(mla_attention, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(attention_pcp, "get_pcp_group", lambda: pcp_group)
+
+    kv_c = torch.zeros(2, 1, device=DEVICE_TYPE)
+    k_pe = torch.zeros(2, 1, 1, device=DEVICE_TYPE)
+    slots = torch.tensor([100, 101, PAD_SLOT_ID, 103], device=DEVICE_TYPE)
+    cache = torch.zeros(201, 1, device=DEVICE_TYPE)
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:  # Captured on a decode-only step.
+        out_kv_c, _, out_slots = layer._gather_pcp_cache_inputs(kv_c, k_pe, slots)
+        rows = torch.where(out_slots >= 0, out_slots, cache.shape[0] - 1)
+        cache.index_copy_(0, rows, out_kv_c)
+    assert cap.num_eager_breaks == 1
+
+    step["metadata"] = SimpleNamespace(num_decode_tokens=1)
+    kv_c.copy_(torch.tensor([[5.0], [6.0]]))
+    cache.zero_()
+    cap.replay()
+    torch.accelerator.synchronize()
+    assert cache[[100, 101, 103], 0].tolist() == [5.0, 6.0, 16.0]
 
 
 def test_attention_op_breaks_when_imported_before_enable(tmp_path):
@@ -316,6 +364,35 @@ def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
     assert cap.num_eager_breaks == 0
 
 
+def test_shutdown_allows_recapture_with_live_outputs(cuda_capture_stream):
+    """A previous engine's graph outputs can outlive its graphs and shutdown."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.shutdown import free_before_shutdown
+
+    vllm_config = VllmConfig()
+    free_before_shutdown(vllm_config)
+    x = torch.ones(4, device=DEVICE_TYPE)
+    first = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
+    with first:
+        old_output = x + 1
+    first.replay()
+    torch.accelerator.synchronize()
+    del first
+
+    free_before_shutdown(vllm_config)
+    torch.accelerator.empty_cache()
+
+    second = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
+    with second:
+        new_output = x + 2
+    x.fill_(3)
+    second.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(old_output, torch.full_like(x, 2))
+    assert torch.equal(new_output, torch.full_like(x, 5))
+
+
 def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -356,7 +433,7 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     Note: during capture, the *captured* kernels are recorded but NOT
     executed (that's CUDA-graph semantics). Only the eager segments
     actually mutate state at capture time. So we check correctness after
-    ``replay()``, not after ``with cap:`` exits.
+    `replay()`, not after `with cap:` exits.
     """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -599,7 +676,7 @@ def test_exception_in_body_clears_active(cuda_capture_stream):
 def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     """A decorated op invoked from inside another decorated op's eager
     body must execute inline -- starting a second eager break mid-flight
-    corrupts the segment state and explodes ``_begin_segment``'s assert.
+    corrupts the segment state and explodes `_begin_segment`'s assert.
 
     This mirrors the deepseek_v4_attention case where the outer attention
     op's impl internally dispatches sparse_attn_indexer (also decorated).

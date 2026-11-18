@@ -13,7 +13,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config_or_none
 from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
@@ -144,7 +143,7 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A ``(backend, allow_trtllm_fallback)`` tuple. ``backend`` is ``None``
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
         when automatic selection has no supported backend for the process
         group.
 
@@ -155,22 +154,6 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
         return backend, False
 
     node_count = _node_count(group)
-    config = get_current_vllm_config_or_none()
-    # TODO: drop once FlashInfer ships flashinfer-ai/flashinfer#7782.
-    if config is not None and config.attention_config.hisparse_config is not None:
-        if node_count == 1:
-            logger.info_once(
-                "Using flashinfer allreduce backend trtllm: the mnnvl fused "
-                "all-reduce + RMSNorm can crash with HiSparse (vllm#64327)."
-            )
-            return "trtllm", False
-        logger.warning_once(
-            "FlashInfer allreduce is disabled: the mnnvl fused all-reduce "
-            "+ RMSNorm can crash with HiSparse (vllm#64327), and trtllm does not "
-            "support multi-node process groups."
-        )
-        return None, False
-
     if node_count == 1:
         # MNNVL decodes faster than TRTLLM on single-node NVSwitch systems
         # (about 3-5% throughput at TP4/TP8 on H200 and B200). Fall back to
@@ -201,23 +184,18 @@ def get_fi_ar_workspace(
     hidden_dim: int,
     dtype: torch.dtype,
     group: ProcessGroup,
-    resolved_backend: tuple[str | None, bool] | None = None,
 ):
     """Return the allreduce workspace for non-quant patterns, initializing if needed.
 
     Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
     for standalone allreduce. Backend is controlled by
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. ``resolved_backend`` is a
-    ``_resolve_fi_ar_backend`` result taken while the vLLM config was current;
-    lazy creation can run outside it.
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var.
     """
     global _fi_ar_workspace, _fi_ar_workspace_failed
     if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
         return _fi_ar_workspace
 
-    backend, allow_trtllm_fallback = (
-        _resolve_fi_ar_backend(group) if resolved_backend is None else resolved_backend
-    )
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
 
     if backend is None:
         return None
@@ -279,7 +257,7 @@ def get_fi_ar_quant_workspace(
     """Return the allreduce workspace for quant patterns, initializing if needed.
 
     Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
-    non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
+    non-quant fusion. With `auto` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
@@ -449,8 +427,7 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        self.resolved_backend = _resolve_fi_ar_backend(self.group)
-        backend = self.resolved_backend[0]
+        backend, _ = _resolve_fi_ar_backend(self.group)
         if backend is None:
             logger.info(
                 "FlashInfer All Reduce is disabled because no supported backend "
@@ -482,7 +459,6 @@ class FlashInferAllReduce:
             hidden_dim=hidden_dim,
             dtype=dtype,
             group=self.group,
-            resolved_backend=self.resolved_backend,
         )
         if workspace is None:
             self.disabled = True

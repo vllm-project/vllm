@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm numerical-equivalence tests for the fused MTP depth-layer input kernel.
 
-``embed_dual_rmsnorm_cat`` must match the unfused module sequence numerically:
+`embed_dual_rmsnorm_cat` must match the unfused module sequence numerically:
 each rmsnorm computes in fp32 and rounds to bf16 at the same points as the
-vendored ``rmsnorm`` kernel (including the bf16 round-trip between the
+vendored `rmsnorm` kernel (including the bf16 round-trip between the
 chained backbone embed_norm and the depth embed_norm), and the fused row
-gather matches ``F.embedding``.
+gather matches `F.embedding`.
 """
 
 from typing import cast
