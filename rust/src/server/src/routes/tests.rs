@@ -6234,7 +6234,7 @@ async fn http_metrics_record_request_cancelled_before_response() {
             &before,
             &after,
             "http_requests_total",
-            Some("method=\"GET\",status=\"5xx\",handler=\"/pending\""),
+            Some("method=\"GET\",status=\"2xx\",handler=\"/pending\""),
         ),
         1.0
     );

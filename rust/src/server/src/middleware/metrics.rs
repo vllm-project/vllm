@@ -64,8 +64,9 @@ pub async fn track_http_metrics(req: Request, next: Next) -> Response {
     let mut guard = HttpMetricsGuard {
         method,
         handler,
-        // Match the Python middleware's fallback before response headers exist.
-        status: "5xx",
+        // Kept when the future is dropped before a response (the client went
+        // away); Python's `with_cancellation` answers that with an empty 200.
+        status: "2xx",
         started_at: Instant::now(),
     };
     let response = next.run(req).await;
