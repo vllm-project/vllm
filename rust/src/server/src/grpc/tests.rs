@@ -3131,7 +3131,6 @@ fn render_state() -> RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len: Some(1024),
-        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
