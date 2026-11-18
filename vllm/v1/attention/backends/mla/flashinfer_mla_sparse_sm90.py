@@ -93,7 +93,13 @@ _PLAN_SLACK = 32
 
 
 def _max_plan_chunk_rows(num_heads: int) -> int:
-    # Smallest planner query tile is 64 heads; keep that for 128-head tiles too.
+    # MLAPlan packs a row's heads into 64-query-row CTA tiles and pairs two CTAs
+    # per cluster only when the batch-average packed query length exceeds 64
+    # (scheduler.cuh). The plan is padded to max_tokens with zero-length rows,
+    # so a partly filled chunk falls back to one CTA per cluster even above 64
+    # heads: divide by that worst-case cdiv(num_heads, 64) tile count. It caps
+    # the query-tile works at 8192, and split-KV works add at most one cluster
+    # each, so the plan stays under MLAPlan's 16384-work capacity.
     return _MAX_PLAN_QUERY_TILES // triton.cdiv(num_heads, 64)
 
 

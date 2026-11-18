@@ -757,6 +757,15 @@ def test_chunked_plan_matches_exact_and_replays(
                 )
 
 
+@pytest.mark.parametrize(
+    "heads,expected_rows",
+    [(16, 8192), (64, 8192), (65, 4096), (128, 4096), (256, 2048), (384, 1365)],
+)
+def test_plan_chunk_rows_assume_worst_case_query_tiles(heads, expected_rows):
+    """Partly filled padded batches fall back to 64-row tiles, so cap on that."""
+    assert sm90_mod._max_plan_chunk_rows(heads) == expected_rows
+
+
 @pytest.mark.skipif(
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
