@@ -21,8 +21,7 @@ use crate::mm_wire;
 /// Mirrors the Python vLLM `MultiModalFeatures` class.
 ///
 /// Each modality maps to parallel lists, one entry per item in placeholder
-/// order. Like Python, `kwargs_data` and `mm_metadata` are serialized as
-/// `null` when unset.
+/// order.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiModalFeatures {
@@ -30,14 +29,10 @@ pub struct MultiModalFeatures {
     /// else its content hash tagged `content:`.
     pub mm_hashes: HashMap<MmModality, Vec<String>>,
     pub mm_placeholders: HashMap<MmModality, Vec<PlaceholderRangeInfo>>,
-    /// Base64-encoded MessagePack `MultiModalKwargsItem`s. Unset unless render
-    /// was asked for `mm_payload: "tensors"`.
+    /// Base64-encoded MessagePack `MultiModalKwargsItem`s. Unset when render
+    /// was asked for `mm_payload: "none"`.
     #[serialize_always]
     pub kwargs_data: Option<HashMap<MmModality, Vec<Option<String>>>>,
-    /// The `keep_on_cpu` fields of each item, encoded like `kwargs_data`. Generate
-    /// still needs them when the embeddings arrive through the EC connector.
-    /// Unset for `mm_payload: "none"`, or if any modality has no such field,
-    /// which keeps it complete when set.
     #[serialize_always]
     pub mm_metadata: Option<HashMap<MmModality, Vec<Option<String>>>>,
 }
@@ -46,11 +41,9 @@ pub struct MultiModalFeatures {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MmPayload {
-    /// Hashes, placeholders, processed tensors and metadata.
+    /// Hashes, placeholders and processed tensors.
     #[default]
     Tensors,
-    /// Hashes, placeholders and metadata, for prefill that loads the
-    /// embeddings through the EC connector.
     Metadata,
     /// Hashes and placeholders only, for callers that route on the prompt
     /// layout. Such features cannot be sent to generate.
@@ -111,8 +104,6 @@ impl MultiModalFeatures {
         })
     }
 
-    /// Whether some item has metadata but no kwargs, so its embedding has to
-    /// come through the EC connector.
     pub(crate) fn has_metadata_only_items(&self) -> bool {
         let Some(mm_metadata) = &self.mm_metadata else {
             return false;
@@ -127,12 +118,6 @@ impl MultiModalFeatures {
     }
 
     /// Rebuild the prepared features, ordered by placeholder offset.
-    ///
-    /// Every item must carry inline kwargs or metadata: the Rust frontend has
-    /// no multimodal processor cache to resolve a missing item from. Like
-    /// Python, an item's metadata fields override its kwargs fields. An item
-    /// with metadata only needs the EC connector for its embedding, which the
-    /// caller checks with [`Self::has_metadata_only_items`].
     pub(crate) fn into_prepared(self) -> Result<MmFeatures, ApiError> {
         let Self {
             mm_hashes,
@@ -227,8 +212,6 @@ impl MultiModalFeatures {
     }
 }
 
-/// Take one modality's items from an optional per-modality map. An unset map
-/// yields `n` unset items; a set map missing the modality yields `None`.
 fn take_items(
     items: &mut Option<HashMap<MmModality, Vec<Option<String>>>>,
     modality: MmModality,
@@ -240,7 +223,6 @@ fn take_items(
     }
 }
 
-/// An item's `keep_on_cpu` fields, or `None` if it has none.
 fn metadata_kwargs(item: &MmKwargsItem) -> Option<MmKwargsItem> {
     let metadata: MmKwargsItem = item
         .iter()
@@ -288,8 +270,6 @@ mod tests {
         }
     }
 
-    /// An item with `pixel_values` and, for `with_grid`, a `keep_on_cpu`
-    /// `image_grid_thw` like Qwen2-VL's.
     fn metadata_feature(modality: MmModality, offset: usize, with_grid: bool) -> MmFeatureSpec {
         let mut feature = feature(modality, offset, None);
         let data = feature.data.as_mut().unwrap();
@@ -302,7 +282,6 @@ mod tests {
         feature
     }
 
-    /// Which `features` keys render sends, and which of them are `null`.
     fn wire_keys(features: &MultiModalFeatures) -> (Vec<String>, Vec<String>) {
         let json = serde_json::to_value(features).unwrap();
         let object = json.as_object().unwrap();
@@ -393,8 +372,6 @@ mod tests {
         assert!(features.into_prepared().is_err());
     }
 
-    /// Like Python, every mode sends all four keys and uses `null` for the
-    /// payloads it leaves out.
     #[test]
     fn features_wire_keys_match_python_for_each_payload() {
         let keys = [MmPayload::Tensors, MmPayload::Metadata, MmPayload::None].map(|payload| {
@@ -452,8 +429,6 @@ mod tests {
         .assert_debug_eq(&keys);
     }
 
-    /// `metadata` keeps the `keep_on_cpu` fields only, and generate rebuilds
-    /// the item from them.
     #[test]
     fn metadata_only_features_round_trip_through_json() {
         let prepared = vec![metadata_feature(MmModality::Image, 1, true)];
@@ -470,7 +445,6 @@ mod tests {
         assert_eq!(rebuilt, expected);
     }
 
-    /// With both payloads, the item keeps its tensors and is not metadata-only.
     #[test]
     fn tensors_features_carry_metadata_without_needing_ec() {
         let prepared = vec![metadata_feature(MmModality::Image, 1, true)];
@@ -481,8 +455,6 @@ mod tests {
         assert_eq!(features.into_prepared().unwrap(), prepared);
     }
 
-    /// A modality without `keep_on_cpu` fields nulls `mm_metadata`, which
-    /// `metadata` rejects and `tensors` leaves to `kwargs_data`.
     #[test]
     fn modality_without_metadata_nulls_mm_metadata() {
         let prepared = || {

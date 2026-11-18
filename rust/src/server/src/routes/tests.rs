@@ -5427,7 +5427,6 @@ async fn render_chat_mm_payload_none_returns_layout_only() {
     let features = &render_json["features"];
     assert_eq!(features["mm_hashes"], json!({"image": ["uuid:image-1"]}));
     assert!(features["mm_placeholders"]["image"][0]["length"].as_u64().unwrap() > 1);
-    // Like Python, the unset payloads are `null` rather than omitted.
     assert_eq!(
         features.get("kwargs_data"),
         Some(&json!(null)),
@@ -5440,14 +5439,11 @@ async fn render_chat_mm_payload_none_returns_layout_only() {
     );
 }
 
-/// Decode one base64 MessagePack kwargs item from render `features`.
 fn decode_feature_item(item: &serde_json::Value) -> MmKwargsItem {
     let bytes = BASE64.decode(item.as_str().expect("base64 item")).expect("base64");
     crate::mm_wire::decode_kwargs(&bytes).expect("kwargs item")
 }
 
-/// `metadata` keeps each item's `keep_on_cpu` fields, here Qwen2-VL's
-/// `image_grid_thw`, and drops the processed tensors.
 #[tokio::test]
 async fn render_chat_mm_payload_metadata_returns_metadata_without_tensors() {
     let decode = |body: axum::body::Bytes| -> serde_json::Value {
@@ -5500,8 +5496,6 @@ async fn generate_rejects_metadata_only_features_without_ec_transfer_params() {
     );
 }
 
-/// With `ec_transfer_params`, a `metadata` render reaches the engine with the
-/// metadata fields only: the embeddings come through the EC connector.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn generate_accepts_metadata_only_features_with_ec_transfer_params() {

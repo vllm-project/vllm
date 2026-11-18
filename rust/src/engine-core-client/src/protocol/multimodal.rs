@@ -205,7 +205,6 @@ pub enum MmField {
 }
 
 impl MmField {
-    /// Whether the model reads this field on the CPU.
     pub fn keep_on_cpu(&self) -> bool {
         match self {
             Self::Batched(field) => field.keep_on_cpu,
