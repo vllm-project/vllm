@@ -913,7 +913,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 topk_indices = topk_indices[num_decode_tokens:]
             kv_c_and_k_pe_cache, block_table, req_id_per_token = (
                 index_group.stage_prefill_rows(
-                    self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
+                    self.index_group_index,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    topk_indices,
                 )
             )
         # Convert per-request indices to global slots (decode) or workspace offsets.

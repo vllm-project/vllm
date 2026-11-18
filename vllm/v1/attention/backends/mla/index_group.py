@@ -16,11 +16,30 @@ from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.hisparse.gather import mark_referenced_blocks
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparsePrefillStagingPlan,
     create_hisparse_cache_handle,
 )
+
+
+def _referenced_blocks(
+    plan: HiSparsePrefillStagingPlan, req_ids: torch.Tensor, topk: torch.Tensor
+) -> torch.Tensor:
+    """One bool per staged block: whether any prefill top-k entry reads it.
+
+    Only host rows are filtered by it, so marking is skipped on device when the
+    plan reads nothing from host.
+    """
+    return mark_referenced_blocks(
+        plan.block_table,
+        req_ids,
+        topk,
+        plan.block_size,
+        plan.row_ids.shape[1] // plan.block_size,
+        enabled=plan.miss_mask.any(),
+    )
 
 
 @dataclass
@@ -262,8 +281,16 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         )
 
     def stage_prefill_rows(
-        self, layer_index: int, kv_cache: torch.Tensor, attn_metadata: Any
+        self,
+        layer_index: int,
+        kv_cache: torch.Tensor,
+        attn_metadata: Any,
+        topk_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Stage the context blocks this layer's prefill top-k reads.
+
+        `topk_indices` holds the prefill tokens' logical top-k positions.
+        """
         cache = self.cache(layer_index)
         prefill = attn_metadata.prefill
         staging_plan = prefill.host_staging_plan if prefill is not None else None
@@ -278,14 +305,15 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
+        req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
+        if attn_metadata.num_decodes > 0:
+            req_ids = req_ids - attn_metadata.num_decodes
         staged_cache = cache.runtime.gather_prefill_cache(
             kv_cache,
             staging_plan,
             resident_cache=resident_cache,
+            used_blocks=_referenced_blocks(staging_plan, req_ids, topk_indices),
         )
-        req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
-        if attn_metadata.num_decodes > 0:
-            req_ids = req_ids - attn_metadata.num_decodes
         return staged_cache, staging_plan.block_table, req_ids
 
     def _prefill_gather_plan(

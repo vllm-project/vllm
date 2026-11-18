@@ -169,6 +169,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                 self.index_group_index,
                 kv_c_and_k_pe_cache,
                 attn_metadata,
+                topk_indices[num_decode_tokens:],
             )
             topk_indices_physical = cast(
                 torch.Tensor,

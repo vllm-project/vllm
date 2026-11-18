@@ -127,6 +127,14 @@ class CUDAHiSparseBackend(HiSparseBackend):
 
         ops.swap_blocks_batch(src, dst, sizes)
 
+    def gather_resident_rows(
+        self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor
+    ) -> None:
+        """Copy resident rows in one pass; rows with a negative id are skipped."""
+        from vllm.v1.hisparse.gather import gather_rows
+
+        gather_rows(source, destination, row_ids)
+
 
 def get_hisparse_backend() -> HiSparseBackend:
     backend_cls = current_platform.get_hisparse_backend_cls()

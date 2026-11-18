@@ -787,8 +787,13 @@ class HiSparseRuntime:
         kv_cache: torch.Tensor,
         plan: HiSparsePrefillStagingPlan,
         resident_cache: torch.Tensor | None = None,
+        used_blocks: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Gather this runtime's host cache using a shared staging plan."""
+        """Gather this runtime's host cache using a shared staging plan.
+
+        With `used_blocks` (one bool per staged block), host rows are read only
+        for those blocks; the rest of their staged rows are left unwritten.
+        """
         if kv_cache.shape[1] != plan.block_size:
             raise ValueError(
                 f"HiSparse staging block size {plan.block_size} does not match "
@@ -803,6 +808,13 @@ class HiSparseRuntime:
             dtype=kv_cache.dtype,
             device=plan.block_table.device,
         )[:num_blocks]
+        miss_mask = plan.miss_mask
+        if used_blocks is not None:
+            miss_mask = miss_mask * (
+                used_blocks[:num_blocks, None]
+                .expand(num_blocks, plan.block_size)
+                .reshape(1, -1)
+            )
         if plan.gpu_row_ids is not None and resident_cache is not None:
             self.backend.gather_resident_rows(
                 resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
@@ -812,7 +824,7 @@ class HiSparseRuntime:
             staged,
             plan.row_ids,
             plan.dst_rows,
-            plan.miss_mask,
+            miss_mask,
         )
         return staged
 

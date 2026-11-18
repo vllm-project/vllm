@@ -64,7 +64,8 @@ class _HiSparseRequestState:
     copies_recorded_blocks: int = 0
     pinned_clean: set[int] = field(default_factory=set)
     unpinned_pages: set[int] = field(default_factory=set)
-    # Prefix pages whose GPU copies are adopted after the admitting allocation.
+    # Prefix-hit pages backed on GPU (adopted or restored) after the admitting
+    # allocation.
     pages_to_adopt: int = 0
     # The worker holds this request's residency for every page below
     # synced_pages, except the stale pages changed since it was sent.
@@ -300,11 +301,22 @@ class HiSparseCoordinator:
     def _adopt_pending_copies(
         self, request_id: str, state: _HiSparseRequestState
     ) -> None:
+        """Back a prefix hit's host pages with GPU pages before it is read.
+
+        Surviving GPU copies are adopted; the rest are restored from host while
+        the pool has room, so the prefill reads the prefix on GPU instead of
+        staging it from host on every layer of every chunk.
+        """
         if state.pages_to_adopt:
             assert self.host_manager is not None
+            num_pages = state.pages_to_adopt
             host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
-            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
+            self._adopt_copies(request_id, state, host_blocks[:num_pages])
             state.pages_to_adopt = 0
+            pages = self._promote_host_pages(request_id, num_pages)
+            self._plan_page_transfers(
+                request_id, pages, budget=len(pages), restore=True
+            )
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -639,20 +651,21 @@ class HiSparseCoordinator:
             # them before promoting the rest.
             self._adopt_pending_copies(request_id, state)
             tail_page = (num_computed_tokens - 1) // block_size
-            pages = (tail_page, *self._promote_imported_pages(request_id, tail_page))
+            pages = (tail_page, *self._promote_host_pages(request_id, tail_page))
             self._plan_page_transfers(
                 request_id, pages, budget=len(pages), restore=True
             )
         self._publish_host_blocks_if_ready(request_id)
 
-    def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
-        """Back an import's first `num_pages` host pages with new GPU pages.
+    def _promote_host_pages(self, request_id: str, num_pages: int) -> list[int]:
+        """Back the first `num_pages` host pages with new GPU pages.
 
-        Imports land in the host tier. While the GPU pool has room above the
-        transition watermark, the imported pages are restored into resident
-        pages too, so decode reads them like a locally computed prefix. They are
-        clean copies of durable host pages: the residency policy unpins them,
-        and the pool reclaims them only after every other free block.
+        Imports and prefix hits land in the host tier. While the GPU pool has
+        room above the transition watermark, those pages are restored into
+        resident pages too, so they are read like a locally computed prefix.
+        They are clean copies of durable host pages: the residency policy
+        unpins them, and the pool reclaims them only after every other free
+        block.
         """
         assert self.host_manager is not None
         num_managers = len(self.resident_managers)
