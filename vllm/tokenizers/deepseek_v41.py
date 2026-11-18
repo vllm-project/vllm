@@ -31,6 +31,8 @@ def _normalize_messages(
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
     # tool_reference, and ValueError (400) instead of the reference's asserts.
+    # A tool_reference renders as the tool name; `_add_updated_tool_schemas`
+    # lists the referenced tools after the user turn.
     result: list[dict[str, Any]] = []
     for original_message in messages:
         content = original_message.get("content")
@@ -51,6 +53,7 @@ def _normalize_messages(
             _reject_image_placeholder(content)
         elif isinstance(content, list):
             parts = []
+            tool_references = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
@@ -66,17 +69,57 @@ def _normalize_messages(
                     image_indices.append(image_idx)
                     image_idx += 1
                 elif part_type == "tool_reference":
-                    # The system prompt already lists every tool, deferred
-                    # ones included, so the name is all the model needs.
                     _reject_image_placeholder(block.get("name"))
                     parts.append(block.get("name", ""))
+                    tool_references.append(block.get("name", ""))
                 else:
                     raise ValueError(
                         "DeepSeek V4.1 supports text and image content only; "
                         f"got {part_type!r}"
                     )
             message["content"] = "\n\n".join(parts)
+            if tool_references:
+                message["_tool_references"] = tool_references
 
+    return result
+
+
+def _is_deferred(tool: dict[str, Any]) -> bool:
+    return bool(
+        tool.get("defer_loading") or tool.get("function", {}).get("defer_loading")
+    )
+
+
+def _tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    function = {
+        k: v
+        for k, v in tool["function"].items()
+        if k != "defer_loading" and v is not None
+    }
+    return {"type": "function", "function": function}
+
+
+def _add_updated_tool_schemas(
+    conversation: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    """Like deepseek-recipe, follow each user turn whose tool results reference
+    tools with a system turn listing those tools' schemas, in reference order."""
+    tools_by_name = {tool["function"]["name"]: tool for tool in tools or []}
+    result: list[dict[str, Any]] = []
+    referenced: list[dict[str, Any]] = []
+    for message, next_message in zip(conversation, [*conversation[1:], {}]):
+        result.append(message)
+        names = message.pop("_tool_references", [])
+        # Without tools (e.g. tool_choice "none"), references stay unlisted.
+        for name in names if tools else []:
+            if name not in tools_by_name:
+                raise ValueError(f"tool_reference {name!r} not found in tools")
+            referenced.append(_tool_schema(tools_by_name[name]))
+        if referenced and next_message.get("role") not in ("user", "tool"):
+            result.append(
+                {"role": "system", "content": "", "updated_tools": referenced}
+            )
+            referenced = []
     return result
 
 
@@ -96,12 +139,27 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             # The generic renderer's conversation has already flattened text
             # parts with '\n'. V4.1 encodes the original messages with '\n\n'.
             conversation = _normalize_messages(messages)
-            if tools:
-                system = next((m for m in conversation if m["role"] == "system"), None)
+            conversation = _add_updated_tool_schemas(conversation, tools)
+            # As in deepseek-recipe, deferred tools load through tool search.
+            listed = [_tool_schema(t) for t in tools or [] if not _is_deferred(t)]
+            if tools and not listed:
+                raise ValueError(
+                    "At least one tool must have defer_loading=false; "
+                    "all tools cannot be deferred."
+                )
+            if listed:
+                system = next(
+                    (
+                        m
+                        for m in conversation
+                        if m["role"] == "system" and "updated_tools" not in m
+                    ),
+                    None,
+                )
                 if system is None:
                     system = {"role": "system", "content": ""}
                     conversation.insert(0, system)
-                system["tools"] = tools
+                system["tools"] = listed
 
             thinking = bool(kwargs.get("thinking") or kwargs.get("enable_thinking"))
             if "thinking" not in kwargs and "enable_thinking" not in kwargs:
