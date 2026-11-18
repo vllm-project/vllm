@@ -751,6 +751,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     on `transformers>=5.18.0`; older versions still require the flag.
 
 !!! note
+    `OpenCUAForConditionalGeneration` applies the Qwen2.5-VL image size kwargs
+    `min_pixels`, `max_pixels` and `size`, set with `--mm-processor-kwargs` (for
+    example `--mm-processor-kwargs '{"max_pixels": 262144}'`) or per request on a
+    server started with `--trust-request-mm-kwargs`.
+    Its images are normalized on the CPU: OpenCUA does not support
+    `--mm-device-do-normalize`.
+
+!!! note
     On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
     or later) and runs its MoE layers on Triton. With
     `VLLM_ROCM_USE_AITER=1`, also pass `--moe-backend triton`: AITER's MoE does not
