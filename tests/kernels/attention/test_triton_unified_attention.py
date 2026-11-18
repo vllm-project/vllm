@@ -1225,6 +1225,8 @@ def _run_use_td_case(
     reference paged-attention implementation that the sibling non-TD
     tests use.
     """
+    if not current_platform.is_xpu():
+        pytest.skip("TRITON_ATTN only uses tensor descriptors on XPU")
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
 
