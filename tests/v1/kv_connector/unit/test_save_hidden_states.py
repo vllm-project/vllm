@@ -128,7 +128,7 @@ def test_multi_connector_merges_one_request_and_refuses_two(monkeypatch):
         )
 
 
-def test_deepseek_connector_aux_layers_are_rejected(vllm_runner):
+def test_deepseek_connector_aux_layers_are_rejected(vllm_runner, enable_pickle):
     """An Eagle3-capable decoder without layer introspection must fail explicitly."""
 
     def check_requests(model):
@@ -203,6 +203,40 @@ def test_custom_aux_layers_with_mtp(vllm_runner, tmp_path, speculative):
     generated = list(output.outputs[0].token_ids)
     assert len(generated) == 8
     assert sampled[: len(generated)] == generated
+
+
+def test_connector_aux_layers_out_of_range_are_rejected(
+    vllm_runner, enable_pickle
+):
+    """Connector layer requests outside 0..num_hidden_layers fail with an
+    explicit error instead of silently misaligning layers and
+    aux_hidden_states."""
+
+    def check_requests(model):
+        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+            set_connector_aux_hidden_state_layers,
+        )
+
+        for layers in ((-1,), (29,)):
+            with pytest.raises(ValueError, match=r"outside 0\.\.28"):
+                set_connector_aux_hidden_state_layers(
+                    model,
+                    HiddenStatesRequest(layers),
+                    speculator_uses_aux_hidden_states=False,
+                )
+
+    with vllm_runner(
+        MODEL,
+        enforce_eager=True,
+        max_model_len=128,
+        kv_transfer_config={
+            "kv_connector": "RecordingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_module_path": MODULE,
+            "kv_connector_extra_config": {"dump_dir": "/tmp", "layers": [2]},
+        },
+    ) as runner:
+        runner.apply_model(check_requests)
 
 
 def _lm_head():

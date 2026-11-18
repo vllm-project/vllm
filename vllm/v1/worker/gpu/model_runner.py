@@ -1066,7 +1066,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata=attn_metadata,
                     slot_mappings=slot_mappings_by_layer,
                     last_hidden_states=spec_hidden_states,
-                    aux_hidden_states=aux_hidden_states,
+                    aux_hidden_states=(
+                        aux_hidden_states
+                        if self.speculator_uses_aux_hidden_states
+                        else None
+                    ),
                     num_sampled=torch.ones(
                         input_batch.num_reqs, dtype=torch.int32, device=self.device
                     ),

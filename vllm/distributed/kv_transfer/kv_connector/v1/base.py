@@ -123,9 +123,12 @@ class StepHiddenStates:
     """One step's hidden states, handed to ``save_hidden_states``.
 
     Rows are the step's scheduled tokens, grouped by request in batch order.
-    Device tensors may be padded past ``num_tokens`` and are only valid during
-    the call: read them on the current stream, or call ``record_stream`` on a
-    tensor another stream reads.
+    Device tensors may be padded past ``num_tokens`` and reuse persistent
+    step buffers or CUDA-graph capture buffers that the next step overwrites
+    in place, so they are only valid during the call. Keep what you need by
+    cloning or copying it into connector-owned memory on the current stream,
+    as ``PendingAuxOutput`` does for routed experts; ``record_stream`` cannot
+    protect a deferred read against a later write into the same storage.
     """
 
     req_ids: list[str]

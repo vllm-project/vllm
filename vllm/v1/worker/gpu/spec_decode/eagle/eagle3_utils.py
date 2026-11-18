@@ -87,6 +87,22 @@ def set_connector_aux_hidden_state_layers(
         if request.layers is not None
         else eagle3_model.get_eagle3_default_aux_hidden_state_layers()
     )
+    if request.layers is not None:
+        # The model emits no rows for layers outside 0..num_hidden_layers,
+        # which would silently misalign layers and aux_hidden_states.
+        decoder = get_eagle_decoder(model)
+        num_hidden_layers = cast(nn.Module, decoder).config.num_hidden_layers
+        out_of_range = [
+            layer
+            for layer in request.layers
+            if not 0 <= layer <= num_hidden_layers
+        ]
+        if out_of_range:
+            raise ValueError(
+                f"The KV connector asks for hidden state layers "
+                f"{out_of_range}, outside 0..{num_hidden_layers} of "
+                f"{type(model).__name__}."
+            )
     eagle3_model.set_aux_hidden_state_layers(tuple(sorted(set(layers))))
     reserve_aux_intermediate_tensor_slots(model)
     return get_aux_hidden_state_layers(model)

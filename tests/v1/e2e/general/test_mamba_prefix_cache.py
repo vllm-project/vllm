@@ -722,9 +722,12 @@ def _run_mamba_prefix_cache_mrv2(
         hidden_states: torch.Tensor,
         input_batch: Any,
         grammar_output: Any,
+        aux_hidden_states: list[torch.Tensor] | None = None,
     ):
         if cur_step_action is None:
-            return original_sample(self, hidden_states, input_batch, grammar_output)
+            return original_sample(
+                self, hidden_states, input_batch, grammar_output, aux_hidden_states
+            )
 
         num_reqs = input_batch.num_reqs
         sampled_token_ids = torch.ones(
@@ -750,7 +753,8 @@ def _run_mamba_prefix_cache_mrv2(
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )
-        return sampler_output, num_sampled, num_rejected
+        # No speculator runs on the wrapped steps the fake drives.
+        return sampler_output, num_sampled, num_rejected, None
 
     monkeypatch.setattr(
         InprocClient,
