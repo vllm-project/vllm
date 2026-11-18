@@ -12,6 +12,13 @@ except Exception as e:
     __version_tuple__ = (0, 0, __version__)
 
 
+def _prev_minor_version():
+    """For the purpose of testing, return a previous minor version number."""
+    # In dev tree, this will return "0.-1", but that will work fine"
+    assert isinstance(__version_tuple__[1], int)
+    return f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
+
+
 def _prev_minor_version_was(version_str):
     """Check whether a given version matches the previous minor version.
 
@@ -27,11 +34,4 @@ def _prev_minor_version_was(version_str):
         return True
 
     assert isinstance(__version_tuple__[1], int)
-    return version_str == f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
-
-
-def _prev_minor_version():
-    """For the purpose of testing, return a previous minor version number."""
-    # In dev tree, this will return "0.-1", but that will work fine"
-    assert isinstance(__version_tuple__[1], int)
-    return f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
+    return version_str == _prev_minor_version()
