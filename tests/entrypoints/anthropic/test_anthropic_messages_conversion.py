@@ -1464,30 +1464,26 @@ PERMISSIVE_TEMPLATE = (
 
 
 class TestDetectMergeInlineSystem:
-    """Verify _detect_merge_inline_system auto-detection.
-
-    Tests three scenarios:
-    1. Template with system-first guard (e.g. Qwen) → merge needed
-    2. Template without restrictions → no merge, cache-friendly
-    3. No template provided → safe default: merge
-    """
+    """Verify the probes that decide whether inline system messages are kept
+    in place (cache-friendly) or merged into the leading system prompt."""
 
     def test_qwen_template_requires_merge(self):
         """Template with loop.first guard rejects mid-conversation system."""
         assert (
-            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
+            AnthropicServingMessages._template_keeps_inline_system(Q35_TEMPLATE)
+            is False
         )
 
     def test_no_restriction_no_merge(self):
         """Template without restriction accepts mid-conversation system."""
         assert (
-            AnthropicServingMessages._detect_merge_inline_system(PERMISSIVE_TEMPLATE)
-            is False
+            AnthropicServingMessages._template_keeps_inline_system(PERMISSIVE_TEMPLATE)
+            is True
         )
 
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
-        assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+        assert AnthropicServingMessages._template_keeps_inline_system(None) is False
 
     def test_tools_none_check_template_merges(self):
         """OLMo 3-style `tools | tojson` on undefined tools falls back to merge."""
@@ -1495,7 +1491,7 @@ class TestDetectMergeInlineSystem:
             "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
             "{% for m in messages %}{{ m.content }}{% endfor %}"
         )
-        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+        assert AnthropicServingMessages._template_keeps_inline_system(template) is False
 
     def test_tools_loop_template_no_merge(self):
         """Hermes-style `for tool in tools` must not raise in the probe."""
@@ -1503,7 +1499,7 @@ class TestDetectMergeInlineSystem:
             "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
             "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"
         )
-        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+        assert AnthropicServingMessages._template_keeps_inline_system(template) is True
 
     def test_generation_tag_template_no_merge(self):
         """HF's `{% generation %}` tag (e.g. Muse Spark) must not force a merge."""
@@ -1512,7 +1508,7 @@ class TestDetectMergeInlineSystem:
             "{% generation %}{{ m.content }}{% endgeneration %}"
             "{% else %}{{ m.role }}: {{ m.content }}{% endif %}{% endfor %}"
         )
-        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+        assert AnthropicServingMessages._template_keeps_inline_system(template) is True
 
     @pytest.mark.parametrize(
         "template",
@@ -1534,12 +1530,12 @@ class TestDetectMergeInlineSystem:
     def test_misplaced_inline_system_merges(self, template):
         """Templates that render without error but misplace inline system
         messages must merge them, or Claude Code's reminders are lost."""
-        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+        assert AnthropicServingMessages._template_keeps_inline_system(template) is False
 
     def test_non_template_error_defaults_merge(self):
         """A non-TemplateError render failure must not abort startup."""
         template = "{{ undefined_var | tojson }}"
-        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+        assert AnthropicServingMessages._template_keeps_inline_system(template) is False
 
     @pytest.mark.parametrize(
         ("resolved", "expected"),

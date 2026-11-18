@@ -288,22 +288,18 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _should_merge_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
-        """Probe the chat templates the renderer applies, not the CLI override.
-
-        Both the tool and non-tool templates are checked since they may differ.
-        """
+        """Probe the chat templates the renderer applies, not the CLI override."""
         renderer = online_renderer.renderer
-        tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
         if renderer.tokenizer is None:
-            merge = True
+            keeps = False
         elif online_renderer.use_harmony:
             # Harmony renders inline system messages in place as developer turns.
-            merge = False
-        elif not isinstance(renderer, HfRenderer):
-            merge = not cls._renderer_keeps_inline_system(online_renderer)
-        else:
-            merge = any(
-                cls._detect_merge_inline_system(
+            keeps = True
+        elif isinstance(renderer, HfRenderer):
+            # The tool and non-tool templates may differ.
+            tool_variants: tuple[list[Any] | None, ...] = (None, [])
+            keeps = all(
+                cls._template_keeps_inline_system(
                     resolve_chat_template(
                         renderer.tokenizer,
                         online_renderer.chat_template,
@@ -313,7 +309,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                 )
                 for tools in tool_variants
             )
-        if merge:
+        else:
+            keeps = cls._renderer_keeps_inline_system(online_renderer)
+        if not keeps:
             hint = (
                 " Pass a --chat-template that accepts non-leading system "
                 "messages to avoid this."
@@ -327,31 +325,29 @@ class AnthropicServingMessages(OpenAIServingChat):
                 "Each new one changes the prompt prefix, so the rest of the "
                 "conversation misses the prefix cache." + hint
             )
-        return merge
+        return not keeps
 
     @classmethod
-    def _detect_merge_inline_system(cls, chat_template: str | None) -> bool:
-        """Auto-detect whether the chat template misplaces inline system messages.
+    def _template_keeps_inline_system(cls, chat_template: str | None) -> bool:
+        """Probe a Jinja chat template.
 
-        Templates that reject inline system messages (e.g. Qwen's `loop.first`
-        guard), drop them (e.g. MiniMax-M2), or hoist them to the top (e.g.
-        DeepSeek-V3.1) need them merged into the leading block. The template is
-        compiled as `apply_chat_template` compiles it, in an
-        `ImmutableSandboxedEnvironment`, so HF-only syntax such as
-        `{% generation %}` is supported.
+        Qwen rejects inline system messages, MiniMax-M2 drops them, and
+        DeepSeek-V3.1 hoists them to the top. The template is compiled as
+        `apply_chat_template` compiles it, in an `ImmutableSandboxedEnvironment`,
+        so HF-only syntax such as `{% generation %}` is supported.
         """
         if not chat_template:
-            return True
+            return False
 
         def render(messages: list[Any]) -> str:
             template = hf_chat_utils._compile_jinja_template(chat_template)
             return template.render(messages=messages, add_generation_prompt=True)
 
-        return not cls._keeps_inline_system(render)
+        return cls._keeps_inline_system(render)
 
     @classmethod
     def _renderer_keeps_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
-        """Probe a non-jinja renderer (e.g. DeepSeek V4.1's encoder).
+        """Probe a non-Jinja renderer (e.g. DeepSeek V4.1's encoder).
 
         DeepSeek V4 appends inline system text to the user turn, V3.2 puts it
         after the generation prompt, and Mistral moves it into the last user turn.
@@ -376,42 +372,50 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @staticmethod
     def _keeps_inline_system(render: Callable[[list[Any]], str]) -> bool:
-        """Check that `render`, which adds the generation prompt, keeps inline
-        system messages in order as distinct system turns, and still follows a
-        trailing one with the generation prompt.
+        """Whether `render`, which adds the generation prompt, keeps an inline
+        system message in place.
+
+        Rendering `[system, user, system, user]`, the inline system message must:
+        1. appear in order with the other messages;
+        2. get its own turn header, not a blank one or a user one;
+        3. when it is the last message, be followed by the generation prompt.
         """
-        markers = ("SYSA", "USRA", "SYSB", "USRB")
-        messages: list[Any] = [
-            {"role": role, "content": marker}
-            for role, marker in zip(("system", "user") * 2, markers)
+
+        def between(text: str, start: str, end: str) -> str:
+            return text[text.find(start) + len(start) : text.find(end)]
+
+        messages = [
+            {"role": "system", "content": "SYS_A"},
+            {"role": "user", "content": "USR_A"},
+            {"role": "system", "content": "SYS_B"},
+            {"role": "user", "content": "USR_B"},
         ]
-
-        def separator(text: str) -> str:
-            return text[text.find(markers[1]) + len(markers[1]) : text.find(markers[2])]
-
         try:
             full = render(messages)
             trailing = render(messages[:3])
         except Exception:
             logger.debug("Inline system probe failed", exc_info=True)
             return False
-        positions = [full.find(marker) for marker in markers]
+
+        positions = [full.find(message["content"]) for message in messages]
         if -1 in positions or positions != sorted(positions):
             return False
-        system_separator = separator(full)
-        if not system_separator.strip():
+
+        system_header = between(full, "USR_A", "SYS_B")
+        if not system_header.strip():
             return False
         try:
-            as_user = render([*messages[:2], {**messages[2], "role": "user"}])
+            as_user = render([*messages[:2], {"role": "user", "content": "SYS_B"}])
+            user_header = between(as_user, "USR_A", "SYS_B")
         except Exception:
-            # e.g. Gemma rejects consecutive user turns.
-            as_user = None
-        if as_user is not None and system_separator == separator(as_user):
+            user_header = None  # e.g. Gemma rejects consecutive user turns.
+        if system_header == user_header:
             return False
-        generation_prompt = full[positions[-1] + len(markers[-1]) :]
-        return trailing.endswith(generation_prompt) and 0 <= trailing.rfind(
-            markers[2]
-        ) < len(trailing) - len(generation_prompt)
+
+        generation_prompt = full[full.find("USR_B") + len("USR_B") :]
+        if not trailing.endswith(generation_prompt):
+            return False
+        return "SYS_B" in trailing.removesuffix(generation_prompt)
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
