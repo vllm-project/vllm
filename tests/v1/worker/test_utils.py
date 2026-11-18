@@ -35,7 +35,11 @@ from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    PagedCacheView,
+    build_hisparse_prefill_staging_plan,
+)
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -71,6 +75,46 @@ def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
     )
 
     torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
+def test_hisparse_prefill_stages_rows_of_multi_page_resident_blocks():
+    """Resident blocks span two staging pages, with other layers' rows between
+    blocks."""
+    raw = torch.arange(18, dtype=torch.float32)
+    resident = PagedCacheView.bind(
+        raw,
+        dtype=torch.float32,
+        row_width=1,
+        byte_offset=0,
+        block_stride=6 * 4,
+        num_blocks=3,
+        block_size=4,
+    )
+    plan = build_hisparse_prefill_staging_plan(
+        torch.tensor([[5, 2]], dtype=torch.int32),
+        torch.tensor([4], dtype=torch.int32),
+        block_size=2,
+        staging_block_capacity=2,
+    )
+    pages, block_stride = resident.pages(plan.block_size)
+    plan.ensure_gpu_sources(
+        torch.tensor([[2]], dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        resident.block_size,
+        block_stride,
+    )
+    assert plan.gpu_row_ids is not None
+    destination = torch.full((plan.gpu_row_ids.shape[1], 1), -1.0)
+
+    HiSparseBackend().gather_resident_rows(pages, destination, plan.gpu_row_ids[0])
+
+    host_rows = plan.row_ids[0]
+    staged = {
+        int(host_rows[i]): float(destination[i])
+        for i in range(host_rows.numel())
+        if plan.gpu_row_ids[0, i] >= 0
+    }
+    assert staged == {10: 12.0, 11: 13.0, 4: 14.0, 5: 15.0}
 
 
 @pytest.mark.parametrize(
@@ -613,8 +657,9 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 def test_hisparse_transfer_builds_page_descriptors(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
-    worker.kernel_block_size = 2
-    source = torch.empty((3, 2, 4), dtype=torch.uint8)
+    worker.resident_block_size = 4
+    worker.host_block_size = 2
+    source = torch.empty((3, 4, 4), dtype=torch.uint8)
     destination = torch.empty((6, 4), dtype=torch.uint8)
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
@@ -625,12 +670,12 @@ def test_hisparse_transfer_builds_page_descriptors(monkeypatch):
     submit_dma_descriptors = MagicMock()
     monkeypatch.setattr(worker, "_submit_dma_descriptors", submit_dma_descriptors)
 
-    worker._enqueue_transfers([SparseKVPageTransfer(7, 2, (1,))])
+    worker._enqueue_transfers([SparseKVPageTransfer(7, 2, (1,), resident_page=1)])
 
     descriptors, count = submit_dma_descriptors.call_args.args
     assert count == 1
     assert descriptors.src[:count].tolist() == [
-        source.data_ptr() + source.stride(0) * source.element_size()
+        source.data_ptr() + source.stride(0) * source.element_size() + 2 * 4
     ]
     assert descriptors.dst[:count].tolist() == [destination.data_ptr() + 4 * 4]
     assert descriptors.sizes[:count].tolist() == [2 * 4]
@@ -670,7 +715,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     )
     worker = _make_hisparse_worker()
     worker.is_host_writer = is_host_writer
-    worker.kernel_block_size = 4
+    worker.resident_block_size = worker.host_block_size = 4
     worker.host_caches = tuple(
         torch.arange(24, dtype=torch.float32).reshape(12, 2) + layer * 100
         for layer in range(2)
@@ -750,7 +795,7 @@ def test_hisparse_lazy_mirror_copies_transfer_pages(monkeypatch):
 def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
-    worker.kernel_block_size = 2
+    worker.resident_block_size = worker.host_block_size = 2
     source = torch.empty((3, 2, 4), dtype=torch.uint8)
     destination = torch.empty((6, 4), dtype=torch.uint8)
     worker.resident_caches = (source,)
@@ -792,7 +837,7 @@ def test_hisparse_row_dma_uses_resident_spans(monkeypatch):
     source = torch.empty((2, 2, 4), dtype=torch.uint8)
     destination = torch.empty((12, 4), dtype=torch.uint8)
     worker.is_host_writer = True
-    worker.kernel_block_size = 2
+    worker.resident_block_size = worker.host_block_size = 2
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = _as_cache_handles(
@@ -1104,7 +1149,7 @@ def test_hisparse_shared_host_reader_skips_transfer_completion():
     """A non-writer TP rank must not acknowledge host writes."""
     worker = _make_hisparse_worker()
     worker.is_host_writer = False
-    worker.kernel_block_size = 1
+    worker.resident_block_size = worker.host_block_size = 1
     worker._enqueued_transfer_ids = []
     worker._pending_transfer_events = []
 

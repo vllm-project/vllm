@@ -298,6 +298,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         host_num_blocks=4,
         device=torch.device("cpu"),
         pinned_host_pools=[],
+        host_block_size=block_size,
     )
     worker._invalidate_written_slots = MagicMock()
     connector = object.__new__(HiSparseConnector)
@@ -501,7 +502,7 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
     metadata = scheduler.build_connector_meta(scheduler_output)
 
     update = metadata.residency_updates[resumed.request_id]
-    assert update.pages == [0, 1, 2, 3]
+    assert update.block_indices == [0, 1, 2, 3]
     assert update.block_ids[0][:3] == copy_ids[:3]
     assert manager.get_block_ids(resumed.request_id)[2] == core_row
     assert core_row[:3] == [0, 0, 0]

@@ -110,6 +110,7 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
     full in-flight window to be admitted."""
     block_size = 16
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(max_model_len=10 * block_size),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         max_in_flight_tokens=10 * block_size,
@@ -140,13 +141,14 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
         hisparse_host_num_blocks=100,
     )
 
-    # Admission takes indexer 10 + resident 10 + hot 4 = 24 blocks and steady
-    # state 16, so 3 fit (2 x 16 + 24 <= 64) but not 4 (3 x 16 + 24 > 64).
-    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 3.5
+    # Admission takes indexer 10 + resident 10 = 20 blocks, since the hot 4 and
+    # tail 2 fit in the resident pages released for them. Steady state takes
+    # 10 + 2 + 4 = 16, so 1 + (64 - 20) / 16 requests fit.
+    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 3.75
     # The worst-case bound charges all 10 resident pages.
     assert get_max_concurrency_for_kv_cache_config(
         config, kv_cache_config
-    ) == pytest.approx(64 / 24)
+    ) == pytest.approx(64 / 20)
 
 
 @pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])

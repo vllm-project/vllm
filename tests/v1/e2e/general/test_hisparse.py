@@ -218,7 +218,7 @@ def test_hisparse_spill_and_prefix_restore(
                     destination_row = mirror.destination_start
                     num_rows = mirror.num_rows
                     source_block, source_offset = divmod(
-                        source_row, worker.kernel_block_size
+                        source_row, worker.resident_block_size
                     )
                     with gpu_sync_allowed():
                         gpu_rows = worker.resident_caches[layer_index][

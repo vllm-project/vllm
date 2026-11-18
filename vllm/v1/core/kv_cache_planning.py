@@ -30,6 +30,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.hisparse.layout import (
+    get_hisparse_device_blocks_per_request,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -1202,9 +1203,15 @@ def _max_memory_usage_bytes_from_groups(
     bytes_per_block = _pool_bytes_per_block_from_builder(
         builder, vllm_config, kv_cache_groups
     )
-    total_blocks = sum(
-        group.max_allocated_blocks_per_request(vllm_config) for group in kv_cache_groups
-    )
+    if vllm_config.attention_config.hisparse_config is not None:
+        total_blocks = get_hisparse_device_blocks_per_request(
+            vllm_config, kv_cache_groups
+        )
+    else:
+        total_blocks = sum(
+            group.max_allocated_blocks_per_request(vllm_config)
+            for group in kv_cache_groups
+        )
 
     return bytes_per_block * total_blocks
 
@@ -1655,8 +1662,10 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         """See `KVCacheConfigBuilder.get_kv_cache_groups`.
 
         A model implementing `SupportsKVCacheGrouping` owns the grouping
-        decision unless HiSparse, which owns its own grouping, is enabled;
-        otherwise the default grouping is used.
+        decision; otherwise the default grouping is used. HiSparse owns its
+        own grouping and replaces the model's. Kimi-K3's GQA-draft grouping,
+        the only one combined with HiSparse, defers to the default under the
+        block-outermost layouts HiSparse requires.
         """
         if (
             not vllm_config.model_config.supports_kv_cache_grouping

@@ -1078,6 +1078,12 @@ def get_max_concurrency_for_kv_cache_config(
             host_blocks_per_request += required
         else:
             num_blocks_per_request += required
+    if vllm_config.attention_config.hisparse_config is not None:
+        from vllm.v1.hisparse.layout import get_hisparse_device_blocks_per_request
+
+        num_blocks_per_request = get_hisparse_device_blocks_per_request(
+            vllm_config, kv_cache_config.kv_cache_groups
+        )
     limits = [kv_cache_config.num_blocks / num_blocks_per_request]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None

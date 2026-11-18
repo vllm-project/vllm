@@ -3563,7 +3563,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = get_hisparse_backend()
     worker.is_host_writer = True
-    worker.kernel_block_size = block_size
+    worker.resident_block_size = worker.host_block_size = block_size
     worker.resident_caches = resident_caches
     worker.host_caches = host_caches
     worker.cache_handles = [
@@ -4126,7 +4126,9 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     )
 
     state_indices = torch.arange(2, dtype=torch.int32)
-    plan.ensure_gpu_sources(resident_table, state_indices, resident_block_size)
+    plan.ensure_gpu_sources(
+        resident_table, state_indices, resident_block_size, resident_block_size
+    )
 
     assert plan.gpu_row_ids is not None
     unique_hosts = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
@@ -4157,7 +4159,10 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     )
 
     plan.ensure_gpu_sources(
-        torch.zeros_like(resident_table), state_indices, resident_block_size
+        torch.zeros_like(resident_table),
+        state_indices,
+        resident_block_size,
+        resident_block_size,
     )
 
     assert plan.gpu_row_ids is not None
@@ -4189,7 +4194,9 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
     host_ids = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
 
     for group in (0, 1, 0, 1):
-        plan.ensure_gpu_sources(state_rows[:, group], state_indices, block_size)
+        plan.ensure_gpu_sources(
+            state_rows[:, group], state_indices, block_size, block_size
+        )
         assert plan.gpu_row_ids is not None
         gpu_blocks = plan.gpu_row_ids[0].view(-1, block_size)[:, 0] // block_size
         staged = {
@@ -4225,6 +4232,7 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype
     plan.ensure_gpu_sources(
         resident_table,
         torch.arange(2, dtype=torch.int32, device=device),
+        resident_block_size,
         resident_block_size,
     )
 
@@ -5592,6 +5600,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     """Every layer must reuse the batch plan instead of synchronizing to dedupe."""
     plan = SimpleNamespace(
         block_table=torch.tensor([[0]], dtype=torch.int32),
+        block_size=1,
         ensure_gpu_sources=MagicMock(),
     )
     staged = torch.empty((1, 1, 8))
@@ -5608,7 +5617,11 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
             gather_prefill_cache=gather,
             request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
-        view=SimpleNamespace(cache=resident_cache, block_size=1),
+        view=SimpleNamespace(
+            cache=resident_cache,
+            block_size=1,
+            pages=lambda page_size: (resident_cache, page_size),
+        ),
         block_table=resident_block_table,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
@@ -5644,7 +5657,11 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     resident_cache = torch.empty((2, 4, 656), dtype=torch.uint8)
     ready = MagicMock()
     cache = _StubHiSparseCacheHandle(
-        view=SimpleNamespace(cache=resident_cache, block_size=4),
+        view=SimpleNamespace(
+            cache=resident_cache,
+            block_size=4,
+            pages=lambda page_size: (resident_cache, page_size),
+        ),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
         runtime=SimpleNamespace(
             request_state_indices=torch.tensor([0], dtype=torch.int32),
@@ -5662,6 +5679,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         block_table=torch.tensor([[0, 1]], dtype=torch.int32),
         row_ids=torch.arange(8, dtype=torch.int32).view(1, -1),
         gpu_row_ids=torch.full((1, 8), -1, dtype=torch.int32),
+        block_size=4,
         ensure_gpu_sources=MagicMock(),
     )
     metadata = SimpleNamespace(

@@ -193,9 +193,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     [
         (8192, 160, False),
         (8192, 1000, True),
-        (32768, 656, False),
-        (32768, 657, True),
-        (-1, 657, True),
+        (32768, 640, False),
+        (32768, 641, True),
+        (-1, 641, True),
     ],
 )
 def test_hisparse_pool_must_fit_max_model_len(
@@ -204,9 +204,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     """Each resident group takes its own blocks from HiSparse's shared GPU pool,
     so a pool that fits only the indexer pages must be rejected at startup.
     Resident pages are capped at the in-flight window: at 32768 tokens with 2048
-    in flight, one request needs 512 indexer + 4 x 32 resident + 16 hot blocks,
-    plus the null block. Auto-fit (-1) must pick a length that passes the same
-    check."""
+    in flight, one request needs 512 indexer + 4 x 32 resident blocks, plus the
+    null block. Its 16 hot blocks fit in the resident pages it releases for
+    them. Auto-fit (-1) must pick a length that passes the same check."""
     monkeypatch.setattr(
         current_platform,
         "get_hisparse_backend_cls",

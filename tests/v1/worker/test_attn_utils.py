@@ -174,7 +174,8 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
 def test_resolve_hisparse_specs_before_kv_cache_layout():
     """Workers derive HiSparse's resident/hot specs before the engine core
     resolves the KV cache layout, even when the other layers have mixed page
-    sizes, and derive the specs the engine core lays out."""
+    sizes, and derive the layers the engine core lays out. Their block sizes
+    depend on the pool row the engine core picks."""
     specs: dict[str, KVCacheLayerConfig] = {}
     for i in range(2):
         specs[f"layers.{i}.attn"] = full_layer(
@@ -226,14 +227,14 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
 
     vllm_config.cache_config.kv_cache_layout = KVCacheLayout.BLHNC.name
     planned = {
-        name: KVCacheLayerConfig(group.manager_config, spec)
+        name: group.manager_cls
         for group in get_kv_cache_groups(vllm_config, resolved)
         for name, spec in group.kv_cache_specs.items()
         if isinstance(spec, HiSparsePageSpec)
     }
     assert len(planned) == 4
     assert {
-        name: lc
+        name: lc.manager_cls
         for name, lc in resolved.items()
         if isinstance(lc.spec, HiSparsePageSpec)
     } == planned

@@ -2917,7 +2917,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
 
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
-    """Track GPU-resident pages for otherwise host-backed KV."""
+    """Track GPU-resident blocks for otherwise host-backed KV. A block holds
+    one or more consecutive host pages."""
 
     max_admission_blocks_per_request: int
 
@@ -2949,20 +2950,24 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         del num_tokens_main_model
         assert not new_computed_blocks
         if total_computed_tokens > num_local_computed_tokens:
-            # Keep the last imported page writable, including the last-token
-            # replay on a full prompt hit. Only earlier pages stay host-only.
-            imported_pages = cdiv(total_computed_tokens, self.block_size)
+            # Keep the last imported block writable, including the last-token
+            # replay on a full prompt hit. Only earlier blocks stay host-only.
+            imported_blocks = cdiv(total_computed_tokens, self.block_size)
             existing = len(self.req_to_blocks.get(request_id, ()))
-            needs_tail = self.get_resident_page(request_id, imported_pages - 1) is None
+            needs_tail = (
+                self.get_resident_block(request_id, imported_blocks - 1) is None
+            )
             return int(needs_tail) + max(
-                cdiv(num_tokens, self.block_size) - max(imported_pages, existing), 0
+                cdiv(num_tokens, self.block_size) - max(imported_blocks, existing), 0
             )
         existing = len(self.req_to_blocks.get(request_id, ()))
-        host_pages = cdiv(num_local_computed_tokens, self.block_size)
+        # A hit ending inside a block still allocates that block for its new
+        # tokens.
+        host_blocks = num_local_computed_tokens // self.block_size
         required = cdiv(num_tokens, self.block_size)
         if apply_admission_cap:
             required = min(required, self.max_admission_blocks_per_request)
-        return max(required - max(existing, host_pages), 0)
+        return max(required - max(existing, host_blocks), 0)
 
     def allocate_external_computed_blocks(
         self,
@@ -2971,15 +2976,15 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        """Reserve a writable final page; earlier imported pages stay on host."""
+        """Reserve a writable final block; earlier imported blocks stay on host."""
         assert num_external_computed_tokens > 0
         num_tokens = num_local_computed_tokens + num_external_computed_tokens
         blocks = self.req_to_blocks[request_id]
-        tail_page = (num_tokens - 1) // self.block_size
-        if len(blocks) <= tail_page:
-            blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
-        if self.get_resident_page(request_id, tail_page) is None:
-            blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
+        tail_block = (num_tokens - 1) // self.block_size
+        if len(blocks) <= tail_block:
+            blocks.extend([self._null_block] * (tail_block + 1 - len(blocks)))
+        if self.get_resident_block(request_id, tail_block) is None:
+            blocks[tail_block] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(
         self,
@@ -2991,11 +2996,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         assert not new_computed_blocks
         req_blocks = self.req_to_blocks[request_id]
         assert not req_blocks
-        num_host_pages = cdiv(num_local_computed_tokens, self.block_size)
-        req_blocks.extend([self._null_block] * num_host_pages)
+        num_host_blocks = num_local_computed_tokens // self.block_size
+        req_blocks.extend([self._null_block] * num_host_blocks)
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
-        self.coordinator.commit_computed_blocks(request_id, num_host_pages)
+        self.coordinator.commit_computed_tokens(request_id, num_local_computed_tokens)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -3017,19 +3022,21 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         super().pop_blocks_for_free(request_id)
         return trim_null_head(blocks)
 
-    def adopt_resident_pages(
+    def adopt_resident_blocks(
         self,
         request_id: str,
         block_indices: Sequence[int],
         blocks: Sequence[KVCacheBlock],
     ) -> list[tuple[int, KVCacheBlock]]:
-        """Point null prefix pages at pinned GPU copies; return the adopted
-        `(page, block)` pairs."""
-        num_pages = len(self.req_to_blocks.get(request_id, ()))
+        """Point null prefix blocks at pinned GPU copies; return the adopted
+        `(block_idx, block)` pairs."""
+        num_blocks = len(self.req_to_blocks.get(request_id, ()))
         candidates = [
-            (idx, block) for idx, block in zip(block_indices, blocks) if idx < num_pages
+            (idx, block)
+            for idx, block in zip(block_indices, blocks)
+            if idx < num_blocks
         ]
-        current = self.get_residency_pages(request_id, [idx for idx, _ in candidates])
+        current = self.get_residency_blocks(request_id, [idx for idx, _ in candidates])
         adopted = [
             candidate for candidate, block in zip(candidates, current) if block.is_null
         ]
@@ -3037,27 +3044,29 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             self.residency_changes.setdefault(request_id, {}).update(adopted)
         return adopted
 
-    def drop_resident_page(
+    def drop_resident_block(
         self, request_id: str, block_idx: int
     ) -> KVCacheBlock | None:
-        """Stop reading a page from the GPU; return the block it was read from."""
-        block = self.get_resident_page(request_id, block_idx)
+        """Stop reading a block from the GPU; return the block it was read from."""
+        block = self.get_resident_block(request_id, block_idx)
         if block is not None:
-            self.drop_resident_pages(request_id, (block_idx,))
+            self.drop_resident_blocks(request_id, (block_idx,))
         return block
 
-    def drop_resident_pages(
+    def drop_resident_blocks(
         self, request_id: str, block_indices: Sequence[int]
     ) -> None:
-        """Stop reading pages from the GPU. Every index must be a resident page
-        within the request's row."""
+        """Stop reading blocks from the GPU. Every index must be a resident
+        block within the request's row."""
         if not block_indices:
             return
         changes = self.residency_changes.setdefault(request_id, {})
         for block_idx in block_indices:
             changes[block_idx] = self._null_block
 
-    def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
+    def get_resident_block(
+        self, request_id: str, block_idx: int
+    ) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
         if blocks is None or block_idx >= len(blocks):
             return None
@@ -3067,11 +3076,12 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             block = changes.get(block_idx, block)
         return None if block.is_null else block
 
-    def get_residency_pages(
+    def get_residency_blocks(
         self, request_id: str, block_indices: Sequence[int]
     ) -> list[KVCacheBlock]:
-        """The request's pages with residency changes applied; host-only pages
-        are the null block. Every index must be within the request's row."""
+        """The request's blocks with residency changes applied; host-only
+        blocks are the null block. Every index must be within the request's
+        row."""
         if not block_indices:
             return []
         blocks = self.req_to_blocks[request_id]
@@ -3082,7 +3092,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
 
     def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
         """The request's row from `start` with residency changes applied. Unlike
-        `get_resident_page`, host-only pages stay as the null block."""
+        `get_resident_block`, host-only blocks stay as the null block."""
         blocks = self.req_to_blocks.get(request_id, [])[start:]
         changes = self.residency_changes.get(request_id)
         if not changes:
