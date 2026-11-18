@@ -109,6 +109,9 @@ class AuxRequestOutput:
         return row_counts.pop()
 
 
+_Keys = tuple[list[str], list[tuple[int, str | None]]]
+
+
 @dataclass(slots=True)
 class _SessionRequest:
     request: Request
@@ -182,6 +185,9 @@ class AuxOutputSchedulerConnector:
         self._session_requests: dict[str, _SessionRequest] = {}
         self._session_tails: dict[str, tuple[str, int, int]] = {}
         self._flushed_hashes: dict[str, PackedBlockHashes] = {}
+        self._preempted: dict[str, int] = {}
+        self._preempted_keys: dict[str, _Keys] = {}
+        self._abort_keys: dict[str, _Keys] = {}
 
     def _session(self, request: Request) -> str | None:
         params = request.sampling_params
@@ -198,6 +204,7 @@ class AuxOutputSchedulerConnector:
         block hashes: with the versions of its `aux_version_segments` up to the
         last full hash block of the prompt they cover, then with the current
         weight version."""
+        self._abort_keys.pop(request.request_id, None)
         session = self._session(request)
         if session is None:
             return
@@ -295,6 +302,20 @@ class AuxOutputSchedulerConnector:
     def finishing(self, request_ids: set[str]) -> bool:
         return not self._finished_requests.keys().isdisjoint(request_ids)
 
+    def finish_preempted(self) -> None:
+        """Finish the session requests preempted with output in flight
+        whose output has all arrived without finishing them."""
+        for request_id in list(self._preempted):
+            request = self._session_requests[request_id].request
+            if not request.num_stale_output_tokens:
+                self.request_finished(request)
+
+    def pop_abort_keys(
+        self, request_id: str
+    ) -> tuple[list[str] | None, list[tuple[int, str | None]] | None]:
+        """The keys and version segments of an aborted session request."""
+        return self._abort_keys.pop(request_id, (None, None))
+
     def _take_events(
         self,
         scheduled_requests: dict[str, int],
@@ -326,6 +347,7 @@ class AuxOutputSchedulerConnector:
         self._flushed_hashes = {}
         self._retained_hashes, self._released_hashes = [], []
         self._session_tails = {}
+        self._abort_keys.clear()
         return metadata
 
     def _emit_start(self, request: Request) -> int:
@@ -507,14 +529,24 @@ class AuxOutputSchedulerConnector:
             return *self.take_output(request, output), None, None
         if not stopped or request.request_id not in self._sent_hash_counts:
             return None, None, None, None
+        return None, None, *self._session_keys(request, state, stopped=True)
+
+    def _session_keys(
+        self, request: Request, state: _SessionRequest, stopped: bool
+    ) -> _Keys:
         size = self._block_size
         hash_size = self._hash_block_size
         token_end = request.num_tokens - 1
         block_hashes = request.block_hashes
-        computed = request.num_computed_tokens - request.num_in_flight_tokens
+        computed = self._preempted.get(request.request_id, request.num_computed_tokens)
+        settled = computed - request.num_in_flight_tokens
+        if stopped:
+            computed = settled
+        else:
+            token_end = min(token_end, settled)
         num_sent = self._sent_hash_counts[request.request_id] * hash_size
         end = min(num_sent, computed) // size * size
-        boundary = min(token_end, end)
+        boundary = min(token_end, end) if stopped else end
         step = size // hash_size
         keys = [
             aux_object_key(self._key_prefix, state.session, block_hashes[last].hex())
@@ -538,7 +570,7 @@ class AuxOutputSchedulerConnector:
             segment for segment in request.cache_salt_segments if segment[0] < end
         ]
         segments.append((end, None))
-        return None, None, keys, segments
+        return keys, segments
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
@@ -546,9 +578,28 @@ class AuxOutputSchedulerConnector:
             return
         request_id = request.request_id
         self._loading.pop(request_id, None)
-        session = request_id in self._session_requests
+        state = self._session_requests.get(request_id)
         num_computed = request.num_computed_tokens
-        if session:
+        if state is not None:
+            if (
+                not request.is_finished()
+                and request.num_stale_output_tokens
+                and not request.drop_stale_output
+            ):
+                self._preempted[request_id] = num_computed
+                return
+            aborted = request.status == RequestStatus.FINISHED_ABORTED
+            listing = self._preempted_keys.pop(request_id, ([], []))
+            if request_id in self._sent_hash_counts and (
+                aborted or not request.is_finished()
+            ):
+                listing = self._session_keys(request, state, stopped=False)
+            if listing[0]:
+                if not request.is_finished():
+                    self._preempted_keys[request_id] = listing
+                elif aborted:
+                    self._abort_keys[request_id] = listing
+            num_computed = self._preempted.pop(request_id, num_computed)
             num_computed -= request.num_in_flight_tokens
         if request_id in self._sent_hash_counts:
             # The next metadata delivers this terminal event to the worker.
@@ -606,6 +657,7 @@ class AuxOutputSchedulerConnector:
             elif block_hashes is not None:
                 self._flushed_hashes[request_id] = block_hashes
         self._finished_requests = finished
+        self._preempted_keys.clear()
         self._generation += 1
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()

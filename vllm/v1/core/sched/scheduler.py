@@ -1103,7 +1103,12 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
-                if request.num_stale_output_tokens and not request.drop_stale_output:
+                if (
+                    request.num_stale_output_tokens and not request.drop_stale_output
+                ) or (
+                    self.aux_output_connector is not None
+                    and self.aux_output_connector.finishing({request_id})
+                ):
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
@@ -1842,16 +1847,6 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        if self.aux_output_connector is not None:
-            self.aux_output_connector.request_finished(request)
-        self._free_request_blocks(request)
-        self.encoder_cache_manager.free(request)
-        self._pending_encoder_input_ids.pop(request.request_id, None)
-        self._inflight_prefills.discard(request)
-        request.status = RequestStatus.PREEMPTED
-        request.num_computed_tokens = 0
-        if request.spec_token_ids:
-            request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
         # still delivered on return (dropping them would perturb spec-decode
         # acceptance) but must not mutate the reset counters; each step drains
@@ -1863,6 +1858,16 @@ class Scheduler(SchedulerInterface):
             request.drop_stale_output and request.num_stale_output_tokens > 0
         )
         request.num_stale_output_tokens = request.num_in_flight_tokens
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(request)
+        self._free_request_blocks(request)
+        self.encoder_cache_manager.free(request)
+        self._pending_encoder_input_ids.pop(request.request_id, None)
+        self._inflight_prefills.discard(request)
+        request.status = RequestStatus.PREEMPTED
+        request.num_computed_tokens = 0
+        if request.spec_token_ids:
+            request.spec_token_ids = []
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
@@ -2579,6 +2584,8 @@ class Scheduler(SchedulerInterface):
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.finish_preempted()
         # Remove stopped requests from their queues, then enqueue the ones
         # that continue, so each ends up in exactly one queue.
         if stopped_running_reqs:

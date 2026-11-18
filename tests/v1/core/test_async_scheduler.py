@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import queue
 import time
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable
@@ -45,7 +46,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine import CheckpointState
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.kv_offload.base import OffloadingSpec, get_offload_block_hash
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -1257,6 +1258,132 @@ def test_session_hits_the_blocks_of_a_request_aborted_before_its_output():
     assert "first" not in engine.keys and len(engine.keys["second"]) == 3
 
 
+def _abort(scheduler, request_id):
+    core = object.__new__(EngineCoreProc)
+    core.scheduler = scheduler
+    core.output_queue = queue.Queue()
+    aborted = scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    core._send_abort_outputs(aborted)
+    ((_, outputs),) = core.output_queue.queue
+    (output,) = outputs.outputs
+    return output
+
+
+def _rows(engine, output):
+    assert output.aux_output_keys
+    rows = read_aux_rows(
+        engine.store, output.aux_output_keys, "routed_experts", timeout_s=0
+    )
+    engine.worker.close()
+    return rows[:, 0, 0].tolist()
+
+
+@pytest.mark.parametrize(
+    "num_prompt_tokens,num_rows",
+    [(40, 40), (47, 48)],
+    ids=["tail-of-settled-positions", "object-a-step-in-flight-completes"],
+)
+def test_aborted_session_request_lists_the_keys_of_its_computed_positions(
+    num_prompt_tokens, num_rows
+):
+    engine = SessionEngine(
+        create_scheduler(async_scheduling=True, enable_prefix_caching=True)
+    )
+    (request,) = _session_requests(["r"], num_prompt_tokens, 8)
+    engine.scheduler.add_request(request)
+    prefill, decode = engine.schedule(), engine.schedule()
+    engine.step(prefill, {"r": [0]})
+    in_flight = engine.schedule()
+    output = _abort(engine.scheduler, "r")
+    engine.worker.begin_step(engine.connector.drain_metadata())
+    engine.step(decode, {"r": [0]})
+    engine.step(in_flight, {"r": [0]})
+    engine.pause()
+    assert _rows(engine, output) == list(range(num_rows))
+    assert output.aux_version_segments == [(0, "v0"), (num_rows // 16 * 16, None)]
+
+
+def test_session_request_resubmitted_after_an_abort_hits_its_kv():
+    engine = SessionEngine(
+        create_scheduler(async_scheduling=True, enable_prefix_caching=True)
+    )
+    (request,) = _session_requests(["first"], 40, 8)
+    engine.scheduler.add_request(request)
+    prefill, decode = engine.schedule(), engine.schedule()
+    engine.step(prefill, {"first": [0]})
+    output = _abort(engine.scheduler, "first")
+    engine.step(decode, {"first": [0]})
+    engine.set_version(1)
+    (retry,) = _session_requests(["retry"], 41, 1, segments=output.aux_version_segments)
+    engine.scheduler.add_request(retry)
+    scheduler_output = engine.schedule()
+    assert scheduler_output.num_scheduled_tokens == {"retry": 9}
+    engine.step(scheduler_output, {"retry": [0]})
+    engine.run()
+    engine.close()
+    assert engine.segments["retry"] == [(0, "v0"), (32, None)]
+
+
+def test_request_reusing_the_id_of_a_client_aborted_one_lists_no_keys():
+    engine = SessionEngine(
+        create_scheduler(async_scheduling=True, enable_prefix_caching=True)
+    )
+    (request,) = _session_requests(["r"], 40, 8)
+    engine.scheduler.add_request(request)
+    prefill, decode = engine.schedule(), engine.schedule()
+    engine.step(prefill, {"r": [0]})
+    engine.scheduler.finish_requests("r", RequestStatus.FINISHED_ABORTED)
+    (replacement,) = _session_requests(["r"], 40, 8)
+    engine.scheduler.add_request(replacement)
+    output = _abort(engine.scheduler, "r")
+    engine.step(decode, {"r": [0]})
+    engine.pause()
+    engine.worker.close()
+    assert output.aux_output_keys is None
+    assert output.aux_version_segments is None
+
+
+@pytest.mark.parametrize(
+    "num_steps_after_preemption", [0, 1], ids=["waiting", "scheduled-again"]
+)
+def test_session_request_aborted_after_a_preemption_lists_its_keys(
+    num_steps_after_preemption,
+):
+    engine = SessionEngine(create_scheduler(enable_prefix_caching=True))
+    scheduler = engine.scheduler
+    (request,) = _session_requests(["r"], 40, 8)
+    scheduler.add_request(request)
+    for _ in range(3):
+        engine.step(engine.schedule(), {"r": [0]})
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    engine.pause()
+    for _ in range(num_steps_after_preemption):
+        engine.step(engine.schedule(), {"r": [0]})
+    output = _abort(scheduler, "r")
+    engine.pause()
+    assert _rows(engine, output) == list(range(request.num_tokens - 1))
+
+
+def test_session_request_preempted_with_output_in_flight_waits_for_it():
+    engine = SessionEngine(
+        create_scheduler(async_scheduling=True, enable_prefix_caching=True)
+    )
+    scheduler = engine.scheduler
+    (request,) = _session_requests(["r"], 40, 8)
+    scheduler.add_request(request)
+    prefill, decode = engine.schedule(), engine.schedule()
+    engine.step(prefill, {"r": [0]})
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    assert "r" not in engine.schedule().num_scheduled_tokens
+    engine.step(decode, {"r": [0]})
+    assert "r" not in engine.schedule().num_scheduled_tokens
+    output = _abort(scheduler, "r")
+    engine.pause()
+    assert _rows(engine, output) == list(range(request.num_tokens - 1))
+
+
 def test_preempted_session_request_that_stops_on_its_output_in_flight():
     scheduler = create_scheduler(
         async_scheduling=True, enable_prefix_caching=True, num_blocks=3
@@ -1275,8 +1402,9 @@ def test_preempted_session_request_that_stops_on_its_output_in_flight():
     outputs = engine.step(step, {"first": [2], "second": [3]})
     assert outputs["second"].finish_reason is not None
     engine.step(preempting, {"first": [4]})
+    engine.pause()
     engine.close()
-    assert outputs["second"].aux_output_keys is None
+    assert outputs["second"].aux_output_keys
 
 
 def test_preempted_session_request_whose_accepted_drafts_complete_an_object():
@@ -1305,8 +1433,9 @@ def test_preempted_session_request_whose_accepted_drafts_complete_an_object():
     outputs = engine.step(drafts, {"first": [6, 7, 8], "second": [9, 10, 11]})
     assert outputs["second"].finish_reason is not None
     engine.step(preempting, {"first": [12]})
+    engine.pause()
     engine.close()
-    assert outputs["second"].aux_output_keys is None
+    assert outputs["second"].aux_output_keys
 
 
 def _two_logits(hidden_states):
