@@ -357,22 +357,40 @@ def test_tiering_spec_aligns_row_size():
     assert spec.num_chunks == 3
 
 
-def test_cpu_spec_gives_the_store_mode_to_the_manager():
-    spec = _create_spec(extra_config={"store_mode": "lazy"})
+def test_cpu_spec_gives_store_when_to_the_manager():
+    spec = _create_spec(extra_config={"store_when": ["on_overwrite"]})
     assert spec.get_manager().store_triggers == (StoreTrigger.ON_OVERWRITE,)
 
 
-def test_cpu_spec_rejects_an_unknown_store_mode():
-    with pytest.raises(ValueError, match="store_mode must be one of"):
-        _create_spec(extra_config={"store_mode": "fast"})
+def test_cpu_spec_stores_on_compute_by_default():
+    spec = _create_spec()
+    assert spec.get_manager().store_triggers == (StoreTrigger.ON_COMPUTE,)
 
 
-def test_tiering_spec_rejects_lazy_store_mode():
+@pytest.mark.parametrize("store_when", [["fast"], "on_overwrite"])
+def test_cpu_spec_rejects_a_bad_store_when(store_when):
+    with pytest.raises(ValueError, match="store_when"):
+        _create_spec(extra_config={"store_when": store_when})
+
+
+def test_tiering_spec_rejects_a_lazy_store():
     spec = _create_spec(
-        spec_name="TieringOffloadingSpec", extra_config={"store_mode": "lazy"}
+        spec_name="TieringOffloadingSpec",
+        extra_config={"store_when": ["on_overwrite"]},
     )
-    with pytest.raises(ValueError, match="store_mode lazy"):
+    with pytest.raises(ValueError, match="store_when"):
         spec.get_manager()
+
+
+def test_tiering_spec_allows_the_handoff_trigger():
+    """The layout adds on_handoff, so the config may name it too."""
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        extra_config={"store_when": ["on_compute", "on_handoff"]},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.store_triggers == (StoreTrigger.ON_COMPUTE, StoreTrigger.ON_HANDOFF)
+    spec._check_store_triggers()
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

@@ -70,7 +70,7 @@ def test_a_trigger_of_the_layout_and_of_the_manager_raises():
     repeated manager trigger; only a layout/manager overlap is left."""
     with pytest.raises(ValueError, match="unique and not empty"):
         _create_handlers(
-            _make_mamba_hybrid_kv_cache_config(), {"store_triggers": ["ON_HANDOFF"]}
+            _make_mamba_hybrid_kv_cache_config(), {"store_when": ["on_handoff"]}
         )
 
 

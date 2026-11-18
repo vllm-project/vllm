@@ -100,11 +100,14 @@ class StoreHandlerFactory:
             (StoreTrigger.ON_HANDOFF,) if config.supports_handoff else ()
         )
         triggers = layout_triggers + tuple(manager_store_triggers)
-        if not triggers or len(set(triggers)) != len(triggers):
+        shown = [trigger.value for trigger in triggers]
+        repeated = sorted({value for value in shown if shown.count(value) > 1})
+        if not triggers or repeated:
             raise ValueError(
-                f"The store triggers of the KV cache layout and of the "
-                f"offloading manager must be unique and not empty: "
-                f"{triggers}"
+                "The store triggers of the KV cache layout and of the "
+                f"offloading manager must be unique and not empty: {shown}"
+                + (f" (repeated: {repeated})" if repeated else "")
+                + ". The layout adds on_handoff when it hands off state blocks."
             )
         return triggers
 
