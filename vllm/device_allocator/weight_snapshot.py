@@ -328,7 +328,7 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
         if header.get("magic") != _MAGIC:
             raise RuntimeError(f"weight snapshot {path} has an old format; delete it")
         _check_size(fd, header, offset, path)
-        plan = _plan(header.get("tensors", []), tensors, aliases, offset, path)
+        plan = _plan(roots, header.get("tensors", []), tensors, aliases, offset, path)
         # Two pinned buffers: the disk read of one overlaps the H2D copy of the other.
         bufs = [_pinned(), _pinned()]
         views = [memoryview(b.numpy()) for b in bufs]
@@ -366,25 +366,30 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     )
 
 
-def _plan(saved: list[dict], tensors, aliases, offset: int, path) -> list:
+def _plan(roots, saved: list[dict], tensors, aliases, offset: int, path) -> list:
     """Match saved entries to live tensors by key or alias; return (tensor, offset).
 
-    Any entry without a live tensor of the same dtype and shape, and any live
-    tensor the snapshot does not cover, is an error: never restore partially."""
+    Attributes the real load created but the dummy build did not (e.g. fused
+    drafter weights) are allocated, or bound to the live tensor they aliased.
+    Anything else that does not match is an error: never restore partially."""
     now = dict(tensors)
     for k, others in list(aliases.items()):
         for o in others:
             now.setdefault(o, now.get(k))
+    live_keys = set(now)
     plan, problems = [], []
     for e in saved:
         keys = [e["key"], *e.get("aliases", [])]
         found = [now.pop(k) for k in keys if now.get(k) is not None]
-        t = found[0] if found else None
+        t = found[0] if found else _create(roots, e["key"], e)
         at = offset
         offset += _round_up(e["nbytes"])
         if t is None or str(t.dtype) != e["dtype"] or list(t.shape) != e["shape"]:
             problems.append(e["key"])
             continue
+        for k in keys:
+            if k not in live_keys and not _bind(roots, k, t):
+                problems.append(f"{k} (cannot bind alias)")
         plan.append((t, at))
     live = {id(t) for t, _ in plan}
     problems += [f"{k} (not in snapshot)" for k, t in now.items() if id(t) not in live]
@@ -396,21 +401,51 @@ def _plan(saved: list[dict], tensors, aliases, offset: int, path) -> list:
     return plan
 
 
+def _bind(roots, key: str, t) -> bool:
+    """Point the attribute path `key` at tensor t if it is missing or None."""
+    root_name, mod_name, path = key.split("/", 2)
+    obj = roots[root_name].get_submodule(mod_name)
+    # A plain view: binding a Parameter would register it on the module.
+    if isinstance(t, nn.Parameter) and not path.startswith("_parameters"):
+        t = t.detach()
+    try:
+        _set_path(obj, path, t, create=True)
+        return True
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return False
+
+
+def _create(roots, key: str, e: dict):
+    root_name, mod_name, path = key.split("/", 2)
+    module = roots[root_name].get_submodule(mod_name)
+    device = next(module.parameters(), torch.empty(0, device="cuda")).device
+    dtype = getattr(torch, e["dtype"].removeprefix("torch."))
+    t = torch.empty(e["shape"], dtype=dtype, device=device)
+    return t if _bind(roots, key, t) else None
+
+
 _TOKEN = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)|\[(\d+|'[^']*')\]")
 
 
-def _set_path(obj, path: str, value) -> None:
-    """Set a value at an attribute/index path such as `a.b[0]['k']`."""
+def _set_path(obj, path: str, value, create: bool = False) -> None:
+    """Set a value at an attribute/index path such as `a.b[0]['k']`.
+
+    With create, missing attributes and list slots on the way are added."""
     steps = [(m[1], m[2]) for m in _TOKEN.finditer("." + path)]
     for i, (attr, idx) in enumerate(steps):
         last = i == len(steps) - 1
+        nxt_is_index = not last and steps[i + 1][0] is None
         if attr is not None:
             if last:
                 setattr(obj, attr, value)
             else:
+                if create and getattr(obj, attr, None) is None:
+                    setattr(obj, attr, [] if nxt_is_index else None)
                 obj = getattr(obj, attr)
         else:
             k = idx[1:-1] if idx.startswith("'") else int(idx)
+            if create and isinstance(obj, list) and isinstance(k, int):
+                obj.extend([None] * (k + 1 - len(obj)))
             if last:
                 obj[k] = value
             else:

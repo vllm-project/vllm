@@ -259,3 +259,16 @@ def test_restore_fills_dummy_weights_with_plausible_bytes():
 
 def test_is_restoring_is_false_outside_a_restore():
     assert ws.is_restoring() is False
+
+
+@cuda
+def test_restore_creates_attributes_only_the_real_load_made(tmp_path):
+    src = _Toy()
+    src.fused = torch.rand(6, device="cuda")  # e.g. fused at load time
+    path = tmp_path / "snap.bin"
+    ws.save(_roots(src), path)
+
+    dst = _Toy()
+    dst.fused = None
+    ws.restore(_roots(dst), path)
+    torch.testing.assert_close(dst.fused, src.fused)
