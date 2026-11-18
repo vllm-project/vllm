@@ -15,9 +15,9 @@ import numpy as np
 from safetensors.numpy import save
 
 from vllm.distributed.aux_output_connector.object_store import (
+    _NOT_FOUND,
     AuxObjectStoreFullError,
     MooncakeAuxObjectStore,
-    release_aux_keys,
 )
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
 from vllm.exceptions import VLLMValidationError
@@ -202,11 +202,9 @@ class SessionObjectWriter:
         max_pending_batches: int,
         fields: Callable[[np.ndarray], dict[str, np.ndarray]],
         put_stall_timeout_s: float = 600.0,
-        remove_timeout_s: float = 30.0,
     ) -> None:
         self._store = store
-        self._remove_timeout_s = remove_timeout_s
-        self.num_unremoved = 0
+        self._unremoved: list[str] = []
         self._key_prefix = key_prefix
         self._fields = fields
         self._put_stall_timeout_s = put_stall_timeout_s
@@ -248,15 +246,18 @@ class SessionObjectWriter:
     def _write(self, batch: tuple[list[str], list[bytes] | None]) -> None:
         keys, values = batch
         if values is None:
-            unremoved = release_aux_keys(self._store, keys, self._remove_timeout_s)
-            if unremoved:
-                self.num_unremoved += len(unremoved)
+            keys = self._unremoved + keys
+            codes = self._store.remove(keys) if keys else []
+            self._unremoved = [
+                key
+                for key, code in zip(keys, codes, strict=True)
+                if code and code != _NOT_FOUND
+            ]
+            if self._unremoved:
                 logger.warning(
-                    "%d auxiliary output objects were not removed, %d in total; "
-                    "first: %s",
-                    len(unremoved),
-                    self.num_unremoved,
-                    unremoved[0],
+                    "%d auxiliary output objects are not removed yet; first: %s",
+                    len(self._unremoved),
+                    self._unremoved[0],
                 )
             self._last_progress = time.monotonic()
             return
@@ -301,6 +302,8 @@ class SessionObjectWriter:
         `BlockObjectStoreError` if a write failed, writes stalled, or
         `timeout_s` passed."""
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        if self._unremoved:
+            self._put(([], None))
         with self._queue.all_tasks_done:
             while self._queue.unfinished_tasks and self._error is None:
                 if deadline is not None and time.monotonic() >= deadline:
