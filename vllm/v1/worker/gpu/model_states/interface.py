@@ -43,6 +43,11 @@ class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
 
+    positions_depend_on_encoder: bool = False
+    """Whether the positions this state prepares depend on encoder outputs.
+    Only the first PP stage runs the encoder, so later stages take the
+    positions from it."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
