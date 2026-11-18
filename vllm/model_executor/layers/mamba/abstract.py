@@ -98,6 +98,7 @@ class MambaBase(AttentionLayerBase):
             mamba_type=self.mamba_type,
             tp_replicated=self.is_kv_cache_tp_replicated,
         )
+        spec = self.get_attn_backend().customize_mamba_spec(spec)
         checkpoint_alignment = self.get_kv_cache_checkpoint_alignment(vllm_config)
         return MambaManager.layer_config(
             spec,

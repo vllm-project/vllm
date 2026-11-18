@@ -38,6 +38,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         use_flashinfer_replayssm=False,
         state_alignment=1,
         get_kv_cache_checkpoint_alignment=lambda vllm_config: None,
+        get_attn_backend=MambaAttentionBackendEnum.MAMBA2.get_class,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
