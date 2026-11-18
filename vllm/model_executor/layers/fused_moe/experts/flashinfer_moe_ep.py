@@ -9,7 +9,7 @@ combines in one launch, so it is paired with a pass-through prepare/finalize.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEp,
     FlashInferMoeEpEpilogue,
+    FlashInferMoeEpWeightFormat,
     FlashInferMoeEpWeights,
     apply_topk_in_fc1,
     flashinfer_moe_ep_unsupported_reasons,
@@ -135,7 +136,8 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         The oracle has already put the weights in kernel format; the per-expert
         weight global scales arrive through the quant config and become the
         epilogue alphas. On SM107 the checkpoint's activation input scales also
-        set the activation and FC1-output quantization (`sm107_nvfp4_epilogue`).
+        set the activation and FC1-output quantization of NVFP4 experts
+        (`sm107_nvfp4_epilogue`); MXFP4 experts have no such scales.
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
         block_fp8 = (
@@ -148,19 +150,25 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 f"{self.moe_config.moe_backend} with block-FP8 weights does not "
                 "support apply_router_weight_on_input"
             )
+        weight_format: FlashInferMoeEpWeightFormat = (
+            "fp8_block"
+            if block_fp8
+            else cast(FlashInferMoeEpWeightFormat, self.quant_config.weight_quant_dtype)
+        )
         epilogue = epilogue_from_quant_config(self.quant_config)
         if is_sm107_device():
-            # Every rank refuses a reload here, before the epilogue's collective.
+            # Every rank refuses a reload here, before any collective.
             if getattr(layer, "_experts_sm107_loaded", False):
                 raise NotImplementedError(
                     "reloading weights is not supported with "
                     f"{self.moe_config.moe_backend} on SM107"
                 )
-            epilogue = sm107_nvfp4_epilogue(
-                epilogue,
-                getattr(layer, "w13_input_scale", None),
-                getattr(layer, "w2_input_scale", None),
-            )
+            if weight_format == "nvfp4":
+                epilogue = sm107_nvfp4_epilogue(
+                    epilogue,
+                    getattr(layer, "w13_input_scale", None),
+                    getattr(layer, "w2_input_scale", None),
+                )
             layer._experts_sm107_loaded = True
         # Layer parameters the megakernel reads. They end up aliasing the
         # megakernel's own tensors, so EPLB permutes exactly what it uses.
@@ -184,7 +192,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             ),
-            block_fp8=block_fp8,
+            weight_format=weight_format,
         )
         adapter.warmup()
         for name, tensor in zip(names, adapter.kernel_weights()):
