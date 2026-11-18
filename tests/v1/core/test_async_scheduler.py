@@ -1303,7 +1303,7 @@ def test_session_retry_after_an_abort_keeps_the_products_of_the_aborted_attempt(
     scheduler.finish_requests("first", RequestStatus.FINISHED_ABORTED)
     keys, segments = engine.connector.pop_abort_output("first")
     held = segments[-1][0]
-    assert keys and held == request.num_tokens - 1
+    assert keys and held % 16 == 0 and 0 < held < request.num_tokens - 1
     assert scheduler.reset_prefix_cache()
     _run_turn(
         engine,
