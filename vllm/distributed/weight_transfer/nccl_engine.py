@@ -37,7 +37,9 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+    chunk_capacity,
     chunks,
+    fit_buffer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -96,6 +98,10 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     `load_weights`. The inference server
     must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
     refuse otherwise at init."""
+
+    def __post_init__(self) -> None:
+        if self.packed:
+            chunk_capacity(self.packed_buffer_size_bytes)
 
 
 @dataclass
@@ -649,14 +655,12 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         device = self.model_update_group.device
         if self.packed:
             # Nothing is kept: receive every chunk into one reused buffer.
-            buf: torch.Tensor | None = None  # the first chunk is the largest
-            for nbytes, _ in chunks(
-                ((m.shape, m.dtype) for m in meta), self.packed_buffer_size_bytes
-            ):
+            capacity = chunk_capacity(self.packed_buffer_size_bytes)
+            buf: torch.Tensor | None = None
+            for nbytes, _ in chunks(((m.shape, m.dtype) for m in meta), capacity):
                 if not nbytes:  # only empty tensors: not sent
                     continue
-                if buf is None:
-                    buf = torch.empty(nbytes, dtype=torch.uint8, device=device)
+                buf = fit_buffer(buf, nbytes, capacity, device)
                 # on the current stream
                 self.model_update_group.broadcast(buf[:nbytes], src=src)
             torch.accelerator.current_stream().synchronize()

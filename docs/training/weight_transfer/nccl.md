@@ -85,7 +85,7 @@ once every transfer has drained.
 | `world_size` | — | Transfer NCCL group size: the [broadcasting trainer ranks](#broadcasting-ranks) plus the inference workers (`1 + num_workers` for a single sender). Other trainer ranks are not counted |
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
 | `packed` | `True` | Use packed broadcasting |
-| `packed_buffer_size_bytes` | 1 GiB | Packed buffer size |
+| `packed_buffer_size_bytes` | 1 GiB | Packed buffer size, at least 16 bytes |
 | `packed_num_buffers` | 2 | Number of rotating buffers (double/triple buffering) |
 
 `packed` defaults to `True` here. The worker-side default is `False`, but it only
@@ -105,9 +105,10 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 `update_weights` fields.
 
 !!! note "Memory"
-    The rotating buffers are live for the whole transfer:
+    The rotating buffers are sized to the chunks they hold: up to
     `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
-    defaults). Lower `packed_buffer_size_bytes` if that is too much headroom.
+    defaults) for a transfer that size or larger. Lower
+    `packed_buffer_size_bytes` if that is too much headroom.
 
 ### Metadata and `iter_full()` must agree
 

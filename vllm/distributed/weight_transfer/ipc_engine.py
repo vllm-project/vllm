@@ -28,6 +28,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedBufferImporter,
     PackedIpcConsumer,
+    chunk_capacity,
     packed_ipc_producer,
 )
 
@@ -57,6 +58,10 @@ class IPCTrainerInitInfo(TrainerInitInfo):
     backend: ClassVar[str] = "ipc"
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+
+    def __post_init__(self) -> None:
+        if self.packed:
+            chunk_capacity(self.packed_buffer_size_bytes)
 
 
 @dataclass

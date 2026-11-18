@@ -32,6 +32,27 @@ def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, 
 ALIGN = 16
 
 
+def chunk_capacity(buffer_size: int) -> int:
+    """The largest chunk, in bytes, of a `buffer_size` packed buffer."""
+    capacity = round_down(buffer_size, ALIGN)
+    if capacity < ALIGN:
+        raise ValueError(
+            f"packed buffer size must be at least {ALIGN} bytes, got {buffer_size}"
+        )
+    return capacity
+
+
+def fit_buffer(
+    buf: torch.Tensor | None, nbytes: int, capacity: int, device: torch.device
+) -> torch.Tensor:
+    """`buf`, or a new buffer if it holds fewer than `nbytes`; a full chunk gets
+    `capacity` bytes, so it is reallocated at most once per transfer."""
+    if buf is not None and buf.numel() >= nbytes:
+        return buf
+    size = capacity if nbytes > capacity - ALIGN else nbytes
+    return torch.empty(size, dtype=torch.uint8, device=device)
+
+
 class Piece(NamedTuple):
     """Bytes `[start, end)` of the tensor at `position` in the sent
     sequence, at `offset` in its chunk."""
@@ -55,15 +76,11 @@ def chunks(
     specs: Iterable[tuple[Sequence[int], torch.dtype]], buffer_size: int
 ) -> Iterator[Chunk]:
     """Lazily cut the `ALIGN`-aligned byte stream of `specs` into chunks of
-    `buffer_size` bytes, splitting tensors that cross a cut.
+    `chunk_capacity(buffer_size)` bytes, splitting tensors that cross a cut.
 
-    Both sides derive it from metadata alone. A full chunk is yielded before
-    the next spec is pulled; trailing padding is not counted in `nbytes`."""
-    limit = round_down(buffer_size, ALIGN)
-    if limit <= 0:
-        raise ValueError(
-            f"packed buffer size must be at least {ALIGN} bytes, got {buffer_size}"
-        )
+    A full chunk is yielded before the next spec is pulled; trailing padding is
+    not counted in `nbytes`."""
+    limit = chunk_capacity(buffer_size)
     pieces: list[Piece] = []
     used = 0  # bytes of the current chunk taken
     for position, (shape, dtype) in enumerate(specs):
@@ -136,25 +153,22 @@ def packed_nccl_broadcast_producer(
             tensors[i] = t
             yield t.shape, t.dtype
 
+    capacity = chunk_capacity(buffer_size_bytes)
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
-    bufs: list[torch.Tensor] = []  # allocated on the first chunk with bytes
-    for k, (nbytes, pieces) in enumerate(chunks(specs(), buffer_size_bytes)):
+    bufs: list[torch.Tensor | None] = [None] * num_buffers  # sized to the chunks
+    for k, (nbytes, pieces) in enumerate(chunks(specs(), capacity)):
         slot = k % num_buffers
-        if nbytes and not bufs:
-            device = tensors[pieces[0].position].device
-            limit = round_down(buffer_size_bytes, ALIGN)
-            bufs = [
-                torch.empty(limit, dtype=torch.uint8, device=device)
-                for _ in range(num_buffers)
-            ]
-        dsts, srcs = _pack_copies(bufs[slot] if bufs else None, pieces, tensors)
         if not nbytes:  # only empty tensors: nothing to send
+            _pack_copies(None, pieces, tensors)
             continue
         prev = done[slot]
         if prev is not None:
             prev.synchronize()
+        device = tensors[pieces[0].position].device
+        buf = bufs[slot] = fit_buffer(bufs[slot], nbytes, capacity, device)
+        dsts, srcs = _pack_copies(buf, pieces, tensors)
         # the sources may come from work the caller queued while iterating
         streams[slot].wait_stream(caller_stream)
         with torch.cuda.stream(streams[slot]):
@@ -163,7 +177,7 @@ def packed_nccl_broadcast_producer(
             for t in srcs:
                 t.record_stream(streams[slot])
             del dsts, srcs
-            group.broadcast(bufs[slot][:nbytes], src=src)
+            group.broadcast(buf[:nbytes], src=src)
             event = torch.Event()
             event.record(streams[slot])
         done[slot] = event
@@ -298,7 +312,7 @@ def packed_ipc_producer(
     assert accelerator is not None
     device = torch.device(accelerator.type, torch.accelerator.current_device_index())
     buf = torch.empty(
-        round_down(buffer_size_bytes, ALIGN), dtype=torch.uint8, device=device
+        chunk_capacity(buffer_size_bytes), dtype=torch.uint8, device=device
     )
     _, ipc_args = reduce_tensor(buf)
 
