@@ -7,15 +7,15 @@ implementations. They provide clear failure signals when AITER library updates
 introduce regressions, independent of vLLM's fusion/compilation passes.
 
 Tested ops:
-- ``rms_norm`` and ``rms_norm2d_with_add`` vs PyTorch reference
-- ``triton_rotary_embedding`` vs manual NeoX RoPE reference (xfail - known issue)
-- ``act_mul_and_fp8_group_quant`` (SiGLU + FP8 group quant)
+- `rms_norm` and `rms_norm2d_with_add` vs PyTorch reference
+- `triton_rotary_embedding` vs manual NeoX RoPE reference (xfail - known issue)
+- `act_mul_and_fp8_group_quant` (SiGLU + FP8 group quant)
 - fused RMSNorm + quantization ops vs sequential composition
 
 Related coverage:
-- per-token/per-tensor quant roundtrips: ``tests/rocm/aiter/test_quant_op_schema.py``
-- RMSNorm determinism: ``tests/rocm/aiter/test_quant_op_schema.py``
-- group_fp8_quant: ``tests/kernels/quantization/test_rocm_aiter_grouped_quant.py``
+- per-token/per-tensor quant roundtrips: `tests/rocm/aiter/test_quant_op_schema.py`
+- RMSNorm determinism: `tests/rocm/aiter/test_quant_op_schema.py`
+- group_fp8_quant: `tests/kernels/quantization/test_rocm_aiter_grouped_quant.py`
 """
 
 import warnings

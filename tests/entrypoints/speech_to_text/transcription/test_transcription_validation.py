@@ -8,10 +8,13 @@ import httpx
 import numpy as np
 import pytest
 import soundfile as sf
+import transformers
 from fastapi import UploadFile
+from packaging.version import Version
 from transformers import WhisperConfig
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from vllm.assets.audio import AudioAsset
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.multimodal.audio import AudioResampler
@@ -139,6 +142,89 @@ async def transcribe_and_check(
         )
 
     return out_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires `tokenize` on `apply_transcription_request`",
+)
+async def test_transformers_backend_audio(mary_had_lamb):
+    """Serve transcription and diarization for a Transformers backend model."""
+    model_name = "microsoft/VibeVoice-ASR-HF"
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.85",
+        *ROCM_EXTRA_ARGS,
+    ]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        await transcribe_and_check(
+            client,
+            model_name,
+            mary_had_lamb,
+            language="en",
+            expected_text="Mary had a little lamb",
+            expected_seconds=16,
+        )
+
+        mary_had_lamb.seek(0)
+        response = await client.audio.transcriptions.create(
+            model=model_name, file=mary_had_lamb, response_format="diarized_json"
+        )
+        assert "Mary had a little lamb" in response.text
+        assert response.segments
+        assert all(segment.end >= segment.start for segment in response.segments)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires `tokenize` on `apply_transcription_request`",
+)
+async def test_transformers_backend_diarization_spans_audio_windows():
+    """Speaker labels hold past 30 s, which is where chunking the audio would start
+    a new transcript. `winning_call` follows `mary_had_lamb` and is one speaker."""
+    model_name = "hf-audio/MOSS-Transcribe-Diarize-HF"
+    target_sr = 16000
+    resampler = AudioResampler(target_sr=target_sr)
+    assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+    audios = [
+        resampler.resample(audio, orig_sr=sr)
+        for audio, sr in (asset.audio_and_sample_rate for asset in assets)
+    ]
+    file = BytesIO()
+    sf.write(file, np.concatenate(audios), target_sr, format="WAV")
+    file.seek(0)
+    file.name = "conversation.wav"
+    server_args = [
+        "--model-impl",
+        "transformers",
+        "--enforce-eager",
+        "--max-model-len",
+        "4096",
+        "--gpu-memory-utilization",
+        "0.85",
+        *ROCM_EXTRA_ARGS,
+    ]
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        response = await client.audio.transcriptions.create(
+            model=model_name, file=file, response_format="diarized_json"
+        )
+
+    first_audio_s = len(audios[0]) / target_sr
+    first = [s for s in response.segments if s.start < first_audio_s]
+    second = [s for s in response.segments if s.start >= first_audio_s]
+    assert second[-1].end > 30
+    assert len({s.speaker for s in second}) == 1
+    assert {s.speaker for s in first}.isdisjoint(s.speaker for s in second)
 
 
 @pytest.mark.asyncio

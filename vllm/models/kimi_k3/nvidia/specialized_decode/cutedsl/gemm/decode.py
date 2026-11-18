@@ -36,8 +36,8 @@ SPLIT_K_ROWS = 64  # cluster split-K up to here; cuBLAS past it
 
 
 def warp_tactic(m, n, k, sms):
-    """Warp split-K tactic of ``m`` rows of an [n, k] weight: 32-row output tiles
-    when they fill at most two waves, the smallest token tile holding ``m``, 256-wide
+    """Warp split-K tactic of `m` rows of an [n, k] weight: 32-row output tiles
+    when they fill at most two waves, the smallest token tile holding `m`, 256-wide
     K tiles and the deepest ring that keeps every wave's CTAs resident on an SM."""
     output = 32 if n % 32 == 0 and n // 32 <= 2 * sms else 16
     token = 8 if m <= 8 else 16 if m <= 16 else 32
@@ -60,10 +60,10 @@ def warp_eligible(n, k):
 
 
 class DecodeProjection:
-    """``out[M, N] = x[M, K] @ weight[N, K]^T`` for each prepared M: warp split-K up
-    to ``WARP_ROWS``, the cluster split-K ``policies`` (M -> tactic) up to
-    ``SPLIT_K_ROWS``, cuBLAS past it. ``skinny``: an optional engine for the rows it
-    prepares (``run(x, out)`` with ``configs``)."""
+    """`out[M, N] = x[M, K] @ weight[N, K]^T` for each prepared M: warp split-K up
+    to `WARP_ROWS`, the cluster split-K `policies` (M -> tactic) up to
+    `SPLIT_K_ROWS`, cuBLAS past it. `skinny`: an optional engine for the rows it
+    prepares (`run(x, out)` with `configs`)."""
 
     def __init__(self, weight, batches, policies, skinny=None):
         n, k = weight.shape

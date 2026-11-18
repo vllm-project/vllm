@@ -524,9 +524,9 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     state_dtype: torch.dtype,
 ) -> None:
     """A prefill split into two calls (the second seeded with the first's
-    ``final_state`` and a rebased ``cu_seqlens``) must match the single-call
+    `final_state` and a rebased `cu_seqlens`) must match the single-call
     result, mimicking the cross-scheduler-step handoff in
-    ``cpu_gdn_attention_core``.
+    `cpu_gdn_attention_core`.
     """
     q, k, v, a, b, A_log, dt_bias = gdn_inputs(
         num_tokens=total_tokens,
@@ -983,7 +983,7 @@ def test_spec_forward_conv_tracks_accepted_tokens(
 @torch.inference_mode()
 def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:
     """Non-AMX conv-state handoff: a two-call split (the second seeded via
-    ``has_initial_state=True`` from the conv_states the first wrote back) must
+    `has_initial_state=True` from the conv_states the first wrote back) must
     match the single-call result.
     """
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
@@ -1225,10 +1225,10 @@ def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
 def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> None:
-    """C++ prefill conv op must honor ``has_initial_state`` so a two-call split
+    """C++ prefill conv op must honor `has_initial_state` so a two-call split
     matches the single-call result.
 
-    Regression test for ``causal_conv1d_fwd_varlen_kernel_impl`` (``conv.cpp``)
+    Regression test for `causal_conv1d_fwd_varlen_kernel_impl` (`conv.cpp`)
     ignoring the carried conv state on continued chunks. Runs on aarch64 cpus with
     bf16 support or any AVX-512BF16 CPU since conv.cpp uses VDPBF16PS, not AMX tiles.
     """
@@ -1688,9 +1688,9 @@ def test_conv_weight_pack_roundtrip_unpacked_matches():
 )
 @torch.inference_mode()
 def test_spec_decode_unpacked_conv_weight_stash():
-    """Spec-decode correctness: AVX-512BF16 and AArch64 BF16 CPUs pack ``conv1d.weight``
-    in place at load time and stash the original ``(dim, width)`` tensor as
-    ``_cpu_unpacked_conv_weight``; the spec-decode path must use that stash since
+    """Spec-decode correctness: AVX-512BF16 and AArch64 BF16 CPUs pack `conv1d.weight`
+    in place at load time and stash the original `(dim, width)` tensor as
+    `_cpu_unpacked_conv_weight`; the spec-decode path must use that stash since
     reading the packed weight directly produces garbage. Verifies the recovered
     weight equals the original and that torch F.conv1d agrees with the C++ conv
     fed the packed weight.

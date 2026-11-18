@@ -47,10 +47,10 @@ def _write_sparse_block_table_row_from_values(
 ):
     """Compact one query's selected logical blocks into physical page-16 ids.
 
-    ``BLOCK_PAGE_STRIDE`` is how many page ids a block spans, which is
-    ``PAGES_PER_BLOCK`` when each K/V side is its own dense plane and twice
+    `BLOCK_PAGE_STRIDE` is how many page ids a block spans, which is
+    `PAGES_PER_BLOCK` when each K/V side is its own dense plane and twice
     that when both sides share a block. Padded rows carry a negative
-    ``abs_pos``, which clamps the causal range to empty.
+    `abs_pos`, which clamps the causal range to empty.
     """
     causal_len = tl.maximum(abs_pos + 1, 0)
     self_blk = abs_pos // SPARSE_BLOCK_SIZE_C
@@ -371,7 +371,7 @@ def minimax_m3_sparse_block_page_stride(
 ) -> int:
     """How many page ids one sparse block spans.
 
-    Each side owns ``PAGES_PER_SPARSE_BLOCK`` pages. When the sides are dense
+    Each side owns `PAGES_PER_SPARSE_BLOCK` pages. When the sides are dense
     planes a block is exactly that wide; when they interleave, a block covers
     both sides' pages and V is reached from the same page id at a fixed offset.
     """
@@ -392,7 +392,7 @@ def minimax_m3_rebase_block_table_to_page16(
     """Rebase a logical page table onto AITER's page-16 page numbering.
 
     The page ids AITER's top-k emits for the attend are
-    ``block_table[blk] * pages_per_block + j``, and ``pages_per_block`` is fixed
+    `block_table[blk] * pages_per_block + j`, and `pages_per_block` is fixed
     at AITER build time to one side's pages. An interleaved block spans both
     sides, so the only way to reach its pages through that kernel is to hand it
     a table already scaled to the wider stride. The caller does this once per

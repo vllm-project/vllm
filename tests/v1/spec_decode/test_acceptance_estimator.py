@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``predict`` writes one probability into two index spaces at once.
+"""`predict` writes one probability into two index spaces at once.
 
 Adaptive verification reads the estimate in this step's batch order, while the
 next step's refit reads it in persistent request-state slots. A mix-up between
@@ -97,7 +97,7 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
     """One row per request (per-step drafting) and a whole block at once.
 
     Which one it is is inferred from whether the draft step is per-row, so the
-    two cases differ only in how ``draft_step`` is shaped.
+    two cases differ only in how `draft_step` is shaped.
     """
     device = current_platform.device_type
     torch.manual_seed(0)
@@ -392,11 +392,11 @@ def test_feature_drops_exactly_one_tied_maximum(num_tied: int, placement: str):
     Both placements are needed because they fail differently, and each is blind
     to the other's bug:
 
-    - ``same_block`` catches excluding by value (``logits == block_max``)
+    - `same_block` catches excluding by value (`logits == block_max`)
       without adding the other tied copies back, which zeroes every tied entry
       inside the block at once. Spread across blocks it would hit one entry per
       block and look correct.
-    - ``across_blocks`` catches excluding from every block whose local max ties
+    - `across_blocks` catches excluding from every block whose local max ties
       the global max, instead of from the single selected one. Within one block
       there is no second block to wrongly exclude from.
 
@@ -429,7 +429,7 @@ def test_feature_ignores_which_token_was_drawn():
 
     This is what keeps rejection sampling lossless: if the score read the drawn
     token, trimming a draft would condition on the token being trimmed and tilt
-    the emitted distribution toward the drafter's confident modes. ``predict``
+    the emitted distribution toward the drafter's confident modes. `predict`
     takes no token argument, and this pins that -- two rows with identical
     logits must score identically no matter what was sampled from them.
     """
