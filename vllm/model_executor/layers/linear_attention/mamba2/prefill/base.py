@@ -97,13 +97,13 @@ class MambaSSDKernel(LinearAttnKernel):
         out: torch.Tensor,
         ssm_state: torch.Tensor,
         metadata: "Mamba2AttentionMetadata",
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> torch.Tensor | None:
         """Scan the prefills from their cached states into `out`, and cache
         their final states.
 
         Returns:
-            The checkpoint states and each prefill's row in them, or None when
-            no checkpoints are exported.
+            The checkpoint states, indexed by `metadata.checkpoint_chunk_idx`,
+            or None when no checkpoints are exported.
 
         """
         assert metadata.state_indices_tensor_p is not None
@@ -122,10 +122,7 @@ class MambaSSDKernel(LinearAttnKernel):
             cls.write_final_states(
                 ssm_state, final_states, metadata.state_indices_tensor_p
             )
-        if checkpoint_states is None:
-            return None
-        assert metadata.checkpoint_chunk_idx is not None
-        return checkpoint_states, metadata.checkpoint_chunk_idx
+        return checkpoint_states
 
     @classmethod
     def _scan(
