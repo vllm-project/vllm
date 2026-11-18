@@ -868,7 +868,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # 3. State Space Model sequence transformation; reads each
             # sequence's cached state and writes back its final one.
-            checkpoint = self.ssd_kernel.forward(
+            checkpoint_states = self.ssd_kernel.forward(
                 self,
                 hidden_states_p.view(
                     num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
@@ -881,10 +881,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 attn_metadata,
             )
 
-            if checkpoint is not None:
+            if checkpoint_states is not None:
                 assert checkpoint_meta is not None
                 assert query_start_loc_p is not None
-                checkpoint_states, checkpoint_rows = checkpoint
                 self._checkpoint_exporter.export(
                     checkpoint_meta,
                     raw_qkv=x.transpose(0, 1),
@@ -892,7 +891,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     recurrent_checkpoint=checkpoint_states,
                     recurrent_state=ssm_state,
                     cu_seqlens=query_start_loc_p,
-                    recurrent_rows=checkpoint_rows,
+                    recurrent_rows=attn_metadata.checkpoint_chunk_idx,
                 )
             if (
                 ring_start is not None
