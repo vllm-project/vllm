@@ -39,7 +39,7 @@ ScoreInput = str | ScoreMultiModalParam
 ScoreData = str | list[ScoreContentPartParam]
 
 
-@dataclass
+@dataclass(slots=True)
 class ScoringData:
     data_1: list[ScoreData]
     data_2: list[ScoreData]

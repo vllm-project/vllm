@@ -105,6 +105,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
+    scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     scheduler.tp_size = 4
     scheduler._has_mamba = False
     scheduler._is_hma_required = False

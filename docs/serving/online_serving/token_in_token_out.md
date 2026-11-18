@@ -24,7 +24,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | Field | Notes |
 | --- | --- |
 | `token_ids` | Required `list[int]`: the already-templated prompt. Non-empty, no negative IDs. |
-| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. |
+| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. `bad_words` needs a tokenizer: a server without one (`--tokens-only` or `--skip-tokenizer-init`) rejects it with a 400. |
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
@@ -49,7 +49,7 @@ Send the header `X-data-parallel-rank: <int>` to pin a request to one data-paral
 
 ## Request priority (`X-Vllm-Priority`)
 
-Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value or body `priority` outside `[-2**31, 2**31 - 1]` is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`). The Rust frontend does not read the header on this endpoint and uses only the body `priority`.
+Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value or body `priority` outside `[-2**31, 2**31 - 1]` is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`).
 
 ## Output modes
 
@@ -175,7 +175,7 @@ turn2 = httpx.post(url, json={
         turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
     ),
     "features": {
-        "mm_hashes": {"image": ["img-a"]},
+        "mm_hashes": {"image": ["uuid:img-a"]},
         "mm_placeholders": turn1["mm_placeholders"],
     },
     "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
@@ -184,7 +184,7 @@ turn2 = httpx.post(url, json={
 }).json()
 ```
 
-Here `"img-a"` finds image A in the processor cache because turn 1 sent it with that `uuid`. Two cases need a different approach:
+Here `"uuid:img-a"` finds image A in the processor cache because turn 1 sent it with `uuid` `"img-a"`. The cache key of an item sent with a `uuid` is that `uuid` prefixed with `uuid:`, which keeps it apart from the content hashes vLLM computes. Two cases need a different approach:
 
 - If the server sets `--mm-processor-kwargs` or `--media-io-kwargs`, the `uuid` is hashed with them and is no longer the cache key. Take `features` from a [render](renderer.md) response instead.
 - If the item has been evicted from the cache, the request fails. Resend the item with `kwargs_data`.

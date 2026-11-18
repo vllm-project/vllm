@@ -1329,7 +1329,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
         if use_fused_gdn_spec_decode:
-            core_attn_out = torch.zeros(
+            # Uninitialized like the non-fused path below.
+            core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
@@ -2396,6 +2397,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if isinstance(attn_metadata_raw, dict):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
+            core_attn_out.zero_()
             self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
             return
 
@@ -2442,25 +2444,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             layer_norm_fwd,
         )
 
-        x_shape = x.shape
-        assert output_gate.shape == x_shape
-        assert out.shape == x_shape
-        x_2d = x.reshape(-1, x_shape[-1])
-        output_gate_2d = output_gate.reshape(-1, x_shape[-1])
-        out_2d = out.reshape(-1, x_shape[-1])
-        assert x_2d.stride(-1) == 1
-        assert output_gate_2d.stride(-1) == 1
-        assert out_2d.stride(-1) == 1
+        num_tokens, num_heads, head_dim = x.shape
+        assert output_gate.shape == x.shape
+        assert out.shape == x.shape
+        # A row per token, a group per head: reads the strided gate in place.
         layer_norm_fwd(
-            x_2d,
-            self.norm.weight.contiguous(),
+            x.view(num_tokens, num_heads * head_dim),
+            self.norm.weight.expand(num_heads, head_dim),
             self.norm.bias,
             self.norm.eps,
-            z=output_gate_2d,
-            out=out_2d,
-            group_size=(
-                x_shape[-1] if self.norm.group_size is None else self.norm.group_size
-            ),
+            z=output_gate.flatten(-2),
+            out=out.view(num_tokens, num_heads * head_dim),
+            group_size=head_dim,
             norm_before_gate=self.norm.norm_before_gate,
             is_rms_norm=True,
             activation=self.norm.activation,
@@ -2484,6 +2479,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        # No zero fill in either branch: the kernels write every actual row,
+        # and padding rows only feed row-wise ops (same as forward_cuda).
         if (
             self._can_use_fused_gdn_mtp_decode(attn_metadata)
             and attn_metadata.num_prefills == 0
@@ -2499,8 +2496,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
         self._forward_core(
             mixed_qkv=mixed_qkv,
-            b=b.contiguous(),
-            a=a.contiguous(),
+            b=b,
+            a=a,
             core_attn_out=core_attn_out,
         )
         num_actual_tokens = attn_metadata.num_actual_tokens

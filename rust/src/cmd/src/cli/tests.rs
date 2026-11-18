@@ -13,7 +13,7 @@ use vllm_server::{
     Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
-use vllm_text::backend::hf::ModelSource;
+use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
@@ -75,6 +75,8 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
+        "--grpc-port",
+        "50051",
         "--dtype",
         "float16",
         "--lora-modules",
@@ -116,6 +118,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
+    assert_eq!(config.grpc_port, Some(50051));
     assert_eq!(config.dtype, Some(ModelDtype::Float16));
     assert_eq!(config.lora_modules[0].name, "adapter-a");
     assert!(!config.language_model_only);
@@ -265,6 +268,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             tokenizer_revision: None,
                             hf_config_path: None,
                             skip_tokenizer_init: false,
+                            hf_token: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -288,6 +292,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
+                        default_mm_loras: {},
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -301,6 +306,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -448,11 +454,11 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--hf-overrides.rope_scaling.rope_type",
+        "--hf-overrides.rope_parameters.rope_type",
         "yarn",
         "--compilation-config.mode",
         "3",
-        "--hf-overrides.rope_scaling.factor=4",
+        "--hf-overrides.rope_parameters.factor=4",
         "--hf-overrides.max_position_embeddings",
         "32k",
         "--hf-overrides.sliding_window=4K",
@@ -472,7 +478,7 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         panic!("expected serve args");
     };
     let hf_overrides = serde_json::json!({
-        "rope_scaling": {"rope_type": "yarn", "factor": 4},
+        "rope_parameters": {"rope_type": "yarn", "factor": 4},
         "max_position_embeddings": 32000,
         "sliding_window": 4096,
         "note": "1.5K",
@@ -1476,6 +1482,61 @@ fn serve_args_accept_explicit_deepseek_v32_renderer() {
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
 }
 
+/// `--default-mm-loras` reaches the frontend config on both startup paths,
+/// and `vllm-rs serve` forwards it to the managed engine, which checks the
+/// adapters against the model.
+#[test]
+fn default_mm_loras_reach_config_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-VL-2B-Instruct",
+        "--default-mm-loras",
+        r#"{"audio": "org/speech-lora"}"#,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert_eq!(
+        config.default_mm_loras.get(&MmModality::Audio).map(String::as_str),
+        Some("org/speech-lora")
+    );
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = engine.python_args.iter().position(|arg| arg == "--default-mm-loras");
+    assert_eq!(
+        forwarded.map(|index| engine.python_args[index + 1].as_str()),
+        Some(r#"{"audio":"org/speech-lora"}"#)
+    );
+
+    let args_json = serde_json::json!({
+        "model_tag": "Qwen/Qwen3-VL-2B-Instruct",
+        "default_mm_loras": {"image": "org/vision-lora"},
+    });
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &args_json.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(
+        config.default_mm_loras.get(&MmModality::Image).map(String::as_str),
+        Some("org/vision-lora")
+    );
+}
+
 #[test]
 fn serve_passes_enable_request_id_headers_into_config() {
     let cli = Cli::try_parse_from([
@@ -2270,6 +2331,7 @@ fn frontend_args_accept_json() {
                             tokenizer_revision: None,
                             hf_config_path: None,
                             skip_tokenizer_init: false,
+                            hf_token: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2293,6 +2355,7 @@ fn frontend_args_accept_json() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
+                        default_mm_loras: {},
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -2306,6 +2369,7 @@ fn frontend_args_accept_json() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -2505,6 +2569,72 @@ fn frontend_args_json_resolve_tokenizer_revision_against_model() {
         )
     "#]]
     .assert_debug_eq(&(config.tokenizer, config.hf_config));
+}
+
+#[test]
+fn hf_token_reaches_model_files_and_managed_engine() {
+    let serve = |hf_token: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "org/model"].iter().chain(hf_token).copied())
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args")
+        };
+        let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
+        let python_args = args.to_managed_engine_config(1234, &topology(&args), None).python_args;
+        (config, python_args)
+    };
+
+    // A bare flag keeps `HF_TOKEN` and the stored login token; the engine gets the flag too.
+    let (config, python_args) = serve(&["--hf-token"]);
+    assert_eq!(config.hf_token, None);
+    assert_eq!(python_args, ["--hf-token"]);
+
+    let (config, python_args) = serve(&["--hf-token", "hf_secret"]);
+    assert_eq!(config.hf_token, Some(HfToken("hf_secret".to_string())));
+    assert_eq!(python_args, ["--hf-token", "hf_secret"]);
+    assert!(!format!("{config:?}").contains("hf_secret"));
+    // `/server_info` serializes the config.
+    assert!(!serde_json::to_string(&config).unwrap().contains("hf_secret"));
+
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "render", "org/model", "--hf-token", "hf_secret"]).unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    assert_eq!(
+        args.into_config().hf_token,
+        Some(HfToken("hf_secret".to_string()))
+    );
+
+    let frontend = |hf_token: &str| {
+        let payload = format!(r#"{{"model_tag":"org/model","hf_token":{hf_token}}}"#);
+        Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            &payload,
+        ])
+        .map(|cli| {
+            let Command::Frontend(args) = cli.command else {
+                panic!("expected frontend args");
+            };
+            args.into_config().hf_token
+        })
+    };
+    // Python sends `True` for a bare flag and the string otherwise.
+    assert_eq!(frontend("true").unwrap(), None);
+    assert_eq!(
+        frontend(r#""hf_secret""#).unwrap(),
+        Some(HfToken("hf_secret".to_string()))
+    );
+    assert!(frontend("false").is_err());
 }
 
 #[test]
@@ -3229,6 +3359,7 @@ fn serve_args_accept_handshake_aliases() {
                             tokenizer_revision: None,
                             hf_config_path: None,
                             skip_tokenizer_init: false,
+                            hf_token: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -3252,6 +3383,7 @@ fn serve_args_accept_handshake_aliases() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
+                        default_mm_loras: {},
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -3265,6 +3397,7 @@ fn serve_args_accept_handshake_aliases() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -3534,6 +3667,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init: false,
+            hf_token: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3557,6 +3691,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
+            default_mm_loras: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -3668,6 +3803,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init: false,
+            hf_token: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3691,6 +3827,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
+            default_mm_loras: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -3916,6 +4053,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init: false,
+            hf_token: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3938,6 +4076,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
+            default_mm_loras: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -4175,4 +4314,50 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
     );
     let engine = args.to_managed_engine_config(1234, &topology(&args), None);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+}
+
+#[test]
+fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
+    // An explicit `--enable-scale-out false` does not turn the routes off, as
+    // in Python's dedicated mode.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--tokens-only",
+        "--enable-scale-out",
+        "false",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert!(config.api_server_options.enable_scale_out);
+    assert!(config.skip_tokenizer_init);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(engine.python_args.iter().any(|arg| arg == "--skip-tokenizer-init"));
+    assert!(!engine.python_args.iter().any(|arg| arg == "--tokens-only"));
+
+    // The Python-supervised path receives `tokens_only` without
+    // `skip_tokenizer_init`, which Python sets on the model config only.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","tokens_only":true,"skip_tokenizer_init":false}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.api_server_options.enable_scale_out);
+    assert!(config.skip_tokenizer_init);
 }

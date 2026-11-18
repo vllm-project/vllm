@@ -82,7 +82,7 @@ def select_store_candidates(
         if req.shared_prefix_boundary:
             reachable_boundaries += (req.shared_prefix_boundary,)
 
-    for group_pos, (group_config, group_state, stored_chunk_idx) in enumerate(
+    for config_group_idx, (group_config, group_state, stored_chunk_idx) in enumerate(
         zip(config.kv_group_configs, req_status.group_states, start_chunk_idxs)
     ):
         num_chunks = req_status.storable_chunks(
@@ -199,7 +199,7 @@ def select_store_candidates(
             ):
                 continue
             new_offload_keys.append(offload_key)
-            new_offload_key_chunks.append((group_pos, abs_chunk_idx))
+            new_offload_key_chunks.append((config_group_idx, abs_chunk_idx))
 
     return StoreCandidates(
         num_offloadable_tokens,

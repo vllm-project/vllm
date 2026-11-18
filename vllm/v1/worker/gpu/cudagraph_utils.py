@@ -295,6 +295,16 @@ class CudaGraphManager:
         prefill_sizes = sorted(
             compilation_config.prefill_cudagraph_capture_token_sizes or []
         )
+        # A batch never holds more than max_num_reqs * max_model_len tokens.
+        max_num_tokens = self.max_num_reqs * self.vllm_config.model_config.max_model_len
+        if prefill_sizes and prefill_sizes[-1] > max_num_tokens:
+            logger.warning(
+                "Dropping %s from CUDA graph capture sizes: above "
+                "max_num_seqs * max_model_len = %d.",
+                [n for n in prefill_sizes if n > max_num_tokens],
+                max_num_tokens,
+            )
+            prefill_sizes = [n for n in prefill_sizes if n <= max_num_tokens]
         decode_sizes = self.decode_request_sizes
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes

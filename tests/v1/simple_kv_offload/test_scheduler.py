@@ -211,7 +211,7 @@ def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerFixture:
     """Bundle returned by make_scheduler for convenient access."""
 

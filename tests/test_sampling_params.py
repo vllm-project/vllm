@@ -12,7 +12,7 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20
@@ -54,6 +54,21 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"min_p": 0.1},
+        {"logit_bias": {0: 1.0}},
+        {"min_p": 0.05, "logit_bias": {1: -1.0}},
+    ],
+)
+def test_spec_decode_accepts_min_p_and_logit_bias(kwargs: dict):
+    """min_p and logit_bias are applied to target logits before rejection
+    sampling, so a speculative config must not reject the request."""
+    params = SamplingParams(**kwargs)
+    params.verify(MockModelConfig(), object(), None, None)
 
 
 def test_verify_leaves_logits_processors_to_admission():

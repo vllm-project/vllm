@@ -55,12 +55,16 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 
-# This module's end-to-end sparse-backend correctness test supports CUDA and
-# ROCm.  The remaining tests exercise CUDA-specific FlashMLA/FlashInfer APIs
-# and are skipped by the autouse fixture below when collecting on ROCm.
-if not (current_platform.is_cuda() or current_platform.is_rocm()):
+# The sparse-backend correctness tests support CUDA, ROCm and XPU. On ROCm
+# and XPU, the autouse fixture below skips tests that exercise CUDA-specific
+# FlashMLA/FlashInfer APIs.
+if not (
+    current_platform.is_cuda()
+    or current_platform.is_rocm()
+    or current_platform.is_xpu()
+):
     pytest.skip(
-        "Sparse MLA backend tests require CUDA or ROCm.",
+        "Sparse MLA backend tests require CUDA, ROCm or XPU.",
         allow_module_level=True,
     )
 
@@ -138,30 +142,50 @@ if current_platform.is_rocm():
     SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
     SPARSE_BLOCK_SIZES = [64]
+elif current_platform.is_xpu():
+    from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseBackend
+
+    SPARSE_BACKENDS = [XPUMLASparseBackend]
+    SPARSE_BACKEND_IDS = ["XPUMLASparse"]
+    SPARSE_KV_CACHE_DTYPES = ["auto"]
+    SPARSE_BLOCK_SIZES = [64]
 else:
     SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
     SPARSE_BACKEND_IDS = ["FlashMLA", "FlashInferTRTLLM"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"]
     SPARSE_BLOCK_SIZES = [32, 64]
 
+ROCM_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_sparse_backend_prefill_correctness",
+    "test_rocm_fused_v32_dense_prefill_matches_mqa",
+    "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+    "test_sparse_mla_common_impl_resolves_buffer_lazily",
+}
+
+XPU_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_triton_convert_req_index_to_global_index_decode_only",
+    "test_triton_convert_req_index_to_global_index_with_prefill_workspace",
+    "test_triton_convert_rejects_req_id_longer_than_token_indices",
+    "test_triton_convert_returns_valid_counts",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+}
+
 
 @pytest.fixture(autouse=True)
-def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
+def _skip_cuda_specific_sparse_mla_tests(request):
     """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
-    rocm_portable_tests = {
-        "test_sparse_backend_decode_correctness",
-        "test_sparse_backend_prefill_correctness",
-        "test_rocm_fused_v32_dense_prefill_matches_mqa",
-        "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
-        "test_split_indexer_prefill_chunks",
-        "test_split_indexer_prefill_chunks_single_request_overflow",
-        "test_sparse_mla_common_impl_resolves_buffer_lazily",
-    }
-    if (
-        current_platform.is_rocm()
-        and getattr(request.node, "originalname", request.node.name)
-        not in rocm_portable_tests
-    ):
+    if current_platform.is_rocm():
+        portable_tests = ROCM_PORTABLE_TESTS
+    elif current_platform.is_xpu():
+        portable_tests = XPU_PORTABLE_TESTS
+    else:
+        return
+    if getattr(request.node, "originalname", request.node.name) not in portable_tests:
         pytest.skip("This sparse MLA test exercises a CUDA-specific API")
 
 
@@ -1220,7 +1244,7 @@ def _triton_convert_reference_impl(
 @pytest.mark.parametrize("block_size", [16, 64, 128])
 @pytest.mark.parametrize("num_topk_tokens", [128, 256, 512])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_decode_only(
@@ -1344,7 +1368,7 @@ def test_index_group_convert_during_piecewise_capture():
 
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_size):
@@ -1409,7 +1433,7 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_rejects_req_id_longer_than_token_indices():
@@ -1553,7 +1577,7 @@ def test_flashmla_bf16_preserves_unused_output_heads(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
@@ -5281,7 +5305,7 @@ def _build_sparse_dcp_vllm_config(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
@@ -5320,7 +5344,7 @@ def test_fp8_dcp_head_envelope_guard(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize("comm_backend", ["ag_rs", "a2a"])
@@ -5381,6 +5405,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         dcp_world_size=2,
         dcp_rank=0,
         need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=True,
         _fp8_flash_mla_kernel=run_kernel,
     )
 
@@ -5399,8 +5424,79 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert not lse.isnan().any()
 
 
+@pytest.mark.parametrize("supports_topk_length", [True, False])
+@pytest.mark.parametrize("num_tokens", [31, 32])
+def test_fp8_mixed_batch_dcp_compacts_topk_from_32_tokens(
+    monkeypatch, num_tokens, supports_topk_length
+):
+    """From 32 tokens on, the rank-local top-k is compacted to the row front
+    and the kernel is bounded by the largest valid count, unless the kernel
+    rejects `topk_length` (SM90): then the -1 holes stay and it masks them."""
+    num_heads, topk = 2, 8
+    counts = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE_TYPE) % 5
+    compacted = torch.where(
+        torch.arange(topk, device=DEVICE_TYPE) < counts.view(-1, 1), 7, -1
+    ).to(torch.int32)
+    converter_kwargs = {}
+
+    def convert(*args, **kwargs):
+        converter_kwargs.update(kwargs)
+        return (compacted, counts) if kwargs["return_valid_counts"] else compacted
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        convert,
+    )
+    kernel_kwargs = {}
+
+    def run_kernel(**kwargs):
+        kernel_kwargs.update(kwargs)
+        out = torch.ones((1, num_tokens, num_heads, 1), device=DEVICE_TYPE)
+        lse = torch.ones((1, num_heads, num_tokens), device=DEVICE_TYPE)
+        return out, lse
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.empty(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        index_group=None,
+        index_group_index=0,
+        dcp_world_size=2,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=supports_topk_length,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    q = torch.empty(num_tokens, num_heads, 1, device=DEVICE_TYPE)
+    topk_indices = torch.empty(num_tokens, topk, dtype=torch.int32, device=DEVICE_TYPE)
+
+    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), topk_indices, metadata
+    )
+
+    assert lse is not None
+    compact = supports_topk_length and num_tokens >= 32
+    assert converter_kwargs["compact_valid_to_front"] is compact
+    if compact:
+        assert kernel_kwargs["topk_length"].tolist() == [4]
+    else:
+        assert kernel_kwargs["topk_length"] is None
+    empty = counts == 0
+    assert torch.isneginf(lse[empty]).all() and (out[empty] == 0).all()
+    assert (lse[~empty] == 1).all() and (out[~empty] == 1).all()
+
+
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
@@ -5688,16 +5784,16 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "rms_norm_eps": 1e-06,
-        "rope_scaling": {
+        "rope_parameters": {
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 40,
             "mscale": 1.0,
             "mscale_all_dim": 1.0,
             "original_max_position_embeddings": 4096,
-            "type": "yarn",
+            "rope_theta": 10000,
+            "rope_type": "yarn",
         },
-        "rope_theta": 10000,
         "routed_scaling_factor": 2.5,
         "scoring_func": "sigmoid",
         "tie_word_embeddings": False,
