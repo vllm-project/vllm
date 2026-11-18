@@ -115,6 +115,209 @@
           "close": "<|im_end|>"
         }
       }
+    },
+    "qwen3_xml": {
+      "defaults": {
+        "role": "assistant"
+      },
+      "start_anchor": "<|im_start|>assistant\n",
+      "fields": {
+        "reasoning_content": {
+          "open": "<think>",
+          "close_pattern": "</think>|(?=<tool_call>)",
+          "content": "text"
+        },
+        "tool_calls": {
+          "open_pattern": "<tool_call>\\s*<function=(?P<name>[^>\\n]+)>",
+          "close_pattern": "</tool_call>|(?=<tool_call>)",
+          "repeats": true,
+          "content": "xml-inline",
+          "content_args": {
+            "tag_pattern": "<parameter=(?P<key>[^>\\n]+)>\\n?(?P<value>.*?)\\n?(?:</parameter>|(?=<parameter=)|(?=</function>))"
+          },
+          "transform": {
+            "type": "function",
+            "function": {
+              "name": "{name}",
+              "arguments": "{content}"
+            }
+          }
+        },
+        "content": {
+          "close": [
+            "<|im_end|>",
+            "<|endoftext|>"
+          ],
+          "content": "text",
+          "repeats": true,
+          "join": ""
+        }
+      }
+    },
+    "mistral": {
+      "defaults": {
+        "role": "assistant"
+      },
+      "start_anchor": [
+        "[/INST]",
+        "[/TOOL_RESULTS]"
+      ],
+      "fields": {
+        "reasoning_content": {
+          "open": "[THINK]",
+          "close": "[/THINK]",
+          "content": "text"
+        },
+        "tool_calls": {
+          "open_pattern": "\\[TOOL_CALLS\\](?P<name>.+?)\\[ARGS\\]",
+          "close_pattern": "(?=\\[TOOL_CALLS\\])|</s>",
+          "repeats": true,
+          "content": "json",
+          "transform": {
+            "type": "function",
+            "function": {
+              "name": "{name}",
+              "arguments": "{content}"
+            }
+          }
+        },
+        "content": {
+          "close": [
+            "[TOOL_CALLS]",
+            "</s>"
+          ],
+          "content": "text",
+          "repeats": true,
+          "join": ""
+        }
+      }
+    },
+    "glm": {
+      "defaults": {
+        "role": "assistant"
+      },
+      "start_anchor": "<|assistant|>",
+      "fields": {
+        "reasoning_content": {
+          "open_pattern": "<think>|(?=</think>)",
+          "close_pattern": "</think>|(?=<tool_call>)",
+          "content": "text",
+          "content_args": {
+            "strip": true
+          },
+          "repeats": true,
+          "join": ""
+        },
+        "tool_calls": {
+          "open_pattern": "\\s*<tool_call>\\s*(?P<name>[^<]*?)\\s*(?=<arg_key>|</tool_call>)",
+          "close": "</tool_call>",
+          "repeats": true,
+          "content": "xml-inline",
+          "content_args": {
+            "tag_pattern": "<arg_key>\\s*(?P<key>.*?)\\s*</arg_key>\\s*<arg_value>(?P<value>.*?)</arg_value>"
+          },
+          "transform": {
+            "type": "function",
+            "function": {
+              "name": "{name}",
+              "arguments": "{content}"
+            }
+          }
+        },
+        "content": {
+          "close": [
+            "<|user|>",
+            "<|observation|>",
+            "<|endoftext|>"
+          ],
+          "content": "text",
+          "content_args": {
+            "strip": false
+          },
+          "repeats": true,
+          "join": ""
+        }
+      }
+    },
+    "chain": {
+      "start_anchor": "<|assistant|>",
+      "fields": {
+        "reasoning_content": {
+          "open": "<think>",
+          "close_pattern": "</think>|(?=<answer>)"
+        },
+        "content": {
+          "open_pattern": "(?=<answer>)",
+          "close": "</answer>"
+        }
+      }
+    },
+    "ernie": {
+      "defaults": {
+        "role": "assistant"
+      },
+      "start_anchor": "Assistant:",
+      "fields": {
+        "reasoning_content": {
+          "open_pattern": "(?:^|<think>\\s*)",
+          "close": "</think>",
+          "content": "text"
+        },
+        "content": {
+          "open": "<response>\n",
+          "close_pattern": "\\n?</response>",
+          "content": "text"
+        },
+        "tool_calls": {
+          "open": "<tool_call>",
+          "close": "</tool_call>",
+          "repeats": true,
+          "content": "json",
+          "transform": {
+            "type": "function",
+            "function": "{content}"
+          }
+        }
+      }
+    },
+    "inkling": {
+      "defaults": {
+        "role": "assistant"
+      },
+      "start_anchor": "<|message_model|>",
+      "fields": {
+        "reasoning_content": {
+          "open_pattern": "(?:<\\|message_model\\|>)?[^<]*<\\|content_thinking\\|>",
+          "close": "<|end_message|>",
+          "repeats": true,
+          "join": "",
+          "content_args": {
+            "strip": false
+          }
+        },
+        "content": {
+          "open_pattern": "(?:<\\|message_model\\|>)?[^<]*<\\|content_text\\|>",
+          "close": "<|end_message|>",
+          "repeats": true,
+          "join": "",
+          "content_args": {
+            "strip": false
+          }
+        },
+        "tool_calls": {
+          "open_pattern": "(?:<\\|message_model\\|>)?[^<]*<\\|content_invoke_tool_json\\|>",
+          "close": "<|end_message|>",
+          "repeats": true,
+          "content": "json",
+          "transform": {
+            "type": "function",
+            "function": {
+              "name": "{content.name}",
+              "arguments": "{content.args}"
+            }
+          }
+        }
+      }
     }
   },
   "cases": [
@@ -434,6 +637,347 @@
       "expected": {
         "reasoning": "reasoning",
         "content": "answer"
+      }
+    },
+    {
+      "template": "qwen3_xml",
+      "prefix": "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "text": "Check the weather.\n</think>\n\n<tool_call>\n<function=set_alarm>\n<parameter=hour>\n7\n</parameter>\n<parameter=label>\nwake up\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "set_alarm",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "hour": {
+                  "type": "integer"
+                },
+                "ratio": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "maybe": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "reasoning": "Check the weather.",
+        "tool_calls": [
+          {
+            "name": "set_alarm",
+            "arguments": {
+              "hour": 7,
+              "label": "wake up"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "qwen3_xml",
+      "prefix": "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "text": "Calling it directly.\n<tool_call>\n<function=get_time>\n</function>\n</tool_call>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Calling it directly.",
+        "tool_calls": [
+          {
+            "name": "get_time",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "template": "qwen3_xml",
+      "prefix": "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "text": "\n</think>\n\nTwo calls.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n<parameter=y>\ntwo\n</function>\n<tool_call>\n<function=b>\n<parameter=z>\nlast\n</function>\n</tool_call>",
+      "tools": null,
+      "expected": {
+        "content": "Two calls.",
+        "tool_calls": [
+          {
+            "name": "a",
+            "arguments": {
+              "x": "1",
+              "y": "two"
+            }
+          },
+          {
+            "name": "b",
+            "arguments": {
+              "z": "last"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "qwen3_xml",
+      "prefix": "<|im_start|>assistant\n",
+      "text": "<think>\nshort\n</think>\n\nHello <tool_call world<tool_call>x<|im_end|>",
+      "tools": null,
+      "expected": {
+        "reasoning": "short",
+        "content": "Hello <tool_call world<tool_call>x"
+      }
+    },
+    {
+      "template": "mistral",
+      "prefix": "[INST]hi[/INST]",
+      "text": "[THINK]Two lookups.[/THINK]Checking.[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\"}[TOOL_CALLS]get_time[ARGS]{}</s>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Two lookups.",
+        "content": "Checking.",
+        "tool_calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          },
+          {
+            "name": "get_time",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "template": "mistral",
+      "prefix": "[INST]hi[/INST]",
+      "text": "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"[TOOL\"}",
+      "tools": null,
+      "expected": {
+        "tool_calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "city": "[TOOL"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "mistral",
+      "prefix": "[INST]hi[/INST]",
+      "text": "Just text [TOOL.</s>",
+      "tools": null,
+      "expected": {
+        "content": "Just text [TOOL."
+      }
+    },
+    {
+      "template": "glm",
+      "prefix": "[gMASK]<sop><|user|>hi<|assistant|><think>",
+      "text": "Look it up.</think>Sure.\n<tool_call>set_alarm\n<arg_key>hour</arg_key>\n<arg_value>7</arg_value>\n</tool_call>",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "set_alarm",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "hour": {
+                  "type": "integer"
+                },
+                "ratio": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "maybe": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "reasoning": "Look it up.",
+        "content": "Sure.",
+        "tool_calls": [
+          {
+            "name": "set_alarm",
+            "arguments": {
+              "hour": 7
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "glm",
+      "prefix": "[gMASK]<sop><|user|>hi<|assistant|><think>",
+      "text": "Calling now.<tool_call>get_time</tool_call>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Calling now.",
+        "tool_calls": [
+          {
+            "name": "get_time",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "template": "glm",
+      "prefix": "[gMASK]<sop><|user|>hi<|assistant|><think>",
+      "text": "</think>Two calls. \n\n<tool_call>a\n<arg_key>x</arg_key>\n<arg_value>1</arg_value>\n</tool_call>\n<tool_call> b <arg_key>y</arg_key><arg_value>two words</arg_value></tool_call>",
+      "tools": null,
+      "expected": {
+        "content": "Two calls.",
+        "tool_calls": [
+          {
+            "name": "a",
+            "arguments": {
+              "x": "1"
+            }
+          },
+          {
+            "name": "b",
+            "arguments": {
+              "y": "two words"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "glm",
+      "prefix": "<|assistant|>",
+      "text": "Thought text</think>Answer",
+      "tools": null,
+      "expected": {
+        "content": "Thought textAnswer"
+      }
+    },
+    {
+      "template": "glm",
+      "prefix": "[gMASK]<sop><|user|>hi<|assistant|><think>",
+      "text": "</think>Line one\n\n  indented <tool_call\n  ",
+      "tools": null,
+      "expected": {
+        "content": "Line one\n\n  indented <tool_call\n  "
+      }
+    },
+    {
+      "template": "chain",
+      "prefix": "",
+      "text": "<think>Thought<answer>Answer</answer>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Thought",
+        "content": "<answer>Answer"
+      }
+    },
+    {
+      "template": "chain",
+      "prefix": "",
+      "text": "<think>Thought</think>Skipped<answer>Answer</answer>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Thought",
+        "content": "<answer>Answer"
+      }
+    },
+    {
+      "template": "ernie",
+      "prefix": "",
+      "text": "The user greets me.\n</think>\n\n<response>\nHello! How can I help?\n</response>\n</s>",
+      "tools": null,
+      "expected": {
+        "reasoning": "The user greets me.",
+        "content": "Hello! How can I help?"
+      }
+    },
+    {
+      "template": "ernie",
+      "prefix": "",
+      "text": "Check the tool.\n</think>\n\n<tool_call>\n{\"name\": \"get_current_temperature\", \"arguments\": {\"location\": \"Paris\"}}\n</tool_call>\n</s>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Check the tool.",
+        "tool_calls": [
+          {
+            "name": "get_current_temperature",
+            "arguments": {
+              "location": "Paris"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "ernie",
+      "prefix": "User: hi\nAssistant:",
+      "text": "<think> Short.</think><response>\nA < B and </resp\n</response>",
+      "tools": null,
+      "expected": {
+        "reasoning": "<think> Short.",
+        "content": "A < B and </resp"
+      }
+    },
+    {
+      "template": "inkling",
+      "prefix": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_model|>",
+      "text": "<|content_thinking|>Consider the weather.<|end_message|><|message_model|><|content_thinking|> Tokyo, probably.<|end_message|><|message_model|><|content_text|>Checking the weather now.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"Tokyo\",\"units\":\"C\"}}<|end_message|><|content_model_end_sampling|>",
+      "tools": null,
+      "expected": {
+        "reasoning": "Consider the weather. Tokyo, probably.",
+        "content": "Checking the weather now.",
+        "tool_calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "city": "Tokyo",
+              "units": "C"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "template": "inkling",
+      "prefix": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_model|>",
+      "text": "<|content_text|>a < b, <i>c</i><|end_message|><|message_model|>author <|content_text|> more<|end_message|>",
+      "tools": null,
+      "expected": {
+        "content": "a < b, <i>c</i> more"
       }
     }
   ]

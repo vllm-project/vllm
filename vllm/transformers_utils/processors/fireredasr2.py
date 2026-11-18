@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from transformers import (
     AutoFeatureExtractor,
+    AutoTokenizer,
     BatchFeature,
 )
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -250,6 +251,19 @@ class FireRedASR2Processor(ProcessorMixin):
 
     feature_extractor_class = "FireRedASR2FeatureExtractor"
     tokenizer_class = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        # Bypass ProcessorMixin's dynamic module lookup, see MiniMaxVLProcessor
+        tokenizer = kwargs.pop("tokenizer", None)
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path, **kwargs
+            )
+        feature_extractor = FireRedASR2FeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path, **kwargs
+        )
+        return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
     def __init__(
         self,

@@ -9,7 +9,7 @@ import typing
 from vllm import envs
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
@@ -38,6 +38,7 @@ def maybe_exec_rust_bench() -> None:
 def _import_bench_subcommand_modules() -> None:
     # Imported lazily so `BenchmarkSubcommandBase` subclasses register only
     # when `vllm bench` is actually invoked.
+    import vllm.entrypoints.cli.benchmark.forward  # noqa: F401
     import vllm.entrypoints.cli.benchmark.latency  # noqa: F401
     import vllm.entrypoints.cli.benchmark.mm_processor  # noqa: F401
     import vllm.entrypoints.cli.benchmark.serve  # noqa: F401

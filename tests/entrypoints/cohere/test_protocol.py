@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``vllm/entrypoints/cohere/protocol.py``.
+"""Unit tests for `vllm/entrypoints/cohere/protocol.py`.
 
-The module is mostly a thin wrapper around the official ``cohere`` SDK
+The module is mostly a thin wrapper around the official `cohere` SDK
 types plus a few local additions:
 
-* :class:`CohereError` envelope.
-* :class:`CohereChatV2Request` (model and messages required,
-  ``max_tokens`` non-negative).
-* :class:`CohereChatV2Response` plus the usage / logprob helpers.
-* The streaming event subclasses that bake a wire-format ``type``
-  discriminator into ``model_dump()`` so SSE consumers can demux on it.
+* `CohereError` envelope.
+* `CohereChatV2Request` (model and messages required,
+  `max_tokens` non-negative).
+* `CohereChatV2Response` plus the usage / logprob helpers.
+* The streaming event subclasses that bake a wire-format `type`
+  discriminator into `model_dump()` so SSE consumers can demux on it.
 """
 
 import pytest
@@ -95,6 +95,27 @@ class TestCohereChatV2Request:
                 tool_choice="ANY",  # not REQUIRED/NONE
             )
 
+    @pytest.mark.parametrize("tool_fields", [{}, {"tools": None}, {"tools": []}])
+    def test_required_tool_choice_requires_tools(self, tool_fields):
+        with pytest.raises(VLLMValidationError, match="REQUIRED.*tools") as exc_info:
+            CohereChatV2Request(
+                model="m",
+                messages=[{"role": "user", "content": "hi"}],
+                tool_choice="REQUIRED",
+                **tool_fields,
+            )
+        assert exc_info.value.parameter == "tool_choice"
+
+    @pytest.mark.parametrize("tool_choice", [None, "NONE"])
+    def test_nonrequired_tool_choice_allows_empty_tools(self, tool_choice):
+        request = CohereChatV2Request(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            tool_choice=tool_choice,
+            tools=[],
+        )
+        assert request.tool_choice == tool_choice
+
     def test_stop_sequences_bounded_by_env_limit(self):
         messages = [{"role": "user", "content": "hi"}]
         limit = envs.VLLM_MAX_STOP_STRINGS
@@ -147,9 +168,9 @@ class TestCohereChatV2Response:
 
 
 class TestStreamingEventTypeField:
-    """Each event subclass adds a ``type: Literal[...]`` field with a
-    default so ``model_dump()`` always emits the wire-format discriminator
-    (the parent SDK classes don't declare ``type`` as a Pydantic field).
+    """Each event subclass adds a `type: Literal[...]` field with a
+    default so `model_dump()` always emits the wire-format discriminator
+    (the parent SDK classes don't declare `type` as a Pydantic field).
     """
 
     @pytest.mark.parametrize(

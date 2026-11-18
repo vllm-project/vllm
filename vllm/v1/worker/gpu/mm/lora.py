@@ -40,7 +40,14 @@ def set_active_mm_loras(
 
         lora_id = int(lora_state.lora_ids[req_idx])
         mm_features = encoder_cache.mm_features[req_id]
-        mm_items.extend((lora_id, mm_features[i]) for i in encoder_input_ids)
+        # "prompt_embeds" is a passthrough modality: the tensor is already in
+        # the model's embedding space, so no encoder runs and there is no
+        # tower or connector output to apply LoRA to.
+        mm_items.extend(
+            (lora_id, mm_features[i])
+            for i in encoder_input_ids
+            if mm_features[i].modality != "prompt_embeds"
+        )
 
         if lora_id > 0:
             lora_request = lora_state.lora_requests.get(req_id)

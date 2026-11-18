@@ -38,7 +38,6 @@ def title(text: str) -> str:
         "openai": "OpenAI",
         "lmcache": "LMCache",
         "multilora": "MultiLoRA",
-        "mlpspeculator": "MLPSpeculator",
         r"fp\d+": lambda x: x.group(0).upper(),  # e.g. fp16, fp32
         r"int\d+": lambda x: x.group(0).upper(),  # e.g. int8, int16
     }

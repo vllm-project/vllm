@@ -6,7 +6,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -27,7 +26,7 @@ def _grouped_gemma_rmsnorm_kernel(
 
     pid = tl.program_id(0)
     group_id = pid % NUM_GROUPS
-    row = pid // NUM_GROUPS
+    row = (pid // NUM_GROUPS).to(tl.int64)
 
     offs_g = tl.arange(0, BLOCK_SIZE)
     offsets = group_id * GROUP_DIM + offs_g
@@ -52,7 +51,7 @@ def _grouped_gemma_rmsnorm_kernel(
     tl.store(y_ptr + row * stride_y + offsets, y, mask)
 
 
-def _grouped_gemma_rmsnorm(
+def grouped_gemma_rmsnorm(
     x: torch.Tensor, weight: torch.Tensor, eps: float, num_groups: int
 ) -> torch.Tensor:
     N, DIM = x.shape
@@ -90,7 +89,7 @@ def _hc_silu_kernel(
 ) -> None:
     BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(DIM)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offs = tl.arange(0, BLOCK_SIZE)
     mask = offs < DIM
 
@@ -105,7 +104,7 @@ def _hc_silu_kernel(
     tl.store(y_ptr + row * stride_y + offs, y, mask)
 
 
-def _hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
+def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
     num_tokens, DIM = x.shape
     assert x.stride(1) == 1
 
@@ -137,7 +136,7 @@ def _hc_gate_mix_kernel(
 ) -> None:
     HC_DIM: tl.constexpr = DIM // HC
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile_id = tl.program_id(1)
     offs_inner = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs_inner < HC_DIM
@@ -160,7 +159,7 @@ def _hc_gate_mix_kernel(
     tl.store(y_ptr + row * stride_y + offs_inner, acc, mask)
 
 
-def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
+def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
     N, DIM = gate.shape
     assert x.shape == gate.shape
     assert DIM % hc_count == 0
@@ -185,6 +184,37 @@ def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Te
     return out
 
 
+# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 32.
+# Decode-sized batches keep the unfused path until they are benchmarked
+# end to end with the fused kernel.
+MIN_FUSED_UP_M = 512
+
+
+def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
+    return (
+        hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix")
+        and current_platform.is_device_capability_family(100)
+        and hc_count == 4
+        and w_up.dtype == torch.bfloat16
+        and tuple(w_up.shape) == (4 * 2560, 320)
+    )
+
+
+def hc_up_gate_mix(
+    lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
+) -> torch.Tensor:
+    """`hc_gate_mix(xn, F.linear(lowrank, w_up), 4)` in one SM100 kernel.
+
+    The gate stays on chip in fp32 (the chain rounds it to bf16) and the
+    sigmoid uses `tanh.approx`; results are within one bf16 ULP of an fp32
+    reference.
+    Only hc_count 4, hidden size 2560 and rank 320 are supported.
+    """
+    out = xn.new_empty(xn.shape[0], xn.shape[1] // 4)
+    torch.ops._C.qwen4_exp_hc_up_gate_mix(out, lowrank, xn, w_up)
+    return out
+
+
 @triton.jit
 def _hc_combine_kernel(
     block_ptr,
@@ -202,7 +232,7 @@ def _hc_combine_kernel(
 ) -> None:
     HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile_id = tl.program_id(1)
 
     offs_inner = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -232,7 +262,7 @@ def _hc_combine_kernel(
     tl.store(out_ptr + row * stride_out + offs, out, mask=mask)
 
 
-def _hc_combine(
+def hc_combine(
     residual: torch.Tensor,
     block_output: torch.Tensor,
     injection_logits: torch.Tensor | None,
@@ -294,7 +324,7 @@ def _hc_combine_norm_kernel(
     NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
 
     pid = tl.program_id(0)
-    row = pid // HC
+    row = (pid // HC).to(tl.int64)
     stream = pid % HC
     offs_hc = tl.arange(0, HC_PAD)
     mask_hc = offs_hc < HC
@@ -345,7 +375,7 @@ def _hc_combine_norm_kernel(
     tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
 
 
-def _hc_combine_norm(
+def hc_combine_norm(
     residual: torch.Tensor,
     block_output: torch.Tensor,
     injection_logits: torch.Tensor | None,
@@ -390,109 +420,6 @@ def _hc_combine_norm(
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out, y
-
-
-def _same_shape_fake(x: torch.Tensor, *args) -> torch.Tensor:
-    return x.new_empty(x.shape)
-
-
-def _hc_gate_mix_fake(
-    x: torch.Tensor, gate: torch.Tensor, hc_count: int
-) -> torch.Tensor:
-    del gate
-    return x.new_empty((x.shape[0], x.shape[1] // hc_count))
-
-
-def _hc_combine_fake(
-    residual: torch.Tensor,
-    block_output: torch.Tensor,
-    injection_logits: torch.Tensor | None,
-    hc_count: int,
-) -> torch.Tensor:
-    del block_output, injection_logits, hc_count
-    return residual.new_empty(residual.shape)
-
-
-def _hc_combine_norm_fake(
-    residual: torch.Tensor,
-    block_output: torch.Tensor,
-    injection_logits: torch.Tensor | None,
-    norm_weight: torch.Tensor,
-    eps: float,
-    hc_count: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del block_output, injection_logits, norm_weight, eps, hc_count
-    return residual.new_empty(residual.shape), residual.new_empty(residual.shape)
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_grouped_gemma_rmsnorm",
-    op_func=_grouped_gemma_rmsnorm,
-    fake_impl=_same_shape_fake,
-)
-direct_register_custom_op(
-    op_name="qwen4_exp_hc_silu",
-    op_func=_hc_silu,
-    fake_impl=_same_shape_fake,
-)
-direct_register_custom_op(
-    op_name="qwen4_exp_hc_gate_mix",
-    op_func=_hc_gate_mix,
-    fake_impl=_hc_gate_mix_fake,
-)
-direct_register_custom_op(
-    op_name="qwen4_exp_hc_combine",
-    op_func=_hc_combine,
-    fake_impl=_hc_combine_fake,
-)
-direct_register_custom_op(
-    op_name="qwen4_exp_hc_combine_norm",
-    op_func=_hc_combine_norm,
-    fake_impl=_hc_combine_norm_fake,
-)
-
-
-def grouped_gemma_rmsnorm(
-    x: torch.Tensor, weight: torch.Tensor, eps: float, num_groups: int
-) -> torch.Tensor:
-    return torch.ops.vllm.qwen4_exp_grouped_gemma_rmsnorm(x, weight, eps, num_groups)
-
-
-def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
-    return torch.ops.vllm.qwen4_exp_hc_silu(x, hc_count)
-
-
-def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
-    return torch.ops.vllm.qwen4_exp_hc_gate_mix(x, gate, hc_count)
-
-
-def hc_combine(
-    residual: torch.Tensor,
-    block_output: torch.Tensor,
-    injection_logits: torch.Tensor | None,
-    hc_count: int,
-) -> torch.Tensor:
-    return torch.ops.vllm.qwen4_exp_hc_combine(
-        residual, block_output, injection_logits, hc_count
-    )
-
-
-def hc_combine_norm(
-    residual: torch.Tensor,
-    block_output: torch.Tensor,
-    injection_logits: torch.Tensor | None,
-    norm_weight: torch.Tensor,
-    eps: float,
-    hc_count: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.qwen4_exp_hc_combine_norm(
-        residual,
-        block_output,
-        injection_logits,
-        norm_weight,
-        eps,
-        hc_count,
-    )
 
 
 __all__ = [

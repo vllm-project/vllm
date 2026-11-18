@@ -134,6 +134,18 @@ impl ToolSchemas {
         let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
         tool_schema.convert(name, value.into())
     }
+
+    /// Whether [`Self::convert_param_with_schema`] keeps any text of the named
+    /// parameter verbatim as a JSON string, so a parser can stream its value
+    /// as it arrives.
+    ///
+    /// Only a schema whose type is exactly `string` qualifies: the null literal
+    /// rule and union branch selection may turn the text of any other schema
+    /// into a different value.
+    pub(super) fn is_verbatim_string(&self, function_name: &str, name: &str) -> bool {
+        let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
+        tool_schema.param_type(name) == Some(JsonParamType::String)
+    }
 }
 
 impl ToolSchema {
@@ -157,13 +169,17 @@ impl ToolSchema {
     /// the value fails to convert, this falls back to returning the raw
     /// string as a JSON string value, or object-like JSON for structured input.
     fn convert(&self, name: &str, input: ParamInput) -> Value {
+        convert_with_optional_schema(self.param_type(name).as_ref(), &input)
+    }
+
+    /// The normalized type of the parameter named `name`, or `None` when the
+    /// schema does not constrain it.
+    fn param_type(&self, name: &str) -> Option<JsonParamType<'_>> {
         let root = SchemaRoot::new(&self.parameters);
-        let param_type = root
-            .resolved()
+        root.resolved()
             .get("properties")
             .and_then(|properties| properties.get(name))
-            .and_then(|schema| JsonParamType::from_schema(&root, schema));
-        convert_with_optional_schema(param_type.as_ref(), &input)
+            .and_then(|schema| JsonParamType::from_schema(&root, schema))
     }
 }
 
@@ -294,7 +310,9 @@ fn try_convert_value(param_type: &JsonParamType<'_>, input: &ParamInput) -> Opti
 fn try_convert_text_value(param_type: &JsonParamType<'_>, value: &str) -> Option<Value> {
     match param_type {
         JsonParamType::String => Some(Value::String(value.to_string())),
-        JsonParamType::Integer => convert_integer_text(value),
+        JsonParamType::Integer => {
+            convert_integer_text(value).or_else(|| convert_whole_number_text(value))
+        }
         JsonParamType::Number => convert_number_text(value),
         JsonParamType::Boolean => try_convert_boolean(value),
         JsonParamType::Object(_) if value.trim().is_empty() => Some(Value::Object(Map::new())),
@@ -399,6 +417,14 @@ pub(crate) fn convert_integer_text(value: &str) -> Option<Value> {
         .ok()
         .map(Number::from)
         .map(Value::Number)
+}
+
+/// Convert a whole number written as a float (`3.0`) to a JSON integer, since JSON Schema
+/// counts any number with a zero fractional part as an `integer`.
+fn convert_whole_number_text(value: &str) -> Option<Value> {
+    let number = without_digit_separators(value.trim())?.parse::<f64>().ok()?;
+    let in_range = number >= i64::MIN as f64 && number < i64::MAX as f64;
+    (number.fract() == 0.0 && in_range).then(|| Value::Number(Number::from(number as i64)))
 }
 
 /// Convert raw text to a JSON number, as for a `number` parameter.
@@ -588,6 +614,25 @@ mod tests {
         assert_eq!(params.convert("size", text("1_000.5")), json!(1000.5));
         for invalid in ["_1", "1_", "1__0", "1_.5"] {
             assert_eq!(params.convert("size", text(invalid)), json!(invalid));
+        }
+    }
+
+    #[test]
+    fn integers_accept_whole_number_floats() {
+        let params = ToolSchema::from_schema(json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "either": { "type": ["integer", "number"] }
+            }
+        }));
+
+        assert_eq!(params.convert("count", text("3.0")), json!(3));
+        assert_eq!(params.convert("count", text(" -2.0 ")), json!(-2));
+        assert_eq!(params.convert("count", text("1_000.0")), json!(1000));
+        assert_eq!(params.convert("either", text("3.5")), json!(3.5));
+        for invalid in ["3.5", "inf", "NaN", "1e300"] {
+            assert_eq!(params.convert("count", text(invalid)), json!(invalid));
         }
     }
 
@@ -940,6 +985,55 @@ mod tests {
             assert_eq!(params.convert("color", text(literal)), json!(literal));
         }
         assert_eq!(params.convert("mode", text("auto")), json!("auto"));
+    }
+
+    #[test]
+    fn verbatim_string_params_convert_any_text_unchanged() {
+        let schemas = ToolSchemas::from_tools(&[test_tool(
+            "write",
+            json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "color": { "enum": ["red", "green"] },
+                    "nullable": { "type": ["string", "null"] },
+                    "mode": { "enum": ["auto", 1] },
+                    "count": { "type": "integer" },
+                    "anything": {}
+                }
+            }),
+        )]);
+
+        let verbatim = ["content", "color"];
+        for name in [
+            "content", "color", "nullable", "mode", "count", "anything", "missing",
+        ] {
+            assert_eq!(
+                schemas.is_verbatim_string("write", name),
+                verbatim.contains(&name),
+                "{name}"
+            );
+        }
+        assert!(!schemas.is_verbatim_string("missing", "content"));
+
+        for text in [
+            "null",
+            "None",
+            "",
+            " 42 ",
+            "true",
+            "1",
+            r#"{"a":1}"#,
+            "\n x\n",
+        ] {
+            for name in verbatim {
+                assert_eq!(
+                    schemas.convert_param_with_schema("write", name, text.to_string()),
+                    json!(text),
+                    "{name}: {text:?}"
+                );
+            }
+        }
     }
 
     #[test]

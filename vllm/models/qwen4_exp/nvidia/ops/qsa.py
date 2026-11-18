@@ -12,6 +12,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
+from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
@@ -20,6 +21,48 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 def _is_sm120() -> bool:
     """True on sm_120 (RTX PRO 6000 Blackwell): selects the sm_120 tuning table."""
     return current_platform.get_device_capability() == (12, 0)
+
+
+@triton.jit
+def _maybe_dequant(tile):
+    if tile.dtype == tl.uint8:
+        # e4m3 bytes below sm_89 (no Triton fp8e4nv pointer type): sign to bit
+        # 15, exp+mantissa to bits 13..7 gives the fp16 of x * 2^-8. Exact for
+        # every finite code; the two NaN codes decode to +-480 after the host
+        # scale instead of NaN. Decodes four bytes per 32-bit register: the
+        # rotate moves each byte's bits 6..1 to 5..0 and its bit 0 to bit 7 of
+        # the byte below, lop3 restores the sign bits, prmt pairs high and low
+        # bytes, and the mask clears the sign copy at bit 14 and bits 6..0.
+        # pack=4 puts element k in byte k of $2 and half k of ($0, $1), the
+        # same lane mapping as Triton's own sm<89 fp8 -> fp16 asm.
+        return tl.inline_asm_elementwise(
+            asm="""
+            {
+            .reg .b32 rot, high;
+            shf.r.wrap.b32 rot, $2, $2, 1;
+            lop3.b32 high, $2, rot, 0x80808080, 0xE4;
+            prmt.b32 $0, rot, high, 0x5043;
+            prmt.b32 $1, rot, high, 0x7261;
+            and.b32 $0, $0, 0xBF80BF80;
+            and.b32 $1, $1, 0xBF80BF80;
+            }
+            """,
+            constraints="=r,=r,r",
+            args=[tile],
+            dtype=tl.float16,
+            is_pure=True,
+            pack=4,
+        )
+    elif tile.dtype == tl.float8e4nv:
+        return tile.to(tl.float16)
+    else:
+        return tile
+
+
+@lru_cache(maxsize=1)
+def _is_sm80() -> bool:
+    """True on sm_80 (A100/A30): selects the wide FP8 byte-decode tiles."""
+    return current_platform.get_device_capability() == (8, 0)
 
 
 @lru_cache(maxsize=1)
@@ -69,7 +112,6 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    IS_FP8: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -141,6 +183,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[None, :],
             other=0.0,
         )
+        # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
+        # measured slower here and less accurate).
+        keys = _maybe_dequant(keys).to(query.dtype)
         values = tl.load(
             v_cache_ptr
             + safe_page[:, None] * stride_v_block
@@ -150,10 +195,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
-        if IS_FP8:
-            # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
-            # measured slower here and less accurate).
-            keys = keys.to(query.dtype)
+        # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
+        # softmax) so fp16 has the range, its wider mantissa is more
+        # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
+        values = _maybe_dequant(values)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
         # caches the K dequant scale is already folded into softmax_scale on the
@@ -165,11 +210,6 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         probabilities = tl.where(
             valid[None, :], tl.math.exp2(scores - next_max[:, None]), 0.0
         )
-        if IS_FP8:
-            # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
-            # softmax) so fp16 has the range, its wider mantissa is more
-            # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
-            values = values.to(tl.float16)
         accumulator = tl.dot(
             probabilities.to(values.dtype),
             values,
@@ -585,6 +625,10 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = 64, 4, 2
     else:
         BLOCK_N, target_splits, num_warps = 64, 1, 2
+    if is_fp8 and _is_sm80():
+        # Wider tiles measured faster for the byte-decode path on A100;
+        # unmeasured on sm_86, which keeps the table's tiles.
+        BLOCK_N, num_warps = 128, 4
     num_tiles = triton.cdiv(num_columns, BLOCK_N)
     # Never more splits than tiles, never empty.
     num_splits = min(target_splits, num_tiles)
@@ -607,7 +651,9 @@ def qsa_sparse_paged_attention(
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
-    With fp8 caches, k_scale/v_scale are the layer's per-tensor dequant scales
+    An fp8 cache is a native e4m3 view on sm_89+ and the raw uint8 storage
+    below sm_89 (no Triton fp8e4nv pointer type there); the kernel dequantizes
+    either on load. k_scale/v_scale are the layer's per-tensor dequant scales
     as host floats (e.g. layer._k_scale_float/_v_scale_float): k_scale is
     pre-multiplied into the softmax scale and v_scale becomes the kernel's
     output scale, so the kernel needs no device scale buffers.
@@ -615,8 +661,9 @@ def qsa_sparse_paged_attention(
     logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
     with the trailing column holding each row's valid-entry count (written by
     the expand kernel; never a token index). The kernel reads it as the
-    tile-loop bound. use_prefill_config only steers the top of the config table; see
-    _select_config.
+    tile-loop bound. use_prefill_config steers the top of the config table (see
+    _select_config). Large fp8 batches, prefill or decode, take the Blackwell
+    kernel in qsa_fp8 (see qsa_fp8.use_fp8_decode_kernel).
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -636,15 +683,21 @@ def qsa_sparse_paged_attention(
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
     assert q.dtype == torch.bfloat16
     assert k_cache.dtype == v_cache.dtype
-    is_fp8 = k_cache.dtype == torch.float8_e4m3fn
+    is_fp8 = k_cache.dtype != torch.bfloat16
     if is_fp8:
         assert k_scale is not None and v_scale is not None
         # Host pre-multiply: fold the K dequant scale into the attention scale
         # and pass V's dequant scale as the kernel's output scale.
         softmax_scale = (head_dim**-0.5) * float(k_scale)
         output_scale = float(v_scale)
+        if k_cache.dtype == torch.uint8:
+            # _maybe_dequant's byte decode yields x * 2^-8; fold 2^8 into the
+            # scales so the decode needs no multiply.
+            softmax_scale *= 256.0
+            output_scale *= 256.0
+        else:
+            assert k_cache.dtype == torch.float8_e4m3fn
     else:
-        assert k_cache.dtype == torch.bfloat16
         softmax_scale = head_dim**-0.5
         output_scale = 1.0
     assert logical_indices.dtype == block_table.dtype == torch.int32
@@ -667,6 +720,49 @@ def qsa_sparse_paged_attention(
     if not q.shape[0]:
         return out
 
+    if qsa_fp8.use_fp8_decode_kernel(q.shape[0] * k_cache.shape[2], k_cache.dtype):
+        return qsa_fp8.qsa_sparse_paged_decode(
+            q,
+            k_cache,
+            v_cache,
+            logical_indices,
+            block_table,
+            token_to_req,
+            out,
+            output_gate_view,
+            softmax_scale,
+            output_scale,
+        )
+    return _qsa_sparse_paged_splitk(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config,
+        out,
+        output_gate_view,
+        softmax_scale,
+        output_scale,
+    )
+
+
+def _qsa_sparse_paged_splitk(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    use_prefill_config: bool,
+    out: torch.Tensor,
+    output_gate_view: torch.Tensor,
+    softmax_scale: float,
+    output_scale: float,
+) -> torch.Tensor:
+    """The split-K kernel (and merge) at _select_config's config."""
+    is_fp8 = k_cache.dtype != torch.bfloat16
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
     selection_width = logical_indices.shape[1] - 1  # trailing column is the count
@@ -731,7 +827,6 @@ def qsa_sparse_paged_attention(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        IS_FP8=is_fp8,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -764,13 +859,20 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
-) -> tuple[tuple[int, int, int], ...]:
-    """Compile every production-reachable split-K/merge specialization."""
+) -> tuple[tuple[int | str, ...], ...]:
+    """Compile every production-reachable split-K/merge and decode
+    specialization."""
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
-    # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
+    # An fp8 cache is allocated as uint8 storage; warm the dtype the impl hands
+    # over: an e4m3 view on sm_89+, the raw bytes below.
     is_fp8 = kv_cache.dtype == torch.uint8
-    cache_dtype = torch.float8_e4m3fn if is_fp8 else key_cache.dtype
+    fp8_dtype = (
+        torch.float8_e4m3fn
+        if current_platform.has_device_capability(89)
+        else torch.uint8
+    )
+    cache_dtype = fp8_dtype if is_fp8 else key_cache.dtype
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
@@ -821,7 +923,7 @@ def warmup_qsa_sparse_paged_attention(
     row_stride = num_query_heads * head_dim
     num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
 
-    warmed = []
+    warmed: list[tuple[int | str, ...]] = []
     for block_n, warps, num_tiles, num_splits in sorted(profiles):
         if num_splits == 1:
             partial_output_ptr = output_ptr
@@ -874,7 +976,6 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
-            IS_FP8=is_fp8,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),
@@ -899,6 +1000,13 @@ def warmup_qsa_sparse_paged_attention(
                 grid=(num_rows, num_query_heads),
             )
         warmed.append((block_n, num_splits, warps))
+
+    warmed += qsa_fp8.warmup_qsa_fp8_decode(
+        kv_cache,
+        block_table,
+        num_query_heads=num_query_heads,
+        selection_width=selection_width,
+    )
     return tuple(warmed)
 
 

@@ -65,6 +65,40 @@ def _saved_tensor(tensor: torch.Tensor) -> bytes:
     return buffer.getvalue()
 
 
+@pytest.mark.parametrize(
+    "model, hidden_size, input_size, buffer_size",
+    [
+        ("facebook/opt-350m", 1024, 512, 512),
+        ("facebook/opt-125m", 768, 768, 768),
+        ("openai/clip-vit-base-patch32", 512, 512, 1024),
+        ("google/siglip-base-patch16-224", 768, 768, 1024),
+    ],
+)
+def test_prompt_embeds_input_width(model, hidden_size, input_size, buffer_size):
+    """OPT uses its token width; dual encoders retain their text input width."""
+    from vllm.config import ModelConfig
+
+    config = ModelConfig(
+        model=model,
+        dtype="float32",
+        enable_prompt_embeds=True,
+    )
+    if "opt-" not in model:
+        config.hf_text_config.projection_dim = buffer_size
+    assert config.get_hidden_size() == hidden_size
+    assert config.get_inputs_embeds_size() == buffer_size
+
+    tensor = torch.randn(4, input_size)
+    loaded = safe_load_prompt_embeds(config, _encode(_saved_tensor(tensor)))
+    torch.testing.assert_close(loaded, tensor)
+
+    wrong_size = hidden_size if hidden_size != input_size else input_size + 1
+    with pytest.raises(VLLMValidationError, match="does not match"):
+        safe_load_prompt_embeds(
+            config, _encode(_saved_tensor(torch.randn(4, wrong_size)))
+        )
+
+
 UNPARSABLE_PAYLOADS = [
     pytest.param(b"", id="empty"),
     pytest.param(b"\x80", id="single-byte"),

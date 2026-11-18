@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the batched-weight RMS norm kernel (vllm._custom_ops.rms_norm).
 
-``rms_norm`` can use the outermost input batch index to select the corresponding
-weight row. The result must match that of looping ``rms_norm`` over that dimension.
+`rms_norm` can use the outermost input batch index to select the corresponding
+weight row. The result must match that of looping `rms_norm` over that dimension.
 """
 
 import pytest
