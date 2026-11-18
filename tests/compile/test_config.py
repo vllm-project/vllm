@@ -602,6 +602,7 @@ def test_cudagraph_sizes_post_init(
 @pytest.fixture
 def capture_platform_config(monkeypatch):
     def resolve(platform, settings=None):
+        monkeypatch.setattr("vllm.platforms.current_platform", platform)
         monkeypatch.setattr("vllm.config.vllm.current_platform", platform)
         return EngineArgs(
             model="facebook/opt-125m",
