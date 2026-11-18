@@ -135,6 +135,8 @@ class Sampler:
                 "data_parallel_index": vllm_config.parallel_config.data_parallel_index,
                 "logprobs_mode": logprobs_mode,
                 "use_fp64_gumbel": use_fp64_gumbel,
+                # Replay overwrites sampled tokens with trace tokens on this rank.
+                "enable_trace_replay": enable_trace_replay,
                 "use_flashinfer": self.use_flashinfer,
                 "use_xpu_sampler": self.use_xpu_sampler,
             }
