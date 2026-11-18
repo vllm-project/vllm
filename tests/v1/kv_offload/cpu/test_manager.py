@@ -16,7 +16,6 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
-    StoreMode,
     StoreTrigger,
     make_offload_key,
 )
@@ -44,7 +43,7 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
-    store_mode: StoreMode = StoreMode.EAGER,
+    store_triggers: tuple[StoreTrigger, ...] = (StoreTrigger.ON_COMPUTE,),
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_chunks=num_chunks,
@@ -53,7 +52,7 @@ def make_cpu_manager(
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
-        store_mode=store_mode,
+        store_triggers=store_triggers,
     )
 
 
@@ -2453,7 +2452,7 @@ def test_store_trigger_and_success_are_keyword_only():
 
 
 def test_overwrite_store_needs_no_request_context():
-    manager = make_cpu_manager(store_mode=StoreMode.LAZY)
+    manager = make_cpu_manager(store_triggers=(StoreTrigger.ON_OVERWRITE,))
     keys = to_keys([1, 2])
 
     output = manager.prepare_store(keys, None, trigger=StoreTrigger.ON_OVERWRITE)
@@ -2466,7 +2465,9 @@ def test_overwrite_store_needs_no_request_context():
 def test_a_held_chunk_that_gets_new_data_keeps_its_rank():
     """A resident chunk whose GPU copy dies keeps its rank, so the older
     chunk is still the one that leaves first."""
-    manager = make_cpu_manager(num_chunks=2, store_mode=StoreMode.LAZY)
+    manager = make_cpu_manager(
+        num_chunks=2, store_triggers=(StoreTrigger.ON_OVERWRITE,)
+    )
     first, second, third = to_keys([1, 2, 3])
     for key in (first, second):
         assert manager.prepare_store([key], None, trigger=StoreTrigger.ON_OVERWRITE)
@@ -2481,21 +2482,15 @@ def test_a_held_chunk_that_gets_new_data_keeps_its_rank():
     assert output.evicted_keys == [first]
 
 
-def test_lazy_mode_refuses_a_store_threshold():
+def test_on_overwrite_refuses_a_store_threshold():
     """An ON_OVERWRITE store offers its chunk once, so a late store never comes."""
     with pytest.raises(ValueError, match="ON_OVERWRITE"):
-        make_cpu_manager(store_threshold=2, store_mode=StoreMode.LAZY)
+        make_cpu_manager(store_threshold=2, store_triggers=(StoreTrigger.ON_OVERWRITE,))
 
 
-@pytest.mark.parametrize(
-    "store_mode, store_triggers",
-    [
-        (StoreMode.EAGER, (StoreTrigger.ON_COMPUTE,)),
-        (StoreMode.LAZY, (StoreTrigger.ON_OVERWRITE,)),
-    ],
-)
-def test_store_mode_selects_the_store_triggers(store_mode, store_triggers):
-    assert make_cpu_manager(store_mode=store_mode).store_triggers == store_triggers
+def test_manager_exposes_the_store_triggers_it_was_given():
+    triggers = (StoreTrigger.ON_OVERWRITE, StoreTrigger.ON_COMPUTE)
+    assert make_cpu_manager(store_triggers=triggers).store_triggers == triggers
 
 
 def test_two_triggers_store_one_copy_of_a_key():
@@ -2524,9 +2519,11 @@ def _overwrite_store(manager: CPUOffloadingManager, keys: list[OffloadKey]):
     return output
 
 
-def _make_arc_ghost(store_mode: StoreMode):
+def _make_arc_ghost(store_triggers: tuple[StoreTrigger, ...]):
     """Return an ARC manager with one chunk, and a key in B1."""
-    manager = make_cpu_manager(num_chunks=1, cache_policy="arc", store_mode=store_mode)
+    manager = make_cpu_manager(
+        num_chunks=1, cache_policy="arc", store_triggers=store_triggers
+    )
     policy = manager._policy
     assert isinstance(policy, ARCCachePolicy)
     ghost, other = to_keys([1, 2])
@@ -2535,7 +2532,7 @@ def _make_arc_ghost(store_mode: StoreMode):
 
 def test_arc_overwrite_store_of_a_ghost_key_adapts():
     """ARC learns from an ON_OVERWRITE store of an evicted key."""
-    manager, policy, ghost, other = _make_arc_ghost(StoreMode.LAZY)
+    manager, policy, ghost, other = _make_arc_ghost((StoreTrigger.ON_OVERWRITE,))
     _overwrite_store(manager, [ghost])
     _overwrite_store(manager, [other])
     assert ghost in policy.b1
@@ -2547,7 +2544,7 @@ def test_arc_overwrite_store_of_a_ghost_key_adapts():
 
 def test_arc_compute_store_of_a_ghost_key_stays_in_t1():
     """The eager store path does not change."""
-    manager, policy, ghost, other = _make_arc_ghost(StoreMode.EAGER)
+    manager, policy, ghost, other = _make_arc_ghost((StoreTrigger.ON_COMPUTE,))
     for key in (ghost, other, ghost):
         ctx = make_req_context(str(key))
         assert manager.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)

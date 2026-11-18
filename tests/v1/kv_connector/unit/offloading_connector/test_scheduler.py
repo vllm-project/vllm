@@ -3575,27 +3575,33 @@ def test_req_context_counts_live_until_request_finished(registered):
 
 
 @pytest.mark.parametrize(
-    "store_triggers",
-    [["ON_COMPUTE"], ["ON_OVERWRITE"], ["ON_OVERWRITE", "ON_COMPUTE"]],
+    "store_when",
+    [
+        ["on_compute"],
+        ["on_overwrite"],
+        ["on_overwrite", "on_compute"],
+        # Inert here: the layout adds on_handoff itself when it hands off.
+        ["on_handoff"],
+    ],
 )
-def test_scheduler_makes_a_handler_per_manager_trigger(request_runner, store_triggers):
+def test_scheduler_makes_a_handler_per_manager_trigger(request_runner, store_when):
     """The manager selects the triggers, after the layout handlers."""
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides={
-            "store_triggers": store_triggers,
+            "store_when": store_when,
             "self_describing_kv_events": False,
         },
     )
     assert [
-        trigger.name for trigger in runner.connector_scheduler._store_handlers
-    ] == store_triggers
+        trigger.value for trigger in runner.connector_scheduler._store_handlers
+    ] == store_when
 
 
 _LAZY_EXTRA_CONFIG = {
-    "store_mode": "lazy",
+    "store_when": ["on_overwrite"],
     "self_describing_kv_events": False,
 }
 
@@ -3644,16 +3650,16 @@ def _offered_keys(offers, trigger: StoreTrigger) -> list:
 
 
 @pytest.mark.parametrize(
-    "extra_config",
+    "extra_config, error",
     [
-        {"store_mode": "lazy"},
-        {"store_triggers": []},
-        {"store_triggers": ["ON_COMPUTE", "ON_COMPUTE"]},
+        ({"store_when": ["on_overwrite"]}, ValueError),
+        ({"store_when": []}, AssertionError),
+        ({"store_when": ["on_compute", "on_compute"]}, ValueError),
     ],
 )
-def test_unsupported_store_triggers_raise(request_runner, extra_config):
+def test_unsupported_store_triggers_raise(request_runner, extra_config, error):
     """Self-describing events with lazy stores, or bad manager triggers."""
-    with pytest.raises(ValueError):
+    with pytest.raises(error):
         request_runner(
             block_size=4,
             num_gpu_blocks=10,
@@ -4465,7 +4471,7 @@ def test_a_load_completing_after_its_blocks_were_reused_records_nothing(
 
 
 def _offers_per_trigger(
-    request_runner, store_triggers: list[str], async_scheduling: bool
+    request_runner, store_when: list[str], async_scheduling: bool
 ) -> dict[StoreTrigger, list[tuple[tuple, bool]]]:
     """Run loads, compute stores and overwrites, and record each offer.
 
@@ -4477,7 +4483,7 @@ def _offers_per_trigger(
         num_gpu_blocks=8,
         async_scheduling=async_scheduling,
         extra_config_overrides={
-            "store_triggers": store_triggers,
+            "store_when": store_when,
             "self_describing_kv_events": False,
         },
     )
@@ -4506,12 +4512,12 @@ def test_store_handlers_do_not_depend_on_each_other(
     """Each handler makes the same offers alone, with the other handler, and
     in either order."""
     alone = {
-        trigger: _offers_per_trigger(request_runner, [trigger.name], async_scheduling)
+        trigger: _offers_per_trigger(request_runner, [trigger.value], async_scheduling)
         for trigger in (StoreTrigger.ON_COMPUTE, StoreTrigger.ON_OVERWRITE)
     }
     for order in (
-        ["ON_COMPUTE", "ON_OVERWRITE"],
-        ["ON_OVERWRITE", "ON_COMPUTE"],
+        ["on_compute", "on_overwrite"],
+        ["on_overwrite", "on_compute"],
     ):
         together = _offers_per_trigger(request_runner, order, async_scheduling)
         for trigger, offers in alone.items():
@@ -8186,7 +8192,7 @@ class TestMambaHybridOffloadServing:
         """A mamba layout needs zeroing, which runs before the store reads."""
         with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
             self._make_scheduler(
-                store_mode="lazy", self_describing_kv_events=False
+                store_when=["on_overwrite"], self_describing_kv_events=False
             )
 
 

@@ -162,30 +162,20 @@ class LookupResult(Enum):
 
 
 class StoreTrigger(Enum):
-    """Why the connector asks the manager to store the keys."""
+    """Why the connector asks the manager to store the keys.
 
-    # The chunks are complete. The eager store.
-    ON_COMPUTE = auto()
-    # The KV cache manager hands off a state block that is about to be reused.
-    # The source is short-lived, so the store cannot be postponed.
-    ON_HANDOFF = auto()
-    # The block pool gives blocks of the chunks to new requests in this step.
-    # req_context is None, and the call can come after on_request_finished.
-    ON_OVERWRITE = auto()
-
-
-class StoreMode(Enum):
-    """When a manager asks for the chunks of a request.
-
-    Set with the store_mode key of kv_connector_extra_config. The manager
-    gives the store triggers of its mode in store_triggers.
+    Set with the store_when key of kv_connector_extra_config, by the value of
+    each trigger.
     """
 
-    # Ask for each chunk when it is computed (StoreTrigger.ON_COMPUTE).
-    EAGER = "eager"
-    # Ask for each chunk when the block pool gives its blocks to new requests
-    # (StoreTrigger.ON_OVERWRITE). The lazy store.
-    LAZY = "lazy"
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = "on_compute"
+    # The KV cache manager hands off a state block that is about to be reused.
+    # The source is short-lived, so the store cannot be postponed.
+    ON_HANDOFF = "on_handoff"
+    # The block pool gives blocks of the chunks to new requests in this step.
+    # req_context is None, and the call can come after on_request_finished.
+    ON_OVERWRITE = "on_overwrite"
 
 
 class OffloadPolicy(Enum):
@@ -861,14 +851,6 @@ class OffloadingSpec(ABC):
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
         )
-        store_modes = {mode.value: mode for mode in StoreMode}
-        store_mode = self.extra_config.get("store_mode", "eager")
-        if store_mode not in store_modes:
-            raise ValueError(
-                f"store_mode must be one of {list(store_modes)}, got {store_mode!r}"
-            )
-        self.store_mode = store_modes[store_mode]
-
         # Direction(s) in which this connector's managers may transfer data.
         # A read-only manager never accepts stores; a write-only manager never
         # serves loads.

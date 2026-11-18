@@ -21,7 +21,6 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
-    StoreMode,
     StoreTrigger,
     get_offload_group_idx,
 )
@@ -73,7 +72,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
         info: CPUOffloadingInfo | None = None,
-        store_mode: StoreMode = StoreMode.EAGER,
+        store_triggers: Sequence[StoreTrigger] = (StoreTrigger.ON_COMPUTE,),
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
@@ -92,11 +91,7 @@ class CPUOffloadingManager(OffloadingManager):
         # Track chunks with an in-flight store (ref_cnt -1, not yet completed).
         self._num_write_pending_chunks: int = 0
 
-        self._store_triggers: tuple[StoreTrigger, ...] = (
-            (StoreTrigger.ON_OVERWRITE,)
-            if store_mode is StoreMode.LAZY
-            else (StoreTrigger.ON_COMPUTE,)
-        )
+        self._store_triggers: tuple[StoreTrigger, ...] = tuple(store_triggers)
         # A late store (store_threshold >= 2) needs a second offer of a chunk,
         # and an ON_OVERWRITE store offers its chunk once.
         if StoreTrigger.ON_OVERWRITE in self._store_triggers and store_threshold >= 2:

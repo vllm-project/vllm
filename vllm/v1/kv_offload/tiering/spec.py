@@ -52,6 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
+from collections.abc import Collection
 from typing import Any
 
 from typing_extensions import override
@@ -64,7 +65,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
-    StoreMode,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
@@ -333,6 +334,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         return metrics
 
+    # The layout adds the handoff trigger when it needs one, so listing it is
+    # allowed and inert. Every other trigger but the eager one has no
+    # multi-tier support.
+    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = (
+        StoreTrigger.ON_COMPUTE,
+        StoreTrigger.ON_HANDOFF,
+    )
+
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
@@ -411,11 +420,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
                     "store_threshold is not supported for TieringOffloadingSpec"
-                )
-            if self.store_mode is not StoreMode.EAGER:
-                raise ValueError(
-                    f"store_mode {self.store_mode.value} is not supported for "
-                    "TieringOffloadingSpec"
                 )
 
             scheduler_mmap: SharedOffloadRegion | None = None

@@ -574,7 +574,7 @@ def test_cpu_offloading_lazy_store() -> None:
         kv_role="kv_both",
         kv_connector_extra_config={
             "cpu_bytes_to_use": 500 << 20,
-            "store_mode": "lazy",
+            "store_when": ["on_overwrite"],
         },
     )
     llm = LLM(

@@ -55,7 +55,7 @@ def _kv_transfer_config(
     connector: str,
     cpu_gib: int = 4,
     spec_name: str = "CPUOffloadingSpec",
-    store_mode: str | None = None,
+    store_when: list[str] | None = None,
 ) -> str:
     if connector == "OffloadingConnector":
         extra_config = {
@@ -63,8 +63,8 @@ def _kv_transfer_config(
             "cpu_bytes_to_use": cpu_gib << 30,
             "eviction_policy": "lru",
         }
-        if store_mode is not None:
-            extra_config["store_mode"] = store_mode
+        if store_when is not None:
+            extra_config["store_when"] = store_when
         return json.dumps(
             {
                 "kv_connector": "OffloadingConnector",
@@ -153,8 +153,8 @@ class OffloadingModelConfig:
     cpu_offload_gib: int = 4
     startup_timeout: int = 600
     spec_name: str = "CPUOffloadingSpec"
-    # `store_mode` of the offloading connector: `eager` or `lazy`.
-    store_mode: str | None = None
+    # `store_when` of the offloading connector, for example ["on_overwrite"].
+    store_when: list[str] | None = None
     assert_reload: bool = False
     num_shots: int = NUM_FEWSHOT
 
@@ -235,7 +235,7 @@ MODELS = [
         accuracy_threshold=0.45,
         # A pure-attention model: the lazy store is refused for a KV cache that
         # needs zeroing (Mamba layers or a mixed-precision cache).
-        store_mode="lazy",
+        store_when=["on_overwrite"],
         cpu_offload_gib=1,
         # Lazy stores happen only when a block is reused, so a second run that
         # skipped its reload must fail here.
@@ -325,7 +325,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
         _kv_transfer_config(
-            cfg.connector, cfg.cpu_offload_gib, cfg.spec_name, cfg.store_mode
+            cfg.connector, cfg.cpu_offload_gib, cfg.spec_name, cfg.store_when
         ),
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,

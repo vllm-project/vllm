@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from typing_extensions import override
@@ -17,6 +18,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
     OffloadingSpec,
     OffloadingWorker,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
@@ -47,8 +49,38 @@ def _all_workers_barrier() -> None:
     group.barrier()
 
 
+def parse_store_triggers(
+    extra_config: Mapping[str, Any],
+    allowed: Collection[StoreTrigger],
+    default: tuple[StoreTrigger, ...] = (StoreTrigger.ON_COMPUTE,),
+) -> tuple[StoreTrigger, ...]:
+    """Resolve the store_when key into the triggers that offload a chunk.
+
+    Args:
+        extra_config: the connector extra config.
+        allowed: the triggers that this tier can serve.
+        default: the triggers to use when the config names none.
+
+    Returns:
+        The configured triggers, in the configured order.
+
+    Raises:
+        ValueError: on a value that `StoreTrigger` does not know.
+
+    """
+    store_when = extra_config.get("store_when", [t.value for t in default])
+    assert store_when, "store_when must name at least one store trigger"
+    triggers = tuple(StoreTrigger(value) for value in store_when)
+    assert set(triggers) <= set(allowed), (
+        f"store_when must be a subset of {[trigger.value for trigger in allowed]}, "
+        f"got {[trigger.value for trigger in triggers]}"
+    )
+    return triggers
+
+
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    STORE_TRIGGERS_ALLOWED: Collection[StoreTrigger] = tuple(StoreTrigger)
     SHARED_REGION_PER_RANK = True
 
     @classmethod
@@ -178,6 +210,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.cache_policy_module_path: str | None = self.extra_config.get(
             "cache_policy_module_path"
         )
+        self.store_triggers = parse_store_triggers(
+            self.extra_config, self.STORE_TRIGGERS_ALLOWED
+        )
 
     @classmethod
     @override
@@ -205,7 +240,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
                 info=self.cpu_info,
-                store_mode=self.store_mode,
+                store_triggers=self.store_triggers,
             )
         return self._manager
 
