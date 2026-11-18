@@ -3,6 +3,7 @@
 
 from typing import Any, TypedDict
 
+import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
@@ -361,6 +362,35 @@ def run_embedding_input_test(
             name_0="original_input",
             name_1="embeddings_input",
         )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+def test_qwen2_vl_negative_stride_image_input(
+    vllm_runner,
+    image_assets,
+    model,
+) -> None:
+    """Flipped NumPy images produce the same result as contiguous images."""
+    image = np.asarray(image_assets[0].pil_image)
+    flipped_image = np.flip(image, axis=1)
+    prompt = IMAGE_PROMPTS[0]
+
+    with vllm_runner(
+        model,
+        runner="generate",
+        dtype=target_dtype,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
+        default_torch_num_threads=1,
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(
+            [prompt, prompt],
+            max_tokens=8,
+            images=[flipped_image, flipped_image.copy()],
+        )
+
+    assert outputs[0] == outputs[1]
 
 
 @pytest.mark.core_model
