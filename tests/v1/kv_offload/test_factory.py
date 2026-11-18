@@ -1203,6 +1203,85 @@ def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
     ]
 
 
+def _mismatched_worker_on_rank(
+    rank: int, init_method: str, engine_id: str, results
+) -> None:
+    """Build this rank's worker for a PP=2 engine across two nodes whose
+    stages hold different KV sizes, and report what it raised and left."""
+    import torch.distributed as dist
+
+    from vllm.distributed import nixl_utils
+    from vllm.v1.kv_offload.base import CanonicalKVCacheRef, CanonicalKVCacheTensor
+
+    _join_engine(rank, init_method, "ab", tp=1, pp=2)
+    nixl_utils.NixlWrapper = _FakeNixlAgent
+    nixl_utils.nixl_agent_config = dict
+    page = 4096 * (rank + 1)
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        engine_id=engine_id,
+        worker_kv_bytes_per_block=page,
+        rank=rank,
+        world_size=2,
+        tp_size=1,
+        pp_size=2,
+        extra_config={"secondary_tiers": _TIERS},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros((8, page), dtype=torch.int8), page_size_bytes=page
+            )
+        ],
+        group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]],
+    )
+    try:
+        spec.create_worker(kv_caches)
+        error = "no error"
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    results.put(
+        (
+            rank,
+            error.split(";")[0],
+            _region_mapping(engine_id) is not None,
+            [agent.registered for agent in _FakeNixlAgent.created],
+        )
+    )
+    dist.destroy_process_group()
+
+
+def test_tiering_spec_rejects_mismatched_mirror_layouts_on_every_rank(tmp_path):
+    """Pipeline stages of unequal KV size derive different head layouts, which
+    would address the wrong bytes of each row. Every rank must raise, none may
+    be left in a collective (it would fail on the Gloo timeout), and rank 0
+    must release the region and its NIXL registration."""
+    import torch.multiprocessing as mp
+
+    engine_id = f"mirror-{uuid.uuid4().hex[:8]}"
+    context = mp.get_context("spawn")
+    results = context.SimpleQueue()
+    mp.start_processes(
+        _mismatched_worker_on_rank,
+        args=(f"file://{tmp_path / 'store'}", engine_id, results),
+        nprocs=2,
+        start_method="spawn",
+    )
+
+    mismatch = (
+        "ValueError: The KV offload mirror needs the same CPU region geometry "
+        "on every worker"
+    )
+    # Rank 0 registered the head region and released it; rank 1, off the head
+    # node, never got as far as registering its KV cache.
+    assert sorted(results.get() for _ in range(2)) == [
+        (0, mismatch, False, [[]]),
+        (1, mismatch, False, []),
+    ]
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{engine_id}.mmap")
+
+
 @pytest.mark.parametrize(
     ("change", "error"),
     [

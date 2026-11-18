@@ -25,13 +25,11 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.region_mirror import (
     MirrorStuckError,
-    MirrorTopology,
     RegionMirrorClient,
     RegionMirrorHead,
     RegionMirrorHeadWorker,
     RegionMirrorWorker,
     SlotLayout,
-    attach_region_mirror,
     slot_planners,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -526,24 +524,6 @@ def test_large_copies_are_split_and_loads_go_between_their_transfers(events):
         assert stored.success and stored.transfer_size == 5 * _PAGE
     finally:
         worker.shutdown()
-
-
-def test_mismatched_head_layouts_are_rejected(monkeypatch):
-    """Uneven pipeline stages would address the wrong bytes of each row."""
-    other = SlotLayout(num_chunks=NUM_CHUNKS, row_stride=3 * SLOT, size=SLOT)
-    monkeypatch.setattr(
-        region_mirror,
-        "_all_gather",
-        lambda topology, value: [(None, ((b"head", 0), other)), value],
-    )
-    new_client = MagicMock()
-    monkeypatch.setattr(region_mirror, "RegionMirrorClient", new_client)
-    topology = MirrorTopology(
-        group=MagicMock(), rank=1, on_head=False, remote_ranks=frozenset({1})
-    )
-    with pytest.raises(ValueError, match="same CPU region geometry"):
-        attach_region_mirror(None, None, MagicMock(), 1, HEAD_LAYOUT, topology, "e")
-    new_client.assert_not_called()
 
 
 def test_shutdown_is_prompt_with_copies_waiting(events):
