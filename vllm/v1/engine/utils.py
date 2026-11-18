@@ -519,6 +519,7 @@ class CoreEngineActorManager:
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
         from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
+        from vllm.v1.executor.ray_utils import init_ray
 
         dp_size = vllm_config.parallel_config.data_parallel_size
         actor_class = (
@@ -550,7 +551,7 @@ class CoreEngineActorManager:
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
-            ray.init()
+            init_ray()
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_elastic_ep:
