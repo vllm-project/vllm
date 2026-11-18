@@ -294,6 +294,7 @@ from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackend,
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     get_dcp_local_seq_lens,
@@ -1142,13 +1143,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key is not None
             and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
-            and (
-                not self.impl.is_sparse
-                or attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-                <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
-            )
             and attn_metadata is not None
             and attn_metadata.prefill is not None
+            and (
+                not self.impl.is_sparse
+                or attn_metadata.prefill.route  # type: ignore[attr-defined]
+                is SparseMLAPrefillRoute.DENSE_MHA
+            )
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
         )
@@ -1470,33 +1471,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return mqa_q
 
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
-        if self.hisparse_cache is not None:
-            return False
-        # ShardQ steps' top-k are compact per rank and run through forward_mqa.
-        if getattr(attn_metadata, "shardq", None) is not None:
-            return False
         prefill = attn_metadata.prefill
-        if prefill is None:
-            return False
-        use_masked_mha = (
-            self.prefill_backend is not None
-            and self.impl.masked_mha_available  # type: ignore[attr-defined]
-            and self.impl.dcp_world_size <= 1
-            and _use_masked_mha(
-                backend_name=self.attn_backend.get_name(),
-                tensor_parallel_size=(
-                    self._vllm_config.parallel_config.tensor_parallel_size
-                ),
-                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                query_len=prefill.max_query_len,
-                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
-                has_context=prefill.chunked_context is not None,
-            )
-            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-        )
-        return (prefill.use_dense_mha or use_masked_mha) and not (
-            self._vllm_config.attention_config.sparse_mla_force_mqa
+        return (
+            prefill is not None
+            and prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA  # type: ignore[attr-defined]
         )
 
     def process_weights_after_loading(self) -> None:
@@ -1909,7 +1887,7 @@ class MLACommonBackend(AttentionBackend):
 class MLACommonPrefillMetadata:
     """Prefill Specific Metadata"""
 
-    @dataclass
+    @dataclass(slots=True)
     class ContextChunk:
         """One workspace-sized slice of paged context for a run of prefills."""
 
@@ -1940,7 +1918,7 @@ class MLACommonPrefillMetadata:
         def num_requests(self) -> int:
             return self.request_slice.stop - self.request_slice.start
 
-    @dataclass
+    @dataclass(slots=True)
     class ChunkedContextMetadata:
         context_lens: torch.Tensor
         workspace: torch.Tensor
@@ -1957,7 +1935,6 @@ class MLACommonPrefillMetadata:
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
     query_lens_cpu: torch.Tensor | None = None
-    use_dense_mha: bool = False
     topk_mask_workspace: torch.Tensor | None = None
 
 
@@ -2020,7 +1997,7 @@ M = TypeVar("M", bound=MLACommonMetadata)
 A = TypeVar("A", bound=AttentionMetadata)
 
 
-@dataclass
+@dataclass(slots=True)
 class MLADims:
     q_lora_rank: int | None
     kv_lora_rank: int
@@ -2055,127 +2032,6 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     )
 
 
-_MaskedMHARanges = tuple[tuple[int, int], ...]
-
-_MASKED_MHA_THRESHOLDS: dict[
-    tuple[int, int],
-    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
-] = {
-    (192, 128): {
-        "FLASHMLA_SPARSE": {
-            1: (((2048, 1536), (4096, 4096)), None),
-            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
-            4: (
-                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
-                None,
-            ),
-            8: (
-                (
-                    (2048, 512),
-                    (4096, 512),
-                    (8192, 1024),
-                    (16384, 2048),
-                    (32768, 16384),
-                ),
-                None,
-            ),
-        },
-        "FLASHINFER_MLA_SPARSE": {
-            8: (
-                (
-                    (2048, 512),
-                    (4096, 1024),
-                    (8192, 1024),
-                    (16384, 2048),
-                    (32768, 32768),
-                ),
-                None,
-            ),
-        },
-    },
-    (256, 256): {
-        "FLASHMLA_SPARSE": {
-            1: (((8 * 1024, 0),), ()),
-            2: (
-                ((20 * 1024, 0),),
-                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
-            ),
-            4: (
-                ((48 * 1024, 0),),
-                (
-                    (8 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (24 * 1024, 16 * 1024),
-                    (34 * 1024, 32 * 1024),
-                ),
-            ),
-            8: (
-                ((112 * 1024, 0),),
-                (
-                    (8 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (32 * 1024, 16 * 1024),
-                    (48 * 1024, 32 * 1024),
-                ),
-            ),
-        },
-        "FLASHINFER_MLA_SPARSE": {
-            4: (
-                ((36 * 1024, 0),),
-                (
-                    (12 * 1024, 4 * 1024),
-                    (16 * 1024, 8 * 1024),
-                    (24 * 1024, 16 * 1024),
-                    (28 * 1024, 24 * 1024),
-                ),
-            ),
-            8: (
-                ((64 * 1024, 0),),
-                (
-                    (20 * 1024, 4 * 1024),
-                    (24 * 1024, 8 * 1024),
-                    (32 * 1024, 16 * 1024),
-                    (48 * 1024, 32 * 1024),
-                    (56 * 1024, 40 * 1024),
-                    (64 * 1024, 48 * 1024),
-                    (72 * 1024, 56 * 1024),
-                ),
-            ),
-        },
-    },
-}
-
-
-def _use_masked_mha(
-    *,
-    backend_name: str,
-    tensor_parallel_size: int,
-    qk_head_dim: int,
-    v_head_dim: int,
-    query_len: int,
-    seq_len: int,
-    has_context: bool,
-) -> bool:
-    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
-        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
-        backend_name = "FLASHINFER_MLA_SPARSE"
-    thresholds = (
-        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
-        .get(backend_name, {})
-        .get(tensor_parallel_size)
-    )
-    if thresholds is None:
-        return False
-    pure_prefill_ranges, context_ranges = thresholds
-    ranges = pure_prefill_ranges
-    if has_context and context_ranges is not None:
-        ranges = context_ranges
-    for max_seq_len, min_query_len in ranges:
-        if seq_len <= max_seq_len:
-            return query_len >= min_query_len
-    return False
-
-
 @functools.cache
 def backend_supports_prefill_query_quantization() -> bool:
     """Check if the selected MLA prefill backend supports query quantization.
@@ -2205,7 +2061,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _ContextChunkPlan:
     """Request-space layout of one context chunk, before tensors are built."""
 

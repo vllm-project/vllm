@@ -17,7 +17,7 @@ from vllm.utils.math_utils import next_power_of_2
 
 
 class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         q_size: int
