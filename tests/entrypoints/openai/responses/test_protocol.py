@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import pytest
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai_harmony import (
@@ -42,7 +44,8 @@ def test_input_audio_in_message_content(audio_format: str) -> None:
             ],
         }
     )
-    audio_part = req.input[0]["content"][0]
+    message: Any = req.input[0]
+    audio_part = message["content"][0]
     assert audio_part["type"] == "input_audio"
     assert audio_part["input_audio"]["data"] == "AAAA"
     assert audio_part["input_audio"]["format"] == audio_format
