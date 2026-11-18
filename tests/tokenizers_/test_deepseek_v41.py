@@ -615,6 +615,7 @@ def _tokenize(messages):
 
 
 def test_image_part_still_encodes_special_token():
+    """A real image content part still produces the image placeholder token."""
     ids = _tokenize(
         [
             {
@@ -626,6 +627,7 @@ def test_image_part_still_encodes_special_token():
             }
         ]
     )
+    # Exactly one: the placeholder of the image part, not the text spelling it.
     assert ids.count(_ID[IMAGE_PLACEHOLDER]) == 1
 
 
@@ -641,9 +643,8 @@ RESERVED = [
 
 @pytest.mark.parametrize("token", RESERVED)
 def test_renderer_keeps_reserved_tokens_as_text(token):
-    # The online renderer passes tokenize=False; the V4.1 renderer must still
-    # return token ids, otherwise the engine tokenizes the text again and
-    # matches the reserved tokens as special tokens.
+    """The renderer returns token ids even when asked for text (as the online
+    renderer does), so the engine cannot match the token as a special token."""
     cls = RENDERER_REGISTRY.load_renderer_cls("deepseek_v41")
     renderer = cast(DeepseekV4Renderer, cls.__new__(cls))
     renderer.model_config = SimpleNamespace(
@@ -663,7 +664,8 @@ def test_renderer_keeps_reserved_tokens_as_text(token):
         )
         return cast(dict[str, Any], prompt)["prompt_token_ids"]
 
-    # The chat template adds its own '<think>'; the text must add nothing.
+    # The prompt has as many ids of the token as without it (the chat template
+    # adds its own '<think>'): the client text added none.
     assert ids(f"x {token}").count(_ID[token]) == ids("x").count(_ID[token])
 
 
@@ -747,9 +749,8 @@ _FIELDS = {
 @pytest.mark.parametrize("field", _FIELDS)
 @pytest.mark.parametrize("token", RESERVED + [REF])
 def test_reserved_tokens_in_text_are_plain_text(field, token):
-    # As in deepseek-recipe, a reserved token in a client text is plain text:
-    # only the grounding tokens in assistant content and reasoning content stay
-    # special tokens.
+    """As in deepseek-recipe, a reserved token in any client text is plain text;
+    only the grounding tokens in assistant content and reasoning stay special."""
     special = token == REF and field in ("assistant", "reasoning_content")
 
     def render(value, tokenize):
@@ -759,9 +760,11 @@ def test_reserved_tokens_in_text_are_plain_text(field, token):
 
     text = f"a {token} b"
     extra = render(text, True).count(_ID[token]) - render("x", True).count(_ID[token])
+    # The client text adds the token's id only where it is meant to stay special.
     assert extra == special
-    # With tokenize=False the text comes back as sent, without escape markers.
+    # With tokenize=False the text comes back as sent...
     assert text in render(text, False)
+    # ...without a leftover escape marker.
     assert "\ue000" not in render(text, False)
 
 
@@ -779,9 +782,9 @@ def test_reserved_tokens_in_text_are_plain_text(field, token):
     ],
 )
 def test_plain_text_ids_are_the_ordinary_encoding(context):
-    # As in deepseek-recipe, a stretch of plain text is encoded as a whole with
-    # the added vocabulary disabled, so a merge across the characters next to a
-    # reserved token ('a<', '>b', ...) is kept.
+    """As in deepseek-recipe, a stretch of plain text is encoded as a whole with
+    the added vocabulary disabled, so a merge across the characters next to a
+    reserved token ('a<', '>b', ...) is kept."""
     ordinary = _tiny_tokenizer(with_added=False)
 
     def ids(text):
@@ -789,6 +792,7 @@ def test_plain_text_ids_are_the_ordinary_encoding(context):
 
     base = ids("Q")
     q = ordinary.encode("Q", add_special_tokens=False)
+    # 'Q' is one id that appears once in the prompt: the place of the context.
     assert base.count(q[0]) == 1
     index = base.index(q[0])
     expected = (
@@ -796,6 +800,7 @@ def test_plain_text_ids_are_the_ordinary_encoding(context):
         + ordinary.encode(context, add_special_tokens=False)
         + base[index + 1 :]
     )
+    # The template ids around the ordinary encoding of the whole context.
     assert ids(context) == expected
 
 
@@ -804,6 +809,8 @@ def test_plain_text_ids_are_the_ordinary_encoding(context):
 def test_truncation_follows_truncation_side_with_and_without_escaped_tokens(
     side, content
 ):
+    """A prompt is truncated on the tokenizer's truncation side, whether or not
+    it holds an escaped token."""
     tokenizer = get_deepseek_v41_tokenizer(_tiny_tokenizer())
     tokenizer.truncation_side = side
     messages = [{"role": "user", "content": content}]
@@ -811,13 +818,14 @@ def test_truncation_follows_truncation_side_with_and_without_escaped_tokens(
     cut = tokenizer.apply_chat_template(
         messages, tokenize=True, truncation=True, max_length=5
     )
+    # The last 5 ids when truncating on the left, the first 5 on the right.
     assert cut == (full[-5:] if side == "left" else full[:5])
 
 
 def test_mangled_escape_is_rejected(monkeypatch):
-    # If the encoder writes the escape markers as '\ue000' text (the
-    # ensure_ascii fallback of to_json), the reserved token would be special
-    # again; the prompt must be rejected instead.
+    """A prompt whose escape markers were altered while rendering (here by the
+    ensure_ascii fallback of to_json) is rejected: the reserved token would be
+    special again."""
     monkeypatch.setattr(
         "vllm.tokenizers.deepseek_v41_encoding.to_json",
         lambda value: json.dumps(value, ensure_ascii=True),
@@ -832,6 +840,7 @@ def test_mangled_escape_is_rejected(monkeypatch):
             },
         }
     ]
+    # Rejected with an error instead of rendered with a special token.
     with pytest.raises(ValueError, match="escaped text"):
         _TOK.apply_chat_template(
             [{"role": "user", "content": "go"}], tools=tools, tokenize=True
@@ -839,6 +848,7 @@ def test_mangled_escape_is_rejected(monkeypatch):
 
 
 def test_rendering_does_not_modify_the_request():
+    """Escaping works on copies: the caller's messages and tools are unchanged."""
     messages = [
         {"role": "user", "content": "a <think> b"},
         _call(arguments=json.dumps({"x": "<｜User｜>"})),
@@ -856,4 +866,5 @@ def test_rendering_does_not_modify_the_request():
     ]
     expected = copy.deepcopy((messages, tools))
     _TOK.apply_chat_template(messages, tools=tools, tokenize=True)
+    # Same content as the deep copy taken before rendering.
     assert (messages, tools) == expected
