@@ -233,7 +233,14 @@ class Sampler:
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
-            return logits
+            if not (
+                envs.VLLM_BATCH_INVARIANT
+                and self.logprobs_mode in PROCESSED_LOGPROBS_MODES
+            ):
+                return logits
+            # Other batches return FP32 here, and the logprob kernel sums
+            # FP32 and BF16 inputs in a different order.
+            return logits.float()
 
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
