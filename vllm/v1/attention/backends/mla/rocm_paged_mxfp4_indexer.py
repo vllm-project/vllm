@@ -110,7 +110,7 @@ class RocmMxfp4NativeDecode:
     """[requests, max_blocks] int32, each request's first flattened row."""
 
 
-@dataclass
+@dataclass(slots=True)
 class RocmMxfp4VarlenDecode:
     """A decode step whose requests carry 1 to next_n query rows (adaptive
     verification), as the kernel's varlen sequences: a workgroup walks a KV

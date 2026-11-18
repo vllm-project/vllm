@@ -216,8 +216,13 @@ def _decode_metadata(case, rows, ratio, query_lens, world=1, rank=0, *, varlen=F
     next_n = max(query_lens)
     context_lens = (torch.tensor(case.seq_lens, dtype=torch.int32) // ratio).to(DEVICE)
     native = native_decode(lens, block_table, query_lens, next_n, context_lens)
+    unit = 1 if native is None else native.next_n
+    shard = DecodeRowShard.plan(len(rows), unit, world, rank, 2 * len(rows))
+    if shard is not None:
+        lens, block_table, native = shard.narrow(lens, block_table, native)
+    # As in the builder, a step the row shard cuts keeps the per-row launch.
     decode_varlen = None
-    if varlen and native is None:
+    if varlen and native is None and shard is None:
         starts = [0, *itertools.accumulate(query_lens)]
         decode_varlen = RocmMxfp4VarlenDecode(
             next_n,
@@ -225,13 +230,6 @@ def _decode_metadata(case, rows, ratio, query_lens, world=1, rank=0, *, varlen=F
             context_lens,
             case.block_table[: len(query_lens)].contiguous(),
         )
-    # As in the builder, a varlen step keeps every row on every rank.
-    shard = None
-    if decode_varlen is None:
-        unit = 1 if native is None else native.next_n
-        shard = DecodeRowShard.plan(len(rows), unit, world, rank, 2 * len(rows))
-        if shard is not None:
-            lens, block_table, native = shard.narrow(lens, block_table, native)
     schedule = torch.empty(
         ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries, next_n),
         dtype=torch.int32,
