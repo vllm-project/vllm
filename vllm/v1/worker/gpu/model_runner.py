@@ -1952,7 +1952,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(
-                self.ubatch_runner is not None and not skip_attn_for_dummy_run
+                self.ubatch_runner is not None
+                and not skip_attn_for_dummy_run
+                # A repair-only step must never be split into microbatches:
+                # the dp_size == 1 fast path re-checks the all-reduce-overlap
+                # split AFTER the eager descriptor and would otherwise route
+                # the repair batch through the ordinary full-depth ubatch
+                # forward (clobbering the healthy above-failure KV) before
+                # the repair branch is ever evaluated.
+                and scheduler_output.repair_works is None
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,

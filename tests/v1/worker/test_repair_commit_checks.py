@@ -9,8 +9,8 @@ comparison silently passes), the pre-write ownership fence, abort
 containment, and the live-getenv sync-profile gate.
 """
 
-from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -35,14 +35,32 @@ BS = 128
 BLOCK_TABLE = [7, 9]
 
 
-@dataclass
-class _FakeMeta:
-    block_tables: list
-    slot_mapping: torch.Tensor
+def _cpu_meta(block_rows: list[torch.Tensor], slot_mapping: torch.Tensor) -> Any:
+    """Real CPUAttentionMetadata with a padded 2D block table: the
+    production constructor for attention metadata, so the executor runs
+    against the real field layout (the per-request row is
+    `block_table[row]`)."""
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionMetadata
+
+    width = max(len(r) for r in block_rows)
+    table = torch.zeros(len(block_rows), width, dtype=torch.int32)
+    for i, row in enumerate(block_rows):
+        table[i, : len(row)] = row
+    num_reqs = len(block_rows)
+    return CPUAttentionMetadata(
+        num_actual_tokens=slot_mapping.shape[0],
+        max_query_len=slot_mapping.shape[0],
+        query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32),
+        max_seq_len=slot_mapping.shape[0],
+        seq_lens=torch.full((num_reqs,), slot_mapping.shape[0], dtype=torch.int32),
+        block_table=table,
+        slot_mapping=slot_mapping,
+        scheduler_metadata=None,
+    )
 
 
-def _meta(slots: torch.Tensor) -> _FakeMeta:
-    return _FakeMeta(block_tables=[torch.tensor(BLOCK_TABLE)], slot_mapping=slots)
+def _meta(slots: torch.Tensor) -> Any:
+    return _cpu_meta([torch.tensor(BLOCK_TABLE)], slots)
 
 
 def _span_slots(block_idx: int) -> torch.Tensor:
@@ -63,7 +81,7 @@ def test_span_slot_coverage_detects_missing_and_foreign_slots():
 
 
 def test_span_slot_coverage_detects_duplicated_slot():
-    """A slot mapping with an EXTRA duplicated row (a mis-built metadata
+    """A slot mapping with an EXTRA duplicated row (a malformed metadata
     emitting one token twice) covers every expected slot exactly once
     plus the alias: the set comparison passes it, the multiset comparison
     must not."""
@@ -162,8 +180,8 @@ def _multi_work_setup():
     input_ids = torch.arange(2 * BS, dtype=torch.int64)
     # req-a's span [0, 128) is its table's block 0 (block id 2); req-b's
     # span [128, 256) is its table's block 1 (block id 3).
-    meta = _FakeMeta(
-        block_tables=[torch.tensor([2]), torch.tensor([8, 3])],
+    meta = _cpu_meta(
+        block_rows=[torch.tensor([2]), torch.tensor([8, 3])],
         slot_mapping=torch.cat([_span_slots(2), _span_slots(3)]),
     )
     return works, tokens, positions, input_ids, meta
@@ -179,7 +197,7 @@ def test_execute_repair_only_multi_item_executes_each_work():
     model = _FakeModel(n_layers=4)
 
     with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="unsloth/Llama-3.2-1B")
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
         results = execute_repair_only(
             model, sub, input_ids, positions, ["req-a", "req-b"]
@@ -207,12 +225,15 @@ def test_pre_write_gate_refuses_foreign_slot_before_any_layer():
     # (foreign -- not in either table row).
     bad_slots = meta.slot_mapping.clone()
     bad_slots[:BS] = 999 * BS + torch.arange(BS)
-    meta_bad = _FakeMeta(block_tables=meta.block_tables, slot_mapping=bad_slots)
+    meta_bad = _cpu_meta(
+        block_rows=[torch.tensor([2]), torch.tensor([8, 3])],
+        slot_mapping=bad_slots,
+    )
     sub = _sub_output(works, tokens)
     model = _FakeModel(n_layers=4)
 
     with set_forward_context(
-        {"model.layers.0": meta_bad}, create_vllm_config(model="unsloth/Llama-3.2-1B")
+        {"model.layers.0": meta_bad}, create_vllm_config(model="facebook/opt-125m")
     ):
         results = execute_repair_only(
             model, sub, input_ids, positions, ["req-a", "req-b"]
@@ -251,7 +272,7 @@ def test_layer_exception_contained_as_abort():
     model.model.layers[1] = _BoomLayer("model.layers.1")
 
     with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="unsloth/Llama-3.2-1B")
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
         results = execute_repair_only(
             model, sub, input_ids, positions, ["req-a", "req-b"]
@@ -268,10 +289,11 @@ def test_layer_exception_contained_as_abort():
 
 
 def test_execute_repair_only_per_work_positions_validation():
-    """The per-work validation RED twin: work req-b's row window carries
-    positions that do not match its repair span -- the per-work positions
-    assert must fire (the multi-item loop may not skip or weaken any
-    item's battery)."""
+    """The per-work validation twin: work req-b's row window carries
+    positions that do not match its repair span. The failure envelope
+    contains the violated assert into req-b's failed verdict (aborted,
+    structural_check False, error_detail preserved) while req-a -- whose
+    geometry is valid -- still executes and commits."""
     works, tokens, positions, input_ids, meta = _multi_work_setup()
     # Corrupt req-b's window: its positions no longer match [128, 256).
     positions = positions.clone()
@@ -279,14 +301,22 @@ def test_execute_repair_only_per_work_positions_validation():
     sub = _sub_output(works, tokens)
     model = _FakeModel(n_layers=4)
 
-    with (
-        pytest.raises(AssertionError, match="req-b"),
-        set_forward_context(
-            {"model.layers.0": meta},
-            create_vllm_config(model="unsloth/Llama-3.2-1B"),
-        ),
+    with set_forward_context(
+        {"model.layers.0": meta},
+        create_vllm_config(model="facebook/opt-125m"),
     ):
-        execute_repair_only(model, sub, input_ids, positions, ["req-a", "req-b"])
+        results = execute_repair_only(
+            model, sub, input_ids, positions, ["req-a", "req-b"]
+        )
+
+    ra, rb = results
+    assert ra.executed_layers == 1
+    assert not ra.aborted
+    assert ra.structural_check
+    assert rb.executed_layers == 0
+    assert rb.aborted
+    assert not rb.structural_check
+    assert "req-b" in (rb.error_detail or "")
 
 
 # ---- The ownership fence: the independent authorization battery ----
@@ -295,7 +325,7 @@ def test_execute_repair_only_per_work_positions_validation():
 def _run_two_works(model, works, tokens, positions, input_ids, meta):
     sub = _sub_output(works, tokens)
     with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="unsloth/Llama-3.2-1B")
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
         return execute_repair_only(model, sub, input_ids, positions, ["req-a", "req-b"])
 
@@ -308,8 +338,8 @@ def test_correlated_metadata_corruption_refused():
     authorization must refuse it before any repair layer runs, with
     req-b unaffected."""
     works, tokens, positions, input_ids, meta = _multi_work_setup()
-    corrupted = _FakeMeta(
-        block_tables=[torch.tensor([8]), torch.tensor([8, 3])],
+    corrupted = _cpu_meta(
+        block_rows=[torch.tensor([8]), torch.tensor([8, 3])],
         slot_mapping=torch.cat([_span_slots(8), _span_slots(3)]),
     )
     results = _run_two_works(
@@ -371,11 +401,11 @@ def test_partial_write_set_authorization_refused():
         epoch=7,
         expected_write_block_ids=(2,),  # omits block 9!
     )
-    meta = _FakeMeta(
+    meta = _cpu_meta(
         # req-a's row covers blocks 0-1 (2, 9); req-b's row must cover
         # its span's ABSOLUTE block index 2 (a 3-entry row: the row
         # lists the request's blocks from ITS block 0).
-        block_tables=[torch.tensor([2, 9]), torch.tensor([11, 12, 3])],
+        block_rows=[torch.tensor([2, 9]), torch.tensor([11, 12, 3])],
         slot_mapping=torch.cat([_span_slots(2), _span_slots(9), _span_slots(3)]),
     )
     works = {
@@ -409,8 +439,8 @@ def test_duplicated_slots_refused_under_authorization():
     works, tokens, positions, input_ids, meta = _multi_work_setup()
     dup = _span_slots(2).clone()
     dup[5] = dup[4]  # duplicate; dup[5]'s expected slot goes missing
-    corrupted = _FakeMeta(
-        block_tables=[torch.tensor([2]), torch.tensor([8, 3])],
+    corrupted = _cpu_meta(
+        block_rows=[torch.tensor([2]), torch.tensor([8, 3])],
         slot_mapping=torch.cat([dup, _span_slots(3)]),
     )
     results = _run_two_works(
@@ -484,7 +514,7 @@ def test_block_table_row_accepts_cuda_and_ascend_spelling():
 
     rows = [torch.tensor([2]), torch.tensor([8, 3])]
     slots = torch.cat([_span_slots(2), _span_slots(3)])
-    ascend_meta = _FakeMeta(block_tables=rows, slot_mapping=slots)
+    ascend_meta = _cpu_meta(block_rows=rows, slot_mapping=slots)
     cuda_rows = [torch.tensor([2, 9]), torch.tensor([8, 3])]
     cuda_meta = SimpleNamespace(block_table=torch.stack(cuda_rows))
     assert _repair_block_table_row(ascend_meta, 1).tolist() == [8, 3]
@@ -501,7 +531,7 @@ def test_rezero_indexes_core_layout_cache():
 
     layer = _CoreLayoutLayer("model.layers.0", num_blocks=16)
     layer.self_attn.attn.kv_cache.fill_(1.0)
-    meta = _FakeMeta(block_tables=[torch.tensor([7])], slot_mapping=_span_slots(7))
+    meta = _cpu_meta(block_rows=[torch.tensor([7])], slot_mapping=_span_slots(7))
     _rezero_repair_span([layer], meta)
     cache = layer.self_attn.attn.kv_cache
     # Rows of block 7 are zeroed across heads and channels...
@@ -547,22 +577,272 @@ def test_scheduler_restores_computed_tokens_via_staged_write():
     )
 
 
-
 def test_scheduler_refuses_async_scheduling_under_repair_policy():
-    """The async-scheduling init guard: the batch-queue step calls
-    sample_tokens unconditionally, but a repair-only step returns its
-    verdicts from execute_model without setting execute_model_state --
-    sample_tokens would return None and the engine would discard the repair
-    verdicts and raise. The repair policy must refuse async scheduling at
-    init, exactly like PP>1 and DP>1."""
+    """kv_load_failure_policy='repair' + async_scheduling must fail at init:
+    the batch-queue step calls sample_tokens unconditionally, but a
+    repair-only step returns verdicts without execute_model_state, so
+    sample_tokens returns None and the engine raises at the batch-queue
+    None check."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="repair",
+    )
+    vllm_config.scheduler_config.async_scheduling = True
+    with pytest.raises(RuntimeError, match="not supported with async scheduling"):
+        create_scheduler(vllm_config)
+
+
+def test_repair_policy_allows_sync_scheduling():
+    """The async guard is repair-specific: the same config with synchronous
+    scheduling constructs a scheduler that carries the repair policy."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="repair",
+    )
+    vllm_config.scheduler_config.async_scheduling = False
+    assert create_scheduler(vllm_config).repair_kv_load_failures
+
+
+def test_recompute_policy_allows_async_scheduling():
+    """The async guard does not over-reject: the recompute policy under
+    async scheduling constructs normally (its fallback rides the ordinary
+    step shape)."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="recompute",
+    )
+    vllm_config.scheduler_config.async_scheduling = True
+    scheduler = create_scheduler(vllm_config)
+    assert scheduler.recompute_kv_load_failures
+    assert not scheduler.repair_kv_load_failures
+
+
+def test_single_rank_consensus_is_local_success():
+    """The single-rank consensus short-circuit returns the local-success
+    predicate (uniform with the multi-rank semantics): a failed or aborted
+    local run never reports agreement."""
+    from vllm.v1.worker.gpu.repair_executor import _ranks_repair_agree
+
+    green = dict(
+        aborted=False,
+        executed_layers=4,
+        pre_write_ok=True,
+        auth_ownership_ok=True,
+        auth_table_ok=True,
+        slot_ownership=True,
+        write_coverage=True,
+        layer_end=4,
+        backend_ok=True,
+    )
+    assert _ranks_repair_agree(**green)
+    assert not _ranks_repair_agree(**{**green, "aborted": True, "executed_layers": 2})
+    assert not _ranks_repair_agree(**{**green, "backend_ok": False})
+    assert not _ranks_repair_agree(**{**green, "pre_write_ok": False})
+    assert not _ranks_repair_agree(**{**green, "executed_layers": 3})
+
+
+def test_short_block_table_row_is_refused_not_raised():
+    """A block-table row too short for the span (the span needs 2 blocks,
+    the row lists 1) is a malformed geometry: the executor must return a
+    REFUSED verdict (aborted, no layers executed, error_detail recorded),
+    never raise out of execute_repair_only."""
+    work = RepairWork(
+        request_id="req-r",
+        repair_span=(0, 2 * BS),
+        layer_end=1,
+        restored_extent=512,
+        plan_id=1,
+        epoch=7,
+        expected_write_block_ids=(2, 3),
+    )
+    meta = _cpu_meta(
+        block_rows=[torch.tensor([2])],  # one entry: the span needs two
+        slot_mapping=torch.arange(2 * BS),
+    )
+    sub = _sub_output({"req-r": work}, {"req-r": 2 * BS})
+    model = _FakeModel(n_layers=4)
+    positions = torch.arange(2 * BS, dtype=torch.int64)
+
+    with set_forward_context(
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
+    ):
+        results = execute_repair_only(
+            model, sub, positions.clone(), positions, ["req-r"]
+        )
+
+    (result,) = results
+    assert result.executed_layers == 0
+    assert result.aborted
+    assert not result.structural_check
+    assert result.error_detail is not None
+
+
+class _PartialWriteBoomLayer(_FakeLayer):
+    """A layer that writes SOME KV rows and then raises -- the realistic
+    partial-write shape (a kernel that partially completed). The write and
+    the raise are scoped to req-a's row window (its positions start below
+    BS)."""
+
+    def __call__(self, positions, hidden_states, residual):
+        if int(positions.min()) < BS:
+            cache = self.self_attn.attn.kv_cache[0]
+            cache[2, :64] = 7.5  # block 2 (req-a's span block), rows 0..63
+            raise RuntimeError("injected partial-write layer failure")
+        return hidden_states + 1.0, residual
+
+
+def test_abort_rezero_covers_the_raising_layer_partial_writes():
+    """The raising layer may have written some KV rows before raising; the
+    abort re-zero must cover its partial writes too (defense in depth --
+    the scheduler-side eviction remains the authoritative invalidation),
+    leaving no partially written state readable."""
+    works, tokens, positions, input_ids, meta = _multi_work_setup()
+    model = _FakeModel(n_layers=4)
+    # req-a spans [0, 128) over block 2 with layer_end=2: layer 0 runs
+    # clean, layer 1 partially writes then raises.
+    works["req-a"].layer_end = 2
+    model.model.layers[1] = _PartialWriteBoomLayer("model.layers.1")
+    # Pre-fill every layer's caches with a sentinel (AFTER the layer
+    # replacement, so the boom layer's fresh caches are covered too) so
+    # the test can see exactly which rows the repair touched/re-zeroed.
+    for layer in model.model.layers:
+        for cache in layer.self_attn.attn.kv_cache:
+            cache.fill_(3.25)
+
+    sub = _sub_output(works, tokens)
+    with set_forward_context(
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
+    ):
+        results = execute_repair_only(
+            model, sub, input_ids, positions, ["req-a", "req-b"]
+        )
+
+    ra, rb = results
+    assert ra.aborted
+    assert ra.executed_layers == 1
+    assert not ra.structural_check
+    assert "partial-write layer failure" in (ra.error_detail or "")
+    # req-b ran clean (its layer 1 call took the benign branch).
+    assert not rb.aborted and rb.structural_check
+
+    layer0, layer1, layer2, layer3 = model.model.layers
+    # Layer 0 (fully executed by req-a): its span rows were re-zeroed.
+    assert layer0.self_attn.attn.kv_cache[0][2].abs().max().item() == 0
+    # Layer 1 (the RAISING layer): its partial writes (rows 0..63 of
+    # block 2) must be re-zeroed too.
+    assert layer1.self_attn.attn.kv_cache[0][2].abs().max().item() == 0
+    # Layers beyond req-a's layer_end never execute: untouched sentinels.
+    assert layer2.self_attn.attn.kv_cache[0][2, 0, 0].item() == 3.25
+    assert layer3.self_attn.attn.kv_cache[0][2, 0, 0].item() == 3.25
+    # Neighbor state (req-b's block 3, any layer): untouched sentinels.
+    for layer in model.model.layers:
+        assert layer.self_attn.attn.kv_cache[0][3, 0, 0].item() == 3.25
+
+
+# ---- Configuration guards and the multimodal admission exclusion ----
+
+
+def test_scheduler_refuses_context_parallelism_under_repair_policy():
+    """kv_load_failure_policy='repair' + context parallelism must fail at
+    init: CP-local positions cannot satisfy the executor's absolute-span
+    validation."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="repair",
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    with pytest.raises(RuntimeError, match="not supported with context"):
+        create_scheduler(vllm_config)
+
+
+def test_repair_works_never_dispatched_to_ubatch_runner():
+    """The DBO guard: a repair-only step must never be split into
+    microbatches -- the dp_size == 1 fast path re-checks the
+    all-reduce-overlap split after the eager descriptor and would route the
+    repair batch through the ordinary full-depth ubatch forward before the
+    repair branch is evaluated. The dispatch call must disable ubatching
+    when repair work is scheduled."""
     import inspect
 
-    from vllm.v1.core.sched import scheduler as sched_mod
+    from vllm.v1.worker.gpu import model_runner as mr
 
-    src = inspect.getsource(sched_mod)
-    assert "async_scheduling" in src, (
-        "the scheduler must guard async scheduling under the repair policy"
+    src = inspect.getsource(mr.GPUModelRunner.execute_model)
+    assert "repair_works is None" in src, (
+        "the ubatching dispatch must be disabled for repair-only steps"
     )
-    assert (
-        "not supported with" in src and "async scheduling" in src
-    ), "the async guard must reject at init with a loud message"
+
+
+def test_mm_request_repairs_fall_back_to_recompute():
+    """A multimodal request's load-failure reports must NOT authorize a
+    repair plan: the repair replay embeds the raw placeholder token ids
+    (not the merged vision features), so the replayed KV would be silently
+    wrong while the geometry-only commit battery passes. The admission
+    pass routes the request to the recompute fallback instead: the
+    request lands in the failed/failed_kv_load set and no recovery plan
+    is installed."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_request,
+        create_scheduler,
+        create_vllm_config,
+    )
+    from vllm.v1.outputs import KVLoadFailureReport
+    from vllm.v1.request import RequestStatus
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        kv_load_failure_policy="repair",
+    )
+    vllm_config.scheduler_config.async_scheduling = False
+    scheduler = create_scheduler(vllm_config)
+    request = create_request()
+    # Make the request multimodal: a non-empty mm_features list is the
+    # scheduler-side marker the admission pass checks.
+    request.mm_features = ["mm"]  # type: ignore[list-item]
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.requests[request.request_id] = request
+
+    report = KVLoadFailureReport(
+        request_id=request.request_id,
+        source_rank=0,
+        token_span=(0, 128),
+        rollback_boundary=0,
+        failed_block_ids=[0],
+        restored_extent=128,
+        healthy_above_span=True,
+        observed_failed_layers=[1],
+        transfer_generation=1,
+    )
+
+    failed = scheduler._handle_repair_reports([report])
+
+    assert request.request_id in failed, (
+        "the MM request must be failed closed to the recompute fallback"
+    )
+    assert scheduler.recovery_plans == {}, (
+        "no repair plan may be installed for a multimodal request"
+    )

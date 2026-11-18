@@ -417,6 +417,19 @@ class Scheduler(SchedulerInterface):
                     "geometry are single-group-shaped)"
                 )
             if self.repair_kv_load_failures and (
+                vllm_config.parallel_config.prefill_context_parallel_size > 1
+                or vllm_config.parallel_config.decode_context_parallel_size > 1
+            ):
+                # Under context parallelism the positions tensor carries
+                # CP-local (not absolute) token positions, so the executor's
+                # span validation cannot hold. Reject at init until the
+                # repair path learns CP-local geometry.
+                raise RuntimeError(
+                    "kv_load_failure_policy='repair' is not supported with "
+                    "context parallelism in v1 (repair spans are expressed "
+                    "in absolute positions)"
+                )
+            if self.repair_kv_load_failures and (
                 self.scheduler_config.async_scheduling
             ):
                 # Repair-only steps return their verdicts from execute_model
@@ -5678,6 +5691,24 @@ class Scheduler(SchedulerInterface):
                     skip_req_ids,
                     trusted_rollback=0,
                     mark_external_untrusted=True,
+                )
+                continue
+            # Multimodal requests cannot take the repair path: the repair
+            # replay embeds the raw placeholder token ids, which is not the
+            # embedding the original prefill used (the merged vision
+            # features), so the replayed KV would be silently wrong while
+            # the geometry-only commit battery passes. Fail closed to the
+            # recompute fallback until a correct re-embedding mechanism
+            # exists.
+            if request.mm_features:
+                self._reject_uninterpretable_reports(
+                    request,
+                    req_reports,
+                    "multimodal request (the repair replay cannot re-embed "
+                    "vision features; a re-embedding mechanism does not "
+                    "exist in v1)",
+                    skip_req_ids,
+                    trusted_rollback=0,
                 )
                 continue
             rollback, corrupt_end = (
