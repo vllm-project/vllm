@@ -5,8 +5,8 @@ import dataclasses
 import logging
 import weakref
 from collections import Counter
-from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -26,25 +26,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
-
-
-# shared across the worker's DBO threads, which execute one forward at a time.
-_cudagraph_wrappers_enabled = True
-
-
-def cudagraph_wrappers_enabled() -> bool:
-    return _cudagraph_wrappers_enabled
-
-
-@contextmanager
-def disable_cudagraph_wrappers() -> Iterator[None]:
-    global _cudagraph_wrappers_enabled
-    previous = _cudagraph_wrappers_enabled
-    _cudagraph_wrappers_enabled = False
-    try:
-        yield
-    finally:
-        _cudagraph_wrappers_enabled = previous
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -170,7 +151,7 @@ class CUDAGraphWrapper:
     2. At runtime, the wrapper receives a runtime_mode and a
     batch_descriptor(key) from the forward context and blindly trust them
     for cudagraph dispatching.
-    3. If wrappers are disabled or runtime_mode is NONE or mismatches the
+    3. If runtime_mode is NONE or runtime_mode does not match the mode of the
     wrapper, just call the runnable directly.
     4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
     the wrapper will perform cudagraph capture(if key does not exist, create
@@ -264,7 +245,6 @@ class CUDAGraphWrapper:
         if (
             cudagraph_runtime_mode == CUDAGraphMode.NONE
             or cudagraph_runtime_mode != self.runtime_mode
-            or not cudagraph_wrappers_enabled()
         ):
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
             # running without cudagraphs.

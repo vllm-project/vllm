@@ -105,7 +105,7 @@ Its `dispatch()` method takes the batch's shape and returns the graph to run it 
 A [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper] instance wraps a runnable and simply mimics the runnable with appended CUDA Graphs abilities. Each wrapper instance is bound to a specific `runtime_mode`, which is restricted to `PIECEWISE` and `FULL` mode, and takes responsibility for capturing/replaying and passing through (directly calling) the runnable.  At runtime, each wrapper would:
 
 1. inspect the runtime_mode and batch_descriptor(dispatching key) from the global forward context.
-2. If wrappers are disabled by `disable_cudagraph_wrappers()`, runtime_mode is `NONE`, or runtime_mode does not match the mode of the wrapper, just call the runnable directly.
+2. If runtime_mode is `NONE` or runtime_mode does not match the mode of the wrapper, just call the runnable directly.
 3. Otherwise, i.e., the runtime_mode matches the mode of the wrapper, the wrapper will perform CUDA Graphs capture (if key does not exist, create
 a new entry and cache it) or replay (if key exists in the cache).
 
@@ -122,7 +122,7 @@ Therefore, for a `FULL` runtime mode, it is safe to capture/replay a full CUDA G
 
 ### Full CUDA Graph capturing & warm-up
 
-`CudaGraphManager` uses runtime mode `NONE` for warmup and `FULL` inside `disable_cudagraph_wrappers()` for externally managed FULL capture; PIECEWISE leaves wrapper dispatch enabled. For full CUDA Graph capture, we explicitly capture different cases (i.e., prefill/mixed batch or uniform_decode batch) by properly setting attention metadata to make sure the underlying attention backends launch the desired kernel routines. To distinguish prefill/mixed batch or uniform_decode batch, the most important property is the `max_query_len` in attn_metadata (true for most attention backends). We set it to the desired `uniform_query_len` for uniform_decode otherwise we make it just the `num_tokens` for a non-uniform_decode batch.
+`CudaGraphManager` uses runtime mode `NONE` for warmup and `FULL` for its own FULL capture; the in-model wrappers are PIECEWISE-scoped, so they run eagerly inside it. For full CUDA Graph capture, we explicitly capture different cases (i.e., prefill/mixed batch or uniform_decode batch) by properly setting attention metadata to make sure the underlying attention backends launch the desired kernel routines. To distinguish prefill/mixed batch or uniform_decode batch, the most important property is the `max_query_len` in attn_metadata (true for most attention backends). We set it to the desired `uniform_query_len` for uniform_decode otherwise we make it just the `num_tokens` for a non-uniform_decode batch.
 
 The CUDA Graphs wrapper no longer manages the warm-up logic. The warm-up process is now controlled directly by the GPU model runner, where the `NONE` runtime mode is assigned to play an eager execution for warm-up. When warming up for a full CUDA Graph, it is also important to explicitly run attention during the warmup `dummy_run` call.
 
