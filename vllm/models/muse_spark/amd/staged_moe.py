@@ -5,7 +5,7 @@
 The post-expert RMSNorm is per route, so the experts must return the unreduced
 `[T, top_k, H]` outputs. The stock path gets them by repeating the input
 `top_k` times and running AITER on `T * top_k` top-1 routes. With AITER's
-`fused_moe_stage1` / `fused_moe_stage2` this module instead
+`fused_moe_prepare_stage2` / `fused_moe_run_stage2` this module instead
 
 * runs the experts on the native `[T, top_k]` routes, one input row per
   token, with stage 2 writing every route to its own row (`per_slot`). The
@@ -56,12 +56,12 @@ def aiter_has_staged_moe() -> bool:
         import aiter.fused_moe as fm
     except ImportError:
         return False
-    stage1 = getattr(fm, "fused_moe_stage1", None)
+    prepare = getattr(fm, "fused_moe_prepare_stage2", None)
     return (
-        stage1 is not None
-        and hasattr(fm, "fused_moe_stage2")
+        prepare is not None
+        and hasattr(fm, "fused_moe_run_stage2")
         and hasattr(fm, "supports_stage2_overrides")
-        and "config_shape" in inspect.signature(stage1).parameters
+        and "config_shape" in inspect.signature(prepare).parameters
     )
 
 
@@ -90,7 +90,7 @@ def _stage2_overridable(
     q_dtype_a = fm.resolve_activation_dtype(
         QuantType.per_1x32, w_dtype, activation=ActivationType.Silu, M=padded
     )
-    # The lookup fused_moe_stage1 does for the calls below.
+    # The lookup fused_moe_prepare_stage2 does for the calls below.
     metadata = fm.get_2stage_cfgs(
         padded,
         model_dim,
@@ -309,7 +309,7 @@ def staged_fused_moe(
     from aiter import ActivationType, QuantType
 
     num_tokens, top_k = topk_ids.shape
-    inputs = fm.fused_moe_stage1(
+    inputs = fm.fused_moe_prepare_stage2(
         hidden_states,
         w1,
         w2,
@@ -331,7 +331,7 @@ def staged_fused_moe(
         cols = column_weights.w2.shape[1]
         routes = route_out.view(-1)[: num_tokens * top_k * cols]
         routes = routes.view(num_tokens, top_k, cols)
-        fm.fused_moe_stage2(
+        fm.fused_moe_run_stage2(
             inputs,
             out=routes,
             per_slot=True,
@@ -341,4 +341,4 @@ def staged_fused_moe(
             a2_scale=_gather_scales(inputs.a2_scale),
         )
         return ColumnShardedRoutes(routes)
-    return fm.fused_moe_stage2(inputs, out=route_out, per_slot=True)
+    return fm.fused_moe_run_stage2(inputs, out=route_out, per_slot=True)
