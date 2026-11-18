@@ -26,6 +26,8 @@ import torch.multiprocessing as mp
 
 from vllm.config import (
     EngramConfig,
+    OffloadConfig,
+    UVAOffloadConfig,
     VllmConfig,
     get_current_vllm_config_or_none,
     set_current_vllm_config,
@@ -58,7 +60,7 @@ from vllm.models.deepseek_v41.common.engram import (
     gather_engram_hashes,
 )
 from vllm.models.qwen4_exp.common import ngram_embedding as ple_ops
-from vllm.models.qwen4_exp.nvidia.ple_peer import Qwen4ExpPLEPeerEmbedding
+from vllm.models.qwen4_exp.nvidia import ple_peer
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -216,6 +218,38 @@ def test_engram_group_creation_honors_model_and_options(
     assert (group is parallel_state._DP) == full_dp
 
 
+@pytest.mark.parametrize(
+    "fabric,options,split",
+    [
+        (True, {}, True),
+        (False, {}, False),
+        (
+            True,
+            {"offload_config": OffloadConfig(uva=UVAOffloadConfig(cpu_offload_gb=1))},
+            False,
+        ),
+        (True, {"load_config": LoadConfig(load_format="sharded_state")}, False),
+    ],
+)
+def test_ple_peer_group_needs_mapped_slices(monkeypatch, fabric, options, split):
+    """Qwen4Exp splits a table across nodes only over one NVLink fabric, and
+    only when its slices stay where loading writes and peers read them."""
+    group = SimpleNamespace(world_size=4, cpu_group=None)
+    monkeypatch.setattr(ple_peer, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(ple_peer, "get_tp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(
+        ple_peer, "in_the_same_node_as", lambda *args, **kwargs: [True, False] * 2
+    )
+    monkeypatch.setattr(ple_peer, "has_cross_node_nvlink", lambda _: fabric)
+    config = {
+        "engram_config": EngramConfig(cpu_offload=False, embedding_across_dp=True),
+        "offload_config": OffloadConfig(),
+        "load_config": LoadConfig(),
+    }
+    config.update(options)
+    assert (ple_peer.get_ple_peer_group(SimpleNamespace(**config)) is group) == split
+
+
 def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
     torch.accelerator.set_device_index(rank)
     update_environment_variables(
@@ -366,7 +400,7 @@ def _check_ple_peer_table(group):
     for method, checkpoint in formats.items():
         tables = []
         for cls, extra in (
-            (Qwen4ExpPLEPeerEmbedding, {"peer_group": group}),
+            (ple_peer.Qwen4ExpPLEPeerEmbedding, {"peer_group": group}),
             (ple_ops.Qwen4ExpPLEDeviceEmbedding, {}),
         ):
             with torch.device("cuda"):

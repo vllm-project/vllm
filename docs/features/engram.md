@@ -196,8 +196,8 @@ Any HIP VMM failure falls back to `/dev/shm` on every replica.
 With `cpu_offload: false` and TP=1, the GPUs of an engine's DP ranks split each
 table's rows when NVLink connects them. Each rank reads its own tokens' rows
 from the owning GPU's HBM, so lookups need no DP collective. The split covers
-the DP ranks on each node, or every DP rank with `embedding_across_dp: true`,
-which then must share one NVLink domain (e.g. GB200 NVL72):
+the DP ranks on each node, or every DP rank with `embedding_across_dp: true`
+when they share one NVLink domain (e.g. GB200 NVL72):
 
 ```bash
 vllm serve <qwen4exp-checkpoint> --data-parallel-size 4 \
@@ -207,7 +207,8 @@ vllm serve <qwen4exp-checkpoint> --data-parallel-size 4 \
 This applies to DeepSeek V4.1 and, on NVIDIA, to Qwen4Exp. Without NVLink peer
 access, DeepSeek V4.1 shards the hash heads and exchanges rows with DP
 collectives instead, and Qwen4Exp keeps a table per DP rank (or ETP-shards it
-with `embedding_across_dp`).
+with `embedding_across_dp`), as it also does with `--cpu-offload-gb`, prefetch
+weight offloading and sharded-state checkpoints.
 
 ## Splitting GPU tables across engines (DeepSeek V4.1)
 

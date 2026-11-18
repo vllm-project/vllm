@@ -4,8 +4,9 @@
 
 import torch
 
-from vllm.config import EngramConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_engram_dp_group, get_tp_group
+from vllm.distributed.device_communicators.nvlink_fabric import has_cross_node_nvlink
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
@@ -23,31 +24,37 @@ from ..common.ngram_embedding import (
 logger = init_logger(__name__)
 
 
-def get_ple_peer_group(engram_config: EngramConfig) -> GroupCoordinator | None:
+def get_ple_peer_group(vllm_config: VllmConfig) -> GroupCoordinator | None:
     """The Engram DP group if its GPUs can split a GPU PLE table's rows: TP=1
     and NVLink between them."""
+    engram_config = vllm_config.engram_config
     group = get_engram_dp_group()
     if (
-        engram_config.cpu_offload
+        engram_config is None
+        or engram_config.cpu_offload
         or engram_config.disk_offload
         or group is None
         or group.world_size == 1
         or get_tp_group().world_size > 1
+        # Weight offloading moves the slice out of symmetric memory, and
+        # sharded-state checkpoints store one table per TP rank, not DP rank.
+        or vllm_config.offload_config.uva.cpu_offload_gb > 0
+        or vllm_config.offload_config.prefetch.offload_group_size > 0
+        or vllm_config.load_config.load_format
+        in ("sharded_state", "runai_streamer_sharded")
     ):
         return None
-    # Cross-node groups come from embedding_across_dp, whose ranks must share
-    # one NVLink domain; node-local groups without NVLink P2P keep a table each.
-    if all(in_the_same_node_as(group.cpu_group, source_rank=0)):
-        physical_id = current_platform.visible_device_id_to_physical_device_id(
-            torch.accelerator.current_device_index()
-        )
-        physical_ids = [None] * group.world_size
-        torch.distributed.all_gather_object(
-            physical_ids, physical_id, group=group.cpu_group
-        )
-        if not current_platform.is_fully_connected(physical_ids):
-            return None
-    return group
+    # Cross-node groups come from embedding_across_dp and need one NVLink fabric.
+    if not all(in_the_same_node_as(group.cpu_group, source_rank=0)):
+        return group if has_cross_node_nvlink(group.cpu_group) else None
+    physical_id = current_platform.visible_device_id_to_physical_device_id(
+        torch.accelerator.current_device_index()
+    )
+    physical_ids = [None] * group.world_size
+    torch.distributed.all_gather_object(
+        physical_ids, physical_id, group=group.cpu_group
+    )
+    return group if current_platform.is_fully_connected(physical_ids) else None
 
 
 @triton.jit

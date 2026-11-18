@@ -433,10 +433,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        engram_config = get_current_vllm_config().engram_config
-        peer_group = (
-            get_ple_peer_group(engram_config) if engram_config is not None else None
-        )
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
+        peer_group = get_ple_peer_group(vllm_config)
         embedding_cls = (
             Qwen4ExpPLEDiskOffloadEmbedding
             if engram_config is not None and engram_config.disk_offload
