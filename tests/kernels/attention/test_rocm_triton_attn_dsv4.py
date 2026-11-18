@@ -692,10 +692,10 @@ def test_sparse_mla_decode_warmup_covers_split_k(
     """After the layer's registered warmup, split-K decodes compile nothing.
 
     The split count follows the batch and its selected KV length while serving.
-    ROCm also keys a variant on whether a pointer's storage fits in 2 GB: the
-    warmup sees the KV cache reservation, which the extensible KV cache re-binds
-    to a view of the committed blocks, and the indices view the metadata
-    builder's buffer.
+    ROCm also keys a variant on whether a pointer's storage fits in 2 GB, and
+    Triton on whether an int divides by 16: the warmup sees the KV cache
+    reservation, which the extensible KV cache re-binds to a view of the
+    committed blocks, and the indices view the metadata builder's buffer.
     """
     from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
     from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
@@ -718,12 +718,15 @@ def test_sparse_mla_decode_warmup_covers_split_k(
     width = row_bytes(NOPE_ONLY_HEAD_DIM) if is_mxfp4 else NOPE_ONLY_HEAD_DIM
     cache_dtype = torch.uint8 if is_mxfp4 else torch.bfloat16
 
-    def kv_cache_in(storage_bytes: int) -> torch.Tensor:
+    def kv_cache_in(storage_bytes: int, num_blocks: int) -> torch.Tensor:
+        # Kernel block size 1: the flat row count is the block count.
         storage = torch.empty(storage_bytes, dtype=torch.uint8, device=device)
-        kv_cache = storage[: 64 * 64 * width * cache_dtype.itemsize].view(cache_dtype)
-        return kv_cache.view(64, 64, width).zero_()
+        kv_cache = storage[: num_blocks * width * cache_dtype.itemsize]
+        return kv_cache.view(cache_dtype).view(num_blocks, 1, width).zero_()
 
-    reserved, committed = kv_cache_in(1 << 32), kv_cache_in(1 << 24)
+    # The committed view differs from the reservation in storage size and in
+    # whether 16 divides its row count.
+    reserved, committed = kv_cache_in(1 << 32, 4096), kv_cache_in(1 << 24, 4093)
     paged_kv_indices = torch.empty(indices_bytes // 4, dtype=torch.int32, device=device)
     impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.num_heads = num_heads

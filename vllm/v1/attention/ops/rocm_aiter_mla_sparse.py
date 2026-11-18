@@ -2633,7 +2633,10 @@ def _sparse_attn_prefill_ragged_kernel(
     )
 
 
-@triton.jit
+# `num_kv` is the row count of the KV cache view, which the extensible KV cache
+# re-binds after the JIT warmup; a specialization on its divisibility by 16
+# could then miss every warmed variant.
+@triton.jit(do_not_specialize=["num_kv"])
 def _sparse_attn_decode_ragged_bf16_partial_kernel(
     q_ptr,
     kv_ptr,
