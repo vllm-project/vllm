@@ -56,7 +56,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId
 use vllm_llm::EngineCoreLlm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -230,12 +230,14 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
 #[derive(Clone)]
 struct FakeTextBackend {
     tokenizer: DynTokenizer,
+    sampling_hints: SamplingHints,
 }
 
 impl Default for FakeTextBackend {
     fn default() -> Self {
         Self {
             tokenizer: Arc::new(TestTokenizer::new()),
+            sampling_hints: SamplingHints::default(),
         }
     }
 }
@@ -247,6 +249,10 @@ impl TextBackend for FakeTextBackend {
 
     fn model_id(&self) -> &str {
         "test-model"
+    }
+
+    fn sampling_hints(&self) -> vllm_text::Result<SamplingHints> {
+        Ok(self.sampling_hints.clone())
     }
 }
 
@@ -857,6 +863,7 @@ async fn generate_without_output_text_skips_detokenization() {
                 default_stream_output_specs(),
                 Arc::new(FakeTextBackend {
                     tokenizer: Arc::new(PanickingTokenizer),
+                    ..Default::default()
                 }),
                 |_| {},
             )
@@ -1760,6 +1767,52 @@ async fn unary_generate_with_sampling_params() {
     // Verify the request was accepted and produced output.
     let outputs = response.outputs.expect("outputs present");
     assert_eq!(outputs.text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_without_temperature_uses_model_default() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-default-temperature",
+            default_stream_output_specs(),
+            Arc::new(FakeTextBackend {
+                sampling_hints: SamplingHints {
+                    default_temperature: Some(0.6),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(params.temperature, 0.6);
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
+    InferenceClient::new(channel)
+        .generate(pb::GenerateRequest {
+            request_id: "test-default-temperature".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("test".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("generate without temperature");
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
@@ -3078,7 +3131,6 @@ fn render_state() -> RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len: Some(1024),
-        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
