@@ -33,8 +33,9 @@ SSM_MODELS = [
 ]
 
 HYBRID_MODELS = [
-    "ibm-granite/granite-4.0-tiny-preview",
+    "tiiuae/Falcon-H1-Tiny-90M-Instruct",
     "Zyphra/Zamba2-1.2B-instruct",
+    "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
     "tiny-random/qwen3-next-moe",
