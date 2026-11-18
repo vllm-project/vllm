@@ -1541,6 +1541,15 @@ requires_rocm_mhc_overlap = pytest.mark.skipif(
 )
 
 
+def _stub_sublayers(decoder, attn, ffn):
+    """Stand plain callables in for the decoder's attention and FFN. Neither
+    has a first GEMM that reads the seam's MXFP8 layer input."""
+    attn.fused_wqa_wkv = nn.Identity()
+    ffn.use_mega_moe, ffn.shared_experts = False, None
+    decoder.attn, decoder.ffn = attn, ffn
+    decoder.attn_seam_mxfp8 = decoder.ffn_seam_mxfp8 = False
+
+
 def _mega_mhc_inputs(num_tokens, hidden_size=5120):
     residual, fn, _, hc_base, norm_weight = _rocm_mhc_inputs(
         num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=4
@@ -1692,7 +1701,9 @@ def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     nn.Module.__init__(layer)
     layer.mono = None
     layer.use_mega_mhc = True
+    layer.use_sequence_parallel = False
     layer.hidden_size = hidden_size
+    _stub_sublayers(layer, lambda x: x, lambda x: x)
     layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_attn_fn_packed = layer.hc_ffn_fn_packed = None
@@ -1856,8 +1867,11 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    _stub_sublayers(
+        decoder,
+        lambda positions, x, _: x * 0.5,
+        lambda x, input_ids: x * 0.25,
+    )
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
@@ -2055,8 +2069,11 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    _stub_sublayers(
+        decoder,
+        lambda positions, x, _: x * 0.5,
+        lambda x, input_ids: x * 0.25,
+    )
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
