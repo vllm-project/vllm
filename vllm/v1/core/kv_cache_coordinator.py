@@ -173,6 +173,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                retention_interval=kv_cache_config.prefix_cache_retention_interval,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -399,11 +400,10 @@ class KVCacheCoordinator(ABC):
         for group_idx, group_blocks in enumerate(computed_blocks):
             if group_blocks:
                 manager = self.single_type_managers[group_idx]
-                group = self.kv_cache_config.kv_cache_groups[group_idx]
                 manager.block_pool.emit_cached_block_events(
                     request,
                     len(group_blocks),
-                    group.block_size,
+                    manager.block_size,
                     group_idx,
                 )
 
@@ -414,17 +414,18 @@ class KVCacheCoordinator(ABC):
         )
         return all([pool.reset_prefix_cache() for pool in pools])
 
-    def free(self, request_id: str) -> None:
+    def free(self, request: Request) -> None:
         """Free the blocks for the request.
 
         Args:
-            request_id: The request ID.
+            request: The request.
 
         """
         for manager in self.single_type_managers:
-            manager.free(request_id)
+            manager.cache_blocks_on_free(request)
+            manager.free(request.request_id)
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping from all single-type managers and
         return its blocks without returning them to the block pool. The
         caller must eventually pass the returned blocks to
@@ -432,7 +433,7 @@ class KVCacheCoordinator(ABC):
         tail blocks are evicted first).
 
         Args:
-            request_id: The request ID.
+            request: The request.
 
         Returns:
             The request's blocks in allocation order.
@@ -440,7 +441,8 @@ class KVCacheCoordinator(ABC):
         """
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
-            blocks.extend(manager.pop_blocks_for_free(request_id))
+            manager.cache_blocks_on_free(request)
+            blocks.extend(manager.pop_blocks_for_free(request.request_id))
         return blocks
 
     def remove_skipped_blocks(
