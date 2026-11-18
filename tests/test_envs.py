@@ -56,6 +56,30 @@ def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
 
 
+_SHM_BROADCAST_SPIN_TUNABLES = {
+    "VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN": "1",
+    "VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS": "2.5",
+    "VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS": "0.1",
+    "VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS": "4.0",
+    "VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA": "0.5",
+    "VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS": "2.0",
+}
+
+
+def test_shm_broadcast_spin_tunables_are_not_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # How processes wait for each other does not change compiled graphs, so
+    # tuning it must not invalidate the compile cache.
+    baseline = envs.compile_factors()
+    for name, value in _SHM_BROADCAST_SPIN_TUNABLES.items():
+        assert name in environment_variables
+        monkeypatch.setenv(name, value)
+    factors = envs.compile_factors()
+    assert not set(_SHM_BROADCAST_SPIN_TUNABLES) & set(factors)
+    assert factors == baseline
+
+
 def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     # Only bounds chat template rendering in the Rust frontend.
     monkeypatch.setenv("VLLM_CHAT_TEMPLATE_FUEL", "2000000")

@@ -284,6 +284,8 @@ def worker_fn_test_idle_to_busy():
         wraps=message_queue._spin_condition.poll_notify,
     ) as parks:
         if not message_queue._is_writer:
+            # This test counts waits under the fixed 1 s grace.
+            message_queue._spin_condition.busy_loop_s = 1
             # Put into idle mode
             message_queue._spin_condition.last_read = 0
 
@@ -1235,6 +1237,279 @@ def test_spin_until_readable_waits_in_the_extension(monkeypatch):
         reader.spin_until_readable([], far_future)
         assert reader.readable()
         assert reader.dequeue(timeout=5) == "message"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+@pytest.fixture
+def adaptive_spin(monkeypatch):
+    monkeypatch.setenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", "1")
+
+
+def test_adaptive_grace_follows_traffic(adaptive_spin):
+    grace = shm_broadcast._AdaptiveSpinGrace()
+    assert grace.adaptive
+    # Seeded at the pivot: a 1 ms interval gives a 1 ms grace.
+    assert grace.current() == pytest.approx(1e-3)
+    fast = shm_broadcast._AdaptiveSpinGrace()
+    slow = shm_broadcast._AdaptiveSpinGrace()
+    for _ in range(50):
+        fast.train(0.2e-3)
+        slow.train(10e-3)
+    # Faster traffic spins longer, slower parks sooner, within the bounds.
+    assert fast.current() == pytest.approx(2e-3)
+    assert slow.current() == pytest.approx(0.1e-3, rel=0.05)
+    graces = []
+    for interval in (0.0, 0.5e-3, 1e-3, 2e-3, 5e-3, 50e-3):
+        g = shm_broadcast._AdaptiveSpinGrace()
+        for _ in range(50):
+            g.train(interval)
+        graces.append(g.current())
+    assert graces == sorted(graces, reverse=True)
+    assert graces[0] == pytest.approx(2e-3)  # a zero interval clamps to MAX
+    assert graces[-1] == pytest.approx(0.05e-3)  # MIN
+
+
+def test_pinned_grace_ignores_traffic(adaptive_spin):
+    grace = shm_broadcast._AdaptiveSpinGrace(0.0)
+    for _ in range(50):
+        grace.train(1e-6)
+    assert not grace.adaptive and grace.current() == 0.0
+    with pytest.raises(ValueError, match="busy_loop_s"):
+        shm_broadcast._AdaptiveSpinGrace(-1.0)
+
+
+def test_adaptive_grace_rejects_bad_tunables(monkeypatch):
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA", "0")
+    with pytest.raises(ValueError, match="ALPHA"):
+        shm_broadcast._AdaptiveSpinGrace()
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA", "0.25")
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS", "3")
+    with pytest.raises(ValueError, match="MIN_GRACE_MS"):
+        shm_broadcast._AdaptiveSpinGrace()
+
+
+def test_adaptive_spin_is_opt_in(monkeypatch):
+    """Without the switch, readers keep the fixed 1 s grace and writers keep
+    yielding; an explicit busy_loop_s always pins the grace."""
+    monkeypatch.delenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", raising=False)
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        cond = reader._spin_condition
+        assert not cond.adaptive and cond.busy_loop_s == 1.0
+        assert writer._write_grace is None
+        monkeypatch.setenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", "1")
+        cond.busy_loop_s = 0.25
+        assert not cond.adaptive and cond.busy_loop_s == 0.25
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_reader_grace_counts_down_from_its_last_read(adaptive_spin):
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        cond = reader._spin_condition
+        assert cond.adaptive
+        cond.last_read = 100.0
+        grace = cond.busy_loop_s
+        assert cond.remaining_grace_s(100.0) == pytest.approx(grace)
+        assert cond.remaining_grace_s(100.0 + grace / 2) == pytest.approx(grace / 2)
+        assert cond.remaining_grace_s(100.0 + 2 * grace) == 0.0
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_native_spin_is_capped_by_the_remaining_grace(adaptive_spin, monkeypatch):
+    """The reader's hardware wait never outlasts its grace, and is skipped
+    once the grace is gone, so a short adaptive grace really parks."""
+    timeouts = []
+
+    def fake_spinloop(buffer, callback, timeout):
+        timeouts.append(timeout)
+        return False
+
+    monkeypatch.setattr(shm_broadcast, "SPINLOOP_EXT_ENABLED", True)
+    monkeypatch.setattr(shm_broadcast, "spinloop", fake_spinloop, raising=False)
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        # Pin a long grace so scheduling delays cannot use it up first, with
+        # a known quarter of it left when the reader starts waiting.
+        cond.busy_loop_s = 0.4
+        cond.last_read = time.monotonic() - 0.3
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01)
+        assert timeouts and timeouts[0] <= 0.1
+        timeouts.clear()
+        cond.last_read = 0.0  # grace long gone
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01)
+        assert timeouts == []
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_writer_parks_in_doubling_steps(adaptive_spin, monkeypatch):
+    """Past its grace, a writer blocked on a reader sleeps 50 us, 100 us, ...
+    up to VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS instead of yielding."""
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS", "0.4")
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=1
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    sleeps: list[float] = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue("held")  # the only block; the reader never reads it
+        with (
+            mock.patch.object(shm_broadcast.time, "sleep", sleeps.append),
+            pytest.raises(TimeoutError),
+        ):
+            writer.enqueue("blocked", timeout=0.05)
+        assert sleeps[:4] == pytest.approx([50e-6, 100e-6, 200e-6, 400e-6])
+        assert sleeps and max(sleeps) == pytest.approx(400e-6)
+        # A park never sleeps past the caller's timeout, even when the first
+        # park step alone is far longer than it.
+        monkeypatch.setattr(shm_broadcast, "_WRITE_PARK_MIN_S", 5.0)
+        monkeypatch.setattr(writer, "_write_park_max_s", 10.0)
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            writer.enqueue("blocked", timeout=0.05)
+        assert time.monotonic() - start < 1.0
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_writer_uses_a_slot_freed_while_it_slept(adaptive_spin, monkeypatch):
+    """A block freed during the writer's last sleep is used, not reported as
+    a timeout, even if the sleep ran past the deadline."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=1
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue("held")
+        real_sleep = time.sleep
+
+        def slow_sleep(seconds):
+            # The reader frees the block while the writer sleeps past its
+            # deadline.
+            assert reader.dequeue(timeout=5) == "held"
+            real_sleep(0.1)
+
+        monkeypatch.setattr(writer._write_grace, "current", lambda: 0.0)
+        monkeypatch.setattr(shm_broadcast.time, "sleep", slow_sleep)
+        writer.enqueue("next", timeout=0.01)
+        monkeypatch.undo()
+        assert reader.dequeue(timeout=5) == "next"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_writer_grace_trains_before_the_payload_copy(adaptive_spin):
+    """The writer learns how long a block took to free, not how long the
+    caller then spent writing into it."""
+    writer = MessageQueue(n_reader=1, n_local_reader=1, max_chunk_bytes=1024)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        grace = writer._write_grace
+        assert grace is not None
+        with mock.patch.object(grace, "train", wraps=grace.train) as train:
+            with writer.acquire_write(timeout=1) as buf:
+                # Trained before the caller copies its payload into `buf`.
+                train.assert_called_once()
+                buf[0] = 0
+            train.assert_called_once()
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_reader_with_a_tiny_grace_wakes_on_back_to_back_writes(
+    adaptive_spin, monkeypatch
+):
+    """A reader that parks within a sub-millisecond grace of each read must
+    still be woken by the next write, not by the 5 s recheck."""
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS", "0.05")
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=4
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    latencies = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        assert reader._spin_condition.busy_loop_s <= 0.05e-3
+        with mock.patch.object(shm_broadcast, "SHM_READER_RECHECK_INTERVAL_MS", 5000):
+            for i in range(50):
+                result: list = []
+                thread = threading.Thread(
+                    target=lambda out=result: out.append(reader.dequeue(timeout=10)),
+                    daemon=True,
+                )
+                thread.start()
+                assert _wait_parked(writer, 0), "reader never parked"
+                sent = time.monotonic()
+                writer.enqueue(i)
+                thread.join(timeout=10)
+                latencies.append(time.monotonic() - sent)
+                assert result == [i]
+        assert max(latencies) < 0.5, f"slowest wake-up {max(latencies):.3f} s"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_adaptive_reply_wait_parks_past_the_grace(adaptive_spin):
+    """The executor's reply wait spins only within the adaptive grace, then
+    parks in short steps, and returns as soon as the reply lands or engine
+    input arrives."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024 * 1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        cond.last_read = 0.0  # grace long gone
+        far_future = time.monotonic() + 60
+        with mock.patch.object(
+            cond, "poll_notify", wraps=cond.poll_notify
+        ) as poll_notify:
+            # Parks in steps of at most REMOTE_POLL_WAIT_MS until the deadline.
+            start = time.monotonic()
+            reader.spin_until_readable([], start + 0.05)
+            assert 0.04 <= time.monotonic() - start < 0.5
+            parks = poll_notify.call_count
+            assert parks > 1
+        threading.Timer(0.05, writer.enqueue, args=("reply",)).start()
+        start = time.monotonic()
+        reader.spin_until_readable([], far_future)
+        assert time.monotonic() - start < 1.0
+        assert reader.readable()
+        assert reader.dequeue(timeout=5) == "reply"
+        # Engine input arriving mid-wait ends it within one park step.
+        pending: list[str] = []
+        threading.Timer(0.05, pending.append, args=("input",)).start()
+        cond.last_read = 0.0
+        start = time.monotonic()
+        reader.spin_until_readable(pending, far_future)
+        assert pending and time.monotonic() - start < 1.0
     finally:
         writer.shutdown()
         reader.shutdown()

@@ -137,6 +137,99 @@ LONG_WAIT_TIME_LOG_MSG = (
 )
 
 
+# First sleep of an adaptive writer whose grace expired while readers still
+# hold its next block; later sleeps double up to
+# VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS.
+_WRITE_PARK_MIN_S = 50e-6
+
+
+def _positive_ms_env(name: str) -> float:
+    """Read a millisecond-valued env var as seconds.
+
+    Args:
+        name: Name of the `vllm.envs` variable to read.
+
+    Returns:
+        The value in seconds.
+
+    Raises:
+        ValueError: If the value is not finite and positive.
+
+    """
+    ms = float(getattr(envs, name))
+    if not math.isfinite(ms) or ms <= 0:
+        raise ValueError(f"{name} must be a finite positive number, got {ms}")
+    return ms / 1000.0
+
+
+class _AdaptiveSpinGrace:
+    """How long to spin after an event before parking.
+
+    An EMA of the interval between events, `T`, sets the grace to
+    `clamp(B * B / T, MIN, MAX)`, with `T` seeded at the pivot `B`. Faster
+    traffic spins longer, because the next event is likely within the grace;
+    slower traffic parks sooner. The grace never grows as traffic slows and
+    stays bounded however stale the estimate is.
+
+    `fixed_s` pins the grace and disables training.
+    """
+
+    def __init__(self, fixed_s: float | None = None):
+        """Build the policy, adaptive unless `fixed_s` pins it.
+
+        Args:
+            fixed_s: Grace in seconds; `None` reads the adaptive policy from
+                the `VLLM_SHM_BROADCAST_ADAPTIVE_*` env vars.
+
+        Raises:
+            ValueError: If `fixed_s` or an adaptive env var is out of range.
+
+        """
+        self.fixed_s = 0.0
+        if fixed_s is not None:
+            if not math.isfinite(fixed_s) or fixed_s < 0:
+                raise ValueError(
+                    f"busy_loop_s must be a finite non-negative number, got {fixed_s}"
+                )
+            self.adaptive = False
+            self.fixed_s = fixed_s
+            return
+        self.adaptive = True
+        self.min_s = _positive_ms_env("VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS")
+        self.max_s = _positive_ms_env("VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS")
+        self.budget_s = _positive_ms_env("VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS")
+        self.alpha = float(envs.VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA)
+        if not math.isfinite(self.alpha) or not 0.0 < self.alpha <= 1.0:
+            raise ValueError(
+                f"VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA must be in (0, 1], got {self.alpha}"
+            )
+        if self.min_s > self.max_s:
+            raise ValueError(
+                "VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS must not exceed "
+                "VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS"
+            )
+        self._interval_ema_s = self.budget_s
+
+    def current(self) -> float:
+        """The grace in seconds."""
+        if not self.adaptive:
+            return self.fixed_s
+        # The floor keeps back-to-back events (a zero interval) well defined.
+        t = max(self._interval_ema_s, 1e-9)
+        return min(self.max_s, max(self.min_s, self.budget_s**2 / t))
+
+    def train(self, interval_s: float) -> None:
+        """Fold one observed interval between events into the policy.
+
+        Args:
+            interval_s: Seconds between two consecutive events.
+
+        """
+        if self.adaptive:
+            a = self.alpha
+            self._interval_ema_s = (1 - a) * self._interval_ema_s + a * interval_s
+
+
 class SpinCondition:
     """This class implements an interface similar to a threading.Condition. It
     allows a writer to notify readers to wake up and read from the shared memory
@@ -158,8 +251,20 @@ class SpinCondition:
         is_reader: bool,
         context: zmq.Context,
         notify_address: str,
-        busy_loop_s: float = 1,
+        busy_loop_s: float | None = None,
     ):
+        """Build one side of the condition and its notification sockets.
+
+        Args:
+            is_reader: Whether this process waits on the buffer (reader) or
+                publishes notifications (writer).
+            context: ZMQ context for the notify and cancel sockets.
+            notify_address: Address the writer binds and readers subscribe to.
+            busy_loop_s: Pins a reader's spin grace, in seconds. `None` uses
+                the adaptive grace when
+                `VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN` is set, else 1 s.
+
+        """
         self.is_reader = is_reader
 
         if is_reader:
@@ -169,7 +274,12 @@ class SpinCondition:
             self.last_notify_poll = self.last_read
 
             # Time to keep busy-looping on the shm buffer before going idle
-            self.busy_loop_s = busy_loop_s
+            if (
+                busy_loop_s is None
+                and not envs.VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN
+            ):
+                busy_loop_s = 1.0
+            self._grace = _AdaptiveSpinGrace(busy_loop_s)
 
             # Readers subscribe to write notifications
             self.local_notify_socket: zmq.Socket = context.socket(SUB)
@@ -216,13 +326,30 @@ class SpinCondition:
             self.local_notify_socket.bind(notify_address)
 
             self.last_read = 0
-            self.busy_loop_s = 0
+            self._grace = _AdaptiveSpinGrace(0.0)
             self.read_cancel_socket = None
             self.write_cancel_socket = None
             self.poller = None
 
+    @property
+    def busy_loop_s(self) -> float:
+        """Seconds a reader keeps spinning after its last read."""
+        return self._grace.current()
+
+    @busy_loop_s.setter
+    def busy_loop_s(self, value: float) -> None:
+        # Assigning pins the grace, as passing it to the constructor does.
+        self._grace = _AdaptiveSpinGrace(value)
+
+    @property
+    def adaptive(self) -> bool:
+        """Whether the grace adapts to traffic rather than being pinned."""
+        return self._grace.adaptive
+
     def record_read(self):
-        self.last_read = time.monotonic()
+        now = time.monotonic()
+        self._grace.train(now - self.last_read)
+        self.last_read = now
         if self.last_read - self.last_notify_poll >= SHM_NOTIFY_POLL_INTERVAL_S:
             self.last_notify_poll = self.last_read
             self.drain_notify()
@@ -670,6 +797,13 @@ class MessageQueue:
             self._spin_condition: SpinCondition = SpinCondition(
                 is_reader=False, context=context, notify_address=local_notify_addr
             )
+            # Adaptive wait for readers to free a block; None keeps yielding.
+            self._write_grace: _AdaptiveSpinGrace | None = None
+            if envs.VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN:
+                self._write_grace = _AdaptiveSpinGrace()
+                self._write_park_max_s = _positive_ms_env(
+                    "VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS"
+                )
         else:
             self.buffer = None  # type: ignore
             local_subscribe_addr = None
@@ -892,9 +1026,25 @@ class MessageQueue:
 
     @contextmanager
     def acquire_write(self, timeout: float | None = None):
+        """Yield the next writable block once every reader has read it.
+
+        By default the writer yields while readers hold the block. With
+        `VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN`, it spins within an
+        adaptive grace trained on how long blocks take to free, then sleeps
+        in steps doubling up to `VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS`.
+
+        Args:
+            timeout: Seconds to wait for a free block; `None` waits forever.
+
+        Raises:
+            TimeoutError: If no block frees within `timeout`.
+
+        """
         assert self._is_writer, "Only writers can acquire write"
         start_time = time.monotonic()
         n_warning = 1
+        grace = self._write_grace
+        park_s = 0.0
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
 
@@ -906,9 +1056,13 @@ class MessageQueue:
 
                 if SPINLOOP_EXT_ENABLED and not check():
                     spin_s = SPINLOOP_TIMEOUT_SECONDS
+                    waited_s = time.monotonic() - start_time
                     if timeout is not None:
                         # Never spin past the caller's deadline.
-                        spin_s = min(spin_s, timeout - (time.monotonic() - start_time))
+                        spin_s = min(spin_s, timeout - waited_s)
+                    if grace is not None:
+                        # Past the adaptive grace, park instead.
+                        spin_s = min(spin_s, grace.current() - waited_s)
                     if spin_s > _SPINLOOP_MIN_TIMEOUT_S:
                         spinloop(metadata_buffer, check, timeout=spin_s)
 
@@ -918,12 +1072,26 @@ class MessageQueue:
                     # if this block is not ready to write,
                     # we need to wait until it is read by all readers
 
-                    # Release the processor to other threads
-                    sched_yield()
+                    if grace is None or (
+                        time.monotonic() - start_time < grace.current()
+                    ):
+                        # Release the processor to other threads
+                        sched_yield()
+                    else:
+                        park_s = min(
+                            park_s * 2 or _WRITE_PARK_MIN_S, self._write_park_max_s
+                        )
+                        sleep_s = park_s
+                        if timeout is not None:
+                            # Never sleep past the caller's deadline.
+                            remaining_s = timeout - (time.monotonic() - start_time)
+                            sleep_s = min(park_s, max(remaining_s, 0.0))
+                        time.sleep(sleep_s)
 
-                    # if we time out, raise an exception
+                    # if we time out, raise an exception, unless the block
+                    # freed while this writer slept or yielded
                     elapsed = time.monotonic() - start_time
-                    if timeout is not None and elapsed > timeout:
+                    if timeout is not None and elapsed > timeout and not check():
                         raise TimeoutError
 
                     # if we wait for a long time, log a message
@@ -938,6 +1106,10 @@ class MessageQueue:
                 # (1) not written
                 # (2) read by all readers
 
+                # Train on how long the block took to free, measured before
+                # the caller's payload copy so that copy does not inflate it.
+                if grace is not None:
+                    grace.train(time.monotonic() - start_time)
                 # mark the block as not written
                 metadata_buffer[0] = 0
                 # let caller write to the buffer
@@ -1168,11 +1340,35 @@ class MessageQueue:
         With the spinloop extension, a local reader waits in hardware on the
         flags it reads: a store to them wakes it, and it re-checks `pending`
         after each bounded hardware wait (about a millisecond at most), as a
-        remote reader does after its socket poll.
+        remote reader does after its socket poll. With an adaptive grace, a
+        local reader spins only within it; past it, it parks on its
+        notification socket in steps of at most REMOTE_POLL_WAIT_MS, checking
+        `pending` between steps.
         """
         if self._is_remote_reader:
             self.remote_socket.poll(timeout=REMOTE_POLL_WAIT_MS)
             return
+        cond = self._spin_condition
+        if cond.adaptive:
+            grace_end = cond.last_read + cond.busy_loop_s
+            if grace_end < deadline:
+                self._spin_until(pending, grace_end)
+                monotonic = time.monotonic
+                while not pending and not self.readable():
+                    wait_ms = min(REMOTE_POLL_WAIT_MS, (deadline - monotonic()) * 1000)
+                    if wait_ms < 1:
+                        # zmq waits in whole milliseconds; spin out the rest.
+                        self._spin_until(pending, deadline)
+                        return
+                    if self._wake_mode == _WAKE_PARKED_PING:
+                        self._park(int(wait_ms))
+                    else:
+                        cond.poll_notify(int(wait_ms))
+                return
+        self._spin_until(pending, deadline)
+
+    def _spin_until(self, pending: Sized, deadline: float) -> None:
+        """The spin of `spin_until_readable`, up to `deadline`."""
         read_flag_idx = self.local_reader_rank + 1
         monotonic = time.monotonic
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:

@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
+    VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN: bool = False
+    VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS: float = 1.0
+    VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS: float = 0.05
+    VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS: float = 2.0
+    VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA: float = 0.25
+    VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS: float = 1.0
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -800,6 +806,36 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
+    ),
+    # Experimental. If set to 1, shared-memory MessageQueue readers spin for
+    # an adaptive grace after each read instead of a fixed second, and a
+    # writer waiting for readers parks in short sleeps instead of yielding.
+    # The grace follows an EMA of the interval between reads: B * B / EMA,
+    # clamped to [MIN_GRACE, MAX_GRACE], where B is the BUDGET below.
+    "VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN": lambda: bool(
+        int(os.getenv("VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN", "0"))
+    ),
+    # Interval, in ms, at which the adaptive spin grace equals itself: faster
+    # traffic spins longer, slower traffic parks sooner.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS": lambda: float(
+        os.getenv("VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS", "1.0")
+    ),
+    # Shortest adaptive spin grace, in ms.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS": lambda: float(
+        os.getenv("VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS", "0.05")
+    ),
+    # Longest adaptive spin grace, in ms.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS": lambda: float(
+        os.getenv("VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS", "2.0")
+    ),
+    # Weight of the newest interval in the adaptive grace's EMA, in (0, 1].
+    "VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA": lambda: float(
+        os.getenv("VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA", "0.25")
+    ),
+    # Longest sleep, in ms, between checks of an adaptive writer waiting for
+    # readers to free a block. Sleeps double from 50 us up to this.
+    "VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS": lambda: float(
+        os.getenv("VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS", "1.0")
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
@@ -2551,6 +2587,13 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        # Inter-process wait policy; does not affect compiled graphs.
+        "VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA",
+        "VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",

@@ -65,6 +65,45 @@ inproc PAIR socket. Every reader wait polls that socket: the ring park, the
 overflow-payload wait on `local_socket`, and a remote reader's wait on
 `remote_socket`. The reader then raises `RuntimeError("cancelled")`.
 
+### Adaptive grace (experimental)
+
+With `VLLM_EXPERIMENTAL_SHM_BROADCAST_ADAPTIVE_SPIN=1`, a reader's grace
+follows its traffic instead of staying at one second. An EMA `T` of the
+interval between reads sets it to `clamp(B * B / T, MIN, MAX)`, with `T`
+seeded at the pivot `B`: faster traffic spins longer, slower traffic parks
+sooner, and the grace never grows as traffic slows.
+
+| Variable | Default | Role |
+| --- | --- | --- |
+| `VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS` | 1.0 | pivot `B` |
+| `VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS` | 0.05 | shortest grace |
+| `VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS` | 2.0 | longest grace |
+| `VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA` | 0.25 | weight of the newest interval |
+| `VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS` | 1.0 | longest writer sleep |
+
+A short grace parks within a millisecond of a read, which is only safe
+because no notification is lost. The native spin of the extension is capped
+by the remaining grace. A writer whose next block is held trains its own
+grace on how long blocks take to free, measured before the payload copy, and
+past it sleeps in steps doubling from 50 µs to
+`VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS`. The executor's reply wait spins only
+within the reply queue's grace, then parks in steps of at most
+`REMOTE_POLL_WAIT_MS`, so `EngineCoreProc._wait_for_output` still handles new
+inputs and aborts during its one-second window. An explicit `busy_loop_s`,
+including 0, pins the grace and makes it non-adaptive; the reply wait of a
+queue with a pinned grace spins until the caller's deadline, as it does with
+the switch off. With the switch off, readers keep the one-second grace and
+writers yield.
+
+The trade is CPU for wake latency. On one AMD x86-64 host with
+`benchmarks/benchmark_shm_broadcast.py` (median of three runs, extension off),
+four workers at a 10 ms step gap used 0.48 CPU-seconds over a 5.8 s window
+with the switch on, against 23.94 over 6.0 s off. Four idle workers used no
+CPU over 10 s, against 3.93 CPU-seconds off. Round trips grew from 58 to
+480 µs at p50 and from 141 to 2077 µs at p99, because every step now wakes a
+parked worker. Back-to-back steps ran at 0.915 (one worker) and 0.927 (four
+workers) of the throughput with the switch off.
+
 ### Hardware waits
 
 With `VLLM_USE_SPINLOOP_EXT=1`, the spinning part of a wait runs in the
