@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import torch
 from typing_extensions import override
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
@@ -18,10 +18,15 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
+
+logger = init_logger(__name__)
 
 
 def _all_workers_barrier() -> None:
@@ -94,6 +99,20 @@ class CPUOffloadingSpec(OffloadingSpec):
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
 
+        # Pre-fault and pin the region in the background; the engine serves
+        # without offloading until every worker is ready.
+        self.async_init = bool(self.extra_config.get("async_init", False))
+        if self.async_init and not current_platform.is_cuda():
+            # Pinning would race graph capture without a capture-mode guard.
+            logger.warning("async_init needs CUDA; setting the CPU tier up now")
+            self.async_init = False
+        # Pause between background pin calls, as a multiple of each call's time.
+        self.async_init_pin_pace = float(
+            self.extra_config.get("async_init_pin_pace", 2.0)
+        )
+        if not 0 <= self.async_init_pin_pace < float("inf"):
+            raise ValueError("async_init_pin_pace must be a finite number >= 0")
+
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
             raise Exception(
@@ -126,6 +145,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        self.cpu_info = CPUOffloadingInfo.from_config(
+            config, self.num_chunks, self.kv_bytes_per_chunk
+        )
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -136,6 +159,12 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.cache_policy_module_path: str | None = self.extra_config.get(
             "cache_policy_module_path"
         )
+
+    @classmethod
+    @override
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the label names CPUOffloadingManager.config_info() fills."""
+        return CPUOffloadingInfo.config_info_keys()
 
     @override
     def get_manager(self) -> OffloadingManager:
@@ -156,33 +185,40 @@ class CPUOffloadingSpec(OffloadingSpec):
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
+                info=self.cpu_info,
             )
         return self._manager
 
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return current_platform.is_cuda_alike() and not current_platform.is_rocm()
+        return (
+            current_platform.is_cuda_alike() and not current_platform.is_rocm()
+        ) or current_platform.is_xpu()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
+        prefault_shard: tuple[int, int] | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
+            # Use the logical worker rank for each slot, and distribute the
+            # replicated region's pre-faulting work across the worker group.
+            world_size = self.config.parallel.world_size
+            worker_index = self.config.parallel.rank
             if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
+                prefault_shard = (worker_index, world_size)
+
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
-                rank=rank,
+                rank=0 if self.replicated_layout else worker_index,
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                num_segments=REGION_SEGMENTS,
+                populate_shard=None if self.async_init else prefault_shard,
+                populate=not self.async_init,
             )
         try:
             return CPUOffloadingWorker(
@@ -190,6 +226,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                defer_host_setup=self.async_init,
+                prefault_shard=prefault_shard,
+                pin_pace=self.async_init_pin_pace,
             )
         except Exception:
             if mmap_region is not None:

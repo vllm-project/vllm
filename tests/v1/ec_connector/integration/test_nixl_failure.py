@@ -30,7 +30,6 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
 )
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_port
 
 MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
 
@@ -77,11 +76,7 @@ def servers():
                 "--ec-transfer-config",
                 config("ec_producer"),
             ],
-            env_dict={
-                "CUDA_VISIBLE_DEVICES": devices[0],
-                "VLLM_EC_SIDE_CHANNEL_HOST": "127.0.0.1",
-                "VLLM_EC_SIDE_CHANNEL_PORT": str(get_open_port()),
-            },
+            env_dict={"CUDA_VISIBLE_DEVICES": devices[0]},
         ) as encoder,
         RemoteOpenAIServer(
             MODEL,
@@ -130,11 +125,14 @@ async def _encode(session, encoder):
     rewritten = rewrite_for_decode(
         body,
         {
-            0: {
-                **handle["metadata"],
-                "mm_hash": item_uuid,
-                "ec_mm_hash": mm_hash,
-            }
+            0: [
+                {
+                    "metadata": handle["metadata"],
+                    "modality": "image",
+                    "mm_hash": mm_hash,
+                    "transfer_id": None,
+                }
+            ]
         },
     )
     assert rewritten["messages"][0]["content"][0]["type"] == "image_embeds"

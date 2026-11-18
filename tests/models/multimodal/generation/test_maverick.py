@@ -20,8 +20,12 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 from vllm import LLM, SamplingParams
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+)
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from ....utils import multi_gpu_test
 
@@ -47,7 +51,6 @@ def run_maverick_serving(model: str):
             enforce_eager=True,
             tensor_parallel_size=8,
             enable_expert_parallel=True,
-            trust_remote_code=True,
             gpu_memory_utilization=0.4,
             kv_cache_dtype="fp8",
         )
@@ -131,9 +134,7 @@ def create_reduced_maverick_model(
 
     try:
         print("Loading original model configuration...")
-        original_config = AutoConfig.from_pretrained(
-            original_model_name, trust_remote_code=True
-        )
+        original_config = AutoConfig.from_pretrained(original_model_name)
         print("Creating reduced configuration...")
         reduced_config = create_reduced_config(
             original_config, text_layers, num_experts, vision_layers
@@ -217,9 +218,7 @@ def create_reduced_config(
 def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
     """Copy tokenizer files from the original model."""
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            original_model_name, trust_remote_code=True
-        )
+        tokenizer = AutoTokenizer.from_pretrained(original_model_name)
         tokenizer.save_pretrained(output_path)
         print("Tokenizer files copied successfully")
     except Exception as e:
@@ -232,8 +231,7 @@ def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
     try:
         processor = AutoProcessor.from_pretrained(
             original_config._name_or_path
-            or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-            trust_remote_code=True,
+            or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
         )
         processor.save_pretrained(output_path)
         print("Copied original preprocessor config")
@@ -523,7 +521,7 @@ def save_weights_to_safetensors(
             print(f"Saved shard {i + 1}/{len(shards)}: {filename}")
 
     # Create index file
-    index_data = {
+    index_data: dict[str, Any] = {
         "metadata": {
             "total_size": sum(
                 tensor.numel() * tensor.element_size() for tensor in weights.values()
@@ -550,19 +548,20 @@ def check_attention_spec_interleaved_rope(
 ):
     """Check that the attention spec is correct."""
     assert isinstance(llm.llm_engine.model_executor, Executor)
-    kv_cache_specs_per_rank = llm.llm_engine.model_executor.get_kv_cache_specs()
+    layer_configs_per_rank = llm.llm_engine.model_executor.get_kv_cache_layer_configs()
     for rank in range(num_ranks):
-        kv_cache_specs = kv_cache_specs_per_rank[rank]
-        assert len(kv_cache_specs.keys()) == num_attention_layers
+        layer_configs = layer_configs_per_rank[rank]
+        assert len(layer_configs.keys()) == num_attention_layers
         for i in range(num_attention_layers):
             if rope_layers[i] == 0:
-                expected_spec = FullAttentionSpec
+                expected_manager = FullAttentionManager
             else:
-                expected_spec = ChunkedLocalAttentionSpec
-            assert isinstance(
-                kv_cache_specs[f"language_model.model.layers.{i}.self_attn.attn"],
-                expected_spec,
-            )
+                expected_manager = ChunkedLocalAttentionManager
+            layer_config = layer_configs[
+                f"language_model.model.layers.{i}.self_attn.attn"
+            ]
+            assert layer_config.manager_cls is expected_manager
+            assert isinstance(layer_config.spec, AttentionSpec)
 
 
 def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
@@ -623,7 +622,6 @@ def test_dummy_maverick(
 
     llm = LLM(
         model=model_path,
-        trust_remote_code=True,
         max_model_len=512,  # Small context for testing
         gpu_memory_utilization=0.3,  # Conservative memory usage
         enforce_eager=enforce_eager,

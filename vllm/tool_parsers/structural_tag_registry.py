@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import CustomTool, FunctionTool, ToolChoiceCustom
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
@@ -39,6 +39,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import (
+    custom_tool_parameters,
+    get_function_tools,
+    require_function_tools,
+)
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -78,25 +83,65 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "plamo3"}
+    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
 
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
+_BUILTIN_TOOL_STRUCTURAL_TAG_MODELS: set[str] = set()
 
 
 def register_vllm_structural_tag(
     model: str,
+    *,
+    builtin_tools: bool = False,
 ) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
-    """Register a vLLM-owned structural tag builder."""
+    """Register a vLLM-owned structural tag builder.
+
+    Args:
+        model: Structural tag model key.
+        builtin_tools: Whether the model can call non-function tools, so its
+            builder receives every request tool instead of only the function
+            tools from `get_function_tools`.
+
+    """
 
     def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
         _VLLM_STRUCTURAL_TAG_REGISTRY[model] = func
+        if builtin_tools:
+            _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS.add(model)
         return func
 
     return decorator
+
+
+def get_structural_tag_tools(
+    model: str,
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool]:
+    """Return the tools a structural tag for `model` lets the model call.
+
+    Most models are only shown function tools, so their grammar must cover
+    exactly those: a tool missing from the prompt cannot be called, and one
+    missing from the grammar is shown but blocked.
+
+    Raises:
+        VLLMValidationError: `tool_choice` requires a call, but the model
+            has no tool it can call.
+
+    """
+    if model in _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS:
+        return tools
+    if (
+        tool_choice is None
+        or tool_choice == "auto"
+        or getattr(tool_choice, "mode", None) == "auto"
+    ):
+        return get_function_tools(tools)
+    return require_function_tools(tools)
 
 
 def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
@@ -117,7 +162,7 @@ def _with_tool_strict(
     tool: ChatCompletionToolsParam | ResponsesTool,
     strict: bool,
 ) -> ChatCompletionToolsParam | ResponsesTool:
-    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    """Return a copy of `tool` with `strict` set, leaving the request's alone."""
     if isinstance(tool, FunctionTool):
         return tool.model_copy(update={"strict": strict})
     if isinstance(tool, ChatCompletionToolsParam):
@@ -132,11 +177,11 @@ def resolve_tool_strictness(
     tool_choice: ToolChoice,
     strict_level: ToolStrictLevel,
 ) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
-    """Decide whether a structural tag applies and pin each tool's ``strict``.
+    """Decide whether a structural tag applies and pin each tool's `strict`.
 
-    A tool without an explicit ``strict`` is treated as non-strict: its call
+    A tool without an explicit `strict` is treated as non-strict: its call
     envelope is still constrained, but its arguments stay free unless the
-    server level is PARAMETER. ``None`` means no structural tag.
+    server level is PARAMETER. `None` means no structural tag.
     """
     if (
         tool_choice == "auto"
@@ -164,6 +209,9 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
+    tools = get_structural_tag_tools(model, tools, tool_choice)
+    if not tools:
+        return None
     tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None
@@ -210,10 +258,10 @@ _TOOL_CALL_LIST_FORMATS = (
 
 
 def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
-    """Stop every tool-call list in ``tag`` after its first call, in place.
+    """Stop every tool-call list in `tag` after its first call, in place.
 
-    Enforces ``parallel_tool_calls=false`` in the grammar. In every registered
-    tag, ``_TOOL_CALL_LIST_FORMATS`` repeat tool calls, never arguments.
+    Enforces `parallel_tool_calls=false` in the grammar. In every registered
+    tag, `_TOOL_CALL_LIST_FORMATS` repeat tool calls, never arguments.
     """
 
     def visit(node: Any) -> None:
@@ -243,6 +291,11 @@ def _dump_tool_for_xgrammar(
         if tool.strict is not None:
             function["strict"] = tool.strict
         return {"type": "function", "function": function}
+    if isinstance(tool, CustomTool):
+        function = {"name": tool.name, "parameters": custom_tool_parameters()}
+        if tool.description is not None:
+            function["description"] = tool.description
+        return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
         return dumped_tool
@@ -262,7 +315,7 @@ def _dump_tool_choice_for_xgrammar(
     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
-    if isinstance(tool_choice, ToolChoiceFunction):
+    if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
         return {
             "type": "function",
             "function": {"name": tool_choice.name},
@@ -302,15 +355,19 @@ def get_function_parameters(function) -> dict[str, Any] | bool:
     return function.parameters if function.parameters is not None else True
 
 
-def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
+def _hermes_tool_tags(
+    tools: list[FunctionToolParam],
+    start_tag: str,
+    end_tag: str,
+) -> list[TagFormat]:
     arguments_field_prefix = '", "arguments": '
     formats = [
         # <tool_call>
         # {"name": "t1", "arguments": {"q": "v"}}
         # </tool_call>
-        ('<tool_call>\n{"name": "', "}\n</tool_call>"),
+        (start_tag + '\n{"name": "', "}\n" + end_tag),
         # <tool_call>{"name": "t1", "arguments": {"q": "v"}}</tool_call>
-        ('<tool_call>{"name": "', "}</tool_call>"),
+        (start_tag + '{"name": "', "}" + end_tag),
     ]
 
     return [
@@ -326,6 +383,36 @@ def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
     ]
 
 
+def _hermes_style_structural_tag(
+    tools: list[FunctionToolParam],
+    tool_choice: SimplifiedToolChoice,
+    start_tag: str,
+    end_tag: str,
+) -> StructuralTag:
+    tags = _hermes_tool_tags(tools, start_tag, end_tag)
+    if tool_choice == "auto":
+        suffix_tag = (
+            TriggeredTagsFormat(triggers=[start_tag], tags=tags)
+            if tags
+            else AnyTextFormat()
+        )
+    elif tool_choice == "forced":
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=True,
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+        )
+
+    return StructuralTag(format=suffix_tag)
+
+
 @register_vllm_structural_tag("hermes")
 def get_hermes_structural_tag(
     tools: list[FunctionToolParam],
@@ -335,31 +422,23 @@ def get_hermes_structural_tag(
     token_suffix: str = "",
 ) -> StructuralTag:
     del builtin_tools, reasoning, token_suffix
+    return _hermes_style_structural_tag(
+        tools, tool_choice, "<tool_call>", "</tool_call>"
+    )
 
-    tool_call_trigger = "<tool_call>"
 
-    if tool_choice == "auto":
-        tags = _hermes_tool_tags(tools)
-        suffix_tag = (
-            TriggeredTagsFormat(triggers=[tool_call_trigger], tags=tags)
-            if tags
-            else AnyTextFormat()
-        )
-    elif tool_choice == "forced":
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
-            stop_after_first=True,
-        )
-    else:
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
-        )
-
-    return StructuralTag(format=suffix_tag)
+@register_vllm_structural_tag("longcat")
+def get_longcat_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    del builtin_tools, reasoning, token_suffix
+    return _hermes_style_structural_tag(
+        tools, tool_choice, "<longcat_tool_call>", "</longcat_tool_call>"
+    )
 
 
 def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
@@ -546,7 +625,7 @@ _K3_JSON_TO_XTML_TYPE = {
 
 
 def _k3_escape_attr(value: str) -> str:
-    """Mirror ``encoding_k3._escape_attr_value`` (``&`` then ``"``)."""
+    """Mirror `encoding_k3._escape_attr_value` (`&` then `"`)."""
     return str(value).replace("&", "&amp;").replace('"', "&quot;")
 
 
@@ -584,16 +663,16 @@ def _k3_argument_tag(
     schema: dict[str, Any],
     root_defs: dict[str, Any] | None = None,
 ) -> TagFormat | None:
-    """Build one ``argument`` XTML tag for property ``key``.
+    """Build one `argument` XTML tag for property `key`.
 
-    ``string`` values are emitted raw (bounded by the close marker); every other
+    `string` values are emitted raw (bounded by the close marker); every other
     JSON type is emitted as JSON and validated against the property schema. A
     property whose type is a union / missing is left permissive (any XTML type,
     raw value) so a valid call is never rejected.
 
-    ``root_defs`` carries the tool parameters' root-level ``$defs`` /
-    ``definitions``: slicing a property out of the parameters document orphans
-    its ``#/$defs/...`` references, so those tables must be re-attached to keep
+    `root_defs` carries the tool parameters' root-level `$defs` /
+    `definitions`: slicing a property out of the parameters document orphans
+    its `#/$defs/...` references, so those tables must be re-attached to keep
     the embedded schema self-contained.
     """
     prop = schema if isinstance(schema, dict) else {}
@@ -642,7 +721,7 @@ def _k3_argument_tag(
 
 
 def _k3_permissive_argument_tag() -> TagFormat:
-    """A key/type-agnostic ``argument`` tag: any attributes, raw value.
+    """A key/type-agnostic `argument` tag: any attributes, raw value.
 
     Used as a fallback so tools with union/loose schemas still get the XTML
     skeleton constrained without over-rejecting the value.
@@ -660,7 +739,7 @@ def _k3_permissive_argument_tag() -> TagFormat:
 
 
 def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
-    """Build ``argument`` tags for a tool's parameter schema.
+    """Build `argument` tags for a tool's parameter schema.
 
     Require at least one tag when the root schema declares required properties.
     Otherwise, keep accepting zero-or-more tags. Arguments remain order-agnostic
@@ -689,7 +768,7 @@ def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
 
 
 def _k3_call_tag(tool: FunctionToolParam) -> TagFormat:
-    """One ``call`` tag: ``<|open|>call tool="N" index="<digits>"<|sep|> args``."""
+    """One `call` tag: `<|open|>call tool="N" index="<digits>"<|sep|> args`."""
     function = tool.function
     parameters = get_function_parameters(function)
     begin = f'{_K3_OPEN}call tool="{_k3_escape_attr(function.name)}" index="'
@@ -709,10 +788,10 @@ def _k3_call_tag(tool: FunctionToolParam) -> TagFormat:
 def _k3_response_prefix() -> list[Any]:
     """The response channel that always precedes the tools channel.
 
-    ``response`` is generated in thinking mode (prefix ends at
-    ``<|open|>think<|sep|>``) but is part of the generation prefix in
+    `response` is generated in thinking mode (prefix ends at
+    `<|open|>think<|sep|>`) but is part of the generation prefix in
     non-thinking mode, so its open marker is optional. Excluding the reserved
-    marker heads commits ``<|close|>`` to the response-close branch immediately
+    marker heads commits `<|close|>` to the response-close branch immediately
     and prevents a nested channel from starting inside response text.
     """
     return [
@@ -784,10 +863,10 @@ def get_kimi_k3_structural_tag(
 
 
 def _hy_v4_argument_keys(parameters: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Split a tool's argument keys into ``(required, optional)``.
+    """Split a tool's argument keys into `(required, optional)`.
 
     Both lists keep declaration order. Required keys missing from
-    ``properties`` are still treated as required.
+    `properties` are still treated as required.
     """
     properties = parameters.get("properties") or {}
     required = parameters.get("required") or []
@@ -814,9 +893,9 @@ def get_hy_v4_structural_tag(
         tool_choice: Simplified tool choice.
         reasoning: Whether the grammar also covers the reasoning phase.
         token_suffix: Per-checkpoint structural-token suffix including the
-            leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
+            leading colon (e.g. `":6124c78e"`), or `""` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
-            tokenizer vocab and passes it to ``get_model_structural_tag``.
+            tokenizer vocab and passes it to `get_model_structural_tag`.
 
     """
     del builtin_tools
@@ -929,6 +1008,14 @@ _GLM_4_7_VALUE_EXCLUDES = [
 ]
 
 
+# Only scalar values are pinned as bare JSON. Array and object values stay raw
+# text: a JSON grammar there admits only JSON escapes after a backslash, so text
+# the model writes with bare backslashes (a Windows path) is forced into escapes
+# the model gives near-zero probability. The parser keeps the raw text when such
+# a value is not valid JSON.
+_GLM_4_7_JSON_SCALAR_TYPES = frozenset({"integer", "number", "boolean", "null"})
+
+
 def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
     if "enum" in prop:
         values = [
@@ -937,20 +1024,15 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
         ]
         return values[0] if len(values) == 1 else OrFormat(elements=values)
     prop_type = prop.get("type")
-    if isinstance(prop_type, list):
-        formats = [
-            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
-        ]
-        if "string" in prop_type:
-            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
-        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
-    if prop_type in (None, "string"):
+    types = prop_type if isinstance(prop_type, list) else [prop_type]
+    if not types or not all(t in _GLM_4_7_JSON_SCALAR_TYPES for t in types):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
-    return JSONSchemaFormat(json_schema={"type": prop_type})
+    formats = [JSONSchemaFormat(json_schema={"type": t}) for t in types]
+    return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
 
 
 def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
-    """Return ``properties`` when the schema is a plain object schema."""
+    """Return `properties` when the schema is a plain object schema."""
     properties = params.get("properties")
     if (
         not isinstance(properties, dict)
@@ -966,7 +1048,7 @@ def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
-    """Shallow tag for a non-strict tool: keys and basic value types pinned."""
+    """Shallow tag for a non-strict tool: keys and scalar value types pinned."""
     properties = _glm_4_7_plain_properties(tool.function.parameters or {})
     if properties is None:
         return TagFormat(
@@ -1024,11 +1106,11 @@ def get_glm_4_7_structural_tag(
     """Build the GLM-4.7 structural tag, dispatching per tool on strictness.
 
     Args:
-        function_tools: Normalized function tools with ``strict`` pinned by
-            ``resolve_tool_strictness``.
+        function_tools: Normalized function tools with `strict` pinned by
+            `resolve_tool_strictness`.
         builtin_tools: Unused; GLM-4.7 has no builtin tools.
-        tool_choice: Simplified tool choice (``auto`` / ``required`` /
-            ``forced``).
+        tool_choice: Simplified tool choice (`auto` / `required` /
+            `forced`).
         reasoning: Whether the grammar also covers the reasoning phase.
         token_suffix: Unused; GLM-4.7 structural tokens are fixed.
 

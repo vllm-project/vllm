@@ -17,14 +17,14 @@
 #
 # Environment variables:
 #   S3_BUCKET   - Bucket name (default: vllm-wheels)
-#   VARIANT     - ROCm variant (default: rocm721)
+#   VARIANT     - ROCm variant the root index serves (required, e.g. rocm100)
 #   DRY_RUN     - Set to 1 for preview mode (same as --dry-run)
 
 set -euo pipefail
 
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
-VARIANT="${VARIANT:-rocm721}"
+VARIANT="${VARIANT:?set VARIANT, e.g. rocm100}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE_VERSION=""
 

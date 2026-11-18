@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -41,6 +42,9 @@ logger = init_logger(__name__)
 # User-facing reason labels for waiting request breakdown
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
+
+# User-facing reason labels for frontend admission rejections.
+ADMISSION_REASONS = ("max_num_queued_reqs", "max_num_queued_tokens")
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
@@ -101,6 +105,9 @@ class AggregateStatLoggerBase(StatLoggerBase):
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]): ...
 
+    def record_admission_rejection(self, reason: str) -> None:  # noqa
+        """Record a frontend admission rejection. Optional for custom loggers."""
+
 
 class LoggingStatLogger(StatLoggerBase):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
@@ -147,6 +154,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+        self.num_finished_reqs: int = 0
 
     def _enable_perf_stats(self) -> bool:
         return self.vllm_config.observability_config.enable_mfu_metrics
@@ -158,6 +166,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+        self.num_finished_reqs += len(iteration_stats.finished_requests)
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -168,12 +177,12 @@ class LoggingStatLogger(StatLoggerBase):
 
     @property
     def log_prefix(self):
-        return "Engine {:03d}: ".format(self.engine_index)
+        return f"Engine {self.engine_index:03d}: "
 
     def _log_prefix_for_engine(self, engine_idx: int) -> str:
         if self.engine_index == engine_idx:
             return self.log_prefix
-        return "Engine {:03d}: ".format(engine_idx)
+        return f"Engine {engine_idx:03d}: "
 
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
@@ -245,12 +254,10 @@ class LoggingStatLogger(StatLoggerBase):
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
-    def _update_stats(self):
-        now = time.monotonic()
+    def _calc_throughput(self, now: float) -> None:
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
 
-        self._reset(now)
         self.engine_is_idle = not any(
             (
                 prompt_throughput,
@@ -259,15 +266,16 @@ class LoggingStatLogger(StatLoggerBase):
                 self.last_generation_throughput,
             )
         )
-        self.last_generation_throughput = generation_throughput
         self.last_prompt_throughput = prompt_throughput
+        self.last_generation_throughput = generation_throughput
 
     def aggregate_scheduler_stats(self):
         # noop for per engine loggers
         return
 
     def log(self):
-        self._update_stats()
+        now = time.monotonic()
+        self._calc_throughput(now)
         self.aggregate_scheduler_stats()
         # Avoid log noise on an idle production system
         log_fn = logger.debug if self.engine_is_idle else logger.info
@@ -292,6 +300,9 @@ class LoggingStatLogger(StatLoggerBase):
         if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
+
+        log_parts.append("Finished: %d reqs")
+        log_args.append(self.num_finished_reqs)
 
         kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
         if any(kv_fetch.values()):
@@ -338,6 +349,8 @@ class LoggingStatLogger(StatLoggerBase):
         if self._enable_perf_stats():
             self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
 
+        self._reset(now)
+
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.debug(
@@ -363,7 +376,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
 
     @property
     def log_prefix(self):
-        return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+        return f"{len(self.engine_indexes)} Engines Aggregated: "
 
     def _enable_perf_stats(self) -> bool:
         # Adding per_gpu perf stats across engines can lead to misleading numbers.
@@ -632,6 +645,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 counter_corrupted_requests, per_engine_labelvalues
             )
 
+        if vllm_config.watermark_config is not None:
+            counter_watermark_requests = self._counter_cls(
+                name="vllm:watermark_requests",
+                documentation=(
+                    "Finished requests by watermark status "
+                    "(only with watermark_config)."
+                ),
+                labelnames=labelnames + ["status"],
+            )
+            self.counter_watermark_requests: dict[str, dict[int, Counter]] = {}
+            for status in ("watermarked", "skipped", "not_watermarked"):
+                per_engine_labelvalues_with_status = {
+                    idx: labelvalues + [status]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                }
+                self.counter_watermark_requests[status] = create_metric_per_engine(
+                    counter_watermark_requests, per_engine_labelvalues_with_status
+                )
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -752,6 +784,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prompt_tokens_cached, per_engine_labelvalues
         )
 
+        self.counter_prompt_tokens_cached_by_source = self._counter_cls(
+            name="vllm:prompt_tokens_cached_by_source",
+            documentation=(
+                "Prefix-cache hit tokens by the cache tier that supplied them: "
+                "device (local HBM), host (offloaded to DRAM), disk, p2p "
+                "(transferred from another vLLM instance) or "
+                "external_unspecified. Counted at admission; sums to "
+                "vllm:prefix_cache_hits + vllm:external_prefix_cache_hits."
+            ),
+            labelnames=labelnames + ["source"],
+        )
+        for source in CacheHitSource:
+            for labelvalues in per_engine_labelvalues.values():
+                self.counter_prompt_tokens_cached_by_source.labels(
+                    *labelvalues, source.value
+                )
+
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
@@ -797,6 +846,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         request_num_preemptions_buckets = histogram_buckets(
             "request_num_preemptions", overrides=custom_buckets
         )
+
+        #
+        # Frontend admission
+        #
+        counter_admission_rejections = self._counter_cls(
+            name="vllm:admission_rejections",
+            documentation=(
+                "Number of admission attempts rejected by a queue limit, by reason."
+            ),
+            labelnames=["model_name", "reason"],
+        )
+        self.admission_rejections = {
+            reason: counter_admission_rejections.labels(
+                model_name=model_name, reason=reason
+            )
+            for reason in ADMISSION_REASONS
+        }
 
         #
         # Histograms of counts
@@ -1111,13 +1177,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.prefix_cache_stats.hits
             )
 
-            if scheduler_stats.connector_prefix_cache_stats is not None:
+            labelvalues = self.per_engine_labelvalues[engine_idx]
+            self.counter_prompt_tokens_cached_by_source.labels(
+                *labelvalues, CacheHitSource.DEVICE.value
+            ).inc(scheduler_stats.prefix_cache_stats.hits)
+
+            connector_stats = scheduler_stats.connector_prefix_cache_stats
+            if connector_stats is not None:
                 self.counter_connector_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.queries
+                    connector_stats.queries
                 )
                 self.counter_connector_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.hits
+                    connector_stats.hits
                 )
+                for tier, num_tokens in connector_stats.hits_by_source.items():
+                    self.counter_prompt_tokens_cached_by_source.labels(
+                        *labelvalues, tier.value
+                    ).inc(num_tokens)
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
@@ -1174,6 +1250,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
+            )
+        if self.vllm_config.watermark_config is not None:
+            counter_watermark = self.counter_watermark_requests
+            counter_watermark["watermarked"][engine_idx].inc(
+                iteration_stats.num_watermarked_reqs
+            )
+            counter_watermark["skipped"][engine_idx].inc(
+                iteration_stats.num_watermark_skipped_reqs
+            )
+            counter_watermark["not_watermarked"][engine_idx].inc(
+                iteration_stats.num_not_watermarked_reqs
             )
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
@@ -1247,6 +1334,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+
+    def record_admission_rejection(self, reason: str) -> None:
+        self.admission_rejections[reason].inc()
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
@@ -1354,6 +1444,11 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def record_admission_rejection(self, reason: str) -> None:
+        """Record one frontend admission rejection on aggregate loggers."""
+        for stat_logger in self.stat_loggers:
+            stat_logger.record_admission_rejection(reason)
 
     def log(self):
         for logger in self.stat_loggers:

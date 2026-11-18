@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../../../attention/attention_dtypes.h"
+#include "core/vec_dtypes/vec_dtypes.h"
 #include <torch/headeronly/core/ScalarType.h>
 #include <assert.h>
 #include <float.h>
@@ -243,7 +243,7 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
 }
 
 // torch stable-ABI (headeronly) scalar types delegate to the CUDA-native
-// conversions, so libtorch_stable kernels dispatched on c10::BFloat16 /
+// conversions, so stable-ABI kernels dispatched on c10::BFloat16 /
 // c10::Half quantize correctly without manual casts.
 template <>
 __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, c10::BFloat16>(
