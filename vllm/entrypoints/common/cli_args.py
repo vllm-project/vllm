@@ -161,6 +161,13 @@ class BaseFrontendArgs:
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
+    max_vad_workers: int = 0
+    """Number of threads that run voice activity detection (VAD) for
+    transcription and translation requests with VAD enabled. With 0
+    (default), VAD runs on the audio preprocessing pool together with audio
+    decoding. With more than 0, VAD runs on a dedicated pool of this size, so
+    it scales independently of decoding. For high-concurrency long-audio
+    workloads with VAD enabled, 4 gave the best throughput in profiling."""
     sse_keep_alive_interval: int = 0
     """Send an SSE keep-alive comment line every this many seconds when a
     `/v1/chat/completions` or `/v1/completions` streaming response is idle
@@ -387,13 +394,6 @@ class FrontendArgs(BaseFrontendArgs):
     When disabled, the setting is also propagated to the engine's
     `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
     path instead of the fused Triton kernel."""
-    max_vad_workers: int = 0
-    """Number of threads that run voice activity detection (VAD) for
-    transcription and translation requests with VAD enabled. With 0
-    (default), VAD runs on the audio preprocessing pool together with audio
-    decoding. With more than 0, VAD runs on a dedicated pool of this size, so
-    it scales independently of decoding. For high-concurrency long-audio
-    workloads with VAD enabled, 4 gave the best throughput in profiling."""
 
     @classmethod
     def _customize_cli_kwargs(
