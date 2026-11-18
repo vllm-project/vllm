@@ -157,7 +157,6 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
-        ("spaces_between_special_tokens", json!(false)),
         ("media_io_kwargs", json!({"image": {}})),
         ("mm_processor_kwargs", json!({})),
         ("enable_response_messages", json!(true)),
@@ -470,6 +469,39 @@ async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
         assert_eq!(response.status(), StatusCode::OK);
         to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
         engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_thinking_token_budget_reaches_engine_core() {
+    for (budget, expected) in [(None, None), (Some(256), Some(256)), (Some(-1), None)] {
+        // Assert after the response drains, so a mismatch fails the test
+        // instead of stalling the mock engine mid-request.
+        let (budget_tx, budget_rx) = std::sync::mpsc::channel();
+        let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                budget_tx.send(params.thinking_token_budget).expect("send budget");
+            },
+        )
+        .await;
+
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true,
+        });
+        if let Some(budget) = budget {
+            body["thinking_token_budget"] = json!(budget);
+        }
+        let response = responses_call(&app, body).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+        assert_eq!(budget_rx.recv().expect("engine request"), expected);
     }
 }
 

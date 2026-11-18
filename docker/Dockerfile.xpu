@@ -89,7 +89,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 
-WORKDIR /workspace/vllm
+WORKDIR /vllm-workspace
 
 ENV UV_HTTP_TIMEOUT=500
 
@@ -100,8 +100,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     uv pip install --upgrade pip
 
 
@@ -119,10 +119,10 @@ FROM vllm-base AS vllm-build
 ARG GIT_REPO_CHECK=0
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
-    uv pip install -r /workspace/vllm/requirements/xpu.txt
+    uv pip install -r /vllm-workspace/requirements/xpu.txt
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency layers.
@@ -213,12 +213,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && rm -rf /tmp/nixl_wheels
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
-    --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
+    --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/test/xpu.txt,target=/vllm-workspace/requirements/test/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
-    uv pip install -r /workspace/vllm/requirements/xpu.txt && \
-    uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt
+    uv pip install -r /vllm-workspace/requirements/xpu.txt && \
+    uv pip install --no-build-isolation -r /vllm-workspace/requirements/test/xpu.txt
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.

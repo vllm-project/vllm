@@ -306,9 +306,9 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
     """jina-embeddings-v5 with a bidirectional EuroBERT (Llama) encoder backbone.
 
     Used by encoder checkpoints such as jina-embeddings-v5-text-nano
-    (``is_decoder=False``). EuroBERT is architecturally a bidirectional Llama, so
+    (`is_decoder=False`). EuroBERT is architecturally a bidirectional Llama, so
     the LlamaModel backbone switches to EncoderOnlyAttention when the config
-    carries ``is_causal=False`` (set by ``JinaEmbeddingsV5ModelConfig``).
+    carries `is_causal=False` (set by `JinaEmbeddingsV5ModelConfig`).
     """
 
     is_pooling_model = True
@@ -332,10 +332,10 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
 class JinaEmbeddingsV5Model(JinaEmbeddingsV5DecoderModel):
     """Dispatcher for the jina-embeddings-v5 family.
 
-    The family ships two backbones under one ``architectures`` entry: Qwen3
+    The family ships two backbones under one `architectures` entry: Qwen3
     decoders (-small) and bidirectional EuroBERT encoders (-nano), told apart by
-    ``is_decoder``. Inherits the decoder implementation so registry introspection
-    still sees a valid pooling model, and ``__new__`` swaps in the encoder
+    `is_decoder`. Inherits the decoder implementation so registry introspection
+    still sees a valid pooling model, and `__new__` swaps in the encoder
     variant for encoder checkpoints.
     """
 

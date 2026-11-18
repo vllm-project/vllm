@@ -4,9 +4,6 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_max_and_sumexp,
-)
 
 # The feature is a log-odds, log(q / (1 - q)), which a row carrying all of its
 # mass on one token sends to infinity. Clamp it symmetrically.
@@ -160,12 +157,33 @@ def _refit_kernel(
     tl.store(counts_ptr + k, 0.0, mask=mask)
 
 
+@triton.jit
+def _max_and_excl_sumexp(logits):
+    """Block max, and its sumexp with one copy of that max left out.
+
+    The excluding sum is what keeps the feature accurate. Forming the full sum
+    and subtracting the max's own e^(m-m) = 1 term afterwards is catastrophic
+    cancellation: the complement mass is the whole quantity of interest, and it
+    is gone as soon as it falls below an fp32 ulp of 1.0 (~6e-8), which a
+    confident drafter reaches routinely.
+    """
+    block_max = tl.max(logits, axis=0)
+    # Excluding by value zeroes every entry tied for the max, so add back all
+    # but one: the others are distinct tokens and belong to the complement.
+    is_max = logits == block_max
+    excl_sumexp = tl.sum(tl.where(is_max, 0.0, tl.exp(logits - block_max)), axis=0)
+    excl_sumexp += tl.sum(is_max.to(tl.float32), axis=0) - 1.0
+    # An all--inf block (vocab padding) ties with itself throughout, leaving a
+    # spurious BLOCK_SIZE - 1 above; it holds no tokens, so it contributes none.
+    return block_max, tl.where(block_max > float("-inf"), excl_sumexp, 0.0)
+
+
 @triton.jit(do_not_specialize=["num_tokens"])
 def _local_max_sumexp_kernel(
     local_max_ptr,
     local_max_stride,
-    local_sumexp_ptr,
-    local_sumexp_stride,
+    local_excl_sumexp_ptr,
+    local_excl_sumexp_stride,
     logits_ptr,
     logits_stride,
     idx_mapping_ptr,
@@ -189,7 +207,10 @@ def _local_max_sumexp_kernel(
         tl.store(
             local_max_ptr + token_idx * local_max_stride + block_idx, float("-inf")
         )
-        tl.store(local_sumexp_ptr + token_idx * local_sumexp_stride + block_idx, 0.0)
+        tl.store(
+            local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + block_idx,
+            0.0,
+        )
         return
 
     # Draft logits are pre-temperature, and acceptance is decided on the scaled
@@ -209,10 +230,11 @@ def _local_max_sumexp_kernel(
         ).to(tl.float32)
         / temp
     )
-    block_max, block_sumexp = _compute_max_and_sumexp(logits)
+    block_max, block_excl_sumexp = _max_and_excl_sumexp(logits)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, block_max)
     tl.store(
-        local_sumexp_ptr + token_idx * local_sumexp_stride + block_idx, block_sumexp
+        local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + block_idx,
+        block_excl_sumexp,
     )
 
 
@@ -228,8 +250,8 @@ def _predict_kernel(
     intercepts_ptr,
     local_max_ptr,
     local_max_stride,
-    local_sumexp_ptr,
-    local_sumexp_stride,
+    local_excl_sumexp_ptr,
+    local_excl_sumexp_stride,
     idx_mapping_ptr,
     idx_mapping_stride,
     step_ptr,
@@ -271,8 +293,8 @@ def _predict_kernel(
         mask=blocks_mask,
         other=float("-inf"),
     )
-    sumexps = tl.load(
-        local_sumexp_ptr + token_idx * local_sumexp_stride + blocks,
+    excl_sumexps = tl.load(
+        local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + blocks,
         mask=blocks_mask,
         other=0.0,
     )
@@ -280,24 +302,31 @@ def _predict_kernel(
     # The feature, logit(q(m*)) for the row's max draft logit, m*, is:
     #   q(x) = e^(x - m*) / Σ_z e^(z - m*)
     #   logit(q(m*)) = log(q(m*) / (1 - q(m*)))
-    #   	= m* - log(Σ_{z≠m*} e^(z - m*)).
+    #                = -log(Σ_{z≠m*} e^(z - m*)).
     # It scores the draft distribution, not the token drawn from it, so it is
     # a function of the prefix alone. Trimming a draft therefore never
     # conditions on the token being trimmed, and rejection sampling stays
     # lossless. Scoring the drawn token instead would select on the proposal
     # and bias the emitted distribution toward the drafter's confident modes.
 
-    # Rescale each block's partial to the global max and sum. The most likely
-    # token contributes exactly e^(m - m) = 1, so removing it leaves the sum
-    # over every other token.
-    global_max = tl.max(maxes, axis=0)
-    total_sumexp = tl.sum(
-        tl.where(blocks_mask, sumexps * tl.exp(maxes - global_max), 0.0), axis=0
+    # Rescale each block's partial to the global max and sum. Every block but
+    # the one holding the global max has to put its own local max back, since
+    # that is a different token and so is genuinely part of the complement; it
+    # re-enters as e^(m_i - m*), the scale itself. A block that merely ties the
+    # global max is one of those, and contributes in full.
+    #
+    # Every term is added, never subtracted, and none exceeds the total, so the
+    # complement keeps fp32 relative accuracy however small it is -- which is
+    # the point, since the feature is its logarithm and is read down to e^-40.
+    global_max, best_block = tl.max(maxes, axis=0, return_indices=True)
+    scale = tl.where(blocks_mask, tl.exp(maxes - global_max), 0.0)
+    complement_sumexp = tl.sum(
+        excl_sumexps * scale + tl.where(blocks == best_block, 0.0, scale), axis=0
     )
-    complement_sumexp = tl.maximum(total_sumexp - 1.0, 0.0)
 
     # Shifted by m*, the numerator is e^(m* - m*) = 1, so the feature is just the
-    # negated complement log-sum-exponential. Clamp to the min/max log-odds.
+    # negated complement log-sum-exponential. A genuinely one-hot row sends it to
+    # infinity, so clamp to the min/max log-odds.
     feature = -tl.log(complement_sumexp)
     feature = tl.minimum(tl.maximum(feature, -MAX_LOG_ODDS), MAX_LOG_ODDS)
     tl.store(features_ptr + req_state_idx * features_stride + step, feature)
@@ -313,12 +342,12 @@ def _predict_kernel(
 class OnlineAcceptanceEstimator:
     """Predicts per-position acceptance, and calibrates itself while serving.
 
-    Lifecycle per step, driven by ``DraftModelSpeculator``:
+    Lifecycle per step, driven by `DraftModelSpeculator`:
 
-    1. ``step`` folds the previous step's drafts, now graded by the target,
+    1. `step` folds the previous step's drafts, now graded by the target,
        into the IRLS accumulators, and periodically solves for new coefficients,
        independently but identically on every rank.
-    2. ``predict`` runs inside the captured draft graph, turning this step's
+    2. `predict` runs inside the captured draft graph, turning this step's
        draft logits into acceptance probabilities for adaptive verification.
 
     Trimming starts immediately: survival is a running product of sigmoids, so it
@@ -475,12 +504,12 @@ class OnlineAcceptanceEstimator:
         local_max = torch.empty(
             num_tokens, num_blocks, dtype=torch.float32, device=self.device
         )
-        local_sumexp = torch.empty_like(local_max)
+        local_excl_sumexp = torch.empty_like(local_max)
         _local_max_sumexp_kernel[(num_tokens, num_blocks)](
             local_max,
             local_max.stride(0),
-            local_sumexp,
-            local_sumexp.stride(0),
+            local_excl_sumexp,
+            local_excl_sumexp.stride(0),
             logits,
             logits.stride(0),
             idx_mapping,
@@ -501,8 +530,8 @@ class OnlineAcceptanceEstimator:
             self.intercepts,
             local_max,
             local_max.stride(0),
-            local_sumexp,
-            local_sumexp.stride(0),
+            local_excl_sumexp,
+            local_excl_sumexp.stride(0),
             idx_mapping,
             idx_mapping.stride(0),
             draft_step,

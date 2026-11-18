@@ -29,7 +29,7 @@ _AUDIO_SAMPLES_PER_TOKEN = 1280
 _AUDIO_CHUNK_SECONDS = 30
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Dots3NoteVideoPart:
     kind: Literal["text", "image", "audio"]
     value: str | Image.Image | np.ndarray

@@ -188,18 +188,18 @@ def _page_count_guard_kernel(
 class PageCountGuardLogitsProcessor(LogitsProcessor):
     """Page-count guard for Unlimited-OCR-2 multi-page parsing.
 
-    In the multi-page layout (``"<PAGE><image>" * n_pages + "Multi page
-    parsing."``) the model must emit exactly one ``<PAGE>`` marker per prompt
+    In the multi-page layout (`"<PAGE><image>" * n_pages + "Multi page
+    parsing."`) the model must emit exactly one `<PAGE>` marker per prompt
     page marker. This request-level guard enforces that contract, mirroring
-    the reference ``_uocr_page_count_guard``:
+    the reference `_uocr_page_count_guard`:
 
-    * while fewer ``<PAGE>`` markers than prompt pages have been generated,
+    * while fewer `<PAGE>` markers than prompt pages have been generated,
       EOS is masked so a page cannot be terminated early;
     * once the page count is reached EOS is allowed, and generating further
-      ``<PAGE>`` markers forces EOS;
-    * each page is capped at ``max_page_tokens`` generated tokens -- hitting
-      the cap forces ``<PAGE>`` (next page) or EOS (last page);
-    * prompts without a ``<PAGE>`` marker (single-page requests) pass
+      `<PAGE>` markers forces EOS;
+    * each page is capped at `max_page_tokens` generated tokens -- hitting
+      the cap forces `<PAGE>` (next page) or EOS (last page);
+    * prompts without a `<PAGE>` marker (single-page requests) pass
       through.
 
     Forced transitions yield to existing token masks from other sampling
@@ -211,10 +211,10 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
         --logits-processors \\
           vllm.model_executor.models.unlimited_ocr2:PageCountGuardLogitsProcessor
 
-    Per-request parameters are read from ``SamplingParams.extra_args``
-    (``page_token_id``, ``eos_token_id``, ``max_page_tokens``); the token ids
-    fall back to ``hf_config.sparse_attention_config.page_token_id`` and
-    ``hf_config.eos_token_id`` when not given. The processor is inactive for
+    Per-request parameters are read from `SamplingParams.extra_args`
+    (`page_token_id`, `eos_token_id`, `max_page_tokens`); the token ids
+    fall back to `hf_config.sparse_attention_config.page_token_id` and
+    `hf_config.eos_token_id` when not given. The processor is inactive for
     requests (or v1 configs) where no page token id can be resolved.
 
     GPU state is keyed by the persistent request slot. The prompt is scanned
