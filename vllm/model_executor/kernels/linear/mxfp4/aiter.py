@@ -211,9 +211,11 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         # Use preshuffled ASM (P) and Triton (D) GEMM when tuned in aiter
         if self.asm_gemm_supported:
             n, k_bytes = layer.weight.shape
-            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
-                n, k_bytes
-            ) and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+            # The Triton preshuffle tuned-table check belongs to the M <= 64 branch
+            # of gemm_with_dynamic_quant, which applies it itself. Requiring it here
+            # disables the ASM GEMM for large-M shapes that are tuned for ASM but
+            # absent from the Triton preshuffle table.
+            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(n, k_bytes)
 
         if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
             layer.weight_scale.data
