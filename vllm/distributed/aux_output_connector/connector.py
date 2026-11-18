@@ -188,8 +188,8 @@ class AuxOutputSchedulerConnector:
         self._session_requests: dict[str, _SessionRequest] = {}
         self._session_tails: dict[str, tuple[str, int, int]] = {}
         self._flushed_hashes: dict[str, PackedBlockHashes] = {}
-        self._written: dict[str, list[BlockHash]] = {}
-        self._written_ends: dict[str, list[tuple[int, BlockHash]]] = {}
+        self._written: dict[str, list[str]] = {}
+        self._written_ends: dict[str, list[tuple[int, str]]] = {}
         self._abort_outputs: dict[
             str, tuple[list[str], list[tuple[int, str | None]]]
         ] = {}
@@ -584,26 +584,15 @@ class AuxOutputSchedulerConnector:
         num_sent = self._sent_hash_counts[request.request_id] * hash_size
         boundary = min(token_end, min(num_sent, computed) // size * size)
         keys = [
-            aux_object_key(self._key_prefix, state.session, block_hash.hex())
-            for end, block_hash in self._written_ends.get(request.request_id, ())
-            if end <= boundary
+            key
+            for end, key in self._written_ends.get(request.request_id, ())
+            if end <= max(boundary, state.floor)
         ]
         start = max(
             boundary, state.floor, self._computed_from.get(request.request_id, 0)
         )
         if start < token_end and not aborted:
-            block_hashes = request.block_hashes
-            parent = block_hashes[boundary // hash_size - 1] if boundary else None
-            extra_keys, _ = generate_block_hash_extra_keys(
-                request, boundary, token_end, 0
-            )
-            tail_hash = hash_block_tokens(
-                self._hash_fn,
-                parent,
-                request.all_token_ids[boundary:token_end],
-                ("aux_tail", start, extra_keys),
-            )
-            key = aux_tail_key(self._key_prefix, state.session, tail_hash.hex())
+            key = self._tail_key(request, state.session, boundary, start, token_end)
             self._session_tails[request.request_id] = (key, start, token_end)
             keys.append(key)
         else:
@@ -615,6 +604,46 @@ class AuxOutputSchedulerConnector:
         if not aborted:
             self._listed[request.request_id] = set(keys)
         return keys, segments
+
+    def _tail_key(
+        self, request: Request, session: str, boundary: int, start: int, end: int
+    ) -> str:
+        parent = (
+            request.block_hashes[boundary // self._hash_block_size - 1]
+            if boundary
+            else None
+        )
+        extra_keys, _ = generate_block_hash_extra_keys(request, boundary, end, 0)
+        tail_hash = hash_block_tokens(
+            self._hash_fn,
+            parent,
+            request.all_token_ids[boundary:end],
+            ("aux_tail", start, extra_keys),
+        )
+        return aux_tail_key(self._key_prefix, session, tail_hash.hex())
+
+    def _write_settled(
+        self, request: Request, state: _SessionRequest, settled: int
+    ) -> None:
+        """At a preemption, write the products a request captured after its
+        last object up to `settled` as an object that starts there, and move
+        its written frontier to `settled`."""
+        request_id = request.request_id
+        num_sent = self._sent_hash_counts[request_id] * self._hash_block_size
+        boundary = min(num_sent, settled) // self._block_size * self._block_size
+        start = max(
+            boundary,
+            state.floor,
+            state.frontier,
+            self._computed_from.get(request_id, 0),
+        )
+        if start >= settled:
+            return
+        key = self._tail_key(request, state.session, boundary, start, settled)
+        self._session_tails[request_id] = (key, start, settled)
+        self._written.setdefault(request_id, []).append(key)
+        self._written_ends.setdefault(request_id, []).append((settled, key))
+        state.frontier = settled
 
     def lists_written(self, request: Request) -> bool:
         """Whether a request's response lists only objects it wrote."""
@@ -664,6 +693,9 @@ class AuxOutputSchedulerConnector:
             self._finished_requests[request_id] = self._take_new_hashes(
                 request, num_computed
             )
+            state = self._session_requests.get(request_id)
+            if state and state.held is not None and not request.is_finished():
+                self._write_settled(request, state, num_computed)
             del self._sent_hash_counts[request_id]
         if session and request.is_finished():
             self._release_unlisted(request)
@@ -711,21 +743,19 @@ class AuxOutputSchedulerConnector:
             object_end = (index + 1) * self._hash_block_size
             if (index + 1) % step or object_end <= state.floor:
                 continue
-            block_hash = request.block_hashes[index]
-            self._written.setdefault(request.request_id, []).append(block_hash)
+            key = aux_object_key(
+                self._key_prefix, state.session, request.block_hashes[index].hex()
+            )
+            self._written.setdefault(request.request_id, []).append(key)
             self._written_ends.setdefault(request.request_id, []).append(
-                (object_end, block_hash)
+                (object_end, key)
             )
             state.frontier = max(state.frontier, object_end)
 
     def _release_unlisted(self, request: Request) -> None:
         self._written_ends.pop(request.request_id, None)
         listed = self._listed.pop(request.request_id, set())
-        session = self._session_requests[request.request_id].session
-        keys = (
-            aux_object_key(self._key_prefix, session, block_hash.hex())
-            for block_hash in self._written.pop(request.request_id, ())
-        )
+        keys = self._written.pop(request.request_id, ())
         orphans = [key for key in dict.fromkeys(keys) if key not in listed]
         if orphans:
             self._orphans[request.request_id] = orphans

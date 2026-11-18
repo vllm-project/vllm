@@ -752,12 +752,20 @@ class AuxOutputWorkerConnector:
                     for request_id in metadata.finished_requests
                     if request_id in self._requests
                 ]
+                preempted = [
+                    request_id
+                    for request_id in metadata.session_tails
+                    if request_id in self._requests and request_id not in carried
+                ]
                 for request_id in carried:
                     state = self._requests[request_id]
                     if request_id in metadata.session_tails:
                         tail = metadata.session_tails[request_id]
                         self._take_tail(request_id, state, tail)
                     state.block_hashes.extend(metadata.block_hashes.get(request_id, ()))
+                for request_id in preempted:
+                    tail = metadata.session_tails[request_id]
+                    self._take_tail(request_id, self._requests[request_id], tail)
                 flushed = [
                     request_id
                     for request_id in metadata.flushed_block_hashes
@@ -770,7 +778,7 @@ class AuxOutputWorkerConnector:
                 self._publish_blocks(
                     [(self._requests[r], []) for r in carried + flushed]
                 )
-                self._teardown(carried)
+                self._teardown(carried + preempted)
                 release_keys.extend(
                     key
                     for state in self._requests.values()

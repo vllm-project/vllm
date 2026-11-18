@@ -1383,6 +1383,56 @@ def test_session_retry_after_an_abort_keeps_the_products_of_the_aborted_attempt(
     assert set(versions[:held]) == {1} and set(versions[held:]) == {2}
 
 
+@pytest.mark.parametrize("reset", [False, True], ids=["preempted", "reset"])
+def test_preempted_held_request_keeps_the_products_it_computed_mid_object(reset):
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    scheduler = engine.scheduler
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 16, 20, hash_block_size=4, aux_held=0)
+    scheduler.add_request(request)
+    for _ in range(6):
+        engine.step(engine.schedule(), {"r": [0]})
+    assert request.num_computed_tokens == 21
+    if reset:
+        assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    else:
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, 0.0)
+    engine.set_version(2)
+    engine.run()
+    keys = engine.keys["r"]
+    positions, versions = _plan_rows(engine, keys)
+    assert positions == list(range(request.num_tokens - 1))
+    assert versions == [1] * 21 + [2] * (request.num_tokens - 22)
+    assert sum("/tail/" in key for key in keys) == 2
+    writes = Counter(key for batch in engine.client.writes for key in batch)
+    assert set(writes) == set(keys) and set(writes.values()) == {1}
+
+
+@pytest.mark.parametrize("reset", [False, True], ids=["hit", "reset"])
+def test_held_abort_after_a_preemption_lists_the_products_before_it(reset):
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    scheduler = engine.scheduler
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 16, 20, hash_block_size=4, aux_held=0)
+    scheduler.add_request(request)
+    for _ in range(6):
+        engine.step(engine.schedule(), {"r": [0]})
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    if reset:
+        assert scheduler.reset_prefix_cache()
+    scheduler_output = engine.schedule()
+    if "r" not in scheduler_output.num_scheduled_tokens:
+        engine.step(scheduler_output, {})
+        scheduler_output = engine.schedule()
+    assert "r" in scheduler_output.num_scheduled_tokens
+    scheduler.finish_requests("r", RequestStatus.FINISHED_ABORTED)
+    keys, segments = engine.connector.pop_abort_output("r")
+    positions, _ = _plan_rows(engine, keys)
+    assert segments[-1] == (21, None) and positions == list(range(21))
+
+
 def test_preempted_session_request_that_stops_on_its_output_in_flight():
     scheduler = create_scheduler(
         async_scheduling=True, enable_prefix_caching=True, num_blocks=3
