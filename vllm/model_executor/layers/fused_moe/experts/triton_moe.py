@@ -125,8 +125,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         if not supported:
             return supported, reason
 
-        if activation_key == kInt8StaticTensorSym and moe_config.is_lora_enabled:
-            return False, "static INT8 activation quantization with LoRA"
+        if activation_key == kInt8StaticTensorSym:
+            if moe_config.is_lora_enabled:
+                return False, "static INT8 activation quantization with LoRA"
+            par = moe_config.moe_parallel_config
+            if par.use_all2all_kernels and not par.use_ag_rs_all2all_kernels:
+                return False, "static INT8 activation quantization with all2all"
 
         if not current_platform.is_cuda_alike():
             return supported, reason

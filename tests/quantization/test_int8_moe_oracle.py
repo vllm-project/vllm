@@ -183,12 +183,13 @@ def test_int8_triton_lora_activation_support(activation_key, supported):
 @pytest.mark.parametrize(
     "all2all_backend,batched",
     [
+        ("allgather_reducescatter", False),
         ("deepep_high_throughput", False),
         ("deepep_low_latency", True),
     ],
 )
 def test_static_int8_dispatch_uses_backend_capabilities(all2all_backend, batched):
-    """Selection follows activation layout, not a static-INT8 backend list."""
+    """Static INT8 is only supported with naive AllGather/ReduceScatter."""
     from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
     config = _make_int8_moe_config(moe_backend="triton")
@@ -204,8 +205,8 @@ def test_static_int8_dispatch_uses_backend_capabilities(all2all_backend, batched
         ),
     )
     assert config.activation_format.is_batched is batched
-    if batched:
-        with pytest.raises(ValueError, match="activation format"):
+    if all2all_backend != "allgather_reducescatter":
+        with pytest.raises(ValueError, match="activation format|all2all"):
             select_int8_moe_backend(config, kInt8StaticChannelSym, kInt8StaticTensorSym)
     else:
         backend, experts_cls = select_int8_moe_backend(
