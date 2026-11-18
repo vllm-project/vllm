@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniCPM-V 4.6 model (MiniCPMV4_6ForConditionalGeneration)."""
 
+import math
 from collections.abc import Iterable, Mapping
+from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -55,6 +57,7 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .minicpmv import (
+    _MAX_FRAMES_PER_VIDEO,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVImageEmbeddingInputs,
     MiniCPMVImageEmbeddingItems,
@@ -162,6 +165,8 @@ def _select_vision_items(
         num_slices=torch.tensor(sizes),
     )
 
+
+_MAX_ASPECT_RATIO = 50
 
 # HF-style modality-scoped keys inside `mm_processor_kwargs`. They scope a value
 # to a single modality and must not be forwarded to the processors, which take
@@ -697,6 +702,102 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         if hasattr(config, "slice_config") and config.slice_config is not None:
             return getattr(config.slice_config, "max_slice_nums", 9)
         return getattr(config, "max_slice_nums", 9)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        if self._has_size_hint("image"):
+            return super().get_image_size_with_most_features()
+        sizes = self._image_sizes_by_tokens
+        return sizes[max(sizes)]
+
+    def get_video_frame_size_with_most_features(self) -> ImageSize:
+        if self._has_size_hint("video"):
+            return super().get_video_frame_size_with_most_features()
+        sizes = self._video_sizes_by_tokens
+        return sizes[max(sizes)]
+
+    def get_video_size_and_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> tuple[ImageSize, int]:
+        if self._has_size_hint("video"):
+            return super().get_video_size_and_frames_with_most_features(
+                seq_len, mm_counts
+            )
+        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
+        max_frames = getattr(video_options, "num_frames", None) or _MAX_FRAMES_PER_VIDEO
+        return self._get_video_size_and_frames(
+            seq_len, mm_counts, min(max_frames, _MAX_FRAMES_PER_VIDEO)
+        )
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        if self._has_size_hint("video"):
+            return super().get_max_video_tokens(seq_len, mm_counts)
+        size, num_frames = self._get_video_size_and_frames(
+            seq_len, mm_counts, _MAX_FRAMES_PER_VIDEO
+        )
+        max_slice_nums = self.get_video_max_slice_num()
+        return num_frames * self.get_num_image_tokens(
+            size, max_slice_nums=max_slice_nums
+        )
+
+    def _get_video_size_and_frames(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        max_frames: int,
+    ) -> tuple[ImageSize, int]:
+        num_videos = max(mm_counts.get("video", 0), 1)
+
+        def num_frames(frame_tokens: int) -> int:
+            return max(min(seq_len // frame_tokens // num_videos, max_frames), 1)
+
+        sizes = self._video_sizes_by_tokens
+        frame_tokens = max(sizes, key=lambda t: (num_frames(t) * t, t))
+        return sizes[frame_tokens], num_frames(frame_tokens)
+
+    def _has_size_hint(self, modality: str) -> bool:
+        options = self.ctx.get_mm_config().limit_per_prompt.get(modality)
+        return bool(getattr(options, "width", None) or getattr(options, "height", None))
+
+    @cached_property
+    def _image_sizes_by_tokens(self) -> dict[int, ImageSize]:
+        max_slice_nums = self.get_image_processor().max_slice_nums
+        return self._get_sizes_by_tokens(max_slice_nums)
+
+    @cached_property
+    def _video_sizes_by_tokens(self) -> dict[int, ImageSize]:
+        return self._get_sizes_by_tokens(
+            self.get_video_max_slice_num(),
+            super().get_video_frame_size_with_most_features(),
+        )
+
+    def _get_sizes_by_tokens(
+        self, max_slice_nums: int, *extra_sizes: ImageSize
+    ) -> dict[int, ImageSize]:
+        scale_resolution = self.get_image_processor().scale_resolution
+        area = scale_resolution * scale_resolution
+        heights = range(
+            math.ceil(scale_resolution / math.sqrt(_MAX_ASPECT_RATIO)),
+            math.floor(scale_resolution * math.sqrt(_MAX_ASPECT_RATIO)) + 1,
+        )
+        sizes = [
+            ImageSize(width=num_slices // rows * (area // height), height=rows * height)
+            for num_slices in sorted({max(max_slice_nums - 1, 1), max_slice_nums})
+            for rows in range(1, num_slices + 1)
+            if num_slices % rows == 0
+            for height in heights
+        ]
+        sizes_by_tokens: dict[int, ImageSize] = {}
+        for size in [*sizes, *extra_sizes]:
+            if max(size) <= _MAX_ASPECT_RATIO * min(size):
+                tokens = self.get_num_image_tokens(size, max_slice_nums=max_slice_nums)
+                sizes_by_tokens.setdefault(tokens, size)
+        return sizes_by_tokens
 
     def get_video_max_slice_num(self) -> int:
         # Override the base class default of 1: transformers v5.7+
