@@ -7,6 +7,9 @@ by overlapping computation of two batches. This test validates that DBO works
 correctly with the DeepSeek-V2-Lite model using GSM8K evaluation.
 """
 
+import json
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 import torch
 
@@ -89,6 +92,104 @@ def test_dbo_v2_features_gsm8k(feature: str, num_gpus_available):
         extra_args=extra_args,
         tp_size=tp_size,
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA NCCL")
+def test_dbo_cuda_ag_rs_prompt_logprobs(num_gpus_available):
+    """Compare AG/RS DBO to unsplit DP+EP with uneven long prefills."""
+    if num_gpus_available < DP_SIZE:
+        pytest.skip(f"Requires {DP_SIZE} GPUs")
+
+    model = "vllm-project/tiny-random-DeepseekV2ForCausalLM"
+    server_args = [
+        "--served-model-name",
+        model,
+        "--api-server-count",
+        "1",
+        "--revision",
+        "c0146ef3550ef77c6520211184cf41184b92346a",
+        "--data-parallel-size",
+        str(DP_SIZE),
+        "--enable-expert-parallel",
+        "--all2all-backend",
+        "allgather_reducescatter",
+        "--moe-backend",
+        "triton",
+        "--attention-backend",
+        "TRITON_MLA",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "2048",
+        "--max-num-seqs",
+        "8",
+        "--kv-cache-memory-bytes",
+        str(1 << 30),
+        "--no-enable-prefix-caching",
+        "--no-enable-extensible-kv-cache",
+        "--dbo-prefill-token-threshold",
+        "16",
+        "--dbo-decode-token-threshold",
+        "2",
+        "--compilation-config",
+        json.dumps(
+            {
+                "mode": 0,
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "decode_cudagraph_capture_request_sizes": [4, 8],
+            }
+        ),
+    ]
+    # Route requests explicitly so both ranks participate and long prompts can
+    # cross the split point even when the two ranks schedule different shapes.
+    requests = [
+        (rank, [11 + (i * 17 + request * 31) % 10000 for i in range(length)])
+        for rank, length in enumerate((1537, 513))
+        for request in range(4)
+    ]
+
+    def run(*dbo_args: str) -> list[list[float]]:
+        with (
+            RemoteOpenAIServer(
+                model,
+                [*server_args, *dbo_args],
+                env_dict={"VLLM_USE_FLASHINFER_SAMPLER": "0"},
+            ) as server,
+            server.get_client() as client,
+            ThreadPoolExecutor(8) as pool,
+        ):
+            futures = [
+                pool.submit(
+                    client.completions.create,
+                    model=model,
+                    prompt=prompt,
+                    temperature=0.0,
+                    max_tokens=4,
+                    extra_headers={"X-data-parallel-rank": str(rank)},
+                    extra_body={"prompt_logprobs": 0, "ignore_eos": True},
+                )
+                for rank, prompt in requests
+            ]
+            results = [future.result().choices[0] for future in futures]
+        logprobs = []
+        for (_, prompt), choice in zip(requests, results):
+            assert choice.finish_reason == "length"
+            assert len(choice.prompt_logprobs) == len(prompt)
+            logprobs.append(
+                [
+                    entry[str(token)]["logprob"]
+                    for token, entry in zip(prompt[1:], choice.prompt_logprobs[1:])
+                ]
+            )
+        return logprobs
+
+    expected = run()
+    actual = run("--enable-dbo")
+    for reference, observed in zip(expected, actual):
+        # BF16 expert/attention kernels may round differently across shapes.
+        assert observed == pytest.approx(reference, abs=0.04)
 
 
 def _run_dbo_gsm8k(

@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
     MoEPrepareAndFinalizeNaiveDPEPModular,
     make_moe_prepare_and_finalize_naive_dp_ep,
 )
+from vllm.platforms import current_platform
 
 
 class _RegionProbe(MoEPrepareAndFinalizeNaiveDPEPModular):
@@ -87,15 +88,13 @@ def test_comm_region_restores_compute_stream_on_error(dbo_mocks):
     dbo_mocks["switch_back"].assert_called_once_with()
 
 
-@pytest.mark.parametrize("is_rocm", [True, False])
-def test_supports_dbo_only_on_rocm(is_rocm):
+def test_naive_dp_ep_dbo_capability():
     inst = MoEPrepareAndFinalizeNaiveDPEPModular()
-    platform = SimpleNamespace(is_rocm=lambda: is_rocm)
-    with patch.object(naive_dp_ep, "current_platform", platform):
-        assert inst.supports_dbo() is is_rocm
-        # supports_async() also drives MK-internal shared-expert overlap, so
-        # it must not change with DBO support.
-        assert not inst.supports_async()
+    assert inst.supports_dbo() == (
+        current_platform.is_cuda() or current_platform.is_rocm()
+    )
+    # supports_async also selects MK-internal shared-expert overlap.
+    assert not inst.supports_async()
 
 
 @pytest.mark.parametrize("is_rocm", [True, False])

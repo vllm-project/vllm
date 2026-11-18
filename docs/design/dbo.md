@@ -34,9 +34,23 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+For expert parallelism, DBO supports `deepep_low_latency`, `deepep_high_throughput`, and `nixl_ep` with their respective kernels installed. `allgather_reducescatter` (AG/RS) is also supported on CUDA and ROCm.
 
-Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
+On CUDA, AG/RS with DBO requires a single node, more than one data parallel rank, tensor parallel size 1, a modular MoE kernel, and standard NCCL collectives (`VLLM_USE_NCCL_SYMM_MEM=0`, the default). Set `--moe-backend triton` for models supported by that kernel. Speculative decoding is unsupported with this combination. All-gather and reduce-scatter can overlap with the other microbatch's compute during eager steps. In a FULL CUDA graph with DBO, both microbatches run their collectives on the capture stream.
+
+For example, start a two-GPU CUDA server that uses AG/RS DBO for eligible prefill steps and keeps decode-only steps on their regular CUDA graphs:
+
+```bash
+vllm serve allenai/OLMoE-1B-7B-0924-Instruct \
+    --data-parallel-size 2 --enable-expert-parallel --enable-dbo \
+    --all2all-backend allgather_reducescatter --moe-backend triton \
+    --max-num-seqs 64 --dbo-decode-token-threshold 128 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+For regular decoding, setting `--dbo-decode-token-threshold` above `--max-num-seqs` keeps decode-only batches unsplit. Batches containing both prefill and decode tokens still use the prefill threshold.
+
+With DeepEP installed, choose `deepep_low_latency` for decode-heavy workloads or `deepep_high_throughput` for prefill-heavy workloads.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
