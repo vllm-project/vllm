@@ -47,7 +47,7 @@ MoERunner (nn.Module, is the return value)                           │
   └── moe_config: FusedMoEConfig     ◄── created by factory          │
                                                                      │
 RoutedExperts (nn.Module)                                            │
-  ├── quant_method: FusedMoEMethodBase  (owns expert weight params)  │
+  ├── quant_method: FusedMoEMethodBase  (registers params here)      │
   ├── expert_map_manager: ExpertMapManager                           │
   ├── moe_config: FusedMoEConfig                                     │
   └── [w13_weight, w2_weight, scales, ...] (registered parameters)   │
@@ -114,14 +114,15 @@ forward()
   → _maybe_pad_hidden_states()
   → _forward_entry (custom op wrapper)
     → _forward_impl()
-      → _maybe_sync_shared_experts_stream()
+      → shared_experts.maybe_forward_async()  [launch aux stream if selected]
       → gate application (if internal)
       → _maybe_dispatch() (DP/EP token redistribution)
       → _apply_quant_method()
-        → shared_experts(NO_OVERLAP)  [if MK can't overlap]
+        → shared_experts(NO_OVERLAP)  [if overlap is disabled]
         → router.select_experts()    [modular path]
         → routed_experts.forward_modular() / forward_monolithic()
-        → shared_experts(MULTI_STREAM_OVERLAPPED)
+           └─ shared_experts(MK_INTERNAL_OVERLAPPED)  [inside async MK]
+        → shared_experts.wait()  [if aux-stream work was launched]
       → _maybe_combine()
   → truncate fused_output to og_hidden_dim_pre_xform (if padded)
   → _maybe_reduce_routed_output_before_transform()  (latent MoE pre-reduction)
@@ -222,12 +223,12 @@ MoERunner.forward()
 
 ### 5. `SharedExperts` (`runner/shared_experts.py`)
 
-**Role**: Wrapper around a model-provided shared expert `nn.Module` that adds CUDA stream overlap and DBO (Dynamic Batch Ordering) support.
+**Role**: Wrapper around a model-provided shared expert `nn.Module` that adds CUDA stream overlap and DBO (Dual Batch Overlap) support.
 
 **Key features**:
 
 - Runs shared experts on a separate CUDA stream when possible, overlapping with routed expert computation.
-- Called at specific ordering points (`SharedExpertsOrder`): `NO_OVERLAP` (before MK), `MK_INTERNAL_OVERLAPPED` (by MK), `MULTI_STREAM_OVERLAPPED` (after MK, in aux stream).
+- Uses three ordering modes (`SharedExpertsOrder`): `NO_OVERLAP` runs before the routed experts, `MK_INTERNAL_OVERLAPPED` runs from inside an asynchronous modular kernel, and `MULTI_STREAM_OVERLAPPED` launches on an auxiliary stream before gate/dispatch and is awaited after the routed experts.
 - Supports DBO by maintaining per-ubatch output buffers.
 - The underlying shared expert layer is a standard `nn.Module` (e.g., another `MLP` layer) provided by the model.
 
@@ -243,7 +244,7 @@ An IntEnum that maps scoring functions (softmax, sigmoid, etc.) and routing stra
 
 The MoE forward pass consists of two GEMMs: GEMM1 (gate+up projection) and GEMM2 (down projection). `FusedMoEQuantConfig` bundles quantization parameters for all four tensors in this pipeline: activations and weights for each GEMM (`_a1`, `_w1`, `_a2`, `_w2`). Each is described by a `FusedMoEQuantDesc` — a dataclass carrying the quantized dtype, quantization granularity (`GroupShape`), scales, zero points, and biases for that tensor.
 
-This two-level structure exists because different quantization schemes vary independently per tensor — e.g., activations may use per-token quantization while weights use per-channel, or GEMM1 may use different block shapes than GEMM2. `FusedMoEQuantConfig` is constructed by the oracle's `make_quant_config` function or by `FusedMoEMethodBase.get_fused_moe_quant_config()`, and is passed to `FusedMoEExperts` constructors. It is only used with modular kernels; non-modular methods set it to `None`.
+This two-level structure exists because different quantization schemes vary independently per tensor — e.g., activations may use per-token quantization while weights use per-channel, or GEMM1 may use different block shapes than GEMM2. `FusedMoEQuantConfig` is constructed by the oracle's `make_quant_config` function or by `FusedMoEMethodBase.get_fused_moe_quant_config()`, and is passed to both modular and monolithic `FusedMoEExperts` constructors. It can also describe unquantized tensors; `FusedMoEMethodBase.moe_quant_config` remains `None` only on paths that do not construct a `FusedMoEKernel`.
 
 #### 6c. `FusedMoEParallelConfig`
 
@@ -287,7 +288,7 @@ Central dataclass carrying all MoE layer configuration. Created once by the fact
 **Key properties**:
 
 - `supports_internal_mk` — `True` when `moe_kernel` is set; signals `MoERunner` to use the internal modular kernel path (dispatch/combine handled by the kernel's `FusedMoEPrepareAndFinalize`) rather than the legacy external dispatch/combine
-- `mk_can_overlap_shared_experts` — `True` when the kernel's prepare/finalize supports async operation, enabling shared expert overlap via DBO
+- `mk_can_overlap_shared_experts` — `True` when the kernel's prepare/finalize supports async operation, enabling shared expert computation to overlap dispatch/combine
 - `is_monolithic` — whether the kernel handles routing internally
 
 **Two execution modes**:
