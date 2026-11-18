@@ -361,7 +361,7 @@ def select_wna16_moe_backend(
             continue
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend))
+            logger.debug_once(oracle.make_log_backend(backend))
             return backend, kernel_cls
 
     raise NotImplementedError(
