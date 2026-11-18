@@ -324,14 +324,19 @@ fn load_preprocessor_config(
     dedicated_name: &str,
     processor_config_path: Option<&Path>,
     processor_section: &str,
-) -> Result<Option<serde_json::Value>> {
+) -> Result<Option<PreProcessorConfig>> {
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
-            return Ok(Some(processor.clone()));
+            let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
+                multimodal!(
+                    "failed to parse {processor_section} from processor_config.json: {error}"
+                )
+            })?;
+            return Ok(Some(config));
         }
     }
     let Some(path) = dedicated_path else {
@@ -339,7 +344,7 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = serde_json::from_str(&text)
+    let config = PreProcessorConfig::from_json(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
     Ok(Some(config))
 }
@@ -347,7 +352,7 @@ fn load_preprocessor_config(
 /// Resolve startup options into an effective config without modifying the
 /// checkpoint config.
 fn resolve_processor_config_overrides(
-    checkpoint: &Value,
+    checkpoint: &PreProcessorConfig,
     kwargs: &HashMap<String, Value>,
     scope: &str,
 ) -> Result<PreProcessorConfig> {
@@ -366,7 +371,8 @@ fn resolve_processor_config_overrides(
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<serde_json::Map<_, _>>();
-    let mut effective = checkpoint.clone();
+    let mut effective = serde_json::to_value(checkpoint)
+        .expect("checkpoint preprocessor config serialization should not fail");
     merge_processor_config(&mut effective, &Value::Object(flat));
     if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
         if !scoped.is_object() {
@@ -447,7 +453,7 @@ impl MultimodalModelInfo {
             files.processor_config,
             "image_processor",
         )?
-        .unwrap_or_else(|| serde_json::json!({}));
+        .unwrap_or_default();
         let video_preprocessor_config = load_preprocessor_config(
             files.video_preprocessor_config,
             "video_preprocessor_config.json",
@@ -1218,7 +1224,6 @@ impl TokenResolver for TokenizerResolver {
 mod tests {
     use std::sync::Arc;
 
-    use expect_test::expect;
     use serde_json::json;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -1836,42 +1841,36 @@ mod tests {
             "audio_kwargs": {"max_samples": 16000},
         }))
         .unwrap();
-        let checkpoint = json!({"custom_options": {"checkpoint": true}});
+        let checkpoint =
+            PreProcessorConfig::from_value(json!({"custom_options": {"checkpoint": true}}))
+                .unwrap();
+        let checkpoint_before = serde_json::to_value(&checkpoint).unwrap();
         let config =
             |scope| resolve_processor_config_overrides(&checkpoint, &kwargs, scope).unwrap().extra;
-        let mut configs = json!({
+        let configs = json!({
             "audio": config("audio_kwargs"),
             "image": config("images_kwargs"),
             "video": config("videos_kwargs"),
         });
-        assert_eq!(checkpoint, json!({"custom_options": {"checkpoint": true}}));
-        configs.sort_all_objects();
-        expect![[r#"
-            {
-              "audio": {
-                "custom_options": {
-                  "checkpoint": true,
-                  "height": 256,
-                  "width": 512
+        assert_eq!(
+            configs,
+            json!({
+                "audio": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                    "max_samples": 16000,
                 },
-                "max_samples": 16000
-              },
-              "image": {
-                "custom_options": {
-                  "checkpoint": true,
-                  "height": 256,
-                  "width": 1024
-                }
-              },
-              "video": {
-                "custom_options": {
-                  "checkpoint": true,
-                  "height": 256,
-                  "width": 512
-                }
-              }
-            }"#]]
-        .assert_eq(&serde_json::to_string_pretty(&configs).unwrap());
+                "image": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 1024},
+                },
+                "video": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                },
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&checkpoint).unwrap(),
+            checkpoint_before
+        );
     }
 
     #[test]
@@ -1894,7 +1893,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(config["sampling_rate"], 24000);
+            assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(24000));
         }
         fs::write(&combined, "{}").unwrap();
         let config = load_preprocessor_config(
@@ -1905,7 +1904,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config["sampling_rate"], 8000);
+        assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
     }
 
     #[tokio::test]
