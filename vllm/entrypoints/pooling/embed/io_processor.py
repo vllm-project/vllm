@@ -810,7 +810,7 @@ class JinaRankingTokenEmbedIOProcessor(
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
         text_prompts = self.ensure_str(ctx.prompts)
-        if not isinstance(ctx.prompts, Sequence) or len(ctx.inputs_seq) < 2:
+        if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
         # The JinaForRanking model concatenates docs first, then query.

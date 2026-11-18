@@ -315,7 +315,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         prompts = data_1 + data_2
 
         return super().get_request_factory_offline(
-            ctx.to_encode_context(inputs_seq=prompts)
+            ctx.to_encode_context(prompts=prompts)
         )
 
     def post_process_offline(
@@ -599,18 +599,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-
-        # `add_special_tokens` is tri-state on the offline context. The
-        # cross-encoder path is completion-only, so when unset (`None`) we
-        # keep the renderer default (`True`, matching
-        # `CompletionRequestMixin.add_special_tokens`). An explicit `True` /
-        # `False` overrides it, and user-provided `tokenization_kwargs` wins
-        # over the default.
-        tok_kwargs: dict[str, Any] = {}
-        if ctx.add_special_tokens is not None:
-            tok_kwargs["add_special_tokens"] = ctx.add_special_tokens
-        tok_kwargs.update(ctx.tokenization_kwargs or {})
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
+        tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
 
         extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
 
