@@ -1300,10 +1300,6 @@ class VllmConfig:
             # its load_weights runs a layerwise reload, and its post-load
             # processing replaces the weight parameter
             raise ValueError("Direct reload does not support torchao quantization.")
-        if self.lora_config is not None:
-            # LoRA wraps layers after cold start; their wrappers forward
-            # `quant_method`, so a rerun would process each base layer twice
-            raise ValueError("Direct reload does not support LoRA.")
         spec = self.speculative_config
         if spec is not None and spec.draft_lm_head_quantization is not None:
             # after `begin` the draft's quantized lm_head is a view of the target
@@ -1637,7 +1633,7 @@ class VllmConfig:
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
         ):
             dcp_size = self.parallel_config.decode_context_parallel_size
             transfer_tp_size = max(
@@ -3654,7 +3650,7 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if not self.kv_transfer_config.has_connector("NixlConnector"):
+        if not self.kv_transfer_config.has_connector("NixlPullConnector"):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
@@ -3683,13 +3679,9 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is finalized from the global KV cache groups.
-        nixl_pd_active = (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
-        )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        # Runs after adjust_dcp_kv_cache_interleave_size, so an auto-resolved NIXL
+        # interleave is already the local block size here.
+        if self.parallel_config.decode_context_parallel_size > 1:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
