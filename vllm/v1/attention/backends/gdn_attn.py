@@ -184,6 +184,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        if layer_names:
+            layer = self.compilation_config.static_forward_context.get(layer_names[0])
+            # OLMo uses Triton even when the resolver prefers FlashInfer.
+            self.gdn_prefill_backend = getattr(
+                layer, "gdn_prefill_backend", self.gdn_prefill_backend
+            )
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
         # Only the Qwen GDN layer opts in on FlashInfer; KDA layers sharing this
         # backend export checkpoints their own way.

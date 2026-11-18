@@ -33,6 +33,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
+from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -42,10 +46,12 @@ from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
@@ -96,6 +102,9 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 "GDN prefill backend 'sycl' is not supported for OLMo Hybrid."
             )
         _log_gdn_backend_decision(vllm_config, requested_backend, "triton")
+        self.gdn_prefill_backend = "triton"
+        self._init_prefill_checkpointing()
+        self._prefill_kernels_warmed_up = False
 
         # Fused QKVG projection: 1 matmul instead of 4
         self.in_proj_qkvg = MergedColumnParallelLinear(
@@ -299,6 +308,54 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = rearrange(core_attn_out, "l h d -> l (h d)")
         output[:num_tokens], _ = self.o_proj(core_attn_out)
 
+    def _warmup_prefill_kernels(self, mixed_qkv: torch.Tensor) -> None:
+        if self._prefill_kernels_warmed_up:
+            return
+        self._prefill_kernels_warmed_up = True
+        q, k, v = self.rearrange_mixed_qkv(
+            mixed_qkv.new_zeros(FLA_CHUNK_SIZE, self.conv_dim // self.tp_size)
+        )
+        gates = mixed_qkv.new_zeros(FLA_CHUNK_SIZE, self.num_v_heads // self.tp_size)
+        g, beta = fused_olmo_hybrid_gdn_gating(
+            self.A_log, gates, gates, self.dt_bias, self.allow_neg_eigval
+        )
+        state = torch.zeros(
+            1,
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+            self.head_k_dim,
+            dtype=self.get_state_dtype()[1],
+            device=mixed_qkv.device,
+        )
+        cu_seqlens = torch.tensor(
+            [0, FLA_CHUNK_SIZE], dtype=torch.int32, device=mixed_qkv.device
+        )
+        checkpoints = [None]
+        if self._exports_checkpoints:
+            # Reserve checkpoint workspace before the cache consumes GPU memory.
+            (buffer,) = current_workspace_manager().get_simultaneous(
+                self._checkpoint_buffer_spec
+            )
+            checkpoints.append(buffer[:1])
+        for checkpoint_state in checkpoints:
+            chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
+                checkpoint_state=checkpoint_state,
+                checkpoint_offsets=(
+                    torch.zeros(1, dtype=torch.int32, device=q.device)
+                    if checkpoint_state is not None
+                    else None
+                ),
+            )
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -311,13 +368,13 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         attn_metadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # V1 profile run
+            self._warmup_prefill_kernels(mixed_qkv)
             return
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata.get(self.prefix)  # type: ignore[assignment]
         if attn_metadata is None:
-            # Profile/warmup dummy runs skip mamba-family metadata.
+            self._warmup_prefill_kernels(mixed_qkv)
             return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
@@ -378,6 +435,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 validate_data=False,
             )
 
+        conv_input_non_spec = mixed_qkv_non_spec
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
@@ -457,28 +515,78 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec, last_recurrent_state = None, None
 
         if attn_metadata.num_prefills > 0:
-            assert non_spec_state_indices_tensor is not None
-            assert has_initial_state is not None
+            assert query_non_spec is not None
+            assert key_non_spec is not None
+            assert value_non_spec is not None
+            assert g_non_spec is not None
+            assert beta_non_spec is not None
             assert non_spec_query_start_loc is not None
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                use_qk_l2norm_in_kernel=True,
+            assert non_spec_state_indices_tensor is not None
+            # Match the metadata builder's decode-first prefill tail.
+            num_decode_tokens = (
+                attn_metadata.num_decode_tokens if spec_sequence_masks is None else 0
             )
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
+            if num_decode_tokens:
+                core_attn_out_decode, _ = fused_recurrent_gated_delta_rule(
+                    q=query_non_spec[:, :num_decode_tokens],
+                    k=key_non_spec[:, :num_decode_tokens],
+                    v=value_non_spec[:, :num_decode_tokens],
+                    g=g_non_spec[:, :num_decode_tokens],
+                    beta=beta_non_spec[:, :num_decode_tokens],
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc[
+                        : attn_metadata.num_decodes + 1
+                    ],
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                query_non_spec = query_non_spec[:, num_decode_tokens:]
+                key_non_spec = key_non_spec[:, num_decode_tokens:]
+                value_non_spec = value_non_spec[:, num_decode_tokens:]
+                g_non_spec = g_non_spec[:, num_decode_tokens:]
+                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+
+            prefill_indices = attn_metadata.prefill_state_indices
+            assert prefill_indices is not None
+            assert attn_metadata.prefill_has_initial_state is not None
+            if attn_metadata.checkpoint is not None:
+                core_attn_out_non_spec, last_recurrent_state = (
+                    self._forward_triton_prefill_with_checkpoints(
+                        query_non_spec,
+                        key_non_spec,
+                        value_non_spec,
+                        g_non_spec,
+                        beta_non_spec,
+                        attn_metadata,
+                        ssm_state=ssm_state,
+                        conv_state=conv_state,
+                        conv_input=conv_input_non_spec,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
+            else:
+                initial_state = gather_initial_states(
+                    ssm_state, prefill_indices, attn_metadata.prefill_has_initial_state
+                )
+                core_attn_out_non_spec, last_recurrent_state = chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=True,
+                )
+            scatter_states(ssm_state, last_recurrent_state, prefill_indices)
+            if num_decode_tokens:
+                core_attn_out_non_spec = torch.cat(
+                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                )
         elif attn_metadata.num_decodes > 0:
             assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None
