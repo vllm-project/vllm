@@ -205,8 +205,12 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
-    # Offered keys the manager had no room for. The connector offers them again.
-    unconsumed_keys: list[OffloadKey] = field(default_factory=list)
+    # Offered keys the manager had no room for, which may be offered again.
+    # Disjoint from keys_to_store. Within a group (get_offload_group_idx), every
+    # key to retry has a later token position than every key to store, so the
+    # stored chunks of each group are a prefix of its offered chunks. Cutting
+    # the offer by req_context.get_offload_key_position() meets this.
+    keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -425,7 +429,8 @@ class OffloadingManager(ABC):
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
             were evicted as a result. A manager short on room may store
-            only some of the keys and report the rest in unconsumed_keys.
+            only some of the keys and report the rest in keys_to_retry,
+            under the constraints documented on that field.
             None is returned if the blocks cannot be stored.
 
         """

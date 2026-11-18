@@ -14,13 +14,21 @@ from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.request import RequestStatus
 
 
+class KeyChunk(NamedTuple):
+    """The chunk that a candidate key identifies."""
+
+    # index into StoreCandidates.group_ranges
+    config_group_idx: int
+    chunk_idx: int
+
+
 class StoreCandidates(NamedTuple):
     """The computed chunks of a request that a trigger can store."""
 
     num_offloadable_tokens: int
     keys: list[OffloadKey]
-    # (index into group_ranges, chunk index) of each key
-    key_chunks: list[tuple[int, int]]
+    # the chunk of each key
+    key_chunks: list[KeyChunk]
     # (start_chunk_idx, end_chunk_idx) of each group
     group_ranges: list[tuple[int, int]]
 
@@ -70,7 +78,7 @@ def select_store_candidates(
     # Filter out chunks skipped due to sliding window attention / SSM
     # or unreachable by the load path's alignment constraints.
     new_offload_keys: list[OffloadKey] = []
-    new_offload_key_chunks: list[tuple[int, int]] = []
+    new_offload_key_chunks: list[KeyChunk] = []
     group_store_ranges: list[tuple[int, int]] = []
 
     apply_eagle_drop = not config.num_hash_lookahead_tokens
@@ -199,7 +207,7 @@ def select_store_candidates(
             ):
                 continue
             new_offload_keys.append(offload_key)
-            new_offload_key_chunks.append((config_group_idx, abs_chunk_idx))
+            new_offload_key_chunks.append(KeyChunk(config_group_idx, abs_chunk_idx))
 
     return StoreCandidates(
         num_offloadable_tokens,

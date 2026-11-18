@@ -40,7 +40,7 @@ class StoreJobSink(Protocol):
         ...
 
     def record_allocation_failure(self) -> None:
-        """Count keys that the manager left unconsumed and are not offered again."""
+        """Count keys to retry that are not offered again."""
         ...
 
     def add_job(

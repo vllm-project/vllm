@@ -103,7 +103,7 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                 store_output = sink.prepare_store([key], req_status.req_context)
                 if store_output is None:
                     continue
-                if store_output.unconsumed_keys:
+                if store_output.keys_to_retry:
                     # A hand-off is not offered again.
                     sink.record_allocation_failure()
                 if not store_output.keys_to_store:
@@ -230,7 +230,7 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             store_output = sink.prepare_store(keys, req_status.req_context)
             if store_output is None:
                 continue
-            if store_output.unconsumed_keys:
+            if store_output.keys_to_retry:
                 # A hand-off is not offered again.
                 sink.record_allocation_failure()
             if not store_output.keys_to_store:

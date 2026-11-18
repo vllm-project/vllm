@@ -151,11 +151,12 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
-            if store_output.unconsumed_keys:
-                # Each group's range ends at its first unconsumed chunk, which
-                # is offered again on the next step.
+            if store_output.keys_to_retry:
+                # Each group's range ends at its first chunk to retry, which is
+                # offered again on the next step.
                 key_chunks = dict(zip(new_offload_keys, candidates.key_chunks))
-                for key in store_output.unconsumed_keys:
+                for key in store_output.keys_to_retry:
+                    assert key in key_chunks, "A key to retry was not offered"
                     config_group_idx, chunk_idx = key_chunks[key]
                     start_chunk_idx, end_chunk_idx = group_store_ranges[
                         config_group_idx
@@ -164,6 +165,12 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                         start_chunk_idx,
                         min(end_chunk_idx, chunk_idx),
                     )
+                # No key to store may sit at or after its group's cut.
+                assert all(
+                    (chunk := key_chunks.get(key)) is not None
+                    and chunk.chunk_idx < group_store_ranges[chunk.config_group_idx][1]
+                    for key in store_output.keys_to_store
+                ), "A key to store follows a key to retry of its group"
                 if req.is_finished():
                     logger.warning("Request %s: cannot store chunks", req_id)
                     sink.record_allocation_failure()

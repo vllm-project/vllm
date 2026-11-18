@@ -2551,7 +2551,7 @@ def _consume_at_most(capacities: Iterable[int]):
     def prepare_store(keys, req_context, trigger):
         capacity = next(capacities)
         output = generate_store_output(keys[:capacity])
-        output.unconsumed_keys = list(keys[capacity:])
+        output.keys_to_retry = list(keys[capacity:])
         return output
 
     return prepare_store

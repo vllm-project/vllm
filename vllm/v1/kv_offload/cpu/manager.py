@@ -339,7 +339,7 @@ class CPUOffloadingManager(OffloadingManager):
                 evicted_keys=[],
             )
 
-        unconsumed_keys: list[OffloadKey] = []
+        keys_to_retry: list[OffloadKey] = []
         if allow_partial:
             # Offered chunks are not evicted, so they are not room for the offer.
             num_storable_keys = (
@@ -359,14 +359,14 @@ class CPUOffloadingManager(OffloadingManager):
                     ),
                 )
                 storable_keys = set(keys_by_position[:num_storable_keys])
-                unconsumed_keys = [k for k in keys_to_store if k not in storable_keys]
+                keys_to_retry = [k for k in keys_to_store if k not in storable_keys]
                 keys_to_store = [k for k in keys_to_store if k in storable_keys]
                 if not keys_to_store:
                     return PrepareStoreOutput(
                         keys_to_store=[],
                         store_spec=self._get_load_store_spec([], []),
                         evicted_keys=[],
-                        unconsumed_keys=unconsumed_keys,
+                        keys_to_retry=keys_to_retry,
                     )
 
         self.allocation_sizes_in_current_batch.append(len(keys_to_store))
@@ -421,7 +421,7 @@ class CPUOffloadingManager(OffloadingManager):
             keys_to_store=keys_to_store,
             store_spec=store_spec,
             evicted_keys=to_evict,
-            unconsumed_keys=unconsumed_keys,
+            keys_to_retry=keys_to_retry,
         )
 
     @override

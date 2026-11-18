@@ -1016,7 +1016,7 @@ class TestTieringOffloadingManager:
 
         assert result is not None
         assert result.keys_to_store == to_keys([3, 4])
-        assert result.unconsumed_keys == to_keys([5])
+        assert result.keys_to_retry == to_keys([5])
         assert self._cascaded_keys_for("req_partial") == [set(to_keys(range(3)))]
 
     def test_request_order_survives_late_cascade_completion(self, manager_setup):

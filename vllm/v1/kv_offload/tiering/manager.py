@@ -984,7 +984,7 @@ class TieringOffloadingManager(OffloadingManager):
         request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
         if request_level_tiers:
             keys_not_in_primary = set(primary_result.keys_to_store)
-            keys_not_in_primary.update(primary_result.unconsumed_keys)
+            keys_not_in_primary.update(primary_result.keys_to_retry)
             keys_already_in_primary = tuple(
                 k for k in keys if k not in keys_not_in_primary
             )
