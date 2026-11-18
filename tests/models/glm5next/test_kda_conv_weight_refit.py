@@ -13,6 +13,8 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -84,11 +86,7 @@ def _decode_layer(conv1d: nn.Module) -> kda.Glm5NextLinearAttention:
     return layer
 
 
-def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
-    """Decode must hand the conv kernel `conv1d.weight` itself, not a copy
-    cached by an earlier forward, so refits reach the address FULL cudagraphs
-    capture (#55087)."""
-    layer = _decode_layer(conv1d)
+def _patch_one_decode_step(monkeypatch, layer: kda.Glm5NextLinearAttention) -> None:
     metadata = GDNAttentionMetadata(
         num_prefills=0,
         num_prefill_tokens=0,
@@ -105,6 +103,14 @@ def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
         "get_forward_context",
         lambda: SimpleNamespace(attn_metadata={layer.prefix: metadata}),
     )
+
+
+def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
+    """Decode must hand the conv kernel `conv1d.weight` itself, not a copy
+    cached by an earlier forward, so refits reach the address FULL cudagraphs
+    capture (#55087)."""
+    layer = _decode_layer(conv1d)
+    _patch_one_decode_step(monkeypatch, layer)
     seen = []
 
     def conv_update(x, conv_state, weight, *args, **kwargs):
@@ -131,3 +137,75 @@ def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
         weight = decode()
         assert weight.data_ptr() == conv1d.weight.data_ptr()
         assert torch.equal(weight, torch.cat(weights).squeeze(1))
+
+
+def _aiter_layout(weights: list[torch.Tensor]) -> torch.Tensor:
+    return torch.stack([weight.squeeze(1).transpose(0, 1) for weight in weights])
+
+
+def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
+    """AITER's decode reads `decode_conv1d_weight`, a `[3, K, C]` copy of
+    `conv1d.weight`. Refits through load_weights, the layerwise reload and the
+    kernel-format in-place reload must refresh it in place, at the address
+    FULL cudagraphs capture."""
+    layer = _decode_layer(conv1d)
+    layer.conv_size = KERNEL
+    layer.o_norm = SimpleNamespace(weight=None, eps=1e-6)
+    layer.kda_decode_backend = "aiter"
+    layer._register_decode_conv1d_weight()
+    # The layerwise reload processes deferred attention layers after every
+    # other layer, so this hook runs after conv1d's weight is restored.
+    assert is_deferred_attention_layer(layer)
+    data_ptr = layer.decode_conv1d_weight.data_ptr()
+    _patch_one_decode_step(monkeypatch, layer)
+    seen = []
+    monkeypatch.setattr(
+        kda.rocm_aiter_ops,
+        "kda_fused_recurrent_packed_decode",
+        lambda **kwargs: seen.append(kwargs["conv_weight"]),
+    )
+
+    def decode() -> torch.Tensor:
+        layer._forward(
+            torch.zeros(1, 3 * CHANNELS),
+            torch.zeros(1, 1, 1, CHANNELS),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 1, CHANNELS),
+            g2=torch.zeros(1, 1, CHANNELS),
+        )
+        return seen.pop()
+
+    for seed in (0, 1):
+        weights = _checkpoint_weights(seed)
+        _load(conv1d, weights)
+        weight = decode()
+        assert weight.data_ptr() == data_ptr
+        assert torch.equal(weight, _aiter_layout(weights))
+
+    reload = _checkpoint_weights(seed=2)
+    model = nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    _load(conv1d, reload)
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    weight = decode()
+    assert weight.data_ptr() == data_ptr
+    assert torch.equal(weight, _aiter_layout(reload))
+
+    # Kernel-format weights are copied into the parameters, bypassing the
+    # loader, and the post-load hooks run under weights_already_processed().
+    kernel_format = _checkpoint_weights(seed=3)
+    reload_weights(
+        SimpleNamespace(
+            model_config=SimpleNamespace(quantization=None),
+            load_config=None,
+            lora_config=None,
+        ),
+        model,
+        [("0.conv1d.weight", torch.cat(kernel_format))],
+        weights_path=None,
+        is_checkpoint_format=False,
+    )
+    weight = decode()
+    assert weight.data_ptr() == data_ptr
+    assert torch.equal(weight, _aiter_layout(kernel_format))
