@@ -469,6 +469,10 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
         "VLLM_USE_BREAKABLE_CUDAGRAPH",
     ):
         monkeypatch.setenv(name, "1")
+    # The workers patch the capture at import, when MERGE_AB is set: forked
+    # workers inherit this module as this process imported it, unpatched. The
+    # engine forks unless something already initialized the GPU here.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     g = torch.Generator().manual_seed(0)
     prompt = torch.randint(1000, 60000, (1000,), generator=g).tolist()
     with vllm_runner(
