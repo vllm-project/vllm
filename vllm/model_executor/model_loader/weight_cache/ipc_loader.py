@@ -12,7 +12,6 @@ from collections.abc import Callable
 from copy import copy
 from typing import TypeVar
 
-import torch
 import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
@@ -33,7 +32,6 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfigMismatchError,
-    UnsupportedQuantForIPCError,
     WeightCacheKey,
     WeightCacheState,
     WeightCacheUnavailableError,
@@ -73,8 +71,8 @@ class IpcModelLoader(BaseModelLoader):
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
       derived from the physical GPU uuid and the cache role (target/draft).
     - socket_dir: directory containing the daemon sockets.
-    - fallback: fall back to disk loading when the daemon is unavailable or
-      the fingerprints mismatch (default: True).
+    - fallback: fall back to disk loading when fetching state fails because the
+      daemon is unavailable or the fingerprints mismatch (default: True).
     - connect_timeout_s: socket connect timeout (default: 5.0).
     - state_timeout_s: timeout for the weight-transfer request (default: 300.0).
 
@@ -180,34 +178,21 @@ class IpcModelLoader(BaseModelLoader):
         )
         try:
             state = self._fetch_state(vllm_config, model_config)
-            model = self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
             logger.warning(
                 "Weight cache unusable (%s); falling back to disk loading", e
             )
-        except UnsupportedQuantForIPCError:
-            # Unsupported quantization is a permanent misconfiguration rather
-            # than a transient daemon outage, so it is raised even when
-            # fallback is on.
-            raise
-        except Exception:
-            if not self.fallback:
-                raise
-            logger.exception(
-                "Weight cache IPC loading failed; falling back to disk loading"
-            )
-            torch.accelerator.empty_cache()
-        else:
-            self._watch_daemon()
-            logger.info(
-                "Mapped %d tensors from the weight cache daemon via zero-copy CUDA IPC",
-                len(state.entries),
-            )
+            model = self._fallback_load(vllm_config, model_config, prefix)
+            record_external_weight_fallback(self._resolve_socket_path())
             return model
-        model = self._fallback_load(vllm_config, model_config, prefix)
-        record_external_weight_fallback(self._resolve_socket_path())
+        model = self._build_model(vllm_config, model_config, prefix, state)
+        self._watch_daemon()
+        logger.info(
+            "Mapped %d tensors from the weight cache daemon via zero-copy CUDA IPC",
+            len(state.entries),
+        )
         return model
 
     def _build_model(
