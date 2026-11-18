@@ -4,7 +4,8 @@
 #
 # Push CPU nightly images from ECR to Docker Hub as
 # vllm/vllm-openai-cpu:nightly and vllm/vllm-openai-cpu:nightly-<commit>,
-# combining the x86_64 and aarch64 architectures into a multi-arch manifest.
+# combining the x86_64 and aarch64 architectures into a multi-arch manifest,
+# and mirror :nightly to the vllm/vllm alias as vllm/vllm:nightly-cpu.
 # Run when NIGHTLY=1 after the CPU release images have been pushed to ECR.
 #
 # Local testing (no push to Docker Hub):
@@ -41,6 +42,7 @@ docker tag "$ARM64_ORIG_TAG" vllm/vllm-openai-cpu:"$TAG_NAME"-arm64
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[DRY_RUN] Would push vllm/vllm-openai-cpu:$TAG_NAME-x86_64 and vllm/vllm-openai-cpu:$TAG_NAME-arm64"
   echo "[DRY_RUN] Would create and push manifests vllm/vllm-openai-cpu:$TAG_NAME and vllm/vllm-openai-cpu:$TAG_NAME_COMMIT"
+  echo "[DRY_RUN] Would mirror vllm/vllm-openai-cpu:$TAG_NAME to vllm/vllm:nightly-cpu"
   echo "[DRY_RUN] Local tags created. Exiting without push."
   exit 0
 fi
@@ -55,4 +57,7 @@ docker manifest create vllm/vllm-openai-cpu:"$TAG_NAME_COMMIT" vllm/vllm-openai-
 docker manifest push vllm/vllm-openai-cpu:"$TAG_NAME"
 docker manifest push vllm/vllm-openai-cpu:"$TAG_NAME_COMMIT"
 
-echo "Pushed vllm/vllm-openai-cpu:$TAG_NAME and vllm/vllm-openai-cpu:$TAG_NAME_COMMIT"
+# Mirror the mutable tag to the vllm/vllm alias (registry-side copy, digest kept)
+docker buildx imagetools create -t vllm/vllm:nightly-cpu vllm/vllm-openai-cpu:"$TAG_NAME"
+
+echo "Pushed vllm/vllm-openai-cpu:$TAG_NAME, vllm/vllm-openai-cpu:$TAG_NAME_COMMIT and vllm/vllm:nightly-cpu"

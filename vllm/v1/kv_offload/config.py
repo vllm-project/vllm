@@ -46,13 +46,13 @@ def places_workers_by_nnodes(distributed_executor_backend: object) -> bool:
 
 
 def workers_may_span_nodes(
-    world_size: int, local_world_size: int | None, placement_known: bool
+    world_size: int, local_world_size: int, placement_known: bool
 ) -> bool:
     """Whether an engine's workers may be on several nodes: as the executor
     reports, or for any engine of several workers whose placement is unknown."""
     if not placement_known:
         return world_size > 1
-    return local_world_size is not None and local_world_size < world_size
+    return local_world_size < world_size
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +61,8 @@ class OffloadingParallelConfig:
     rank: int
     # Total number of workers.
     world_size: int
+    # Number of workers on this node.
+    local_world_size: int
     # Tensor parallel size.
     tp_size: int
     # Pipeline parallel size.
@@ -81,8 +83,6 @@ class OffloadingParallelConfig:
     # under any topology; for the canonical layout, the canonical page itself
     # is topology-free.
     is_parallelism_agnostic: bool
-    # Workers of this engine on each node; world_size when unknown.
-    local_world_size: int | None = None
     # False when the executor does not place workers by the configured node
     # count (Ray, external_launcher, executor classes): local_world_size then
     # says nothing about the nodes.

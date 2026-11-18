@@ -49,6 +49,9 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         parallel=OffloadingParallelConfig(
             rank=kwargs.get("rank", 0),
             world_size=kwargs.get("world_size", 1),
+            local_world_size=kwargs.get(
+                "local_world_size", kwargs.get("world_size", 1)
+            ),
             tp_size=kwargs.get("tp_size", 1),
             pp_size=kwargs.get("pp_size", 1),
             pcp_size=kwargs.get("pcp_size", 1),
@@ -57,7 +60,6 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             data_parallel_size=1,
             data_parallel_rank_local=None,
             is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
-            local_world_size=kwargs.get("local_world_size"),
             placement_known=kwargs.get("placement_known", True),
         ),
         replicated_layout=kwargs.get("replicated_layout", False),
@@ -164,7 +166,6 @@ def test_hybrid_file_identity_uses_resolved_tokens_per_hash():
 @pytest.mark.parametrize(
     ("local_world_size", "placement_known", "multi_node"),
     [
-        (None, True, False),
         (2, True, False),
         (1, True, True),
         # Ray reports every worker as local wherever it places them.

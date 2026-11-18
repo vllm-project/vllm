@@ -279,6 +279,7 @@ def build_offloading_config(
         parallel=OffloadingParallelConfig(
             rank=parallel_config.rank,
             world_size=parallel_config.world_size,
+            local_world_size=parallel_config.local_world_size,
             tp_size=parallel_config.tensor_parallel_size,
             pp_size=parallel_config.pipeline_parallel_size,
             pcp_size=parallel_config.prefill_context_parallel_size,
@@ -287,7 +288,6 @@ def build_offloading_config(
             data_parallel_size=parallel_config.data_parallel_size,
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
-            local_world_size=parallel_config.local_world_size,
             placement_known=places_workers_by_nnodes(
                 parallel_config.distributed_executor_backend
             ),
