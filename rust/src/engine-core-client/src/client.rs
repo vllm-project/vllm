@@ -587,6 +587,14 @@ impl EngineCoreClient {
             .expect("engine core client requires at least one engine")
             .ready_response
     }
+
+    /// Whether every engine computes prompt logprobs. A request may go to any
+    /// engine, so one engine without them (e.g. under
+    /// `--kv-sharing-fast-prefill`) disables them for all.
+    pub fn supports_prompt_logprobs(&self) -> bool {
+        (self.engines.iter()).all(|engine| engine.ready_response.supports_prompt_logprobs)
+    }
+
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines

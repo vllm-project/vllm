@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
     check_shm_free_space,
 )
 from vllm.logger import init_logger
@@ -94,10 +95,15 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
-    given, the path is unlinked once every worker has mapped the file, so
-    the kernel reclaims the memory when the last worker exits, no matter
-    how it exits; mappings taken before the unlink stay valid.
+    File path: `mmap_path` if given, and `engine_id` is then unused;
+    otherwise /dev/shm/vllm_offload_{engine_id}.mmap.  Further segment files
+    add a `.{i}` suffix.  When a barrier is given, the path is unlinked once
+    every worker has mapped the file, so the kernel reclaims the memory when
+    the last worker exits, no matter how it exits; mappings taken before the
+    unlink stay valid.
+
+    Regions opened at the same `mmap_path` share its files.  The caller owns
+    files at a custom path: pass no barrier to keep them for later openers.
 
     `populate_shard=(index, count)` pre-faults only this worker's contiguous
     share, for layouts where every worker maps the same bytes. The barrier
@@ -122,6 +128,7 @@ class SharedOffloadRegion:
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
         populate: bool = True,
+        mmap_path: str | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
@@ -131,7 +138,9 @@ class SharedOffloadRegion:
         self.total_size_bytes = self.num_chunks * self._row_stride
         self.cpu_page_size = cpu_page_size
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self.mmap_path = mmap_path or os.path.join(
+            SHM_PATH, f"vllm_offload_{engine_id}.mmap"
+        )
         num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
         alignment = 2 << 20 if num_chunks == 1 else self._row_stride
         segment_bytes = round_up(
@@ -173,9 +182,11 @@ class SharedOffloadRegion:
                 self._creator = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
+                region_dir = os.path.dirname(os.path.abspath(self.mmap_path))
                 check_shm_free_space(
                     self.total_size_bytes,
-                    allocation_name="CPU KV offload shared region in /dev/shm",
+                    shm_path=region_dir,
+                    allocation_name=f"CPU KV offload shared region in {region_dir}",
                 )
                 for path, _, length in self._segments[1:]:
                     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)

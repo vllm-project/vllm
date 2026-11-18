@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-13
+  date_updated: 2026-11-14
   tasks:
     - text
     - multimodal
@@ -1273,6 +1273,133 @@ presets:
       at `3df335bfe629` confirmed active mono execution. Both GSM8K evaluations
       scored 97.42% strict exact match over 1,319 samples. The effective serving
       configuration is unchanged at reviewed source head `c8befe0ed1f0`.
+
+      InferenceX throughput measurement separately substitutes synthetic
+      acceptance length 3.51 from its committed DSpark thinking-on curve.
+      This control is excluded from the preset's serving and accuracy commands;
+      the generic Bench action is not an AgentX trace replay. Concurrency labels
+      identify the measured workload, while the generated sequence cap controls
+      admission and may queue additional sessions. No independent accuracy
+      evaluation was performed at every concurrency or on the 1017 checkpoint.
+
+  mi300x_agentx:
+    label: "AgentX TP8 / TP4"
+    hardware: mi300x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "TP8 with resident Engram tables and TP4 with host Engram; six concurrency points per topology."
+    source: { label: "InferenceX #5058", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5058", key: "dsv41flash-fp4-mi300x-vllm-agentic-dspark", revision: 3df6aeb375cc662c8613f77b9b4e22dadc5b4032 }
+    image: "vllm/vllm-openai-rocm:nightly-rocm100-f5d93296c8ec82b7e7dabdb308d24d43cb1907bf@sha256:1b1b0c7c62d8ba3503d4f2e448795ed00e261bc73ad681f6811c3690613c7084"
+    select:
+      frontend: rust
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, encoder_parallel: false }
+      dcp: 1
+      kv_offload: off
+    args:
+      - "--served-model-name"
+      - "deepseek-ai/DeepSeek-V4.1-Flash"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-seqs"
+      - "128"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-cudagraph-capture-size"
+      - "1024"
+      - "--disable-uvicorn-access-log"
+    env:
+      OMP_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+    json_args:
+      "--speculative-config":
+        num_speculative_tokens: 5
+        draft_sample_method: probabilistic
+        rejection_sample_method: block
+        enable_adaptive_verification: false
+      "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
+    points:
+      tp8_c1:
+        label: "1 (TP8)"
+        concurrency: 1
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c2:
+        label: "2 (TP8)"
+        concurrency: 2
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c4:
+        label: "4 (TP8)"
+        concurrency: 4
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c8:
+        label: "8 (TP8)"
+        concurrency: 8
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c16:
+        label: "16 (TP8)"
+        concurrency: 16
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c32:
+        label: "32 (TP8)"
+        concurrency: 32
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp4_c1:
+        label: "1 (TP4)"
+        concurrency: 1
+        tp: 4
+      tp4_c2:
+        label: "2 (TP4)"
+        concurrency: 2
+        tp: 4
+      tp4_c4:
+        label: "4 (TP4)"
+        concurrency: 4
+        default: true
+        tp: 4
+      tp4_c8:
+        label: "8 (TP4)"
+        concurrency: 8
+        tp: 4
+      tp4_c16:
+        label: "16 (TP4)"
+        concurrency: 16
+        tp: 4
+      tp4_c32:
+        label: "32 (TP4)"
+        concurrency: 32
+        tp: 4
+    runbook: |
+      These points serve the 0909 launch checkpoint with five-token DSpark and
+      real block verification. TP8 keeps Engram in HBM; TP4 offloads it to host
+      memory. Decode uses full graphs and prefill runs eagerly. There is no TP2
+      lane, and no monokernel point: its weight copies leave about 2.7 GiB a
+      rank on this 192 GB part.
+
+      Decoder SWA bounded replay keeps vLLM's enabled default. The pinned image
+      carries [vLLM #65249](https://github.com/vllm-project/vllm/pull/65249),
+      which turns on prefix-cache SWA replay on CDNA3, so the sliding-window
+      cache no longer takes part in prefix caching. The lane's earlier v0.33.0
+      image predates #65249 and ran with `--no-swa-bounded-replay`; keep that
+      flag if you serve these points on such an image. There decoder replay
+      trims the sliding-window layers while their cache still takes part in
+      prefix caching, so a later prefix hit can read window KV that was never
+      written. Adaptive verification stays disabled, as in the measured lane.
+
+      [Run 43350013915](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/43350013915)
+      passed all 12 performance points and the TP8 c32 GSM8K evaluation at
+      `3df6aeb375cc`, with 97.65% strict exact match over 1,319 samples.
 
       InferenceX throughput measurement separately substitutes synthetic
       acceptance length 3.51 from its committed DSpark thinking-on curve.

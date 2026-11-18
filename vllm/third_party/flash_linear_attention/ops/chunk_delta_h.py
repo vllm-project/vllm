@@ -29,6 +29,7 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        "STORE_CHECKPOINT": lambda args: args["checkpoint_offsets"] is not None,
     }
 )
 @triton.autotune(
@@ -54,6 +55,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    checkpoint_state,
+    checkpoint_offsets,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -67,6 +70,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    STORE_CHECKPOINT: tl.constexpr,
     USE_EXP2: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -109,6 +113,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         h0 = h0 + i_nh.to(tl.int64) * V * K
     if STORE_FINAL_STATE:
         ht = ht + i_nh.to(tl.int64) * V * K
+    if STORE_CHECKPOINT:
+        # The state after o_c tokens is the one entering chunk o_c / BT. Only
+        # offsets on a chunk boundary strictly inside the sequence are stored.
+        o_c = tl.load(checkpoint_offsets + i_n).to(tl.int32)
+        i_c = tl.where((o_c > 0) & (o_c % BT == 0) & (o_c < T), o_c // BT, -1)
+        checkpoint_state = checkpoint_state + i_nh.to(tl.int64) * V * K
 
     # load initial state
     o_v = i_v * BV + tl.arange(0, BV)
@@ -157,6 +167,20 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             p_h4 = h + i_t.to(tl.int64) * stride_h + o_v[:, None] * K + o_k4[None, :]
             m_h4 = m_v[:, None] & m_k4[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_h4)
+        if STORE_CHECKPOINT:
+            if i_t == i_c:
+                # From the fp32 accumulator, unlike h.
+                p_c = checkpoint_state + o_v[:, None] * K + o_k1[None, :]
+                tl.store(p_c, b_h1.to(p_c.dtype.element_ty), mask=m_h1)
+                if K > 64:
+                    p_c = checkpoint_state + o_v[:, None] * K + o_k2[None, :]
+                    tl.store(p_c, b_h2.to(p_c.dtype.element_ty), mask=m_h2)
+                if K > 128:
+                    p_c = checkpoint_state + o_v[:, None] * K + o_k3[None, :]
+                    tl.store(p_c, b_h3.to(p_c.dtype.element_ty), mask=m_h3)
+                if K > 192:
+                    p_c = checkpoint_state + o_v[:, None] * K + o_k4[None, :]
+                    tl.store(p_c, b_h4.to(p_c.dtype.element_ty), mask=m_h4)
 
         p_w = w + o_t[:, None] * stride_w + o_k1[None, :]
         b_w = tl.load(p_w, mask=m_t[:, None] & m_k1[None, :], other=0.0)
@@ -292,7 +316,22 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_exp2: bool = False,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Run the chunk-state recurrence.
+
+    Args:
+        checkpoint_state: Contiguous `[N, H, V, K]` buffer; row `n` receives
+            sequence `n`'s state after `checkpoint_offsets[n]` tokens.
+        checkpoint_offsets: `[N]` token offset into each sequence; `0` for
+            none. Only multiples of `chunk_size` below the sequence length are
+            stored, and other rows are left untouched.
+
+    Returns:
+        The per-chunk states, the new values if `save_new_value`, and the final
+        state if `output_final_state`.
+    """
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
     B, T, Hg, K, V = *k.shape, u.shape[-1]
@@ -332,6 +371,8 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
         T=T,
         H=H,
         Hg=Hg,

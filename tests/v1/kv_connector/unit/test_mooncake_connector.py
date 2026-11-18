@@ -349,6 +349,23 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
     assert mismatch_err is not None
 
 
+def test_del_keeps_quiet_when_the_constructor_did_not_finish():
+    """A constructor that raised leaves no state for the hook to tear down."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+    worker.__del__()
+
+
+def test_del_shuts_down_a_worker_that_started():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.shutdown = MagicMock()
+
+    worker.__del__()
+
+    worker.shutdown.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_build_transfer_params_separates_prefill_pp_layers():
     """Each producer PP stage should send only its registered layer shard."""
@@ -466,9 +483,13 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
 
         assert err_reqs == []
         assert err_msg is None
-        assert src_ptrs == expected_by_pp_rank[pp_rank]["src_ptrs"]
-        assert dst_ptrs == expected_by_pp_rank[pp_rank]["dst_ptrs"]
-        assert lengths == [2 * block_len, 2 * block_len]
+        np.testing.assert_array_equal(
+            src_ptrs, expected_by_pp_rank[pp_rank]["src_ptrs"]
+        )
+        np.testing.assert_array_equal(
+            dst_ptrs, expected_by_pp_rank[pp_rank]["dst_ptrs"]
+        )
+        np.testing.assert_array_equal(lengths, [2 * block_len, 2 * block_len])
 
 
 @pytest.mark.asyncio
@@ -535,14 +556,14 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         identity = b"consumer-layer-align"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
         src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
-        assert src_ptrs == [0x1000 + 10 * block_len]
-        assert dst_ptrs == [0xB000 + 20 * block_len]
-        assert lengths == [block_len]
+        np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+        np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
+        np.testing.assert_array_equal(lengths, [block_len])
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
@@ -933,15 +954,14 @@ class _FlakyAsyncClient:
     async def post(self, url, json=None):
         self.calls.append(1)
         if len(self.calls) <= self.failures:
-            raise httpx.ReadTimeout("simulated slow bootstrap server")
+            raise mooncake_connector.httpx.ReadTimeout(
+                "simulated slow bootstrap server"
+            )
         response = MagicMock()
         response.raise_for_status = MagicMock()
         return response
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_retries_on_read_timeout(monkeypatch):
     """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
@@ -950,7 +970,7 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
 
     calls: list[int] = []
     monkeypatch.setattr(
-        httpx,
+        mooncake_connector.httpx,
         "AsyncClient",
         lambda **kwargs: _FlakyAsyncClient(2, calls),
     )
@@ -961,9 +981,6 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
     assert len(calls) == 3
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_raises_after_max_attempts(monkeypatch):
     """Terminal registration failure must raise, not loop forever."""
@@ -972,7 +989,7 @@ async def test_register_worker_raises_after_max_attempts(monkeypatch):
 
     calls: list[int] = []
     monkeypatch.setattr(
-        httpx,
+        mooncake_connector.httpx,
         "AsyncClient",
         lambda **kwargs: _FlakyAsyncClient(99, calls),
     )
@@ -1273,9 +1290,91 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
+            FakeMooncakeWrapper, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("array_api", ["available", "missing", "not_callable"])
+@pytest.mark.parametrize("base_addr", [0x1000, 0xFF00000000200000])
+async def test_transfer_arrays_and_legacy_list_fallback(
+    monkeypatch, array_api, base_addr
+):
+    """Both engine generations receive exact descriptors, including high pointers."""
+    calls = []
+
+    def transfer(api, session, src, dst, lengths):
+        calls.append((api, session, src, dst, lengths))
+        expected_type = np.ndarray if array_api == "available" else list
+        for values in (src, dst, lengths):
+            assert isinstance(values, expected_type)
+            if isinstance(values, np.ndarray):
+                assert values.dtype == np.uint64
+                assert values.ndim == 1 and values.flags.c_contiguous
+            else:
+                assert all(type(value) is int for value in values)
+        return 0
+
+    monkeypatch.setattr(
+        FakeMooncakeWrapper,
+        "batch_transfer_sync_write",
+        lambda engine, *args: transfer("list", *args),
+    )
+    if array_api != "missing":
+        monkeypatch.setattr(
+            FakeMooncakeWrapper,
+            "batch_transfer_sync_write_arrays",
+            (lambda engine, *args: transfer("arrays", *args))
+            if array_api == "available"
+            else None,
+            raising=False,
+        )
+
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        try:
+            local_regions = [_region(base_addr + i * 0x10000) for i in range(2)]
+            remote_regions = [
+                _region(base_addr + i * 0x10000 + 0x8000) for i in range(2)
+            ]
+            meta = SendBlockMeta(
+                p_req_id="p-array",
+                transfer_id="xfer-array",
+                local_block_ids=[[2, 5]],
+                ready=asyncio.Event(),
+            )
+            xfer = _xfer_meta(remote_regions, {"d-array": ("xfer-array", [[7, 9]])})
+            src, dst, lengths, errors, error = await worker._build_transfer_params(
+                [("d-array", meta)], xfer, local_regions, remote_regions
+            )
+            assert errors == [] and error is None
+            for values in (src, dst, lengths):
+                assert isinstance(values, np.ndarray)
+                assert values.dtype == np.uint64
+                assert values.ndim == 1 and values.flags.c_contiguous
+            assert worker._send_blocks("peer:1234", src, dst, lengths) is None
+            assert len(calls) == 1
+            api, session, got_src, got_dst, got_lengths = calls[0]
+            assert api == ("arrays" if array_api == "available" else "list")
+            assert session == "peer:1234"
+            if array_api == "available":
+                assert got_src is src and got_dst is dst and got_lengths is lengths
+            np.testing.assert_array_equal(
+                got_src, [r.base_addr + b * 256 for r in local_regions for b in (2, 5)]
+            )
+            np.testing.assert_array_equal(
+                got_dst, [r.base_addr + b * 256 for r in remote_regions for b in (7, 9)]
+            )
+            np.testing.assert_array_equal(got_lengths, [256] * 4)
+            stats = worker.xfer_stats.clone_and_reset().data
+            assert stats["bytes_transferred"] == [1024]
+            assert type(stats["bytes_transferred"][0]) is int
+            assert stats["num_descriptors"] == [4]
+            empty = await worker._build_transfer_params([], xfer, [], [])
+            for values in empty[:3]:
+                assert values.shape == (0,) and values.dtype == np.uint64
+        finally:
+            worker.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1414,7 +1513,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
             sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
             with (
                 patch.object(worker, "sender_loop", asyncio.get_running_loop()),
-                patch.object(worker, "_send_blocks", return_value=0) as send,
+                patch.object(worker, "_send_blocks", return_value=None) as send,
             ):
                 for pp_rank in range(2):
                     metadata = _xfer_meta(
@@ -1509,7 +1608,7 @@ async def test_kv_producer(monkeypatch):
         identity = b"consumer-id"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
 
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
@@ -1599,7 +1698,9 @@ async def test_kv_producer(monkeypatch):
 
         # Transfer error
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=123
+            prefill_worker,
+            "_send_blocks",
+            return_value="Mooncake transfer engine returned 123",
         ) as mock_send_blocks:
             mock_socket.send_multipart.reset_mock()
             prefill_worker.reqs_need_send[transfer_id] = send_meta
@@ -2201,7 +2302,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
             req_blocks,
         )
         sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
-        with patch.object(producer, "_send_blocks", return_value=0):
+        with patch.object(producer, "_send_blocks", return_value=None):
             await producer.send_kv_to_decode(b"consumer", sock, metadata)
 
         # No placeholder that would wait for a prefill that already ran.
@@ -2244,7 +2345,7 @@ def test_worker_publishes_and_clears_shared_engine():
         worker, _reg = worker_reg
         shared = get_shared_transfer_engine()
         assert shared is not None
-        assert shared.engine is worker.engine
+        assert shared.engine is worker.transfer_backend.engine
         assert shared.hostname == "127.0.0.1"
         assert shared.rpc_port == 12345
         assert shared.protocol == "rdma"
@@ -2565,9 +2666,9 @@ async def test_build_transfer_params_sends_packed_region_once(
 
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [0x1000 + 10 * block_len]
-    assert dst_ptrs == [0xA000 + 20 * block_len]
-    assert lengths == [n_blocks * block_len]
+    np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+    np.testing.assert_array_equal(dst_ptrs, [0xA000 + 20 * block_len])
+    np.testing.assert_array_equal(lengths, [n_blocks * block_len])
 
 
 @pytest.mark.parametrize(
@@ -2654,13 +2755,15 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
         local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [
-        r.base_addr + b * block_len for r in local_regions for b in local_ids
-    ]
-    assert dst_ptrs == [
-        r.base_addr + b * block_len for r in remote_regions for b in remote_ids
-    ]
-    assert lengths == sizes * len(local_regions)
+    np.testing.assert_array_equal(
+        src_ptrs,
+        [r.base_addr + b * block_len for r in local_regions for b in local_ids],
+    )
+    np.testing.assert_array_equal(
+        dst_ptrs,
+        [r.base_addr + b * block_len for r in remote_regions for b in remote_ids],
+    )
+    np.testing.assert_array_equal(lengths, sizes * len(local_regions))
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
@@ -2874,7 +2977,7 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     worker.is_kv_consumer = True
     # The first register built a producer. Its thread patch is already gone,
     # so stay on the consumer path and return before the sender thread starts.
-    with patch.object(worker.engine, "batch_register_memory", return_value=0):
+    with patch.object(FakeMooncakeWrapper, "batch_register_memory", return_value=0):
         worker.register_kv_caches(kv_caches)
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
@@ -3279,15 +3382,21 @@ async def test_packed_hetero_pp_keeps_shared_layers():
     assert copied.coalesced_d[0].base_addr == copied.d_base + 2 * page
     assert copied.err_reqs == []
     assert copied.err_msg is None
-    assert copied.lengths == [2 * page, 2 * page]
-    assert copied.src == [
-        copied.p_base + 10 * (2 * page),
-        copied.p_base + 11 * (2 * page),
-    ]
-    assert copied.dst == [
-        copied.d_base + 2 * page + 10 * (4 * page),
-        copied.d_base + 2 * page + 11 * (4 * page),
-    ]
+    np.testing.assert_array_equal(copied.lengths, [2 * page, 2 * page])
+    np.testing.assert_array_equal(
+        copied.src,
+        [
+            copied.p_base + 10 * (2 * page),
+            copied.p_base + 11 * (2 * page),
+        ],
+    )
+    np.testing.assert_array_equal(
+        copied.dst,
+        [
+            copied.d_base + 2 * page + 10 * (4 * page),
+            copied.d_base + 2 * page + 11 * (4 * page),
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -3307,9 +3416,9 @@ async def test_packed_matching_layers_coalesce_to_one_copy():
     assert len(copied.coalesced_p) == 1
     assert copied.coalesced_p[0].kv_block_len == copied.coalesced_p[0].block_len
     block_len = 2 * page
-    assert copied.src == [copied.p_base + 10 * block_len]
-    assert copied.dst == [copied.d_base + 20 * block_len]
-    assert copied.lengths == [2 * block_len]
+    np.testing.assert_array_equal(copied.src, [copied.p_base + 10 * block_len])
+    np.testing.assert_array_equal(copied.dst, [copied.d_base + 20 * block_len])
+    np.testing.assert_array_equal(copied.lengths, [2 * block_len])
 
 
 @pytest.mark.asyncio
@@ -3387,7 +3496,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         }
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             for d_rank in target_d_ranks:
                 remote_block_ids = d_rank_remote_blocks[d_rank]
@@ -3485,7 +3594,7 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.register_kv_caches(dict(zip(layer_names, views)))
         reg.reset_mock()
         with patch.object(
-            worker.engine, "batch_unregister_memory", return_value=0
+            FakeMooncakeWrapper, "batch_unregister_memory", return_value=0
         ) as unreg:
             worker.unregister_kv_caches()
             worker.unregister_kv_caches()

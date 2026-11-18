@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import logging
 import math
 import queue
@@ -102,6 +103,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -116,6 +118,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
@@ -3588,13 +3591,63 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
-    def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
+    def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
+        """KV heads of a layer across all TP ranks.
+
+        Layers may differ from the model-wide count, which is their maximum:
+        Gemma4's sliding and full attention layers, or a draft model's layers.
+        Without a layer: the model-wide count.
+        """
+        if layer_name is None:
+            return self.model_config.get_total_num_kv_heads()
+        spec = cast(AttentionSpec, self.layer_to_spec[layer_name])
+        if spec.num_kv_heads > 1 or self.world_size == 1:
+            return spec.num_kv_heads * self.world_size
+        # With one head per rank, up to world_size ranks share each head, so the
+        # spec cannot tell the count: take it from the config of the model the
+        # layer belongs to.
+        model_config = self.model_config
+        is_draft = self._is_draft_layer(layer_name)
+        if is_draft:
+            spec_config = self.vllm_config.speculative_config
+            assert spec_config is not None and spec_config.draft_model_config
+            model_config = spec_config.draft_model_config
+        arch = model_config.model_arch_config
+        total = model_config.get_total_num_kv_heads()
+        if arch.per_layer_overrides is not None:
+            layer_idx = extract_layer_index(layer_name)
+            if is_draft:
+                # Drafters may number their layers after the target's (EAGLE).
+                assert self._draft_layer_start is not None
+                layer_idx -= self._draft_layer_start
+            total = arch[layer_idx].total_num_kv_heads
+        return min(total, self.world_size)
+
+    def _is_draft_layer(self, layer_name: str) -> bool:
+        layer = self.vllm_config.compilation_config.static_forward_context.get(
+            layer_name
+        )
+        return bool(getattr(layer, "is_draft_layer", False))
+
+    @functools.cached_property
+    def _draft_layer_start(self) -> int | None:
+        """Index of the first draft model layer with its own KV cache."""
+        indices = [
+            extract_layer_index(name)
+            for name in self.layer_to_spec
+            if self._is_draft_layer(name)
+        ]
+        return min(indices, default=None)
+
+    def _write_tp_mapping(
+        self, remote_tp_size: int | None, layer_name: str | None = None
+    ) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
         return compute_write_tp_mapping(
             self.tp_rank,
             self.world_size,
             remote_tp_size or self.world_size,
-            1 if self.use_mla else self.model_config.get_total_num_kv_heads(),
+            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
             self.use_mla,
             self._has_mamba,
         )
@@ -3733,7 +3786,7 @@ class MoRIIOConnectorWorker:
                 if remote_tp_size and remote_tp_size > 0
                 else self.world_size
             ),
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=self._layer_total_num_kv_heads(layer_name),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
         local, remote, sizes = compute_block_transfer_offsets(

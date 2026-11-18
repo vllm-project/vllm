@@ -2004,6 +2004,82 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
 
 
 @pytest.mark.skipif(
+    not (current_platform.is_rocm() and HAS_AITER_MHC),
+    reason="AITER mHC required",
+)
+def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_config):
+    """gfx942 projects layer 0's expanded residual with the unfolded hc_attn_fn,
+    other platforms the embedding with the folded copy; both give the same seam.
+
+    `on_gfx942` is patched so both forms run on any ROCm GPU with AITER mHC.
+    """
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.model_executor.layers.mhc import MHCPostOp
+    from vllm.models.deepseek_v41.amd import model as amd_model
+
+    set_random_seed(0)
+    num_tokens, hidden_size = 24, 5120
+    decoder = amd_model.DeepseekV4DecoderLayer.__new__(amd_model.DeepseekV4DecoderLayer)
+    nn.Module.__init__(decoder)
+    decoder.mono = None
+    decoder.engram = None
+    decoder.mhc_overlap = None
+    decoder.use_sequence_parallel = False
+    decoder.fuse_seam_norm = False
+    decoder.hc_attn_fn_packed = decoder.hc_ffn_fn_packed = None
+    decoder.hc_mult = 4
+    decoder.hc_sinkhorn_iters = 20
+    decoder.hc_eps = 1e-6
+    decoder.rms_norm_eps = 1e-6
+    decoder.hc_post_alpha = 2.0
+    decoder.mhc_post = MHCPostOp()
+    decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    decoder.attn = lambda positions, x, _: x * 0.5
+    decoder.ffn = lambda x, input_ids: x * 0.25
+    with torch.device(DEVICE):
+        decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
+        decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
+        decoder.hc_attn_fn_broadcast = decoder.hc_attn_fn.view(24, 4, hidden_size).sum(
+            1
+        )
+        decoder.hc_attn_scale = decoder.hc_ffn_scale = torch.ones(3)
+        decoder.hc_attn_base = torch.randn(24)
+        decoder.hc_ffn_base = torch.randn(24)
+        x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
+        positions = torch.arange(num_tokens)
+
+    pre_delayed = MHCPreDelayedOp()
+    seams = []
+
+    def recorded_pre_delayed(residual, fn, *args, **kwargs):
+        out = pre_delayed(residual, fn, *args, **kwargs)
+        seams.append((fn, out))
+        return out
+
+    decoder.mhc_pre_delayed = recorded_pre_delayed
+
+    def entry_seam(gfx942: bool):
+        monkeypatch.setattr(amd_model, "on_gfx942", lambda: gfx942)
+        seams.clear()
+        with set_forward_context(None, default_vllm_config):
+            decoder(x, positions, None)
+        return seams[0]
+
+    folded_fn, folded = entry_seam(False)
+    unfolded_fn, unfolded = entry_seam(True)
+    assert folded_fn is decoder.hc_attn_fn_broadcast
+    assert unfolded_fn is decoder.hc_attn_fn
+    # residual, post_mix, res_mix, layer input, pre_mix: the layer input is copy 0
+    # of the embedding; the mixes differ only in the order the hc copies are added.
+    assert torch.equal(unfolded[3], folded[3])
+    for i in (1, 2, 4):
+        torch.testing.assert_close(unfolded[i], folded[i], atol=1e-4, rtol=1e-3)
+
+
+@pytest.mark.skipif(
     not (current_platform.is_rocm() and HAS_AITER_MHC and HAS_AITER_MHC_PRE_NORM),
     reason="AITER mHC with fused RMSNorm required",
 )
