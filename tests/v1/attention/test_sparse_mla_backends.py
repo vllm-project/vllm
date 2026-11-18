@@ -28,6 +28,7 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import (
+    CacheConfig,
     CUDAGraphMode,
     HiSparseConfig,
     SpeculativeConfig,
@@ -41,26 +42,34 @@ from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.attention import (
     sparse_mla_attention as sparse_mla_module,
 )
-from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLADims,
+)
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLACommonImpl,
+    SparseMLACommonMetadataBuilder,
     SparseMLAPrefillMetadata,
     _is_masked_mha_available,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
-    _use_dense_mha_prefill,
+    _use_masked_mha,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 
-# This module's end-to-end sparse-backend correctness test supports CUDA and
-# ROCm.  The remaining tests exercise CUDA-specific FlashMLA/FlashInfer APIs
-# and are skipped by the autouse fixture below when collecting on ROCm.
-if not (current_platform.is_cuda() or current_platform.is_rocm()):
+# The sparse-backend correctness tests support CUDA, ROCm and XPU. On ROCm
+# and XPU, the autouse fixture below skips tests that exercise CUDA-specific
+# FlashMLA/FlashInfer APIs.
+if not (
+    current_platform.is_cuda()
+    or current_platform.is_rocm()
+    or current_platform.is_xpu()
+):
     pytest.skip(
-        "Sparse MLA backend tests require CUDA or ROCm.",
+        "Sparse MLA backend tests require CUDA, ROCm or XPU.",
         allow_module_level=True,
     )
 
@@ -138,30 +147,50 @@ if current_platform.is_rocm():
     SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
     SPARSE_BLOCK_SIZES = [64]
+elif current_platform.is_xpu():
+    from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseBackend
+
+    SPARSE_BACKENDS = [XPUMLASparseBackend]
+    SPARSE_BACKEND_IDS = ["XPUMLASparse"]
+    SPARSE_KV_CACHE_DTYPES = ["auto"]
+    SPARSE_BLOCK_SIZES = [64]
 else:
     SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
     SPARSE_BACKEND_IDS = ["FlashMLA", "FlashInferTRTLLM"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"]
     SPARSE_BLOCK_SIZES = [32, 64]
 
+ROCM_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_sparse_backend_prefill_correctness",
+    "test_rocm_fused_v32_dense_prefill_matches_mqa",
+    "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+    "test_sparse_mla_common_impl_resolves_buffer_lazily",
+}
+
+XPU_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_triton_convert_req_index_to_global_index_decode_only",
+    "test_triton_convert_req_index_to_global_index_with_prefill_workspace",
+    "test_triton_convert_rejects_req_id_longer_than_token_indices",
+    "test_triton_convert_returns_valid_counts",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+}
+
 
 @pytest.fixture(autouse=True)
-def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
+def _skip_cuda_specific_sparse_mla_tests(request):
     """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
-    rocm_portable_tests = {
-        "test_sparse_backend_decode_correctness",
-        "test_sparse_backend_prefill_correctness",
-        "test_rocm_fused_v32_dense_prefill_matches_mqa",
-        "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
-        "test_split_indexer_prefill_chunks",
-        "test_split_indexer_prefill_chunks_single_request_overflow",
-        "test_sparse_mla_common_impl_resolves_buffer_lazily",
-    }
-    if (
-        current_platform.is_rocm()
-        and getattr(request.node, "originalname", request.node.name)
-        not in rocm_portable_tests
-    ):
+    if current_platform.is_rocm():
+        portable_tests = ROCM_PORTABLE_TESTS
+    elif current_platform.is_xpu():
+        portable_tests = XPU_PORTABLE_TESTS
+    else:
+        return
+    if getattr(request.node, "originalname", request.node.name) not in portable_tests:
         pytest.skip("This sparse MLA test exercises a CUDA-specific API")
 
 
@@ -392,20 +421,136 @@ def test_flashinfer_sparse_mla_attends_tokens_past_grid_limit(
         torch.testing.assert_close(out[t].float(), ref, atol=2e-2, rtol=2e-2)
 
 
-def test_hisparse_routes_prefill_to_sparse_mqa():
-    layer = SimpleNamespace(hisparse_cache=object())
+_DENSE = SparseMLAPrefillRoute.DENSE_MHA
+_MASKED = SparseMLAPrefillRoute.MASKED_MHA
+_MQA = SparseMLAPrefillRoute.SPARSE_MQA
 
-    assert not mla_attention.MLAAttention._use_sparse_mha(layer, SimpleNamespace())
+
+@pytest.mark.parametrize(
+    ("route", "uses_mha"), [(_DENSE, True), (_MASKED, True), (_MQA, False)]
+)
+def test_layer_takes_mha_for_mha_routes(route, uses_mha):
+    metadata = SimpleNamespace(prefill=SimpleNamespace(route=route))
+    assert mla_attention.MLAAttention._use_sparse_mha(None, metadata) is uses_mha
 
 
-def test_hisparse_metadata_keeps_short_prefill_indexer_enabled():
-    config = SimpleNamespace(
+@pytest.mark.parametrize(
+    ("seq_len", "overrides", "expected"),
+    [
+        (2048, {}, _DENSE),
+        (2049, {}, _MASKED),
+        (2048, {"force_mqa": True}, _MQA),
+        (2048, {"hisparse": True}, _MQA),
+        (2048, {"pcp": True, "dcp": 2}, _MQA),
+        (2048, {"dcp": 2}, _DENSE),
+        (8192, {}, _MASKED),
+        (8192, {"force_mqa": True}, _MQA),
+        (8192, {"hisparse": True}, _MQA),
+        (8192, {"shardq": True}, _MQA),
+        (8192, {"dcp": 2}, _MQA),
+        (8192, {"context": True}, _MQA),
+        (8192, {"workspace_numel": None}, _MQA),
+        (8192, {"workspace_numel": 1}, _MQA),
+        (8193, {}, _MQA),
+    ],
+)
+def test_prefill_route(seq_len, overrides, expected):
+    """Masked cases use GLM-5's FlashMLA TP1 thresholds: pure prefills up to 8K."""
+    workspace_numel = overrides.get(
+        "workspace_numel", math.prod(_topk_mask_shape(1, seq_len, seq_len))
+    )
+    builder = object.__new__(SparseMLACommonMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
         attention_config=SimpleNamespace(
-            hisparse_config=object(), sparse_mla_force_mqa=False
-        )
+            sparse_mla_force_mqa=overrides.get("force_mqa", False),
+            hisparse_config=object() if overrides.get("hisparse") else None,
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    builder.topk_tokens = 2048
+    builder.use_pcp = overrides.get("pcp", False)
+    builder.dcp_world_size = overrides.get("dcp", 1)
+    builder.topk_mask_workspace = (
+        None
+        if workspace_numel is None
+        else torch.empty(workspace_numel, dtype=torch.int32)
+    )
+    builder._masked_mha_available = builder.topk_mask_workspace is not None
+    builder._backend_name = "FLASHMLA_SPARSE"
+    builder.mla_dims = MLADims(
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=192,
+        qk_rope_head_dim=64,
+        v_head_dim=256,
+    )
+    chunked_context = (
+        SimpleNamespace(chunks=[SimpleNamespace(max_seq_len=seq_len - 64)])
+        if overrides.get("context")
+        else None
     )
 
-    assert not _use_dense_mha_prefill(config, prefill_max_seq_len=512, topk_tokens=2048)
+    route = builder._prefill_route(
+        prefill_max_seq_len=seq_len,
+        prefill_max_query_len=64 if chunked_context else seq_len,
+        prefill_query_lens_cpu=torch.tensor([64 if chunked_context else seq_len]),
+        chunked_context=chunked_context,
+        use_shardq=overrides.get("shardq", False),
+    )
+
+    assert route is expected
+
+
+@pytest.mark.parametrize(
+    "cache_dtype, expected", [("auto", _MASKED), ("fp8_ds_mla", _MQA)]
+)
+def test_masked_route_needs_layer_masked_mha(
+    default_vllm_config, dist_init, workspace_init, cache_dtype, expected
+):
+    """A quantized layer cache rules out masked MHA despite the global workspace."""
+    if not _is_masked_mha_available(128, 512, 128, 64, 128, "auto"):
+        pytest.skip("masked MHA needs SM100 and FA4")
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2",
+        max_model_len=4096,
+        num_gpu_blocks=128,
+        block_size=64,
+        dtype="bfloat16",
+    )
+    with set_current_vllm_config(vllm_config), torch.device(DEVICE_TYPE):
+        layer = mla_attention.MLAAttention(
+            num_heads=128,
+            scale=192**-0.5,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            kv_b_proj=ColumnParallelLinear(512, 128 * 256, bias=False),
+            cache_config=CacheConfig(block_size=64, cache_dtype=cache_dtype),
+            prefix="placeholder",
+            attn_backend=FlashMLASparseBackend,
+            use_sparse=True,
+            topk_indices_buffer=torch.empty((4096, 2048), dtype=torch.int32),
+        )
+        builder = FlashMLASparseBackend.get_builder_cls()(
+            layer.get_kv_cache_config(vllm_config).spec,
+            ["placeholder"],
+            vllm_config,
+            torch.device(DEVICE_TYPE),
+        )
+        metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=create_common_attn_metadata(
+                BatchSpec(seq_lens=[4096], query_lens=[4096]),
+                64,
+                torch.device(DEVICE_TYPE),
+                arange_block_indices=True,
+            ),
+        )
+    assert builder.topk_mask_workspace is not None
+    assert metadata.prefill is not None
+    assert metadata.prefill.route is expected
 
 
 def test_unified_mla_prepares_batch_without_slot_mapping(monkeypatch):
@@ -957,7 +1102,11 @@ def test_sparse_backend_decode_correctness(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
+        SimpleNamespace(
+            prefill_backend=prefill_backend,
+            impl=SimpleNamespace(masked_mha_available=True),
+            get_attn_backend=lambda: backend_cls,
+        )
     )
 
     builder_cls = backend_cls.get_builder_cls()
@@ -1073,6 +1222,15 @@ def test_sparse_backend_decode_correctness(
             (128, 128, 64, 128),
             id="FlashInferTRTLLM",
         ),
+        # Blocks only whole rows apart.
+        pytest.param(
+            FlashInferMLASparseTRTLLMBackend,
+            "auto",
+            128,
+            1155,
+            (128, 128, 64, 128),
+            id="FlashInferTRTLLM-unaligned",
+        ),
         # GLM-5.3 on SM90: the fp8 kernel's 64-token pages in larger blocks.
         pytest.param(
             FlashMLASparseBackend,
@@ -1110,6 +1268,51 @@ def test_sparse_mla_packed_stride(
         monkeypatch,
         block_stride_rows=block_stride_rows,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="trtllm-gen sparse MLA needs SM100",
+)
+def test_flashinfer_sparse_mla_reads_rows_past_the_last_whole_page():
+    """Top-k indices address flat rows, so the kernel must read rows that lie
+    after the last whole page of the cache it is given (blocks only whole rows
+    apart leave such a tail)."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    torch.manual_seed(0)
+    device = torch.device(DEVICE_TYPE)
+    rows, tail, width, heads, tokens, topk = 192, 40, 576, 64, 4, 128
+    kv = torch.zeros(rows + 64, width, dtype=torch.bfloat16, device=device)
+    kv[: rows + tail].normal_()
+    q = torch.randn(tokens, 1, heads, width, dtype=torch.bfloat16, device=device)
+    indices = torch.full((tokens, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[:, 0, :tail] = torch.arange(rows, rows + tail, device=device)
+    seq_lens = torch.full((tokens,), tail, dtype=torch.int32, device=device)
+    workspace = torch.zeros(256 << 20, dtype=torch.uint8, device=device)
+
+    def decode(kv_cache: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(tokens, 1, heads, 512, dtype=torch.bfloat16, device=device)
+        trtllm_batch_decode_with_kv_cache_mla(
+            query=q,
+            kv_cache=kv_cache.view(-1, 64, width).unsqueeze(1),
+            workspace_buffer=workspace,
+            qk_nope_head_dim=512,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            block_tables=indices,
+            seq_lens=seq_lens,
+            max_seq_len=topk,
+            out=out,
+            bmm1_scale=0.04,
+            bmm2_scale=1.0,
+            sparse_mla_top_k=topk,
+        )
+        return out
+
+    out = decode(kv[:rows])
+    assert out.any()
+    torch.testing.assert_close(out, decode(kv), rtol=0, atol=0)
 
 
 def _triton_convert_reference_impl(
@@ -1166,7 +1369,7 @@ def _triton_convert_reference_impl(
 @pytest.mark.parametrize("block_size", [16, 64, 128])
 @pytest.mark.parametrize("num_topk_tokens", [128, 256, 512])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_decode_only(
@@ -1290,7 +1493,7 @@ def test_index_group_convert_during_piecewise_capture():
 
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_size):
@@ -1355,7 +1558,7 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_rejects_req_id_longer_than_token_indices():
@@ -1499,7 +1702,7 @@ def test_flashmla_bf16_preserves_unused_output_heads(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
@@ -1976,7 +2179,11 @@ def test_sparse_backend_prefill_correctness(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
+        SimpleNamespace(
+            prefill_backend=prefill_backend,
+            impl=SimpleNamespace(masked_mha_available=True),
+            get_attn_backend=lambda: backend_cls,
+        )
     )
 
     builder_cls = backend_cls.get_builder_cls()
@@ -1994,6 +2201,13 @@ def test_sparse_backend_prefill_correctness(
     metadata = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )
+    assert metadata.prefill is not None
+    if masked_mha:
+        # These batches may be below the masked-MHA thresholds; run the
+        # masked path regardless.
+        metadata.prefill.route = SparseMLAPrefillRoute.MASKED_MHA
+    else:
+        assert metadata.prefill.route is SparseMLAPrefillRoute.DENSE_MHA
 
     mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
 
@@ -2052,6 +2266,9 @@ def test_sparse_backend_prefill_correctness(
     assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
     if kv_cache_dtype.startswith("fp8"):
         torch.testing.assert_close(out_buffer, ref_output, rtol=0.065, atol=0.05)
+    elif batch_name == "masked_mha_chunked_context":
+        # Each context-chunk merge rounds the running partial to bf16.
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.02, atol=0.01)
     else:
         torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
 
@@ -3517,7 +3734,10 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
 
 
 @requires_hisparse_ops
-def test_hisparse_remaps_strided_hma_rows_for_attention():
+@pytest.mark.parametrize("stride_rows", [12, 13])
+def test_hisparse_remaps_strided_hma_rows_for_attention(stride_rows):
+    """Hot rows are addressed by the row stride between blocks, which need
+    only be whole rows apart."""
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 4, 8
     runtime = _make_hisparse_runtime(
@@ -3526,7 +3746,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         row_width=row_width,
     )
     page_elements = block_size * row_width
-    stride_elements = 3 * page_elements
+    stride_elements = stride_rows * row_width
     byte_offset = page_elements * torch.float32.itemsize
     raw = torch.zeros(2 * stride_elements, dtype=torch.float32, device=device).view(
         torch.int8
@@ -3560,7 +3780,9 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     )
 
     assert runtime.hot.attention_cache is not None
-    assert runtime.hot.attention_cache.is_contiguous()
+    assert runtime.hot.attention_cache.is_contiguous() == (
+        stride_rows % block_size == 0
+    )
     physical_indices = runtime.index_group.shared_topk.device_topk_rows[0]
     expected = (
         physical_indices // block_size * (stride_elements // row_width)
@@ -3852,7 +4074,11 @@ def test_hisparse_mixed_batch_bf16_row_split(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
+        SimpleNamespace(
+            prefill_backend=prefill_backend,
+            impl=SimpleNamespace(masked_mha_available=True),
+            get_attn_backend=lambda: FlashMLASparseBackend,
+        )
     )
 
     builder_cls = FlashMLASparseBackend.get_builder_cls()
@@ -4210,7 +4436,8 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
 
 
 def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
-    """Verification rows resolve in one swap_in; FP8 attention sees them batched."""
+    """Verification rows resolve in one swap_in; FP8 attention sees them batched,
+    each index addressing the hot-cache row HiSparse resolved it to."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -4222,18 +4449,32 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         .expand(-1, 4)
     )
     kernel_shapes: list[torch.Size] = []
+    kernel_rows: list[torch.Tensor] = []
+    # Hot blocks interleave with other layers' rows, as in HiSparse's layout.
+    block_size, block_stride_rows, row_width = 64, 100, 4
+    hot_storage = torch.arange(
+        3 * block_stride_rows * row_width, dtype=torch.float32, device=device
+    )
+    hot_cache = hot_storage.as_strided(
+        (3, block_size, row_width), (block_stride_rows * row_width, row_width, 1)
+    )
+    physical_rows = torch.tensor([5, 105, 263, 205], dtype=torch.int32)
 
     def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
-        return logical_topk_indices + 10
+        return physical_rows.expand_as(logical_topk_indices).contiguous()
 
-    def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
+    def run_kernel(self, *, q, kv_c_and_k_pe_cache, topk_indices, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
+        page_size = kv_c_and_k_pe_cache.shape[1]
+        kernel_rows.append(
+            kv_c_and_k_pe_cache[topk_indices // page_size, topk_indices % page_size]
+        )
         return q[..., :1], None
 
     swap_in_mock = MagicMock(side_effect=swap_in)
     cache = _StubHiSparseCacheHandle(
         runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device)),
+            hot=SimpleNamespace(attention_cache=hot_cache),
             max_swap_rows=num_tokens,
         ),
         source_block_table=torch.empty(
@@ -4277,6 +4518,10 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         swap_in_mock.call_args.kwargs["logical_topk_indices"], topk
     )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
+    expected_rows = hot_storage.view(-1, row_width)[physical_rows.long()]
+    torch.testing.assert_close(
+        kernel_rows[0], expected_rows.expand(num_decodes, query_len, -1, -1)
+    )
     assert output.shape == (num_tokens, 2, 1)
 
 
@@ -5209,13 +5454,15 @@ def _build_sparse_dcp_vllm_config(
     # The base builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; the guard tests never run prefill.
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=None)
+        SimpleNamespace(
+            prefill_backend=None, get_attn_backend=lambda: FlashMLASparseBackend
+        )
     )
     return vllm_config
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
@@ -5254,7 +5501,7 @@ def test_fp8_dcp_head_envelope_guard(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize("comm_backend", ["ag_rs", "a2a"])
@@ -5315,6 +5562,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         dcp_world_size=2,
         dcp_rank=0,
         need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=True,
         _fp8_flash_mla_kernel=run_kernel,
     )
 
@@ -5333,8 +5581,79 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert not lse.isnan().any()
 
 
+@pytest.mark.parametrize("supports_topk_length", [True, False])
+@pytest.mark.parametrize("num_tokens", [31, 32])
+def test_fp8_mixed_batch_dcp_compacts_topk_from_32_tokens(
+    monkeypatch, num_tokens, supports_topk_length
+):
+    """From 32 tokens on, the rank-local top-k is compacted to the row front
+    and the kernel is bounded by the largest valid count, unless the kernel
+    rejects `topk_length` (SM90): then the -1 holes stay and it masks them."""
+    num_heads, topk = 2, 8
+    counts = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE_TYPE) % 5
+    compacted = torch.where(
+        torch.arange(topk, device=DEVICE_TYPE) < counts.view(-1, 1), 7, -1
+    ).to(torch.int32)
+    converter_kwargs = {}
+
+    def convert(*args, **kwargs):
+        converter_kwargs.update(kwargs)
+        return (compacted, counts) if kwargs["return_valid_counts"] else compacted
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        convert,
+    )
+    kernel_kwargs = {}
+
+    def run_kernel(**kwargs):
+        kernel_kwargs.update(kwargs)
+        out = torch.ones((1, num_tokens, num_heads, 1), device=DEVICE_TYPE)
+        lse = torch.ones((1, num_heads, num_tokens), device=DEVICE_TYPE)
+        return out, lse
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.empty(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        index_group=None,
+        index_group_index=0,
+        dcp_world_size=2,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=supports_topk_length,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    q = torch.empty(num_tokens, num_heads, 1, device=DEVICE_TYPE)
+    topk_indices = torch.empty(num_tokens, topk, dtype=torch.int32, device=DEVICE_TYPE)
+
+    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), topk_indices, metadata
+    )
+
+    assert lse is not None
+    compact = supports_topk_length and num_tokens >= 32
+    assert converter_kwargs["compact_valid_to_front"] is compact
+    if compact:
+        assert kernel_kwargs["topk_length"].tolist() == [4]
+    else:
+        assert kernel_kwargs["topk_length"] is None
+    empty = counts == 0
+    assert torch.isneginf(lse[empty]).all() and (out[empty] == 0).all()
+    assert (lse[~empty] == 1).all() and (out[~empty] == 1).all()
+
+
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
@@ -5622,16 +5941,16 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "rms_norm_eps": 1e-06,
-        "rope_scaling": {
+        "rope_parameters": {
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 40,
             "mscale": 1.0,
             "mscale_all_dim": 1.0,
             "original_max_position_embeddings": 4096,
-            "type": "yarn",
+            "rope_theta": 10000,
+            "rope_type": "yarn",
         },
-        "rope_theta": 10000,
         "routed_scaling_factor": 2.5,
         "scoring_func": "sigmoid",
         "tie_word_embeddings": False,

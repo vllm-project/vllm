@@ -23,7 +23,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
+from vllm.entrypoints.serve.engine.types import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
@@ -475,12 +475,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 f"Currently do not support diarized_json for {request.model}"
             )
 
-        if (
-            request.response_format in {"verbose_json", "diarized_json"}
-            and request.stream
-        ):
+        if request.response_format == "verbose_json" and request.stream:
             return self.create_error_response(
-                f"{request.response_format} format doesn't support streaming case"
+                "verbose_json format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 

@@ -15,7 +15,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (
     _resolve_cache_prefix,
 )
 

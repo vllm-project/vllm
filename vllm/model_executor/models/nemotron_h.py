@@ -40,6 +40,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
@@ -248,7 +249,7 @@ class NemotronHMoE(nn.Module):
             routed_input_transform=self.fc1_latent_proj,
             routed_output_transform=self.fc2_latent_proj,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -662,9 +663,6 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
-
-    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
-        return weight_name.startswith("mtp.")
 
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.

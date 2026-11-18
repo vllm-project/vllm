@@ -55,8 +55,6 @@ class _FABackend(FlashAttentionBackend):
         fa_version = get_flash_attn_version(
             head_size=head_size,
             has_sinks=has_sink,
-            kv_cache_block_size=block_size,
-            supports_fa4_hd256=True,
         )
         if fa_version not in (3, 4):
             return "causal route requires FlashAttention v3 or v4"
