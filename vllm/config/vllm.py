@@ -831,7 +831,7 @@ class VllmConfig:
         draft steps would run eagerly and pay their host launch time on every
         step, while their graphs are small. Empty without such steps or decode
         graphs."""
-        speculative_config = self.speculative_config
+        speculative_config = self.runner_speculative_config
         sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
         if (
             not sizes

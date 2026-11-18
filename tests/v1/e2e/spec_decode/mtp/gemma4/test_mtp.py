@@ -44,8 +44,11 @@ def test_mtp_correctness(
     )
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
-def test_prefill_with_only_assistant_config(vllm_runner, tmp_path: Path):
+def test_prefill_with_only_assistant_config(
+    vllm_runner, tmp_path: Path, enforce_eager: bool
+):
     assistant = "google/gemma-4-E2B-it-assistant"
     shutil.copy(
         hf_api().hf_hub_download(assistant, "config.json"), tmp_path / "config.json"
@@ -56,7 +59,7 @@ def test_prefill_with_only_assistant_config(vllm_runner, tmp_path: Path):
         max_model_len=256,
         max_num_seqs=2,
         enable_chunked_prefill=True,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         limit_mm_per_prompt={"image": 0, "audio": 0},
         speculative_config={
             "method": "mtp",

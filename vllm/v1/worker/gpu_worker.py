@@ -154,7 +154,7 @@ def _min_across_ranks(value: int) -> int:
 
 
 def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
-    spec_config = vllm_config.speculative_config
+    spec_config = vllm_config.runner_speculative_config
     return (
         2 if spec_config is not None and spec_config.uses_separate_workspace_lane else 1
     )
