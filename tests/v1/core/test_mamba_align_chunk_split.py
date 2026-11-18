@@ -438,3 +438,47 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail stop ({tail_stop})"
         )
+
+
+@pytest.mark.parametrize(
+    ("computed", "num_new_tokens", "connector", "expected"),
+    [
+        # Mid-scheduler-block start: re-align at the next 9216 boundary.
+        (4608, 9216, True, 4608),
+        (1152, 2304, True, 2304),
+        # Aligned start: unchanged (block-aligned end only).
+        (9216, 10240, True, 9216),
+        (0, 20000, True, 19584),
+        # Without a connector: no extra stop.
+        (4608, 9216, False, 9216),
+        # The prompt's last full boundary (36864 of 40000) ends a chunk.
+        (32256, 7744, True, 4608),
+        (27648, 12352, True, 9216),
+        (27648, 12352, False, 11520),
+    ],
+)
+def test_connector_stop_at_scheduler_block_boundary(
+    computed: int, num_new_tokens: int, connector: bool, expected: int
+) -> None:
+    # DCP-style geometry: scheduler block 9216 = 8 Mamba blocks of 1152;
+    # prompt 40000 tokens.
+    (request,) = create_requests(1, num_tokens=40000, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = computed
+    stub = SimpleNamespace(
+        block_size=9216,
+        cache_config=SimpleNamespace(block_size=1152),
+        connector=object() if connector else None,
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
+        max_num_scheduled_tokens=32768,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        mamba_partial_cache_hit=False,
+        mamba_shared_prefix_checkpoint=False,
+        hash_block_size=1152,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
+    )
+    assert (
+        Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+        == expected
+    )

@@ -608,6 +608,21 @@ class Scheduler(SchedulerInterface):
         )
 
         end = start + num_new_tokens
+        # KV connector: end chunks at scheduler-block boundaries (Mamba state
+        # exists only at chunk ends).
+        if (
+            getattr(self, "connector", None) is not None
+            and self.block_size > block_size
+        ):
+            last_full = request.num_prompt_tokens // self.block_size * self.block_size
+            for stop in (
+                (start // self.block_size + 1) * self.block_size
+                if start % self.block_size
+                else 0,
+                last_full,
+            ):
+                if start < stop < end:
+                    end = stop
         checkpoint_position = get_mamba_prefill_checkpoint_position(
             prefill_end,
             ckpt_block_size,
