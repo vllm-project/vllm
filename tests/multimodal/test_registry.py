@@ -39,6 +39,6 @@ def test_encoder_budget_excludes_modality_with_embeds_disabled():
         vllm_config = VllmConfig(model_config=model_config)
         return MultiModalBudget(vllm_config, MULTIMODAL_REGISTRY).encoder_cache_size
 
-    image_only = encoder_cache_size({"count": 0, "embeds": False})
+    image_only = encoder_cache_size({"count": 0, "allow_embeds": False})
 
     assert image_only < encoder_cache_size(0)

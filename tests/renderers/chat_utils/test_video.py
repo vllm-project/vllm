@@ -182,7 +182,7 @@ def test_parse_chat_messages_video_embeds_disabled_modality(count):
     model_config = ModelConfig(
         QWEN25OMNI_MODEL_ID,
         runner="generate",
-        limit_mm_per_prompt={"video": {"count": count, "embeds": False}},
+        limit_mm_per_prompt={"video": {"count": count, "allow_embeds": False}},
         enable_mm_embeds=True,
     )
 

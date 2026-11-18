@@ -212,7 +212,7 @@ class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
 
     count: int = Field(default=999, ge=0)
-    embeds: bool = True
+    allow_embeds: bool = True
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
@@ -323,9 +323,9 @@ class MultiModalConfig:
         {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512,
         "height": 512}}
 
-    Set `"embeds": false` to reject pre-computed embeddings of a modality
+    Set `"allow_embeds": false` to reject pre-computed embeddings of a modality
     even when `enable_mm_embeds` is on:
-        {"image": 0, "video": {"count": 0, "embeds": false}}
+        {"image": 0, "video": {"count": 0, "allow_embeds": false}}
     """
     enable_mm_embeds: bool = False
     """If `True`, enables passing multimodal embeddings:
@@ -723,7 +723,7 @@ class MultiModalConfig:
 
         limit_data = self.limit_per_prompt.get(modality)
 
-        return limit_data is None or limit_data.embeds
+        return limit_data is None or limit_data.allow_embeds
 
     def merge_mm_processor_kwargs(
         self,

@@ -132,7 +132,7 @@ llm = LLM(
 
 !!! note
     If [embedding inputs](../features/multimodal_inputs.md#embedding-inputs) are enabled (`enable_mm_embeds=True`, which EC/KV consumers turn on automatically), a zero limit only disables raw inputs: the modality still accepts pre-computed embeddings and reserves encoder cache space for them.
-    Also set `"embeds": False` to disable it completely:
+    Also set `"allow_embeds": False` to disable it completely:
 
     ```python
     from vllm import LLM
@@ -141,7 +141,7 @@ llm = LLM(
     llm = LLM(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
         enable_mm_embeds=True,
-        limit_mm_per_prompt={"image": 0, "video": {"count": 0, "embeds": False}},
+        limit_mm_per_prompt={"image": 0, "video": {"count": 0, "allow_embeds": False}},
     )
     ```
 

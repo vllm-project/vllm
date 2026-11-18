@@ -676,7 +676,7 @@ def test_consumer_resolves_mm_embedding_inputs(
 def test_mm_embeds_disabled_per_modality():
     mm_config = MultiModalConfig(
         enable_mm_embeds=True,
-        limit_per_prompt={"image": 0, "video": {"count": 0, "embeds": False}},
+        limit_per_prompt={"image": 0, "video": {"count": 0, "allow_embeds": False}},
     )
 
     assert mm_config.is_mm_embeds_enabled("image")
