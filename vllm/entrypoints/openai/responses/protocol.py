@@ -483,6 +483,11 @@ class ResponsesRequest(OpenAIBaseModel):
     def _normalize_prompt_cache_retention(cls, value: object) -> object:
         return "in_memory" if value == "in-memory" else value
 
+    @field_validator("service_tier", mode="before")
+    @classmethod
+    def _default_null_service_tier(cls, value: object) -> object:
+        return "auto" if value is None else value
+
     def build_chat_params(
         self,
         default_template: str | None,

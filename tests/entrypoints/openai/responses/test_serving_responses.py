@@ -225,6 +225,10 @@ def test_safety_identifier_defaults_to_none() -> None:
     assert _echoed_response()["safety_identifier"] is None
 
 
+def test_null_service_tier_echoes_default() -> None:
+    assert _echoed_response(service_tier=None)["service_tier"] == "auto"
+
+
 @pytest.mark.parametrize(
     "sent, echoed",
     [("in_memory", "in_memory"), ("in-memory", "in_memory"), ("24h", "24h")],

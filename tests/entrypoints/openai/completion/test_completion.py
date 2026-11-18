@@ -135,6 +135,19 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
+async def test_null_n_returns_one_choice(client: openai.AsyncOpenAI):
+    """`n` is nullable in the OpenAI spec; null means the default of 1."""
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello, my name is",
+        max_tokens=5,
+        temperature=0.0,
+        n=None,
+    )
+    assert len(completion.choices) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
