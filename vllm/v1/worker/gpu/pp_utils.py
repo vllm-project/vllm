@@ -44,8 +44,8 @@ def compute_need_sampled_mask(
     with outputs that might be needed in a subsequent (decode) step.
     Returns None if no sampled outputs are needed in the requests' next step.
 
-    With ``always``, every request is marked: the default heuristic reads
-    worker-local ``num_computed_tokens``, which diverges across PP ranks for
+    With `always`, every request is marked: the default heuristic reads
+    worker-local `num_computed_tokens`, which diverges across PP ranks for
     models that roll it back (diffusion), deadlocking the broadcast pair.
     """
     if always:
