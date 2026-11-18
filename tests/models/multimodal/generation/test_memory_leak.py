@@ -2,19 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
-import os
 import random
+import re
 import string
 import sys
-import weakref
+from pathlib import Path
 
 import pytest
 import torch
 from PIL import Image
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -33,6 +32,20 @@ WARMUP_ROUNDS = 2
 MEASURED_ROUNDS = 16
 GPU_GROWTH_THRESHOLD_MIB = 0
 CPU_PEAK_GROWTH_THRESHOLD_MIB = 0
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+
+    ATTENTION_BACKENDS = [
+        "TRITON_ATTN",
+        "ROCM_ATTN",
+        pytest.param(
+            "ROCM_AITER_FA",
+            marks=pytest.mark.skipif(not on_gfx9(), reason="AITER needs gfx9"),
+        ),
+    ]
+else:
+    ATTENTION_BACKENDS = [None]
 
 SAMPLING_PARAMS = SamplingParams(
     temperature=0.0,
@@ -85,59 +98,45 @@ def _ru_maxrss_bytes() -> int | None:
     return rss if sys.platform == "darwin" else rss * KiB_bytes
 
 
-_FDINFO_UNITS = {"": 1, "KiB": KiB_bytes, "MiB": MiB_bytes, "GiB": 1 << 30}
+_DRM_SIZE_UNITS = {"": 1, "KiB": KiB_bytes, "MiB": MiB_bytes}
 
 
-def _rocm_process_vram_bytes() -> int | None:
-    # VRAM of this process's amdgpu DRM clients, by preferred placement.
-    # Device-wide used memory also moves in 2 MiB steps when other processes,
-    # including those on a sibling partition of the same physical GPU, start,
-    # exit or create queues.
-    clients: dict[tuple[str, str], int] = {}
-    for fd in os.listdir("/proc/self/fdinfo"):
+def _rocm_process_vram_bytes() -> int:
+    """VRAM of this process's amdgpu clients, from DRM client usage stats.
+
+    Unlike PyTorch allocator stats, this also counts device memory allocated
+    outside PyTorch. See https://docs.kernel.org/gpu/drm-usage-stats.html.
+    """
+    vram_by_client: dict[str, int] = {}
+    for fdinfo in Path("/proc/self/fdinfo").iterdir():
         try:
-            with open(f"/proc/self/fdinfo/{fd}") as f:
-                info = {
-                    key: value.strip()
-                    for key, value in (line.split(":", 1) for line in f if ":" in line)
-                }
+            stats = dict(re.findall(r"^([\w-]+):\s*(.*)$", fdinfo.read_text(), re.M))
         except OSError:
             continue
-        if info.get("drm-driver") != "amdgpu":
+        if stats.get("drm-driver") != "amdgpu":
             continue
         # drm-memory-vram counts only resident memory, so eviction would move it.
-        size = info.get("drm-total-vram")
-        if size is None:
-            return None
-        value, *unit = size.split()
-        # Duplicated fds share one DRM client.
-        client = (info.get("drm-pdev", ""), info.get("drm-client-id", fd))
-        clients[client] = int(value) * _FDINFO_UNITS[unit[0] if unit else ""]
-    return sum(clients.values()) if clients else None
+        size, _, unit = stats["drm-total-vram"].partition(" ")
+        # Duplicated fds share one client, identified by its GPU VM.
+        vram_by_client[stats["pasid"]] = int(size) * _DRM_SIZE_UNITS[unit]
+    assert vram_by_client, "no amdgpu DRM client in /proc/self/fdinfo"
+    return sum(vram_by_client.values())
 
 
-def _gpu_used_bytes() -> tuple[int, int | None]:
-    """Device-wide used memory, and this process's VRAM where available."""
+GPU_MEMORY_KINDS = (
+    ("allocated", "process")
+    if current_platform.is_rocm()
+    else ("allocated", "reserved")
+)
+
+
+def _gpu_memory_bytes() -> tuple[int, int]:
+    # Process-local: device-wide used memory also counts other processes on
+    # the GPU, and even a bare HIP context adds 2 MiB to it.
     torch.accelerator.synchronize()
-    free_bytes, total_bytes = torch.accelerator.get_memory_info()
-    process_bytes = None
     if current_platform.is_rocm():
-        process_bytes = _rocm_process_vram_bytes()
-        assert process_bytes is not None, (
-            "drm-total-vram for the amdgpu DRM clients of this process is missing "
-            "from /proc/self/fdinfo"
-        )
-    return int(total_bytes - free_bytes), process_bytes
-
-
-def _gpu_growth(
-    baseline: tuple[int, int | None], sample: tuple[int, int | None]
-) -> int:
-    # Prefer this process's own VRAM, which other processes on the device
-    # cannot move, and use device-wide used memory where it is not measured.
-    if baseline[1] is not None and sample[1] is not None:
-        return sample[1] - baseline[1]
-    return sample[0] - baseline[0]
+        return torch.accelerator.memory_allocated(), _rocm_process_vram_bytes()
+    return torch.accelerator.memory_allocated(), torch.accelerator.memory_reserved()
 
 
 def _format_mib(num_bytes: int | None) -> str:
@@ -147,35 +146,31 @@ def _format_mib(num_bytes: int | None) -> str:
     return f"{format_mib(num_bytes)} MiB"
 
 
+@pytest.fixture
+def attention_backend() -> str | None:
+    return None
+
+
 @pytest.fixture(scope="function")
-def llm(monkeypatch):
+def llm(vllm_runner, monkeypatch, attention_backend):
+    # In process, so the tests can measure memory and read the worker's state.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm_kwargs = dict(
-        model=maybe_model_redirect(MODEL_NAME),
+    with vllm_runner(
+        maybe_model_redirect(MODEL_NAME),
         enforce_eager=True,
+        enable_chunked_prefill=None,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=REQUESTS_PER_ROUND,
         limit_mm_per_prompt={"image": 1},
-        seed=0,
-        disable_log_stats=True,
         gpu_memory_utilization=0.8,
-    )
-    if current_platform.is_rocm():
-        llm_kwargs["attention_backend"] = "TRITON_ATTN"
-
-    llm = LLM(**llm_kwargs)
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        attention_backend=attention_backend,
+    ) as runner:
+        yield runner.llm
 
 
 @pytest.mark.core_model
+@pytest.mark.parametrize("attention_backend", ATTENTION_BACKENDS)
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_NAMES], indirect=True)
 def test_no_memory_leak(llm, image_urls: list[str]) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(MODEL_NAME)
@@ -193,10 +188,10 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
         del outputs
 
     gc.collect()
-    warmup_gpu = _gpu_used_bytes()
+    warmup_gpu = _gpu_memory_bytes()
     warmup_cpu_peak = _ru_maxrss_bytes()
 
-    post_warmup_gpu_samples: list[tuple[int, int | None]] = []
+    post_warmup_gpu_samples: list[tuple[int, int]] = []
     post_warmup_cpu_peak_samples: list[int] = []
 
     for _ in range(MEASURED_ROUNDS):
@@ -206,23 +201,23 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
         del outputs
 
         gc.collect()
-        post_warmup_gpu_samples.append(_gpu_used_bytes())
+        post_warmup_gpu_samples.append(_gpu_memory_bytes())
         cpu_peak = _ru_maxrss_bytes()
         if cpu_peak is not None:
             post_warmup_cpu_peak_samples.append(cpu_peak)
 
-    gpu_growth = max(_gpu_growth(warmup_gpu, x) for x in post_warmup_gpu_samples)
     gpu_threshold = GPU_GROWTH_THRESHOLD_MIB * MiB_bytes
+    for i, kind in enumerate(GPU_MEMORY_KINDS):
+        samples = [sample[i] for sample in post_warmup_gpu_samples]
+        gpu_growth = max(samples) - warmup_gpu[i]
 
-    assert gpu_growth <= gpu_threshold, (
-        "Qwen3-VL GPU memory kept growing after warmup. "
-        f"warmup_baseline={_format_mib(warmup_gpu[0])}, "
-        f"post_warmup_samples={[_format_mib(x[0]) for x in post_warmup_gpu_samples]}, "
-        f"warmup_process_vram={_format_mib(warmup_gpu[1])}, "
-        f"post_warmup_process_vram={[_format_mib(x[1]) for x in post_warmup_gpu_samples]}, "  # noqa: E501
-        f"gpu_growth={_format_mib(gpu_growth)}, "
-        f"gpu_threshold={GPU_GROWTH_THRESHOLD_MIB} MiB"
-    )
+        assert gpu_growth <= gpu_threshold, (
+            f"Qwen3-VL {kind} GPU memory kept growing after warmup. "
+            f"warmup_baseline={_format_mib(warmup_gpu[i])}, "
+            f"post_warmup_samples={[_format_mib(x) for x in samples]}, "
+            f"gpu_growth={_format_mib(gpu_growth)}, "
+            f"gpu_threshold={GPU_GROWTH_THRESHOLD_MIB} MiB"
+        )
 
     if warmup_cpu_peak is not None and post_warmup_cpu_peak_samples:
         cpu_peak_growth = max(post_warmup_cpu_peak_samples) - warmup_cpu_peak
