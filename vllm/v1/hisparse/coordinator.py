@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -109,6 +110,7 @@ class HiSparseCoordinator:
         # Spec decode step tokens an import needs beyond its sequence.
         self.import_step_tokens = import_step_tokens
         self.num_reprefillable_tokens = num_reprefillable_tokens
+        self.managers = managers
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -492,20 +494,40 @@ class HiSparseCoordinator:
             for block in blocks
         )
 
-    def prepare_allocation(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
-    ) -> dict[int, list[KVCacheBlock]]:
-        """Allocate the hot tier before releasing pages to fund other groups."""
-        if not self.get_num_reclaimable_blocks(request_id):
-            return {}
-        hot_blocks = {
-            manager.kv_cache_group_id: manager.allocate_new_blocks(
-                request_id, num_tokens, num_tokens_main_model
+    def adjust_allocation_budget(self, request_id: str, required: int) -> int:
+        if self.gpu_pool is None or required > self.gpu_pool.num_gpu_blocks:
+            return required
+        return max(0, required - self.get_num_reclaimable_blocks(request_id))
+
+    def allocate_new_blocks(
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_encoder_tokens: int = 0,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        """Allocate hot groups before releasing pages to fund the next chunk."""
+        hot_blocks: dict[int, list[KVCacheBlock]] = {}
+        if self.get_num_reclaimable_blocks(request_id):
+            hot_blocks = {
+                manager.kv_cache_group_id: manager.allocate_new_blocks(
+                    request_id, num_tokens, num_tokens_main_model
+                )
+                for manager in self.hot_managers
+            }
+            self.update_residency(request_id)
+        return tuple(
+            hot_blocks[group_id]
+            if group_id in hot_blocks
+            else manager.allocate_new_blocks(
+                request_id,
+                num_encoder_tokens
+                if isinstance(manager, CrossAttentionManager)
+                else num_tokens,
+                num_tokens_main_model,
             )
-            for manager in self.hot_managers
-        }
-        self.update_residency(request_id)
-        return hot_blocks
+            for group_id, manager in enumerate(self.managers)
+        )
 
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
@@ -1125,9 +1147,8 @@ def get_hisparse_coordinator(
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
-    from vllm.v1.hisparse.kv_cache_coordinator import _HiSparseKVCacheCoordinator
-
-    cache_coordinator = kv_cache_manager.coordinator
-    assert isinstance(cache_coordinator, _HiSparseKVCacheCoordinator)
-    cache_coordinator.hisparse_coordinator = coordinator
+    kv_cache_manager.coordinator.allocation_budget_hook = (
+        coordinator.adjust_allocation_budget
+    )
+    kv_cache_manager.coordinator.allocation_hook = coordinator.allocate_new_blocks
     return coordinator

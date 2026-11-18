@@ -164,14 +164,7 @@ class KVCacheManager:
         # potential configs we could expose in the future.
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
-        coordinator_factory = get_kv_cache_coordinator
-        if kv_cache_config.hisparse_host_num_blocks is not None:
-            from vllm.v1.hisparse.kv_cache_coordinator import (
-                get_hisparse_kv_cache_coordinator,
-            )
-
-            coordinator_factory = get_hisparse_kv_cache_coordinator
-        self.coordinator = coordinator_factory(
+        self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -176,6 +176,10 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self.allocation_budget_hook: Callable[[str, int], int] | None = None
+        self.allocation_hook: (
+            Callable[[str, int, int, int], tuple[list[KVCacheBlock], ...]] | None
+        ) = None
         # Match Mamba checkpoints to Eagle's attention replay boundary.
         if use_eagle:
             for manager in self.single_type_managers:
@@ -262,6 +266,8 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
                 )
+        if self.allocation_budget_hook is not None:
+            return self.allocation_budget_hook(request_id, num_blocks_to_allocate)
         return num_blocks_to_allocate
 
     def allocate_new_computed_blocks(
@@ -338,6 +344,10 @@ class KVCacheCoordinator(ABC):
             The new allocated blocks.
 
         """
+        if self.allocation_hook is not None:
+            return self.allocation_hook(
+                request_id, num_tokens, num_tokens_main_model, num_encoder_tokens
+            )
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
