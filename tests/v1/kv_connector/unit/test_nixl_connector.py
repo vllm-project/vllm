@@ -3414,7 +3414,11 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
 
 
 @pytest.mark.cpu_test
-class TestPeerReplacement:
+class _PullWorkerHarness:
+    """Pull worker on a fake NIXL transport, connected to remote engine "old"."""
+
+    extra_config: dict[str, Any] = {"engine_ttl": 0}
+
     @pytest.fixture(autouse=True)
     def setup(self, monkeypatch):
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -3423,7 +3427,7 @@ class TestPeerReplacement:
         block_size = maybe_update_block_size(16)
 
         config = create_vllm_config(
-            kv_connector_extra_config={"engine_ttl": 0}, block_size=block_size
+            kv_connector_extra_config=dict(self.extra_config), block_size=block_size
         )
         config.kv_transfer_config.kv_buffer_device = "cpu"
         platform = SimpleNamespace(
@@ -3460,19 +3464,32 @@ class TestPeerReplacement:
         self.nixl.REMOTE_AGENT_NAME = engine_id
         future.set_result(self.worker._nixl_handshake(host, port, 1, engine_id))
 
-    def _request(self, engine_id="new", blocks=(1,), awaiting_kvs=True, req_id=None):
+    def _request(
+        self,
+        engine_id="new",
+        blocks=(1,),
+        awaiting_kvs=True,
+        req_id=None,
+        remote_blocks=(2,),
+    ):
         metadata = NixlConnectorMetadata()
         metadata.reqs_to_recv[req_id or f"{engine_id}-req"] = ReqMeta(
             local_block_ids=(blocks,),
             local_physical_block_ids=(blocks,),
             tp_size=1,
             remote=RemoteMeta(
-                ([2],), "localhost", 1234, engine_id, f"{engine_id}-prefill"
+                (list(remote_blocks),),
+                "localhost",
+                1234,
+                engine_id,
+                f"{engine_id}-prefill",
             ),
             awaiting_kvs=awaiting_kvs,
         )
         return metadata
 
+
+class TestPeerReplacement(_PullWorkerHarness):
     def _fail_old_peer(self):
         self.worker.start_load_kv(self._request("old"))
         self.nixl.invalid_remote_agents.add("old")
@@ -3847,6 +3864,50 @@ class TestPeerReplacement:
         self.transport.make_prepped_xfer.assert_not_called()
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert "old" in self.worker._handshake_futures
+
+
+class TestReadRunBudget(_PullWorkerHarness):
+    extra_config = {"engine_ttl": 0, "max_read_runs_per_step": 2}
+
+    def _start_read(self):
+        # No two blocks are adjacent, so each descriptor is a run of its own.
+        self.transport.reset_mock()
+        self.worker.start_load_kv(
+            self._request("old", blocks=(1, 3, 5, 7), remote_blocks=(2, 4, 6, 8))
+        )
+
+    def test_read_over_budget_is_posted_over_steps_and_notifies_once(self):
+        """P must be notified once, after the last slice; earlier slices
+        completing must not finish the request."""
+        self._start_read()
+        first = self.transport.make_prepped_xfer.call_args
+        assert "notif_msg" not in first.kwargs
+        assert self.worker.get_transfer_results().finished_recving == set()
+        self.transport.send_notif.assert_not_called()
+
+        self.transport.make_prepped_xfer.reset_mock()
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        second = self.transport.make_prepped_xfer.call_args
+        for local, remote, posted in (
+            ([1, 3], [2, 4], first),
+            ([5, 7], [6, 8], second),
+        ):
+            np.testing.assert_array_equal(posted.args[2], local)
+            np.testing.assert_array_equal(posted.args[4], remote)
+        assert self.worker.get_transfer_results().finished_recving == {"old-req"}
+        self.transport.send_notif.assert_called_once_with(
+            "old", notif_msg=b"old-prefill:1"
+        )
+
+    def test_failed_slice_stops_read_without_notifying(self):
+        self._start_read()
+        self.transport.check_xfer_state.return_value = "ERR"
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        self.transport.make_prepped_xfer.assert_called_once()
+        self.transport.send_notif.assert_not_called()
 
 
 def test_transfer_topology_unregister():

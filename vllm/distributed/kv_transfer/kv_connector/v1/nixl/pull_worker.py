@@ -4,6 +4,8 @@
 
 import math
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -33,8 +35,37 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _run_starts(local_ids: np.ndarray, remote_ids: np.ndarray) -> np.ndarray:
+    """Start positions of the descriptor runs that are contiguous on both sides.
+
+    NIXL merges such runs, so posting a READ costs about one request per run.
+    """
+    if len(local_ids) == 0:
+        return np.zeros(0, dtype=np.int64)
+    breaks = np.flatnonzero((np.diff(local_ids) != 1) | (np.diff(remote_ids) != 1))
+    return np.concatenate(([0], breaks + 1))
+
+
+@dataclass
+class _QueuedRead:
+    """A READ posted in slices of whole runs over several engine steps."""
+
+    request_id: ReqId
+    dst_engine_id: EngineId
+    remote_rank: int
+    local_xfer_side_handle: int
+    remote_xfer_side_handle: int
+    local_ids: np.ndarray
+    remote_ids: np.ndarray
+    run_starts: np.ndarray
+    next_run: int = 0
+
+
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
+
+    # 0: post every READ whole as soon as it is ready.
+    _max_read_runs_per_step = 0
 
     def __init__(
         self,
@@ -46,6 +77,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
 
+        # Over UCX CUDA IPC, posting a READ blocks this thread for about 5us per
+        # descriptor run. Under DP every rank waits for the slowest one each
+        # step, so a rank posting a large READ delays all of them; bounding the
+        # runs each rank posts per step keeps the ranks in step.
+        self._max_read_runs_per_step = int(
+            self.kv_transfer_config.get_from_extra_config("max_read_runs_per_step", 0)
+        )
+        if self._max_read_runs_per_step < 0:
+            raise ValueError(
+                "max_read_runs_per_step must be >= 0, got "
+                f"{self._max_read_runs_per_step}"
+            )
+        self._read_runs_left = 0
+        self._queued_reads: deque[_QueuedRead] = deque()
+
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
@@ -54,6 +100,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # replicated-PCP ranks > 0 (which return early) and this step's reads see
         # this round's renewals.
         self._send_heartbeats(metadata)
+        self._read_runs_left = self._max_read_runs_per_step
 
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
@@ -84,6 +131,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
+
+        if self._max_read_runs_per_step and self._queued_reads:
+            self._post_queued_reads()
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -676,6 +726,29 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     notif_id=notif_id,
                 )
                 return True
+            if self._max_read_runs_per_step:
+                run_starts = _run_starts(local_block_descs_ids, remote_block_descs_ids)
+                if self._queued_reads or len(run_starts) > self._read_runs_left:
+                    # Notify P once every slice has completed.
+                    self._pending_recv_notifs.setdefault(request_id, []).append(
+                        (remote_agent, notif_id)
+                    )
+                    # Outstanding until _pop_done_transfers sees its last slice.
+                    self._recving_transfers.setdefault(request_id, [])
+                    self._queued_reads.append(
+                        _QueuedRead(
+                            request_id=request_id,
+                            dst_engine_id=dst_engine_id,
+                            remote_rank=remote_rank,
+                            local_xfer_side_handle=local_xfer_side_handle,
+                            remote_xfer_side_handle=remote_xfer_side_handle,
+                            local_ids=local_block_descs_ids,
+                            remote_ids=remote_block_descs_ids,
+                            run_starts=run_starts,
+                        )
+                    )
+                    return True
+                self._read_runs_left -= len(run_starts)
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
                 local_xfer_side_handle,
@@ -706,6 +779,77 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 assert handle is not None
                 self._recving_transfers[request_id].append(handle)
             return False
+
+    def _post_queued_reads(self) -> None:
+        """Post queued READs, oldest first, in slices of whole runs until this
+        step's run budget is spent."""
+        while self._queued_reads and self._read_runs_left > 0:
+            read = self._queued_reads[0]
+            req_id = read.request_id
+            if req_id in self._recv_failures:
+                self._drop_queued_reads({req_id})
+                continue
+            if read.dst_engine_id in self._invalid_remote_engines:
+                self._handle_failed_transfer(
+                    req_id, None, self._recv_failures, record_failed_transfer=False
+                )
+                self._drop_queued_reads({req_id})
+                continue
+            num_runs = len(read.run_starts)
+            end = min(read.next_run + self._read_runs_left, num_runs)
+            lo = read.run_starts[read.next_run]
+            hi = read.run_starts[end] if end < num_runs else len(read.local_ids)
+            handle = None
+            try:
+                handle = self.nixl_wrapper.make_prepped_xfer(
+                    "READ",
+                    read.local_xfer_side_handle,
+                    read.local_ids[lo:hi],
+                    read.remote_xfer_side_handle,
+                    read.remote_ids[lo:hi],
+                )
+                self.nixl_wrapper.transfer(handle)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="transfer_setup_failed",
+                    req_id=req_id,
+                    msg="Deferring failure reporting until outstanding transfers "
+                    "finish",
+                    error=e,
+                    dst_engine_id=read.dst_engine_id,
+                    remote_rank=read.remote_rank,
+                )
+                if not self._handle_failed_transfer(
+                    req_id, handle, self._recv_failures, error=e
+                ):
+                    assert handle is not None
+                    self._recving_transfers[req_id].append(handle)
+                self._drop_queued_reads({req_id})
+                continue
+            self._recving_transfers[req_id].append(handle)
+            self._read_runs_left -= end - read.next_run
+            read.next_run = end
+            if end == num_runs:
+                self._queued_reads.popleft()
+
+    def _drop_queued_reads(self, req_ids: set[ReqId]) -> None:
+        self._queued_reads = deque(
+            read for read in self._queued_reads if read.request_id not in req_ids
+        )
+
+    def _pop_done_transfers(
+        self, transfers: dict[str, list[int]]
+    ) -> tuple[set[str], set[str]]:
+        done_req_ids, failed_req_ids = super()._pop_done_transfers(transfers)
+        if self._max_read_runs_per_step and self._queued_reads:
+            # A failed request does not need its unposted slices.
+            self._drop_queued_reads(failed_req_ids | self._recv_failures)
+            for read in self._queued_reads:
+                if read.request_id in done_req_ids:
+                    # Its posted slices are done, but more are still queued.
+                    done_req_ids.discard(read.request_id)
+                    transfers[read.request_id] = []
+        return done_req_ids, failed_req_ids
 
     def _read_blocks_mixed(
         self,
