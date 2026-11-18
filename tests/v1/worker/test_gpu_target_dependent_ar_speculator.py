@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -350,13 +349,12 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
 @pytest.mark.parametrize("prompt_len", [1, 2, 4])
 @pytest.mark.parametrize("num_rejected", [0, 1, 2, 4])
 @pytest.mark.parametrize("use_input_embeds", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires a GPU")
 def test_multi_module_mtp_reprefill_uses_only_cached_request_history(
     prompt_len, num_rejected, use_input_embeds
 ):
     """A short request reusing a slot must never re-prefill its old occupant."""
-    device = torch.device(
-        "cpu" if os.environ.get("TRITON_INTERPRET") == "1" else "cuda"
-    )
+    device = torch.device("cuda")
     steps, hidden_size, max_reqs, max_tokens, slot = 4, 8, 2, 16, 1
     buffers = InputBuffers(max_reqs, max_tokens, device)
     hidden_states = torch.zeros(max_tokens, hidden_size, device=device)
