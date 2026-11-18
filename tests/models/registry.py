@@ -963,9 +963,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
     ),
     "HYV4VLForConditionalGeneration": _HfExamplesInfo(
-        "tencent/Hy4",
-        trust_remote_code=True,
-        min_transformers_version="5.17.0",
+        "placeholder", is_available_online=False
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -1774,6 +1772,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "HYV4MTPModel": _HfExamplesInfo(
         "tencent/Hy4-preview",
         speculative_model="tencent/Hy4-preview",
+    ),
+    "HYV4DFlyModel": _HfExamplesInfo(
+        "tencent/Hy4-flash",
+        speculative_model="tencent/Hy4-flash",
+        speculative_method="dfly",
     ),
     "InklingMTPModel": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4",
