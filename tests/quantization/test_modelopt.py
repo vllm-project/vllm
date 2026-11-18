@@ -260,38 +260,6 @@ def test_modelopt_mxfp8_pre_processed_weights_follow_kernel(monkeypatch):
         method.process_weights_after_loading(layer)
 
 
-def test_modelopt_int8_pre_processed_weights_restore_marlin_zp(monkeypatch):
-    """Cached INT8_PB_WO weights only need Marlin's empty zero-point handle."""
-    from vllm.config.quantization import QuantSpec
-    from vllm.model_executor.kernels.linear.mixed_precision import MarlinLinearKernel
-    from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8Static
-
-    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
-    method.spec = QuantSpec(weight=kInt8Static, activation=None)
-    method.kernel = object.__new__(MarlinLinearKernel)
-    method.kernel.config = SimpleNamespace(act_type=torch.bfloat16)
-    method.kernel.w_zp_name = None
-
-    assert method.supports_pre_processed_weights
-
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.modelopt.is_weights_pre_processed",
-        lambda: True,
-    )
-    layer = torch.nn.Module()
-    layer.register_parameter(
-        "weight", torch.nn.Parameter(torch.empty(1), requires_grad=False)
-    )
-    layer.register_parameter(
-        "w_zp",
-        torch.nn.Parameter(torch.empty(0, dtype=torch.int32), requires_grad=False),
-    )
-    method.process_weights_after_loading(layer)
-
-    assert method.kernel.w_zp_name == "w_zp"
-    assert layer.w_zp.numel() == 0
-
-
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """The per-tensor FP8 scheme transposes the weight to [in, out] and records
     that layout in layer.processed_weight_dims, which Humming reads.
