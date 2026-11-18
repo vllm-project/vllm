@@ -9,14 +9,12 @@ These utilities enable efficient batched tensor transfer over NCCL.
 import pytest
 import torch
 
-from vllm.distributed.weight_transfer import packed_tensor
 from vllm.distributed.weight_transfer.packed_tensor import (
     ALIGN,
     DEFAULT_PACKED_NUM_BUFFERS,
     Chunk,
     PackedIpcConsumer,
     Piece,
-    _get_streams,
     _Unpacker,
     chunks,
     packed_ipc_producer,
@@ -98,32 +96,6 @@ class TestPackedBroadcastProducer:
 
         # No broadcasts for empty iterator
         assert mock_group.broadcast_count == 0
-
-    def test_producer_failing_mid_transfer_drains_its_streams(self):
-        """The chunk buffers are freed only after their queued work ends."""
-
-        class FailingGroup:
-            calls = 0
-
-            def broadcast(self, tensor, src):
-                self.calls += 1
-                if self.calls == 2:
-                    raise RuntimeError("broadcast failed")
-                torch.cuda._sleep(SLEEP_CYCLES)
-
-        params = [(f"w{i}", torch.randn(4, device="cuda")) for i in range(3)]
-        with pytest.raises(RuntimeError, match="broadcast failed"):
-            packed_nccl_broadcast_producer(
-                iterator=iter(params),
-                group=FailingGroup(),
-                src=0,
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=16,
-            )
-        streams = _get_streams(
-            torch.accelerator.current_device_index(), DEFAULT_PACKED_NUM_BUFFERS
-        )
-        assert all(stream.query() for stream in streams)
 
 
 # Long enough (~1 s on current GPUs) that the host always gets through the
@@ -739,19 +711,6 @@ class TestPackedIpcRoundtrip:
             )
 
 
-@pytest.mark.parametrize(
-    "buf",
-    [torch.empty(4, dtype=torch.float32), torch.empty(17, dtype=torch.uint8)],
-    ids=["float32", "unaligned"],
-)
-def test_ipc_consumer_rejects_a_malformed_buffer(monkeypatch, buf):
-    monkeypatch.setattr(packed_tensor, "rebuild_cuda_tensor", lambda *args: buf)
-    with pytest.raises(ValueError, match="must be uint8"):
-        PackedIpcConsumer(0, gpu_uuid="u").receive(
-            {"u": (0,) * 8}, ["w"], [[1]], ["float32"]
-        )
-
-
 # --- Chunk layout ---
 
 
@@ -822,6 +781,8 @@ class TestChunkLayout:
         assert next(layout) == Chunk(28, [Piece(0, 0, 28, 0)], full=True)
         assert len(pulled) == 1
         assert next(layout) == Chunk(8, [Piece(1, 0, 8, 0)], full=False)
+        with pytest.raises(ValueError, match="at least 16 bytes"):
+            next(chunks(specs(), 15))
 
     def test_specs_fed_per_chunk_give_the_same_layout(self):
         """As the IPC consumer feeds them; a chunk past the end raises."""

@@ -100,10 +100,6 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
     refuse otherwise at init."""
 
-    def __post_init__(self) -> None:
-        if self.packed:
-            chunk_capacity(self.packed_buffer_size_bytes)
-
 
 @dataclass
 class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):

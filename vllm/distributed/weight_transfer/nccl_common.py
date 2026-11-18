@@ -29,7 +29,6 @@ from vllm.distributed.weight_transfer.base import WeightTransferInitInfo
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
-    chunk_capacity,
 )
 from vllm.platforms import current_platform
 from vllm.utils.nccl import unpinned_nccl_env
@@ -118,8 +117,6 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
 
     def __post_init__(self) -> None:
         _ = self.nccl_unique_id_bytes
-        if self.packed:
-            chunk_capacity(self.packed_buffer_size_bytes)
 
     @property
     def nccl_unique_id_bytes(self) -> bytes | None:

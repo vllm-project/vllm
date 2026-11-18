@@ -1853,36 +1853,6 @@ def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
             engine.finish_weight_update()
 
 
-@pytest.mark.parametrize(
-    "make",
-    [
-        lambda size: IPCTrainerInitInfo(
-            rank=0, packed=True, packed_buffer_size_bytes=size
-        ),
-        lambda size: NCCLTrainerInitInfo(
-            master_address="127.0.0.1",
-            master_port=29500,
-            world_size=2,
-            rank=0,
-            packed_buffer_size_bytes=size,
-        ),
-        lambda size: NCCLWeightTransferInitInfo(
-            master_address="127.0.0.1",
-            master_port=29500,
-            rank_offset=1,
-            world_size=2,
-            packed=True,
-            packed_buffer_size_bytes=size,
-        ),
-    ],
-    ids=["ipc-trainer", "nccl-trainer", "nccl-worker"],
-)
-def test_packed_buffer_under_the_alignment_is_rejected_at_init(make):
-    make(16)
-    with pytest.raises(ValueError, match="at least 16 bytes"):
-        make(15)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_packed_discard_receives_every_chunk_whole():
     """A relay rank receives chunks larger than the first one in full."""

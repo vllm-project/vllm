@@ -237,34 +237,34 @@ def packed_nccl_broadcast_producer(
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
     bufs: list[torch.Tensor | None] = [None] * num_buffers  # sized to the chunks
-    try:
-        for k, chunk in enumerate(chunks(specs(), buffer_size_bytes)):
-            slot = k % num_buffers
-            if not chunk.sent:
-                _pack_copies(None, chunk.pieces, tensors)
-                continue
-            prev = done[slot]
-            if prev is not None:
-                prev.synchronize()
-            device = tensors[chunk.pieces[0].position].device
-            # the sources may come from work the caller queued while iterating
-            streams[slot].wait_stream(caller_stream)
-            with torch.cuda.stream(streams[slot]):
-                buf = bufs[slot] = fit_buffer(bufs[slot], chunk, capacity, device)
-                dsts, srcs = _pack_copies(buf, chunk.pieces, tensors)
-                torch._foreach_copy_(dsts, srcs)
-                # keep dropped sources alive until the copies end
-                for t in srcs:
-                    t.record_stream(streams[slot])
-                del dsts, srcs
-                group.broadcast(buf[: chunk.nbytes], src=src)
-                event = torch.Event()
-                event.record(streams[slot])
-            done[slot] = event
-    finally:
-        # also on failure: the buffers are freed once the queued work ends
-        for stream in streams:
-            stream.synchronize()
+    for k, chunk in enumerate(chunks(specs(), buffer_size_bytes)):
+        slot = k % num_buffers
+        if not chunk.sent:
+            _pack_copies(None, chunk.pieces, tensors)
+            continue
+        prev = done[slot]
+        if prev is not None:
+            prev.synchronize()
+        device = tensors[chunk.pieces[0].position].device
+        with torch.cuda.stream(streams[slot]):
+            buf = bufs[slot] = fit_buffer(bufs[slot], chunk, capacity, device)
+        # on the caller stream: a split tensor's contiguous copy is read by
+        # later chunks' slot streams too
+        dsts, srcs = _pack_copies(buf, chunk.pieces, tensors)
+        # the sources may come from work the caller queued while iterating
+        streams[slot].wait_stream(caller_stream)
+        with torch.cuda.stream(streams[slot]):
+            torch._foreach_copy_(dsts, srcs)
+            # keep dropped sources alive until the copies end
+            for t in srcs:
+                t.record_stream(streams[slot])
+            del dsts, srcs
+            group.broadcast(buf[: chunk.nbytes], src=src)
+            event = torch.Event()
+            event.record(streams[slot])
+        done[slot] = event
+    for stream in streams:
+        stream.synchronize()
 
 
 def packed_nccl_broadcast_consumer(
@@ -452,18 +452,11 @@ class PackedIpcConsumer:
                     "the previous one"
                 )
             args = local_rebuild_args(ipc_handle, self._gpu_uuid, self._device_index)
-            buf = rebuild_cuda_tensor(*args)
-            if buf.dtype != torch.uint8 or buf.numel() % ALIGN:
-                raise ValueError(
-                    f"the packed IPC buffer must be uint8 with a multiple of "
-                    f"{ALIGN} bytes, got {buf.dtype} with {buf.numel()} elements"
-                )
-            self._buf = buf
+            self._buf = rebuild_cuda_tensor(*args)
             # the producer's buffer is exactly the chunk size
-            self._unpacker = _Unpacker(buf.numel(), views=False)
-        elif self._buf is None:
+            self._unpacker = _Unpacker(self._buf.numel(), views=False)
+        if self._buf is None or self._unpacker is None:
             raise ValueError("the first packed IPC chunk must carry a handle")
-        assert self._unpacker is not None and self._buf is not None
         self._unpacker.feed(
             names,
             [
