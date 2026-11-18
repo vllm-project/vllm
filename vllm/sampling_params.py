@@ -457,6 +457,11 @@ class SamplingParams(
     aux_version_segments: list[tuple[int, str | None]] | None = None
     """`aux_version_segments` of the session's previous response: the weight
     versions of the prompt positions it covers."""
+    aux_held: int | None = None
+    """Number of leading positions whose products the client already holds:
+    the longest common prefix of the prompt and the tokens of its plan. The
+    engine writes no position below it, and the response lists the objects of
+    the positions from it on."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -502,6 +507,7 @@ class SamplingParams(
         indexer_topk_prompt_start: int = 0,
         aux_session: str | None = None,
         aux_version_segments: list[tuple[int, str | None]] | None = None,
+        aux_held: int | None = None,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
@@ -573,6 +579,7 @@ class SamplingParams(
             indexer_topk_prompt_start=indexer_topk_prompt_start,
             aux_session=aux_session,
             aux_version_segments=aux_version_segments,
+            aux_held=aux_held,
             trace_decode_token_ids=trace_decode_token_ids,
         )
 

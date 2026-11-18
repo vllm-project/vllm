@@ -1140,6 +1140,7 @@ def _session_requests(
     stop_token_ids=None,
     hash_block_size=16,
     prompt_logprobs=None,
+    **held,
 ):
     init_none_hash(sha256)
     params = SamplingParams(
@@ -1149,6 +1150,7 @@ def _session_requests(
         aux_session=session,
         aux_version_segments=segments,
         prompt_logprobs=prompt_logprobs,
+        **held,
     )
     params.update_from_generation_config({}, EOS_TOKEN_ID)
     salted = SimpleNamespace(
@@ -1256,6 +1258,67 @@ def test_session_request_aborted_before_its_output_leaves_no_objects():
     engine.close()
     assert "first" not in engine.keys and engine.client.removes
     assert set(engine.client.objects) == set(engine.keys["second"])
+
+
+def _plan_rows(engine, plan):
+    engine.pause()
+    rows = read_aux_rows(engine.store, plan, "routed_experts", timeout_s=0)
+    assert set(engine.client.objects) <= set(plan)
+    return rows[:, 0, 0].tolist(), rows[:, 0, 1].tolist()
+
+
+def test_session_turn_after_a_reset_keeps_the_products_first_produced():
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    _run_turn(engine, 1, "first", 40, 5, hash_block_size=4, aux_held=0)
+    held = engine.segments["first"][-1][0]
+    first = engine.requests["first"]
+    assert held == first.num_tokens - 1 and held % 16
+    assert engine.scheduler.reset_prefix_cache()
+    _run_turn(
+        engine,
+        2,
+        "second",
+        first.num_tokens + 8,
+        3,
+        segments=engine.segments["first"],
+        hash_block_size=4,
+        aux_held=held,
+    )
+    end = engine.segments["second"][-1][0]
+    positions, versions = _plan_rows(
+        engine, engine.keys["first"] + engine.keys["second"]
+    )
+    assert positions == list(range(end))
+    assert set(versions[:held]) == {1} and set(versions[held:]) == {2}
+
+
+def test_session_retry_after_an_abort_keeps_the_products_of_the_aborted_attempt():
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    scheduler = engine.scheduler
+    engine.set_version(1)
+    (request,) = _session_requests(["first"], 40, 20, hash_block_size=4, aux_held=0)
+    scheduler.add_request(request)
+    for _ in range(6):
+        engine.step(engine.schedule(), {"first": [0]})
+    scheduler.finish_requests("first", RequestStatus.FINISHED_ABORTED)
+    keys, segments = engine.connector.pop_abort_output("first")
+    held = segments[-1][0]
+    assert keys and held == request.num_tokens - 1
+    assert scheduler.reset_prefix_cache()
+    _run_turn(
+        engine,
+        2,
+        "retry",
+        request.num_tokens,
+        4,
+        segments=segments,
+        hash_block_size=4,
+        aux_held=held,
+    )
+    end = engine.segments["retry"][-1][0]
+    positions, versions = _plan_rows(engine, keys + engine.keys["retry"])
+    assert positions == list(range(end))
+    assert set(versions[:held]) == {1} and set(versions[held:]) == {2}
 
 
 def test_preempted_session_request_that_stops_on_its_output_in_flight():

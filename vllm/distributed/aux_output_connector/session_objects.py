@@ -61,13 +61,18 @@ def validate_aux_request(
     """Check the auxiliary-output parameters of a request."""
     session = sampling_params.aux_session
     segments = sampling_params.aux_version_segments
+    held = sampling_params.aux_held
     if session is None:
-        if segments is not None:
+        if segments is not None or held is not None:
             raise VLLMValidationError(
-                "aux_version_segments requires aux_session.",
+                "aux_version_segments or aux_held requires aux_session.",
                 parameter="aux_version_segments",
             )
         return
+    if held is not None and not (isinstance(held, int) and held >= 0):
+        raise VLLMValidationError(
+            "aux_held must be a non-negative integer.", parameter="aux_held"
+        )
     if vllm_config.aux_output_config.object_key_prefix is None:
         reason = "requires AuxOutputConfig.object_key_prefix"
     elif not session or "/" in session:
@@ -315,22 +320,33 @@ class SessionObjectWriter:
         """Stage the next full hash blocks of a request; write completed objects."""
         keys: list[str] = []
         values: list[bytes] = []
-        pieces = [rows for _, rows in state.staged]
+        pieces = list(state.staged)
         first = 0
         for index, (start, rows) in enumerate(blocks):
-            pieces.append(rows)
+            pieces.append((start, rows))
             end = start + len(rows)
             if end % object_size:
                 continue
             assert state.session is not None
-            key = aux_object_key(
-                self._key_prefix,
-                state.session,
-                state.block_hashes[end // len(rows) - 1 - state.hash_start].hex(),
-            )
-            keys.append(key)
-            fields = self._take_fields(state, end - object_size, end)
-            values.append(save({**self._fields(np.concatenate(pieces)), **fields}))
+            low = max(end - object_size, state.write_from)
+            if end <= low:
+                self._drop_fields(state, end)
+            else:
+                key = aux_object_key(
+                    self._key_prefix,
+                    state.session,
+                    state.block_hashes[end // len(rows) - 1 - state.hash_start].hex(),
+                )
+                keys.append(key)
+                fields = self._take_fields(state, low, end)
+                data = np.concatenate(
+                    [
+                        piece[max(low - begin, 0) :]
+                        for begin, piece in pieces
+                        if begin + len(piece) > low
+                    ]
+                )
+                values.append(save({**self._fields(data), **fields}))
             pieces = []
             first = index + 1
             state.staged.clear()
@@ -372,13 +388,10 @@ class SessionObjectWriter:
         return fields
 
     @staticmethod
-    def _take_fields(
-        state: _WorkerRequestState, start: int, end: int
-    ) -> dict[str, np.ndarray]:
-        """Rows `[start, end)` of the staged fields; later rows stay staged. A
-        remainder of less than half the buffer it views is copied so that it
-        does not keep that buffer alive."""
-        fields = SessionObjectWriter.field_rows(state, start, end)
+    def _drop_fields(state: _WorkerRequestState, end: int) -> None:
+        """Drop the staged field rows before `end`. A remainder of less than
+        half the buffer it views is copied so that it does not keep that
+        buffer alive."""
         for name, (position, stop, chunks) in state.fields.items():
             while chunks and position + len(chunks[0]) <= end:
                 position += len(chunks.pop(0))
@@ -387,6 +400,14 @@ class SessionObjectWriter:
                 buffer = rest if rest.base is None else rest.base
                 chunks[0] = rest.copy() if 2 * rest.nbytes < buffer.nbytes else rest
             state.fields[name] = end, stop, chunks
+
+    @staticmethod
+    def _take_fields(
+        state: _WorkerRequestState, start: int, end: int
+    ) -> dict[str, np.ndarray]:
+        """Rows `[start, end)` of the staged fields; later rows stay staged."""
+        fields = SessionObjectWriter.field_rows(state, start, end)
+        SessionObjectWriter._drop_fields(state, end)
         return fields
 
     def close(self) -> None:

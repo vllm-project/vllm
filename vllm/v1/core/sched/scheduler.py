@@ -3121,6 +3121,13 @@ class Scheduler(SchedulerInterface):
             self.async_kv_waiting.remove_requests(waiting_requests_to_remove)
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
 
+        if (
+            self.aux_output_connector is not None
+            and finished_status == RequestStatus.FINISHED_ABORTED
+        ):
+            for request in valid_requests:
+                self.aux_output_connector.take_abort_output(request)
+
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False

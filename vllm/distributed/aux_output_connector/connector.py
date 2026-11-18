@@ -88,6 +88,7 @@ class AuxOutputConnectorMetadata:
     flushed_block_hashes: dict[str, PackedBlockHashes] = field(default_factory=dict)
     session_hash_starts: dict[str, int] = field(default_factory=dict)
     session_orphans: dict[str, list[str]] = field(default_factory=dict)
+    session_write_from: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -115,6 +116,9 @@ class AuxRequestOutput:
 class _SessionRequest:
     request: Request
     session: str
+    held: int | None = None
+    floor: int = 0
+    frontier: int = 0
 
 
 class AuxOutputSchedulerConnector:
@@ -185,6 +189,10 @@ class AuxOutputSchedulerConnector:
         self._session_tails: dict[str, tuple[str, int, int]] = {}
         self._flushed_hashes: dict[str, PackedBlockHashes] = {}
         self._written: dict[str, list[BlockHash]] = {}
+        self._written_ends: dict[str, list[tuple[int, BlockHash]]] = {}
+        self._abort_outputs: dict[
+            str, tuple[list[str], list[tuple[int, str | None]]]
+        ] = {}
         self._listed: dict[str, set[str]] = {}
         self._orphans: dict[str, list[str]] = {}
 
@@ -208,8 +216,10 @@ class AuxOutputSchedulerConnector:
         session = self._session(request)
         if session is None:
             return
-        self._session_requests[request.request_id] = _SessionRequest(request, session)
         assert request.sampling_params is not None
+        self._session_requests[request.request_id] = _SessionRequest(
+            request, session, request.sampling_params.aux_held
+        )
         end, segments = session_version_segments(
             request.sampling_params.aux_version_segments,
             request.num_prompt_tokens,
@@ -258,6 +268,7 @@ class AuxOutputSchedulerConnector:
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         sessions: dict[str, str] = {}
         hash_starts: dict[str, int] = {}
+        write_from: dict[str, int] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             request = requests[request_id]
             if self._untracked(request):
@@ -269,6 +280,9 @@ class AuxOutputSchedulerConnector:
                     sessions[request_id] = state.session
                     first = request.num_computed_tokens // self._hash_block_size
                     self._sent_hash_counts[request_id] = hash_starts[request_id] = first
+                    if state.held is not None:
+                        state.floor = max(state.held, state.frontier)
+                        write_from[request_id] = state.floor
             self._computed_from.setdefault(request_id, request.num_computed_tokens)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
@@ -292,6 +306,7 @@ class AuxOutputSchedulerConnector:
         metadata = self._take_events(
             scheduled_requests, block_hashes_by_request, sessions, hash_starts
         )
+        metadata.session_write_from = write_from
         for request_id in scheduler_output.finished_req_ids or ():
             self._session_requests.pop(request_id, None)
         return metadata
@@ -518,6 +533,8 @@ class AuxOutputSchedulerConnector:
             return *self.take_output(request, output), None, None
         if not stopped or request.request_id not in self._sent_hash_counts:
             return None, None, None, None
+        if state.held is not None:
+            return None, None, *self._held_keys(request, state, aborted=False)
         size = self._block_size
         hash_size = self._hash_block_size
         token_end = request.num_tokens - 1
@@ -551,6 +568,69 @@ class AuxOutputSchedulerConnector:
         segments.append((end, None))
         self._listed[request.request_id] = set(keys)
         return None, None, keys, segments
+
+    def _held_keys(
+        self, request: Request, state: _SessionRequest, aborted: bool
+    ) -> tuple[list[str], list[tuple[int, str | None]]]:
+        """Keys of the objects a request wrote, from its floor on, and its
+        segments, ending at the end of the positions it has products of."""
+        size = self._block_size
+        hash_size = self._hash_block_size
+        computed = request.num_computed_tokens - request.num_in_flight_tokens
+        token_end = request.num_tokens - 1
+        if aborted:
+            token_end = min(token_end, computed)
+        num_sent = self._sent_hash_counts[request.request_id] * hash_size
+        boundary = min(token_end, min(num_sent, computed) // size * size)
+        keys = [
+            aux_object_key(self._key_prefix, state.session, block_hash.hex())
+            for end, block_hash in self._written_ends.get(request.request_id, ())
+            if end <= boundary
+        ]
+        start = max(boundary, state.floor)
+        if start < token_end:
+            block_hashes = request.block_hashes
+            parent = block_hashes[boundary // hash_size - 1] if boundary else None
+            extra_keys, _ = generate_block_hash_extra_keys(
+                request, boundary, token_end, 0
+            )
+            tail_hash = hash_block_tokens(
+                self._hash_fn,
+                parent,
+                request.all_token_ids[boundary:token_end],
+                ("aux_tail", start, extra_keys),
+            )
+            key = aux_tail_key(self._key_prefix, state.session, tail_hash.hex())
+            self._session_tails[request.request_id] = (key, start, token_end)
+            keys.append(key)
+        token_end = max(token_end, 0)
+        segments: list[tuple[int, str | None]] = [
+            segment
+            for segment in request.cache_salt_segments
+            if segment[0] < token_end or segment[0] == 0
+        ]
+        segments.append((token_end, None))
+        self._listed[request.request_id] = set(keys)
+        return keys, segments
+
+    def take_abort_output(self, request: Request) -> None:
+        """Before an aborted session request is freed, list the objects it
+        wrote so that its partial output returns them."""
+        state = self._session_requests.get(request.request_id)
+        if (
+            state is None
+            or state.held is None
+            or request.request_id not in self._sent_hash_counts
+        ):
+            return
+        self._abort_outputs[request.request_id] = self._held_keys(
+            request, state, aborted=True
+        )
+
+    def pop_abort_output(
+        self, request_id: str
+    ) -> tuple[list[str], list[tuple[int, str | None]]] | None:
+        return self._abort_outputs.pop(request_id, None)
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
@@ -608,14 +688,21 @@ class AuxOutputSchedulerConnector:
         return self._pack_hashes(block_hashes[num_sent:num_keyed])
 
     def _record_written(self, request: Request, first: int, end: int) -> None:
+        state = self._session_requests[request.request_id]
         step = self._block_size // self._hash_block_size
-        self._written.setdefault(request.request_id, []).extend(
-            request.block_hashes[index]
-            for index in range(first, end)
-            if (index + 1) % step == 0
-        )
+        for index in range(first, end):
+            object_end = (index + 1) * self._hash_block_size
+            if (index + 1) % step or object_end <= state.floor:
+                continue
+            block_hash = request.block_hashes[index]
+            self._written.setdefault(request.request_id, []).append(block_hash)
+            self._written_ends.setdefault(request.request_id, []).append(
+                (object_end, block_hash)
+            )
+            state.frontier = max(state.frontier, object_end)
 
     def _release_unlisted(self, request: Request) -> None:
+        self._written_ends.pop(request.request_id, None)
         listed = self._listed.pop(request.request_id, set())
         session = self._session_requests[request.request_id].session
         keys = (
