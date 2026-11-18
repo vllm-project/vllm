@@ -618,23 +618,24 @@ class EngineCore:
             )
             raise err
 
-    @contextmanager
-    def capture_iteration_details(
+    def _untimed_iteration_details(
         self, scheduler_output: SchedulerOutput | None
-    ) -> Generator[SchedulerIterationDetails | None, None, None]:
+    ) -> SchedulerIterationDetails | None:
+        """Details of a finished iteration that the output worker does not time."""
         enable_details = (
             self.vllm_config.observability_config.enable_logging_iteration_details
+            # With GPU timing the worker returns the iteration's record later.
+            and not self.vllm_config.gpu_iteration_timing
         )
         if not self.log_stats or not enable_details:
-            yield None
-            return
-        # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
+            return None
+        # 0-token step: DPEngineCoreProc logs the dummy batch it runs instead
+        # (avoids double-log).
         if (
             scheduler_output is not None
             and scheduler_output.total_num_scheduled_tokens == 0
         ):
-            yield None
-            return
+            return None
 
         iteration_index = getattr(self, "_iteration_index", 0)
         # scheduler_output=None marks a DP dummy iteration.
@@ -645,7 +646,6 @@ class EngineCore:
                 num_ctx_tokens=0,
                 num_generation_requests=0,
                 num_generation_tokens=0,
-                elapsed_ms=0.0,
                 is_dummy=True,
             )
         else:
@@ -657,21 +657,17 @@ class EngineCore:
                 num_ctx_tokens=details.num_ctx_tokens,
                 num_generation_requests=details.num_generation_requests,
                 num_generation_tokens=details.num_generation_tokens,
-                elapsed_ms=0.0,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,
             )
-
-        start_time = time.monotonic()
-        yield iteration_details
-        iteration_details.elapsed_ms = (time.monotonic() - start_time) * 1000
         self._iteration_index = iteration_index + 1
+        return iteration_details
 
     def _make_iteration_details_stats(
         self, iteration_details: SchedulerIterationDetails
     ) -> SchedulerStats:
         stats = self.scheduler.make_stats() or SchedulerStats()
-        stats.iteration_details = iteration_details
+        stats.iteration_records = [iteration_details]
         return stats
 
     def _attach_iteration_details(
@@ -687,7 +683,8 @@ class EngineCore:
         if eco.scheduler_stats is None:
             eco.scheduler_stats = self._make_iteration_details_stats(iteration_details)
         else:
-            eco.scheduler_stats.iteration_details = iteration_details
+            # Replaces the worker output's (empty) list rather than extending it.
+            eco.scheduler_stats.iteration_records = [iteration_details]
 
     def _attach_weight_version(self, outputs: dict[int, EngineCoreOutputs]) -> None:
         # Weight versions change only while generation is paused.
@@ -715,13 +712,11 @@ class EngineCore:
             self.num_executed_steps += 1
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with (
-            self.capture_iteration_details(scheduler_output) as iteration_details,
-            self.log_error_detail(scheduler_output),
-        ):
+        with self.log_error_detail(scheduler_output):
             model_output = self._wait_for_output(future)
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+        iteration_details = self._untimed_iteration_details(scheduler_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -826,16 +821,14 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with (
-            self.capture_iteration_details(scheduler_output) as iteration_details,
-            self.log_error_detail(scheduler_output),
-        ):
+        with self.log_error_detail(scheduler_output):
             model_output = self._wait_for_output(future)
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+        iteration_details = self._untimed_iteration_details(scheduler_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -1859,6 +1852,13 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
+    def execute_dummy_batch(self) -> None:
+        records = self.model_executor.execute_dummy_batch()
+        # No request output carries the iteration records a dummy batch returns.
+        if records and (stats := self.scheduler.make_stats()) is not None:
+            stats.iteration_records = records
+            self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
+
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
         get_watch_dog().feed()
@@ -2247,10 +2247,8 @@ class EngineCoreProc(EngineCore):
                             self._handle_mm_cache_miss(req, e)
                             continue
                         except VLLMValidationError as e:
-                            # Note(arpera):
-                            # Currently we validate in engine core
-                            # only if request uses the same structured output backend
-                            # as engine core latched
+                            # Report request validation errors without terminating
+                            # the engine.
                             self._handle_request_validation_error(req, e)
                             continue
                         except Exception:
@@ -2792,8 +2790,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
-                    with self.capture_iteration_details(None) as iteration_details:
-                        self.execute_dummy_batch()
+                    self.execute_dummy_batch()
+                    iteration_details = self._untimed_iteration_details(None)
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(
