@@ -38,8 +38,16 @@ def fused_rope_unified_mla_kv_cache_update_impl(
     attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
         layer_name
     )
+    assert isinstance(attn_layer, MLAAttention)
     attn_layer.prepare_kv_cache_update(attn_metadata)
-    if layer_slot_mapping is not None:
+    if layer_slot_mapping is not None and not attn_layer.defer_rope_kv_cache_update(
+        attn_metadata,
+        positions,
+        cos_sin_cache,
+        is_neox,
+        layer_slot_mapping,
+        kv_cache_scale,
+    ):
         ops.concat_and_cache_mla_rope_fused(
             positions,
             q_pe,
