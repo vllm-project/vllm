@@ -9,8 +9,7 @@ EP is typically coupled with Data Parallelism (DP). While DP can be used indepen
 Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
 1. **Install DeepEP**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
-2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
+2. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
 !!! note "NCCL version (CUDA 13+)"
     The `deepep_v2` backend requires NCCL >= 2.30.4. PyTorch ships an older
@@ -36,10 +35,11 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 | Backend | Use Case | Features | Best For |
 | ------- | -------- | -------- | -------- |
-| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
+| `auto` | Default | Picks `flashinfer_nvlink_one_sided` for EP without elastic EP, on any GB200/GB300/VR200 topology or on a single HGX B200/B300 node launched by vLLM (serving fits on that one node, any parallel layout), for BF16/FP16, ModelOpt NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend; `allgather_reducescatter` otherwise | Most deployments |
+| `allgather_reducescatter` | General purpose | Standard all2all using allgather/reducescatter primitives | Works with any EP+DP configuration |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
-| `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
+| `flashinfer_nvlink_one_sided` | MNNVL systems, single-node NVSwitch | FlashInfer's one-sided A2A strategy over NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
