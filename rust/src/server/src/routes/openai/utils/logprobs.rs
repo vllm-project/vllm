@@ -235,23 +235,21 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
     }
 }
 
-/// Collecting keeps each key at its first position and the last value for it,
-/// like Python's dict, so a sampled token repeated among the top-k candidates,
-/// or two tokens decoding to the same string, yield one entry in Python's place.
+/// A sampled token repeated among the top-k candidates, or several tokens
+/// decoding to the same string (byte fragments), share one entry. As in the
+/// Python frontend, the entry stays at its first position and keeps the highest
+/// logprob.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
 ) -> IndexMap<String, f32> {
-    position
-        .entries
-        .iter()
-        .map(|entry| {
-            (
-                format_token(entry, return_tokens_as_token_ids),
-                clamp_logprob(entry.logprob),
-            )
-        })
-        .collect()
+    let mut map = IndexMap::with_capacity(position.entries.len());
+    for entry in &position.entries {
+        let logprob = clamp_logprob(entry.logprob);
+        let kept = map.entry(format_token(entry, return_tokens_as_token_ids)).or_insert(logprob);
+        *kept = kept.max(logprob);
+    }
+    map
 }
 
 fn position_to_chat_logprobs_content(
@@ -399,6 +397,28 @@ mod tests {
         expect_test::expect![[r#"[{"C":-2.0,"A":-0.1,"B":-1.0}]"#]].assert_eq(&top_logprobs(false));
         expect_test::expect![[r#"[{"token_id:3":-2.0,"token_id:1":-0.1,"token_id:2":-1.0}]"#]]
             .assert_eq(&top_logprobs(true));
+    }
+
+    #[test]
+    fn completion_top_logprobs_keep_highest_on_string_collision() {
+        // Byte fragments: sampled `C` (rank 3), `A` and `B` all decode to "".
+        // The engine row is `[C, A, B, C, D]`.
+        let mut logprobs = sample_logprobs();
+        for entry in &mut logprobs.positions[0].entries {
+            entry.token = String::new();
+        }
+        let sampled = logprobs.positions[0].entries[2].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+        logprobs.positions[0].entries.push(DecodedTokenLogprob {
+            token_id: 4,
+            token: "D".to_string(),
+            logprob: -3.0,
+            rank: 4,
+        });
+
+        let logprobs = decoded_logprobs_to_openai(&logprobs, 0, false).unwrap();
+        expect_test::expect![[r#"[{"":-0.1,"D":-3.0}]"#]]
+            .assert_eq(&serde_json::to_string(&logprobs.top_logprobs).unwrap());
     }
 
     fn chat_top_logprobs_len(top_logprobs: i32) -> usize {
