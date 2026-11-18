@@ -91,7 +91,7 @@ GPU memory:
 
 - Weights are laid out as one byte stream, each starting 16-byte aligned, and cut into chunks of `packed_buffer_size_bytes`; a tensor larger than a chunk is split across chunks (the same layout as NCCL packed transfer).
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
-- One buffer of `packed_buffer_size_bytes` is reused for every chunk of a transfer, bounding its extra GPU memory.
+- One buffer of `packed_buffer_size_bytes` is reused for every chunk of a transfer, bounding its extra GPU memory; a non-contiguous tensor split across chunks also needs a contiguous copy of its full size on the trainer while it is sent.
 
 ```python
 engine = WeightTransferTrainerFactory.trainer_init(

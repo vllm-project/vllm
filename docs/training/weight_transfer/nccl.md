@@ -106,7 +106,9 @@ decodes with exactly the values the trainer encoded with. They are not per-round
     The rotating buffers are sized to the chunks they hold: up to
     `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
     defaults) for a transfer that size or larger. Lower
-    `packed_buffer_size_bytes` if that is too much headroom.
+    `packed_buffer_size_bytes` if that is too much headroom. A non-contiguous
+    tensor split across chunks also needs a contiguous copy of its full size
+    on the trainer while it is sent.
 
 ### Metadata and `iter_full()` must agree
 

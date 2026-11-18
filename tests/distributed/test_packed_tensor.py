@@ -56,6 +56,16 @@ class MockConsumerCommunicationGroup:
         self.calls += 1
 
 
+# Copied as bytes: CUDA `_foreach_copy_` does not implement them.
+QUANT_DTYPES = [torch.float8_e4m3fn, torch.float8_e8m0fnu, torch.float4_e2m1fn_x2]
+
+
+def _randn(*shape: int, dtype: torch.dtype) -> torch.Tensor:
+    if dtype in QUANT_DTYPES:
+        return torch.randint(0, 256, shape, dtype=torch.uint8).view(dtype)
+    return torch.randn(*shape, dtype=dtype)
+
+
 def create_mock_model_params(
     num_layers: int = 3,
     dtype: torch.dtype = torch.float32,
@@ -63,9 +73,19 @@ def create_mock_model_params(
     """Create mock model parameters for testing."""
     params = []
     for i in range(num_layers):
-        params.append((f"layer{i}.weight", torch.randn(10, 20, dtype=dtype)))
-        params.append((f"layer{i}.bias", torch.randn(10, dtype=dtype)))
+        params.append((f"layer{i}.weight", _randn(10, 20, dtype=dtype)))
+        params.append((f"layer{i}.bias", _randn(10, dtype=dtype)))
     return params
+
+
+def staged(params: list[tuple[str, torch.Tensor]]):
+    """Yield `params` through one reused staging tensor, as a source may."""
+    device = params[0][1].device
+    stage = torch.empty(max(t.nbytes for _, t in params), dtype=torch.uint8)
+    stage = stage.to(device)
+    for name, t in params:
+        stage[: t.nbytes].copy_(_flat(t))
+        yield name, stage[: t.nbytes].view(t.dtype).view(t.shape)
 
 
 def create_state_dict_info(
@@ -106,25 +126,27 @@ SLEEP_CYCLES = 2_000_000_000
 def roundtrip(
     params: list[tuple[str, torch.Tensor]],
     buffer_size_bytes: int,
+    stage: bool = False,
 ) -> MockCommunicationGroup:
-    """Round-trip `params` (again behind a slow fill) and check they arrive
-    intact. Returns the producer's group."""
+    """Round-trip `params` (again behind a slow fill), sent through one staging
+    tensor if `stage`, and check they arrive intact. Returns the producer's
+    group."""
     producer_group = MockCommunicationGroup()
     packed_nccl_broadcast_producer(
-        iterator=iter(params),
+        iterator=staged(params) if stage else iter(params),
         group=producer_group,
         src=0,
         post_iter_func=lambda x: x[1],
         buffer_size_bytes=buffer_size_bytes,
     )
-    dst = {name: torch.empty_like(t) for name, t in params}
+    dst = {n: torch.empty(t.shape, dtype=t.dtype, device=t.device) for n, t in params}
 
     def consume(sleep: bool) -> bool:
         torch.accelerator.synchronize()
         if sleep:
             torch.cuda._sleep(SLEEP_CYCLES)
         for t in dst.values():
-            t.zero_()
+            _flat(t).zero_()
         filled = torch.Event()
         filled.record()
         fill_pending_at_load: list[bool] = []
@@ -134,7 +156,7 @@ def roundtrip(
             for name, tensor in tensor_list:
                 target = dst[name]
                 assert (tensor.shape, tensor.dtype) == (target.shape, target.dtype)
-                target.copy_(tensor)
+                _flat(target).copy_(_flat(tensor))
 
         packed_nccl_broadcast_consumer(
             iterator=iter(create_state_dict_info(params).items()),
@@ -145,7 +167,7 @@ def roundtrip(
         )
         torch.accelerator.synchronize()
         for name, t in params:
-            assert torch.equal(dst[name], t), name
+            assert torch.equal(_flat(dst[name]), _flat(t)), name
         return fill_pending_at_load[0]
 
     consume(sleep=False)
@@ -170,13 +192,16 @@ def roundtrip(
 class TestPackedBroadcastRoundtrip:
     """Test producer-consumer roundtrip behavior."""
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize(
+        "dtype", [torch.float32, torch.float16, torch.bfloat16, *QUANT_DTYPES]
+    )
     def test_roundtrip_different_dtypes(self, dtype):
         """Test roundtrip with different data types."""
         params = create_mock_model_params(num_layers=2, dtype=dtype)
         roundtrip([(n, t.cuda()) for n, t in params], buffer_size_bytes=1000)
 
-    def test_roundtrip_mixed_dtypes(self):
+    @pytest.mark.parametrize("stage", [False, True])
+    def test_roundtrip_mixed_dtypes(self, stage):
         """Test roundtrip with mixed data types."""
         # Create params with mixed dtypes
         params = [
@@ -184,7 +209,7 @@ class TestPackedBroadcastRoundtrip:
             ("layer1.bias", torch.randn(10, dtype=torch.float16).cuda()),
             ("layer2.weight", torch.randn(20, 30, dtype=torch.bfloat16).cuda()),
         ]
-        roundtrip(params, buffer_size_bytes=500)
+        roundtrip(params, buffer_size_bytes=500, stage=stage)
 
     @pytest.mark.parametrize("target_size", [100, 100000])
     def test_roundtrip_different_batch_sizes(self, target_size):
@@ -548,7 +573,8 @@ class TestPackedIpcRoundtrip:
         torch.cuda.ipc_collect()
         return num_chunks, payload
 
-    def test_roundtrip_basic(self):
+    @pytest.mark.parametrize("stage", [False, True])
+    def test_roundtrip_basic(self, stage):
         """Test basic IPC producer -> consumer roundtrip."""
         params = [
             ("w1", torch.randn(10, 20, dtype=torch.float32).cuda()),
@@ -560,7 +586,7 @@ class TestPackedIpcRoundtrip:
 
         num_chunks, result = self._run_roundtrip(
             packed_ipc_producer(
-                iterator=iter(params),
+                iterator=staged(params) if stage else iter(params),
                 gpu_uuid=gpu_uuid,
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
@@ -576,7 +602,9 @@ class TestPackedIpcRoundtrip:
             assert res_tensor.dtype == orig_tensor.dtype
             assert torch.allclose(res_tensor, orig_tensor.cpu(), rtol=1e-4, atol=1e-6)
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize(
+        "dtype", [torch.float32, torch.float16, torch.bfloat16, *QUANT_DTYPES]
+    )
     def test_roundtrip_dtypes(self, dtype):
         """Test IPC roundtrip with different dtypes."""
         params = create_mock_model_params(num_layers=2, dtype=dtype)
@@ -600,7 +628,7 @@ class TestPackedIpcRoundtrip:
         ):
             assert orig_name == res_name
             assert res_tensor.dtype == dtype
-            assert torch.allclose(res_tensor, orig_tensor.cpu(), rtol=1e-4, atol=1e-6)
+            assert torch.equal(_flat(res_tensor), _flat(orig_tensor.cpu()))
 
     def test_roundtrip_multiple_chunks(self):
         """Test IPC roundtrip across multiple chunks."""
@@ -845,13 +873,15 @@ class TestChunkedRoundtrip:
 
     def test_split_tensor_is_joined_without_a_second_copy(self):
         """The consumer writes a split tensor's bytes into one tensor of its
-        full size: peak growth is about one tensor plus the receive buffers."""
+        full size: peak growth is about one tensor plus the receive buffers,
+        also over two consecutive ones."""
         mib = 1 << 20
-        big = torch.randn(64, 256 * 1024, device="cuda")  # 64 MiB
+        shape = [32, 256 * 1024]  # 32 MiB
+        params = [(n, torch.randn(shape, device="cuda")) for n in ("a", "b")]
         limit = 2 * mib
         producer_group = MockCommunicationGroup()
         packed_nccl_broadcast_producer(
-            iterator=iter([("big", big)]),
+            iterator=iter(params),
             group=producer_group,
             src=0,
             post_iter_func=lambda x: x[1],
@@ -863,7 +893,7 @@ class TestChunkedRoundtrip:
         base = torch.cuda.memory_allocated()
         seen: list = []
         packed_nccl_broadcast_consumer(
-            iterator=iter([("big", ([64, 256 * 1024], torch.float32))]),
+            iterator=iter([(n, (shape, torch.float32)) for n, _ in params]),
             group=group,
             src=0,
             post_unpack_func=lambda items: seen.extend(
@@ -872,9 +902,9 @@ class TestChunkedRoundtrip:
             buffer_size_bytes=limit,
         )
         torch.accelerator.synchronize()
-        assert seen == [pytest.approx(big.sum().item(), rel=1e-4)]
+        assert seen == [pytest.approx(t.sum().item(), rel=1e-4) for _, t in params]
         growth = torch.cuda.max_memory_allocated() - base
-        assert growth < big.nbytes + 8 * limit, growth / mib
+        assert growth < params[0][1].nbytes + 8 * limit, growth / mib
 
 
 def _packed_chunks(tensors, limit):
