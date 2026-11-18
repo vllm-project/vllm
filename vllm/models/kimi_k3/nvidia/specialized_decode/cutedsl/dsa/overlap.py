@@ -15,6 +15,7 @@ q_c rows of the query, so the rest of the query stage leaves the critical path:
 
 The main stream joins the side stream just before the sparse core."""
 
+import os
 from functools import cache
 
 import cutlass
@@ -108,6 +109,11 @@ WIDE_MODES = ("serial", "fork")
 # DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
 # decode-step A/B there.
 QUERY_AFTER_FRONT = {16: "6-8:1", 8: "5-15:1"}
+# VLLM_KIMI_K3_DCP8_QUERY_AFTER_FRONT_WIDE=1: DCP8 verify batches of 16-20 rows (four
+# requests at k = 4) also fork their MlaQuery after IndexFront. Only the launch order
+# changes, not what any kernel computes. Opt-in; default off.
+if os.environ.get("VLLM_KIMI_K3_DCP8_QUERY_AFTER_FRONT_WIDE") == "1":
+    QUERY_AFTER_FRONT[8] = "5-20:1"
 
 
 def query_after_front(batch, dcp):

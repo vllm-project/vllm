@@ -17,6 +17,7 @@ every context.
 """
 
 import math
+import os
 from functools import cache, reduce
 from operator import or_
 
@@ -99,6 +100,64 @@ VALUE_ROWS = {16: "7-8:2", 8: "5-15:2"}
 # source still pending when the row's LSEs landed). Same words, same order (bit for
 # bit). DCP16 at 7-8 rows: set by a 16-rank decode-step A/B and the c=1 AgentX runs.
 VALUE_POLL_ALL = {16: "7-8:1"}
+# Row-spread merge of the DSA DcpValue that pushes its rows itself (the FlashInfer
+# core): request rows per CTA, batch tables per DCP size (absent: one CTA per (head, 16
+# rows)). Every CTA pushes its share of this rank's rows (`push_share`: all of a
+# thread's loads in flight before its first store), then merges R rows of its head as
+# the `rows_per_cta` merge does, instead of one CTA per head merging every row after its
+# share of the push. Same stores and the same merge operations (bit for bit).
+# VLLM_KIMI_K3_DCP8_VALUE_SPREAD=1 turns it on; SPREAD_POLL_ALL: its `poll_all` (1: on).
+# DCP8 (TP8 + DCP8, 1-3 requests of 5 rows): measured faster in A/B (one-GPU DcpValue
+# microbenchmark, 12 heads, 8 sources, other sources prefilled): R = 2 with poll_all
+# ahead of R = 3, 4 and of the 16-row merge at 5, 10 and 15 rows; R = 1 does not fit
+# one wave at 15 rows.
+SPREAD_ROWS = {8: "5-15:2"}
+SPREAD_POLL_ALL = {8: "5-15:1"}
+SPREAD_ON = os.environ.get("VLLM_KIMI_K3_DCP8_VALUE_SPREAD", "0") == "1"
+# The tensor-core sparse decode (dsa.attn_sparse.TcsDecode) of the pushing DSA decode,
+# batch tables per DCP size (value: CTAs per row). VLLM_KIMI_K3_DCP8_TC_SPARSE=1 turns
+# it on for these batches (every other batch and DCP size keeps its kernel), with
+# `poll_all` in the `pushed` merge after it. DCP8 (TP8 + DCP8, DSpark k = 4): 5, 10 and
+# 15 rows (one to three requests), measured faster in A/B (8-rank chain microbenchmark,
+# attention start to DcpValue end, against SparseDcpDecode + DcpValue at 5 rows and the
+# dense decode + reduction + DcpValue at 10 and 15 rows).
+TCS_ROWS = {8: "5:4,10:4,15:4"}
+TCS_ON = os.environ.get("VLLM_KIMI_K3_DCP8_TC_SPARSE", "0") == "1"
+# VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE=1 (with VLLM_KIMI_K3_DCP8_TC_SPARSE=1) adds these
+# DCP8 batches of 4-8 requests (20-40 rows) to TCS_ROWS, with TCS_VALUE_ROWS the
+# `pushed` merge's request rows per CTA there (absent: one CTA per (head, 16 rows)).
+# Measured faster in A/B (8-rank chain microbenchmark, attention start to DcpValue end,
+# against the dense decode + reduction + DcpValue): 20 rows with 2 rows per merging CTA,
+# 25-40 rows with 4.
+TCS_WIDE_ROWS = {8: "20:4,25:4,35:4,40:4"}
+TCS_VALUE_ROWS = {8: "20:2,25:4,35:4,40:4"}
+# TcsDecodePair keys per CTA per pass where not the default (dsa.attn_sparse.PAIR_OWN).
+TCS_PAIR_OWN = {8: "45:128"}
+# VLLM_KIMI_K3_DCP8_TC_SPARSE_PAIR=1 (with VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE=1): the
+# wider DCP8 table of 4-11 requests (20-55 rows): value 2 = TcsDecodePair (two CTAs per
+# row, so the larger batches run in one wave) at 30 and 40-55 rows, with the `pushed`
+# merge's request rows per CTA listed, and the early trigger (TCS_EARLY_ROWS) at 5 and
+# 10 rows only. Measured faster in A/B (8-rank chain microbenchmark, attention start to
+# DcpValue end, against the dense decode + reduction + DcpValue; server profile of the
+# attention chain for the early trigger). Opt-in; default off.
+WIDE_PAIR_ON = os.environ.get("VLLM_KIMI_K3_DCP8_TC_SPARSE_PAIR", "0") == "1"
+if WIDE_PAIR_ON:
+    TCS_WIDE_ROWS = {8: "20:4,25:4,30:2,35:4,40:2,45:2,50:2,55:2"}
+    TCS_VALUE_ROWS = {8: "20:2,25:4,30:4,35:4,40:4,45:4"}
+TCS_WIDE_ON = TCS_ON and os.environ.get("VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE", "0") == "1"
+# VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE=1: at these DCP8 batches of the TcsDecode table (1:
+# on) the `pushed` merge after TcsDecode triggers its dependents before waiting on it
+# rather than after (the o-projection producer loads its weights before its PDL wait).
+# Same operations and results. Measured no slower in A/B (8-rank chain microbenchmark,
+# attention start to the o-projection producer's end).
+TCS_EARLY_ROWS = {8: "5:1,10:1,20:1,25:1,35:1"}
+if WIDE_PAIR_ON:
+    TCS_EARLY_ROWS = {8: "5:1,10:1"}
+if TCS_WIDE_ON:
+    TCS_ROWS = {
+        dcp: ",".join(filter(None, (TCS_ROWS.get(dcp, ""), TCS_WIDE_ROWS.get(dcp, ""))))
+        for dcp in sorted(set(TCS_ROWS) | set(TCS_WIDE_ROWS))
+    }
 
 
 def resolve_partials(spec, kind):
@@ -267,7 +326,21 @@ class DcpValue:
     through DcpValue's operations in its order. As above, no CTA
     waits on another CTA of this grid: each waits on the sparse decode before it
     (griddepcontrol_wait) and polls only what the sparse decodes of every rank push,
-    and those never wait on DcpValue."""
+    and those never wait on DcpValue.
+
+    `spread` R (not `pushed`, `per_row`; SPREAD_ROWS under
+    VLLM_KIMI_K3_DCP8_VALUE_SPREAD=1): the `rows_per_cta` grid and merge, each CTA first
+    pushing its share of this rank's rows, LSEs and q mailbox re-arm (`push_share`: the
+    stores of push_rows over every CTA of the grid). A CTA polls only after its own
+    pushes, and the grid is at most one CTA per SM, so as above every CTA's pushes land
+    while the others poll."""
+
+    # `spread`: push_share (every load of a thread's share before its first store);
+    # False: push_rows' loop over the same grid (A/B reference).
+    push_loads_first = True
+    # `pushed` with `rows_per_cta`: trigger the dependents before the PDL wait
+    # (TCS_EARLY_ROWS).
+    early_trigger = False
 
     def __init__(
         self,
@@ -285,6 +358,8 @@ class DcpValue:
         pushed=False,
         rows_per_cta=None,
         poll_all=None,
+        spread=None,
+        spread_poll_all=None,
     ):
         """`q_chunks`: 16 B chunks per q mailbox head row (36 FP8, 72 BF16);
         `q_heads`: q mailbox rows per token (default DCP * H); `lse_scale`: to
@@ -297,8 +372,12 @@ class DcpValue:
         only): request rows per merging CTA (None: VALUE_ROWS of the DCP size and
         batch; 0: one CTA per (head, 16 rows)); `poll_all` (`rows_per_cta` only):
         poll a row's sources together (None: VALUE_POLL_ALL of the DCP size and
-        batch)."""
+        batch). `spread` (not `pushed`, `per_row` only): request rows per pushing
+        and merging CTA (None: SPREAD_ROWS of the DCP size and batch when
+        VLLM_KIMI_K3_DCP8_VALUE_SPREAD=1, else off; 0: off), `spread_poll_all` its
+        `poll_all` (None: SPREAD_POLL_ALL)."""
         self.heads, self.size, self.batch = heads, size, batch
+        self.spread = False
         assert partials in FORMATS, partials
         self.q, self.per_row, self.partials = q, per_row, partials
         self.projected = partials == PROJECTED
@@ -335,6 +414,8 @@ class DcpValue:
         self.grid = (heads, tiles, pushers)
         if pushed and rows_per_cta is None:
             rows_per_cta = batch_table(VALUE_ROWS.get(size, "")).get(batch, 0)
+            if TCS_WIDE_ON and batch_table(TCS_WIDE_ROWS.get(size, "")).get(batch, 0):
+                rows_per_cta = batch_table(TCS_VALUE_ROWS.get(size, "")).get(batch, 0)
         if pushed and rows_per_cta:
             # 128 threads per row slot; at most 64 rows (16-row tiles above).
             assert 1 <= rows_per_cta <= 4 and batch <= 64, (rows_per_cta, batch)
@@ -343,6 +424,28 @@ class DcpValue:
         if poll_all is None:
             poll_all = batch_table(VALUE_POLL_ALL.get(size, "")).get(batch, 0) == 1
         self.poll_all = self.rows_per_cta > 0 and poll_all
+        if pushed and TCS_ON and self.rows_per_cta:  # noqa: SIM102
+            if batch_table(TCS_ROWS.get(size, "")).get(batch, 0):
+                self.poll_all = True
+                if TCS_WIDE_ON:
+                    early = batch_table(TCS_EARLY_ROWS.get(size, "")).get(batch, 0)
+                    self.early_trigger = early == 1
+        if not pushed and per_row and spread is None:
+            spread = 0
+            if SPREAD_ON:
+                spread = batch_table(SPREAD_ROWS.get(size, "")).get(batch, 0)
+        if not pushed and spread:
+            # 128 threads per row slot; pushes by every CTA, then the row merge.
+            assert per_row and 1 <= spread <= 4 and batch <= 64, (spread, batch)
+            self.spread = True
+            self.rows_per_cta = spread
+            self.grid = (heads, -(-batch // spread), 1)
+            # At most one CTA per SM (the progress argument in the class docstring).
+            assert heads * self.grid[1] <= sms, (self.grid, sms)
+            if spread_poll_all is None:
+                table = batch_table(SPREAD_POLL_ALL.get(size, ""))
+                spread_poll_all = table.get(batch, 0) == 1
+            self.poll_all = bool(spread_poll_all)
 
     @cute.jit
     def __call__(self, *args):
@@ -392,8 +495,8 @@ class DcpValue:
 
     @cute.kernel
     def kernel_rows(self, args):
-        """`pushed` with `rows_per_cta` R: CTA (head, m) merges request rows
-        R m .. R m + R - 1 of this head (see the class docstring)."""
+        """`pushed` (or `spread`) with `rows_per_cta` R: CTA (head, m) merges
+        request rows R m .. R m + R - 1 of this head (see the class docstring)."""
         w_uv, gate, totals, output = args[8], args[9], args[10], args[11]
         R, B = self.rows_per_cta, self.batch
         smem = cutlass.utils.SmemAllocator()
@@ -409,8 +512,16 @@ class DcpValue:
             load_words(at(w_uv, head, 32 * c + 8 * quarter, v), count=4)
             for c in range(16)
         ]
+        if cutlass.const_expr(self.early_trigger and self.pushed):
+            cute.arch.griddepcontrol_launch_dependents()
         cute.arch.griddepcontrol_wait()
-        cute.arch.griddepcontrol_launch_dependents()
+        if cutlass.const_expr(self.spread):
+            if cutlass.const_expr(self.push_loads_first):
+                self.push_share(args, head, tile, tid)
+            else:
+                self.push_rows(args, head, tile, 0, tid)
+        if cutlass.const_expr(not (self.early_trigger and self.pushed)):
+            cute.arch.griddepcontrol_launch_dependents()
         t0 = tile * R
         col = head * 128 + 32 * (warp // 4) + 8 * (warp % 4) + 2 * quarter
         gate_word = Uint32(0)
@@ -528,6 +639,47 @@ class DcpValue:
             slot = ((parity * D + rank) * cap + b) * H + gh % H
             store_relaxed(lpeers[gh // H] + Int64(slot) * 4, (float_bits(value),))
         # The peer stores leave first; the local re-arm overlaps their flight.
+        self.rearm(mailbox, me, threads)
+
+    @cute.jit
+    def push_share(self, args, head, tile, tid):
+        """`spread`: push_rows' stores (`skip_empty`) over every CTA of the grid,
+        each thread issuing every load of its share (LSE and length, row chunk,
+        owner address; indices past the end clamped, their stores skipped) before
+        its first store, then the LSEs, the row chunks and the q mailbox re-arm. In
+        push_rows' loop each row chunk waits on its LSE load and the next chunk's
+        loads on the previous chunk's store."""
+        rows, rows_lse, lens, box, lbox, peers, lpeers, mailbox = args[0:8]
+        parity, rank = args[12], args[13]
+        H, D, B, cap = self.heads, self.size, self.batch, box.shape[1]
+        threads: cutlass.Constexpr = H * self.grid[1] * self.grid[2] * 512
+        me = (tile * H + head) * 512 + tid
+        heads: cutlass.Constexpr = B * D * H  # LSEs: one per (row, gathered head)
+        chunks: cutlass.Constexpr = heads * 64  # 16 B row chunks
+        lses = []
+        for j in cutlass.range_constexpr(-(-heads // threads)):
+            i = cutlass.min(me + j * threads, Int32(heads - 1))
+            b, gh = i // (D * H), i % (D * H)
+            value = self.sent_lse(rows_lse, lens, b, gh)
+            slot = ((parity * D + rank) * cap + b) * H + gh % H
+            address = lpeers[gh // H] + Int64(slot) * 4
+            lses.append((me + j * threads < heads, address, value))
+        parts = []
+        for j in cutlass.range_constexpr(-(-chunks // threads)):
+            i = cutlass.min(me + j * threads, Int32(chunks - 1))
+            r, k = i // 64, i % 64  # r = b * D * H + global head
+            b, gh = r // (D * H), r % (D * H)
+            sent = self.sent_lse(rows_lse, lens, b, gh) > Float32(EMPTY_LSE)
+            words = load_words(at(rows, b, 0, gh, 8 * k), count=4, mutable=True)
+            slot = ((parity * D + rank) * cap + b) * H + gh % H
+            address = peers[gh // H] + (Int64(slot) * 512 + 8 * k) * 2
+            parts.append(((me + j * threads < chunks) & sent, address, words))
+        for ok, address, value in lses:
+            if ok:
+                store_relaxed(address, (float_bits(value),))
+        for ok, address, words in parts:
+            if ok:
+                store_relaxed(address, tuple(no_neg_zero(w) for w in words))
         self.rearm(mailbox, me, threads)
 
     @cute.kernel

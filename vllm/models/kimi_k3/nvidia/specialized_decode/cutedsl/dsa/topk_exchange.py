@@ -95,6 +95,19 @@ TABLE_CAP = 1024  # block-table columns staged in shared memory
 # after another, so pairs landing late cost one reload round, not one each. The same
 # words (bit for bit). DCP16: set by a 16-rank decode-step A/B.
 MERGE_SETTLE_ALL = {16: "1-8:1"}
+# VLLM_KIMI_K3_DCP8_TOPK_DIGITS_HALF=1: the "digits" round 1 (with the re-poll of all
+# pairs) also where the DCP world is half the CTA's warps (DCP8): warp w < W owns source
+# rank w, the other warps read this rank's own source (it lands first) and drop its
+# keys, so they only take part in the scans. The same rows, counts, saturation word and
+# rescue (bit for bit). Rows up to DIGITS_HALF_ROWS. Opt-in; default off.
+DIGITS_HALF = os.environ.get("VLLM_KIMI_K3_DCP8_TOPK_DIGITS_HALF", "0") == "1"
+DIGITS_HALF_ROWS = 48
+
+
+def digits_half(world) -> bool:
+    """Whether the "digits" form serves `world` ranks on half the warps
+    (VLLM_KIMI_K3_DCP8_TOPK_DIGITS_HALF)."""
+    return DIGITS_HALF and 2 * world == TB // _WARP
 
 
 def merge_settle_all(rows, world, digits) -> bool:
@@ -102,6 +115,8 @@ def merge_settle_all(rows, world, digits) -> bool:
     pairs together (MERGE_SETTLE_ALL)."""
     if not digits:
         return False
+    if digits_half(world) and rows <= DIGITS_HALF_ROWS:
+        return True
     return batch_table(MERGE_SETTLE_ALL.get(world, "")).get(rows, 0) == 1
 
 
@@ -111,8 +126,11 @@ def merge_select(rows, topk, local_topk, world, emit_ids) -> str:
     an even number of 32-pair groups per rank, a rank's keys within one 512-key
     stride, the rows only), else "radix"."""
     kind = batch_table(MERGE_SELECT.get(world, "")).get(rows, "radix")
+    half = digits_half(world)
+    if half and rows <= DIGITS_HALF_ROWS:
+        kind = "digits"
     fits = (
-        world == TB // _WARP
+        (world == TB // _WARP or half)
         and local_topk % 64 == 0
         and local_topk <= TB
         and local_topk < topk < world * local_topk
@@ -274,7 +292,7 @@ def build_merge(
     assert world <= 16 and local_topk < topk and block_size > 0
     assert stock._TB_SIZE == TB
     assert not digits or (
-        world == TB // _WARP
+        (world == TB // _WARP or 2 * world == TB // _WARP)
         and local_topk % 64 == 0
         and local_topk <= TB
         and topk < world * local_topk
@@ -809,7 +827,11 @@ def build_merge(
         ep = epoch[row] + Int32(1)
         tag = recast_val(ep, Uint32)
         part = Int64(ep & Int32(1))
-        slot = (part * Int64(world) + Int64(warp)) * Int64(xrows) + Int64(row)
+        srank = warp
+        if cutlass.const_expr(world < num_warps):  # noqa: SIM102 - compile-time test
+            if warp >= Int32(world):  # a spare warp: this rank's own source
+                srank = dcp_rank
+        slot = (part * Int64(world) + Int64(srank)) * Int64(xrows) + Int64(row)
         base = recv + slot * Int64(pairs * 16)
         raw = []
         for m in cutlass.range_constexpr(groups):
@@ -855,7 +877,7 @@ def build_merge(
         lt = lanemask_lt()
         me = recast_val(lane, Uint32)
         keys = cute.make_rmem_tensor((kpl,), Uint64)
-        source = recast_val(warp, Uint32)
+        source = recast_val(srank, Uint32)
         for m in cutlass.range_constexpr(groups):
             if cutlass.const_expr(settle_all_pairs):
                 w0, w1 = pv[m, 0], pv[m, 2]
@@ -874,6 +896,10 @@ def build_merge(
             keys[2 * m + 1] = stock._decode_key(
                 w1, high, j + Int32(1), source, world, gid_bits
             )
+        if cutlass.const_expr(world < num_warps):  # noqa: SIM102 - compile-time test
+            if warp >= Int32(world):  # spare warps hold no candidate
+                for k in cutlass.range_constexpr(kpl):
+                    keys[k] = Uint64(0)
         for k in cutlass.range_constexpr(kpl):
             key = keys[k]
             if key != Uint64(0):
@@ -1100,7 +1126,8 @@ def build_merge(
                 for m in cutlass.range_constexpr(groups):
                     for e in cutlass.range_constexpr(2):
                         flat = warp * Int32(n) + Int32(64 * m + e) + Int32(2) * lane
-                        ties[flat] = Uint32(keys[2 * m + e] >> Uint64(32 * h))
+                        if warp < Int32(world):
+                            ties[flat] = Uint32(keys[2 * m + e] >> Uint64(32 * h))
                 cute.arch.sync_threads()
                 for u in cutlass.range_constexpr(kpt):
                     flat = tid + Int32(u * tb)
