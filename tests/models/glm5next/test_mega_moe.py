@@ -169,8 +169,7 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
 
 
 def _sm90_layout(w13, s13, w2, s2):
-    """Block-FP8 weights as loaded, and the checkpoint block scale of each
-    weight row."""
+    """Block-FP8 weights as loaded and the block scale of each weight row."""
     return (
         _interleave(w13.view(torch.uint8)),
         _interleave(s13.repeat_interleave(128, -2)),
@@ -180,10 +179,8 @@ def _sm90_layout(w13, s13, w2, s2):
 
 
 def _sm90_scale_reads(sf, is_l1):
-    """The block scale of each weight row, read from the kernel's SM90 scales
-    `[..., N / 128, K / 128]` the way the kernel reads them: tile `j` of 128
-    weight rows takes word `j & 2` for gate rows, `(j & 2) + 1` for up rows and
-    `j & 3` for L2 rows, of the four MN-major words at `j & ~3`."""
+    """The block scale of each weight row, read as the SM90 kernel does
+    (DeepGEMM's `read_like_kernel`)."""
     *_, mn, num_k = sf.shape
     # MN-major, MN stride aligned to 16 bytes, experts contiguous.
     assert sf.stride()[-2:] == (1, round_up(mn, 4))
@@ -217,8 +214,6 @@ def _expected_routed(ckpt, sm90=False):
 
 
 def _assert_layout(actual, expected, sm90=False):
-    """`actual` and `expected` are (w13, s13, w2, s2); on SM90 the scales are
-    compared as the kernel reads them."""
     for i, (tensor, reference) in enumerate(zip(actual, expected)):
         if sm90 and i % 2:
             tensor = _sm90_scale_reads(tensor, is_l1=i == 1)

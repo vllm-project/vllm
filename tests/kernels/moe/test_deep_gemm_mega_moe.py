@@ -1570,9 +1570,8 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
 
 
 def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
-    """E4M3 weight `[n, k]` with one FP32 scale per 128x128 block, the scales
-    spread over 3x so that a misplaced block scale shows, and its dequantized
-    weight."""
+    """Block-FP8 weight, its 128x128 scales (spread so a misplaced one shows)
+    and the dequantized weight."""
     weight = torch.randn(n, k, device=device).to(torch.float8_e4m3fn)
     scale = (torch.rand(n // 128, k // 128, device=device) + 0.5) / k**0.5
     full = scale.repeat_interleave(128, 0).repeat_interleave(128, 1)
@@ -1598,9 +1597,8 @@ def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
 def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
     dist_init, act_name, fuse_shared
 ):
-    """A 128x128 block-FP8 checkpoint on SM90 runs as is: the GLM-5.3 experts,
-    which take this format, load its weights and block scales, lay out the
-    scales for the kernel, and the kernel matches the dequantized reference."""
+    """A 128x128 block-FP8 checkpoint loaded through the GLM experts matches
+    the dequantized reference."""
     from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
     fmt, act = MEGA_MOE_FP8_BLOCK_SM90, ACTIVATIONS[act_name]

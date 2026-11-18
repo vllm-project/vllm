@@ -754,7 +754,6 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
-    # Mocks every DeepGEMM call; covers the warmup's layer and M selection.
     - pytest -v -s model_executor/test_deep_gemm_warmup.py
   mirror:
     amd:

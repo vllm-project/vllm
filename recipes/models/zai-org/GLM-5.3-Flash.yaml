@@ -11,7 +11,6 @@ meta:
   performance_headline: "320B MoE with 18B active parameters and 1M-token context"
   hardware:
     h100: verified
-    # FP8 DEP4 and DEP8, text only, with DeepGEMM Mega MoE (vLLM #66812).
     h200: verified
     b200: verified
     gb200: verified
@@ -148,9 +147,6 @@ hardware_notes:
       GB300 section for the requirements.
 
 presets:
-  # The BF16 checkpoint has no SM90 Mega MoE kernel, hence FP8 only. Text only:
-  # DP ranks with image/video enabled fail the encoder profiling run on H200
-  # (illegal memory access in FlashAttention), with any MoE backend.
   h200_dep_mega_moe:
     label: "Mega MoE"
     hardware: h200
@@ -282,18 +278,12 @@ guide: |
 
   ### FP8 Mega MoE on H200 (DP + EP)
 
-  `--moe-backend deep_gemm_mega_moe` runs the FP8 checkpoint's routed and shared experts in
-  one DeepGEMM Mega MoE kernel on H200 ([vLLM #66812](https://github.com/vllm-project/vllm/pull/66812)),
-  using the checkpoint's 128x128 block scales as they are. It needs data + expert parallelism
-  with TP1; on H200 the builder's **Data + Expert Parallel** strategy offers it as the opt-in
-  **Mega MoE** preset. The BF16 checkpoint has no Hopper Mega MoE kernel. On 8×H200 it served
-  22-44% more output tokens/s than the default MoE backend on random 1K/1K and 8K/256 prompts
-  at concurrency 1 to 256.
-
-  The command is text only. With image and video inputs enabled, DP ranks on H200 currently
-  fail the encoder profiling run at startup with an illegal memory access, with any MoE
-  backend. On 4 GPUs (`--data-parallel-size 4`), also pass `--max-num-seqs 948`: the default
-  of 1024 exceeds the KDA state blocks each rank has.
+  `--moe-backend deep_gemm_mega_moe` runs the FP8 routed and shared experts in one DeepGEMM
+  kernel ([vLLM #66812](https://github.com/vllm-project/vllm/pull/66812)). It needs DP + EP with
+  TP1 and is the opt-in **Mega MoE** preset of the **Data + Expert Parallel** strategy. On 8×H200
+  it served 22-44% more output tokens/s than the default MoE backend. It is text only for now:
+  with image or video input, H200 DP ranks fail encoder profiling. On 4 GPUs, also pass
+  `--max-num-seqs 948`.
 
   ```bash
   VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash \
