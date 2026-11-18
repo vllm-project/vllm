@@ -14,7 +14,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -307,11 +307,11 @@ class INCXPULinearBase(INCLinearScheme):
 class INCXPULinearMethod(INCXPULinearBase):
     """XPU linear method for INC w4a16 quantization (symmetric only).
 
-    Supports both GPTQ-packed (``auto_round:auto_gptq``) and AWQ-packed
-    (``auto_round:auto_awq``) AutoRound checkpoints. AWQ-packed qweights are
+    Supports both GPTQ-packed (`auto_round:auto_gptq`) and AWQ-packed
+    (`auto_round:auto_awq`) AutoRound checkpoints. AWQ-packed qweights are
     losslessly repacked into the GPTQ-style nibble layout during
-    ``process_weights_after_loading``, before the final oneDNN "NT" transpose
-    that ``torch.ops._xpu_C.int4_gemm_w4a16`` expects.
+    `process_weights_after_loading`, before the final oneDNN "NT" transpose
+    that `torch.ops._xpu_C.int4_gemm_w4a16` expects.
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -434,9 +434,10 @@ class INCARKLinearMethod(INCXPULinearBase):
         layer.ark_weight_type = ark_linear.wdt
         layer.ark_scale_type = ark_linear.sdt
 
-        if hasattr(layer, "qzeros"):
-            del layer.qzeros
-        del layer.scales
+        # ARK holds its own qzeros/scales; the loaded params keep their data.
+        if getattr(layer, "qzeros", None) is not None:
+            retire_parameter(layer, "qzeros")
+        retire_parameter(layer, "scales")
 
     def apply_weights(
         self,

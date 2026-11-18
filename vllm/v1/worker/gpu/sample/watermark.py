@@ -269,7 +269,7 @@ def repeated_context_mask(
         contexts: `[num_rows, context_width]` context per row, padded with -1
             before the start of the scanned history.
         max_history: Number of most recent history positions searched, or
-            ``None`` for all of them. The window compared at each position
+            `None` for all of them. The window compared at each position
             reaches `context_width` tokens further back.
         include_prompt: Search the prompt as well as the generated tokens.
         skip_partial_context: Mark contexts containing start padding so they use
@@ -884,6 +884,13 @@ def _draft_step_kernel(
         req_idx = tl.load(next_req_indices_ptr + row).to(tl.int64)
         temperature = tl.load(temp_ptr + req_idx, mask=req_idx >= 0, other=0.0)
         active = tl.load(enabled_ptr + row) & (temperature != 0)
+        context_offsets = tl.arange(0, BLOCKS_POW2)
+        context = tl.load(
+            contexts_row_ptr + context_offsets,
+            mask=context_offsets < CONTEXT_WIDTH,
+            other=0,
+        )
+        active &= tl.min(context, axis=0) >= 0
         if DEDUPLICATE:
             # The dedup kernel body runs in place on the skip mask buffer.
             tl.store(skip_mask_ptr + row, active)

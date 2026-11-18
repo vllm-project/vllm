@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused QSA prepare kernel for the AMD Qwen4Exp path.
 
-Started as a copy of the NVIDIA kernel (``nvidia/ops/qsa_prepare.py``) and is
+Started as a copy of the NVIDIA kernel (`nvidia/ops/qsa_prepare.py`) and is
 kept separate so either vendor can change its own copy without re-validating
 the other. The state source select is two masked loads rather than a pointer
 select, which ROCm Triton rejects.
@@ -124,14 +124,14 @@ def _to_dst_dtype(x, dst, scale):
     """Round to BF16 like the unfused path, then scale for an FP8 destination."""
     out_ty = dst.dtype.element_ty
     x = x.to(tl.bfloat16)
-    if out_ty == tl.float8e4nv:
+    if out_ty.is_fp8():
         x = x.to(tl.float32) / scale
     return x.to(out_ty)
 
 
 @triton.jit
 def _store_rotated(dst, y, o1, o2, scale):
-    """Store a normalized head whose first ``2 * len(o1)`` dims are rotated."""
+    """Store a normalized head whose first `2 * len(o1)` dims are rotated."""
     HALF: tl.constexpr = o1.shape[0]
     dims = tl.arange(0, y.shape[0])
     rot = tl.arange(0, HALF)
@@ -581,7 +581,7 @@ def qsa_prepare(
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its Q and gate. ``main_gate_out`` lets the gate land in a
+    and returns its Q and gate. `main_gate_out` lets the gate land in a
     caller-owned buffer, e.g. one that outlives an opaque custom op.
     """
     num_tokens = q.shape[0]

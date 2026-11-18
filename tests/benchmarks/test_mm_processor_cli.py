@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end test for the ``vllm bench mm-processor`` CLI.
+"""End-to-end test for the `vllm bench mm-processor` CLI.
 
 Most other bench subcommands have a subprocess smoke test in this directory.
 This file covers mm-processor, including the per-stage stats its JSON output

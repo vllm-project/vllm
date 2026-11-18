@@ -41,6 +41,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_adaptive_verification: bool = False
     use_dcp: bool = False
     use_rswa: bool = False
+    use_hisparse: bool = False
 
     def __repr__(self):
         return (
@@ -61,7 +62,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_adaptive_verification={self.use_adaptive_verification}, "
             f"use_pcp={self.use_pcp}, "
             f"use_dcp={self.use_dcp}, "
-            f"use_rswa={self.use_rswa})"
+            f"use_rswa={self.use_rswa}, "
+            f"use_hisparse={self.use_hisparse})"
         )
 
 
@@ -72,23 +74,23 @@ def get_attn_spec_kind(
 ) -> "KVCacheSpecKind":
     """Derive the KV-cache group kind a layer belongs to from its signals.
 
-    Mirrors ``get_kv_cache_spec_kind`` (which derives the kind from the
-    produced ``KVCacheSpec``) so users can target groups by kind when
-    setting ``AttentionConfig.backend_per_kind``.
+    Mirrors `get_kv_cache_kind` (which derives the kind from the layer's
+    KV cache manager config and spec) so users can target groups by kind when
+    setting `AttentionConfig.backend_per_kind`.
 
-    ``SINK_FULL_ATTENTION`` is intentionally not derived here: it is produced
-    only by the ``StaticSinkAttention`` layer, whereas a plain ``Attention``
-    layer with attention sinks (e.g. gpt-oss) still yields a
-    ``FullAttentionSpec``/``SlidingWindowSpec``. Sinks therefore do not change
+    `SINK_FULL_ATTENTION` is intentionally not derived here: it is produced
+    only by the `StaticSinkAttention` layer, whereas a plain `Attention`
+    layer with attention sinks (e.g. gpt-oss) still uses the full-attention or
+    sliding-window manager. Sinks therefore do not change
     the kind.
 
     Args:
         use_mla: Whether the layer uses multi-head latent attention.
         has_sliding_window: Whether the layer applies a sliding window.
-        attn_type: The layer's ``AttentionType``.
+        attn_type: The layer's `AttentionType`.
 
     Returns:
-        The ``KVCacheSpecKind`` the layer maps to.
+        The `KVCacheSpecKind` the layer maps to.
 
     """
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
@@ -177,6 +179,9 @@ def get_attn_backend(
             vllm_config.model_config is not None
             and vllm_config.model_config.rswa_window is not None
         ),
+        use_hisparse=(
+            use_sparse and vllm_config.attention_config.hisparse_config is not None
+        ),
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
@@ -192,7 +197,7 @@ def get_attn_backend(
         backend = attention_config.backend_per_kind.get(kind.value, backend)
 
     # The KV cache layout is resolved across all of the model's backends at once
-    # in get_kv_cache_spec(); a single selection cannot see its peers.
+    # in the engine core; a single selection cannot see its peers.
     return _cached_get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,

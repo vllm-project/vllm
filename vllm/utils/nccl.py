@@ -7,7 +7,7 @@ import contextlib
 import ctypes
 import importlib.util
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 
 import torch
 
@@ -88,7 +88,7 @@ def find_nccl_library_paths() -> list[str] | None:
 def query_nccl_gin_type(
     group: torch.distributed.ProcessGroup, *, railed: bool = False
 ) -> int | None:
-    """Return the full or railed GIN type, or ``None`` on query failure."""
+    """Return the full or railed GIN type, or `None` on query failure."""
     from vllm.distributed.device_communicators.pynccl_wrapper import (
         NCCL_COMM_PROPERTIES_LAYOUT_VERSION,
         NCCLLibrary,
@@ -158,7 +158,7 @@ def pin_nccl_env(pins: dict[str, str]) -> None:
 
 
 @contextlib.contextmanager
-def unpinned_nccl_env() -> Iterator[None]:
+def unpinned_nccl_env() -> Generator[None]:
     """Create communicators shared with other processes without the pins."""
     if _unpinned_env == {}:
         logger.warning_once(

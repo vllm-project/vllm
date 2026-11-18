@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Host side of the CuTe KDA RecoverSSM kernels (SM10x tensor cores).
 
-* ``CuteRecoverSSMVerify``: the speculative verify of one KDA layer with the short
-  convolution fused in (``cutedsl/verify_ws.py`` for the dim-first conv state,
-  ``cutedsl/verify.py`` otherwise). It writes the outputs, the rolled conv state
-  and the verify records, like ``causal_conv1d_update`` followed by
-  ``kda_recoverssm_verify``.
-* ``cute_recoverssm_commit``: the state fold of a prepared commit plan for all
-  KDA layers in one launch (``cutedsl/commit.py``), replacing the Triton fold of
-  ``KDARecoverSSMCommitContext.commit``.
+* `CuteRecoverSSMVerify`: the speculative verify of one KDA layer with the short
+  convolution fused in (`cutedsl/verify_ws.py` for the dim-first conv state,
+  `cutedsl/verify.py` otherwise). It writes the outputs, the rolled conv state
+  and the verify records, like `causal_conv1d_update` followed by
+  `kda_recoverssm_verify`.
+* `cute_recoverssm_commit`: the state fold of a prepared commit plan for all
+  KDA layers in one launch (`cutedsl/commit.py`), replacing the Triton fold of
+  `KDARecoverSSMCommitContext.commit`.
 
 The kernels compile when the KV cache is bound, before CUDA graph capture;
 nothing compiles under capture.
@@ -220,11 +220,11 @@ class CuteRecoverSSMVerify:
         conv_weight: torch.Tensor,
         out: torch.Tensor,
     ) -> bool:
-        """Verify ``state_indices.shape[0]`` requests. ``mixed_qkv`` [T, 3HK] is
-        the raw projection (before the convolution), ``raw_gate`` [T, HK],
-        ``raw_beta`` [T, H], ``out`` [T, HV]; ``conv_state`` is the stored
+        """Verify `state_indices.shape[0]` requests. `mixed_qkv` [T, 3HK] is
+        the raw projection (before the convolution), `raw_gate` [T, HK],
+        `raw_beta` [T, H], `out` [T, HV]; `conv_state` is the stored
         [slots, 3HK, Q + 2] (dim first) or [slots, Q + 2, 3HK] page view.
-        Request ``b`` writes its verify records to row ``b`` of ``records``.
+        Request `b` writes its verify records to row `b` of `records`.
 
         Returns False without launching when an activation does not start on a
         16-byte boundary (e.g. for an odd token offset into projection rows that
@@ -344,7 +344,7 @@ def cute_recoverssm_commit(
     align: bool,
 ) -> None:
     """Fold the accepted tokens of a prepared commit plan into the state of all
-    of ``context``'s layers in one launch. It runs after sampling, outside CUDA
+    of `context`'s layers in one launch. It runs after sampling, outside CUDA
     graphs, on the current stream (TVM-FFI)."""
     state = context.checkpoints[0]
     assert context.lower_bound is not None

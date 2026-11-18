@@ -15,6 +15,13 @@ from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
+    kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
@@ -39,6 +46,7 @@ from ..mamba_utils import (
 )
 from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from ..ops.gather_initial_states import gather_initial_states
+from ..ops.scatter_states import scatter_states
 
 # Empirical lower bound for the KDA gate to avoid numerical underflow.
 _KDA_GATE_LOGBOUND_MIN = -5.0
@@ -95,8 +103,8 @@ def _make_fused_conv1d_weight_loader(
 class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with one output replicated across TP ranks.
 
-    The replicated shard is represented as ``size * tp_size`` so the merged
-    parameter reserves ``size`` local rows on every rank. Loading that shard
+    The replicated shard is represented as `size * tp_size` so the merged
+    parameter reserves `size` local rows on every rank. Loading that shard
     from rank zero then gives every rank the complete checkpoint weight.
     """
 
@@ -207,8 +215,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 4 * self.local_projection_size + self.head_dim + self.local_num_heads
             )
             self.in_proj_padding = -local_output_size % 16
-            if self.in_proj_padding:
-                in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         else:
             in_proj_output_sizes = [self.projection_size] * 3 + [
                 self.num_heads,
@@ -220,12 +226,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             in_proj_output_sizes,
             replicated_shard_id=4,
             tp_size=self.tp_size,
+            padding_size=self.in_proj_padding,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvgfab",
         )
-        if self.in_proj_padding:
-            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -286,6 +291,17 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             "The shared Kimi GDN layer only supports the Triton KDA "
             f"prefill backend, got {backend!r}."
         )
+        self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+            state_len=self.conv_size - 1
+        )
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
+        if vllm_config.cache_config.mamba_cache_mode == "align":
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.get_state_dtype()[1],
+            )
         if not self.use_full_rank_gate:
             self.g_a_proj = ReplicatedLinear(
                 self.hidden_size,
@@ -314,6 +330,18 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+        _, recurrent_state_shape = self.get_state_shape()
+        _, recurrent_state_dtype = self.get_state_dtype()
+        scatter_states.register_warmup(
+            state_shape=recurrent_state_shape,
+            state_dtype=recurrent_state_dtype,
+            indices_dtype=torch.int32,
+            max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+        )
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment("triton")
 
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
@@ -572,6 +600,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     non_spec_state_indices_tensor,
                     has_initial_state,
                 )
+                checkpoint = m.checkpoint
+                checkpoint_state, checkpoint_offsets = get_triton_kda_checkpoint_buffer(
+                    checkpoint, self._triton_checkpoint_spec, initial_state.shape[0]
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -588,9 +620,22 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=non_spec_query_start_loc,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
                 )
+                if checkpoint is not None:
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=mixed_qkv_ns,
+                        conv_state=conv_state,
+                        recurrent_checkpoint=checkpoint_state,
+                        recurrent_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
                 # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+                scatter_states(
+                    recurrent_state, last_recurrent_state, non_spec_state_indices_tensor
+                )
 
             else:
                 # pure-decode non-spec batch
