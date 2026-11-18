@@ -192,6 +192,7 @@ pub(super) struct SamplingDefaults {
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+    pub skip_special_tokens: Option<bool>,
 }
 
 /// Deserialize a generation-config `top_k` into the text sampling model.

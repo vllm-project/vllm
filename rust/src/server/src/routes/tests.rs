@@ -5109,6 +5109,109 @@ async fn chat_generation_config_overrides_reach_engine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn skip_special_tokens_defaults_to_generation_config() {
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let routes = [
+        (
+            "/v1/chat/completions",
+            json!({"model": model, "messages": [{"role": "user", "content": "hello"}]}),
+            "",
+            "/choices/0/message/content",
+        ),
+        (
+            "/v1/completions",
+            json!({"model": model, "prompt": "hello"}),
+            "",
+            "/choices/0/text",
+        ),
+        (
+            "/v1/responses",
+            json!({"model": model, "input": "hello"}),
+            "",
+            "/output/0/content/0/text",
+        ),
+        (
+            "/inference/v1/generate",
+            json!({"token_ids": [11, 22], "output_mode": "text", "sampling_params": {}}),
+            "/sampling_params",
+            "/choices/0/text",
+        ),
+    ];
+    let mut contents = Vec::new();
+    for (route, body, params, text) in &routes {
+        for (model_default, request_value) in [
+            (None, None),
+            (Some(false), None),
+            (Some(false), Some(json!(null))),
+            (Some(false), Some(json!(true))),
+            (Some(true), Some(json!(false))),
+        ] {
+            let backend = FakeChatBackend {
+                sampling_hints: vllm_text::SamplingHints {
+                    default_skip_special_tokens: model_default,
+                    ..Default::default()
+                },
+                ..FakeChatBackend::new()
+            };
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+                b"engine-skip-special-tokens",
+                vec![(
+                    vec![FAKE_BOS_TOKEN_ID, b'h' as u32, b'i' as u32, b'!' as u32],
+                    Some(EngineCoreFinishReason::Stop),
+                )],
+                Arc::new(backend),
+            )
+            .await;
+            let mut app = build_router_with_gates(
+                Arc::new(AppState::new(vec![model.to_string()], chat)),
+                RouteGates {
+                    scale_out: true,
+                    ..RouteGates::default()
+                },
+            );
+            let mut body = body.clone();
+            if let Some(value) = &request_value {
+                body.pointer_mut(params).expect("params object")["skip_special_tokens"] =
+                    value.clone();
+            }
+            let (status, json) = post_json(&mut app, route, body).await;
+            engine_task.await.expect("mock engine task");
+            contents.push(format!(
+                "{route}: model {model_default:?}, request {} -> {status}: {}",
+                request_value.map_or("omitted".to_string(), |value| value.to_string()),
+                json.pointer(text).unwrap_or(&json)
+            ));
+        }
+    }
+    expect_test::expect![[r#"
+        [
+            "/v1/chat/completions: model None, request omitted -> 200 OK: \"hi\"",
+            "/v1/chat/completions: model Some(false), request omitted -> 200 OK: \"<bos>hi\"",
+            "/v1/chat/completions: model Some(false), request null -> 200 OK: \"<bos>hi\"",
+            "/v1/chat/completions: model Some(false), request true -> 200 OK: \"hi\"",
+            "/v1/chat/completions: model Some(true), request false -> 200 OK: \"<bos>hi\"",
+            "/v1/completions: model None, request omitted -> 200 OK: \"hi\"",
+            "/v1/completions: model Some(false), request omitted -> 200 OK: \"<bos>hi\"",
+            "/v1/completions: model Some(false), request null -> 200 OK: \"<bos>hi\"",
+            "/v1/completions: model Some(false), request true -> 200 OK: \"hi\"",
+            "/v1/completions: model Some(true), request false -> 200 OK: \"<bos>hi\"",
+            "/v1/responses: model None, request omitted -> 200 OK: \"hi\"",
+            "/v1/responses: model Some(false), request omitted -> 200 OK: \"<bos>hi\"",
+            "/v1/responses: model Some(false), request null -> 200 OK: \"<bos>hi\"",
+            "/v1/responses: model Some(false), request true -> 200 OK: \"hi\"",
+            "/v1/responses: model Some(true), request false -> 200 OK: \"<bos>hi\"",
+            "/inference/v1/generate: model None, request omitted -> 200 OK: \"hi\"",
+            "/inference/v1/generate: model Some(false), request omitted -> 200 OK: \"<bos>hi\"",
+            "/inference/v1/generate: model Some(false), request null -> 200 OK: \"<bos>hi\"",
+            "/inference/v1/generate: model Some(false), request true -> 200 OK: \"hi\"",
+            "/inference/v1/generate: model Some(true), request false -> 200 OK: \"<bos>hi\"",
+        ]
+    "#]]
+    .assert_debug_eq(&contents);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::with_multimodal_model_info(

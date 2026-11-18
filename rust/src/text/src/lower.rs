@@ -73,6 +73,8 @@ pub fn lower_text_request(
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
     validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    let skip_special_tokens = &mut request.decode_options.skip_special_tokens;
+    *skip_special_tokens = skip_special_tokens.or(sampling_hints.default_skip_special_tokens);
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -126,6 +128,8 @@ pub fn lower_sampling_params(
         default_presence_penalty,
         default_frequency_penalty,
         default_max_tokens,
+        // A decode option, resolved by `lower_text_request`.
+        default_skip_special_tokens: _,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
     structured_outputs_backend: StructuredOutputBackend,
@@ -476,6 +480,7 @@ mod tests {
             default_presence_penalty: None,
             default_frequency_penalty: None,
             default_max_tokens: None,
+            default_skip_special_tokens: None,
         }
     }
 
@@ -505,6 +510,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             sampling_limits,
             StructuredOutputBackend::Xgrammar,
@@ -1044,6 +1050,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             }
         "#]]
         .assert_debug_eq(&hints);
@@ -1127,6 +1134,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1208,6 +1216,7 @@ mod tests {
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
                 default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1273,6 +1282,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             SamplingLimits {
                 max_logprobs: -1,
@@ -1674,6 +1684,7 @@ mod tests {
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
                 default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,

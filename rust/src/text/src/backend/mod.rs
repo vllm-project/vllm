@@ -68,6 +68,9 @@ pub struct SamplingHints {
     pub default_presence_penalty: Option<f32>,
     pub default_frequency_penalty: Option<f32>,
     pub default_max_tokens: Option<DefaultMaxTokens>,
+    /// Applies when a request leaves `skip_special_tokens` unset; see
+    /// [`TextDecodeOptions::skip_special_tokens`](crate::output::TextDecodeOptions::skip_special_tokens).
+    pub default_skip_special_tokens: Option<bool>,
 }
 
 /// Server-side `max_tokens` from the generation config.

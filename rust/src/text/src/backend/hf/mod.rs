@@ -178,7 +178,6 @@ fn build_sampling_hints(
     primary_eos_token_id: Option<u32>,
     extra_eos_token_ids: BTreeSet<u32>,
 ) -> Result<SamplingHints> {
-    // TODO: Python also takes a `skip_special_tokens` default from this config.
     let mut sampling = match mode {
         GenerationConfigMode::Auto => model_sampling,
         // `lower_sampling_params` applies vLLM fallback values instead.
@@ -206,6 +205,7 @@ fn build_sampling_hints(
         default_presence_penalty: defaults.presence_penalty,
         default_frequency_penalty: defaults.frequency_penalty,
         default_max_tokens,
+        default_skip_special_tokens: defaults.skip_special_tokens,
     })
 }
 
@@ -410,6 +410,7 @@ mod tests {
                             4096,
                         ),
                     ),
+                    default_skip_special_tokens: None,
                 },
                 SamplingHints {
                     primary_eos_token_id: Some(
@@ -426,6 +427,7 @@ mod tests {
                     default_presence_penalty: None,
                     default_frequency_penalty: None,
                     default_max_tokens: None,
+                    default_skip_special_tokens: None,
                 },
             )
         "#]]
@@ -442,7 +444,7 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), r#"{"vocab_size": 128}"#).unwrap();
         std::fs::write(
             dir.path().join("generation_config.json"),
-            r#"{"temperature": 0.6, "top_p": 0.95, "top_k": 20}"#,
+            r#"{"temperature": 0.6, "top_p": 0.95, "top_k": 20, "skip_special_tokens": false}"#,
         )
         .unwrap();
         let files = ResolvedModelFiles::from_sources(&ModelFileSources {
@@ -469,7 +471,8 @@ mod tests {
         let overrides =
             r#"{"temperature": 0.2, "top_k": null, "min_p": 0.05, "max_new_tokens": 64}"#;
 
-        // `auto` keeps the model's `top_p`; `vllm` keeps only the overrides.
+        // `auto` keeps the model's `top_p` and `skip_special_tokens`; `vllm` keeps
+        // only the overrides.
         expect_test::expect![[r#"
             (
                 SamplingHints {
@@ -493,6 +496,9 @@ mod tests {
                             64,
                         ),
                     ),
+                    default_skip_special_tokens: Some(
+                        false,
+                    ),
                 },
                 SamplingHints {
                     primary_eos_token_id: None,
@@ -513,6 +519,7 @@ mod tests {
                             64,
                         ),
                     ),
+                    default_skip_special_tokens: None,
                 },
             )
         "#]]
@@ -521,5 +528,14 @@ mod tests {
             hints(GenerationConfigMode::Vllm, overrides).unwrap(),
         ));
         assert!(hints(GenerationConfigMode::Vllm, r#"{"temperature": "hot"}"#).is_err());
+        assert_eq!(
+            hints(
+                GenerationConfigMode::Auto,
+                r#"{"skip_special_tokens": true}"#
+            )
+            .unwrap()
+            .default_skip_special_tokens,
+            Some(true)
+        );
     }
 }
