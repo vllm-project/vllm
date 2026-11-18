@@ -1139,59 +1139,6 @@ def update_kv_cache_capacity(
         f"{max_model_len:,}",
         max_concurrency,
     )
-    _validate_mamba_block_capacity(vllm_config, kv_cache_config)
-
-
-def _validate_mamba_block_capacity(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> None:
-    """Fail fast (with actionable numbers) when a Mamba-hybrid model cannot
-    host ``max_num_seqs`` decode sequences.
-
-    Mirrors the later check guarding full-decode CUDA graph capture in
-    ``CompilationConfig`` (see #34094 for why that one raises instead of
-    silently capping capture sizes), but triggers right after KV cache
-    sizing — minutes before graph capture — and spells out the per-request
-    block costs. Long-context configs can otherwise spend several minutes
-    loading weights before dying at graph capture (see #55533).
-    """
-    num_blocks = kv_cache_config.num_blocks
-    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-    if num_blocks is None or not kv_cache_config.kv_cache_groups:
-        return
-    mamba_groups = [
-        group
-        for group in kv_cache_config.kv_cache_groups
-        if not group.host_resident
-        and any(
-            "Mamba" in type(spec).__name__
-            for spec in group.kv_cache_specs.values()
-        )
-    ]
-    if not mamba_groups or max_num_seqs <= num_blocks:
-        return
-    per_req_blocks = sum(
-        group.max_allocated_blocks_per_request(vllm_config)
-        for group in mamba_groups
-    )
-    # Only suggest raising --gpu-memory-utilization when it can actually be
-    # raised: with the extensible KV cache (CUDA/ROCm default) an unset
-    # value already resolves to 1.0.
-    suggestions = [f"--max-num-seqs {num_blocks}"]
-    if vllm_config.cache_config.resolved_gpu_memory_utilization < 1.0:
-        suggestions.append("increase --gpu-memory-utilization")
-    suggestions.append("reduce --max-model-len")
-    joined = ", or ".join(suggestions)
-    raise ValueError(
-        f"max_num_seqs ({max_num_seqs}) exceeds the available Mamba cache "
-        f"blocks ({num_blocks}). Each decode sequence requires one Mamba "
-        f"cache block; at max_model_len="
-        f"{vllm_config.model_config.max_model_len:,} a request costs "
-        f"{per_req_blocks} Mamba block(s) across {len(mamba_groups)} "
-        f"group(s) (page size {mamba_groups[0].page_size_bytes:,} "
-        "bytes; speculative decoding reserves additional blocks per draft "
-        f"token). Start with {joined}."
-    )
 
 
 class BlockHashListWithBlockSize:

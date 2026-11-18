@@ -186,6 +186,62 @@ class CUDAGraphMode(enum.Enum):
         return self != CUDAGraphMode.NONE
 
 
+def validate_mamba_cudagraph_capacity(
+    cudagraph_mode: CUDAGraphMode,
+    kv_cache_config: "KVCacheConfig",
+    max_num_reqs: int,
+    num_blocks: int,
+    *,
+    vllm_config: "VllmConfig | None" = None,
+) -> None:
+    """Check the device Mamba state blocks for the resolved graph mode.
+
+    The measured post-warmup capacity can be smaller than the reservation
+    recorded in `kv_cache_config.num_blocks`.
+    """
+    if not cudagraph_mode.has_full_cudagraphs() or max_num_reqs <= num_blocks:
+        return
+
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    mamba_groups = [
+        group
+        for group in kv_cache_config.kv_cache_groups
+        if not group.host_resident
+        and any(isinstance(spec, MambaSpec) for spec in group.kv_cache_specs.values())
+    ]
+    if not mamba_groups:
+        return
+
+    # Raising instead of capping capture sizes leaves PIECEWISE unchanged.
+    # See https://github.com/vllm-project/vllm/issues/34094.
+    message = (
+        f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache blocks "
+        f"({num_blocks}). FULL decode CUDA graphs require one Mamba state block "
+        "per sequence."
+    )
+    suggestions = [f"set --max-num-seqs to {num_blocks} or lower"]
+    if vllm_config is not None:
+        blocks_per_request = sum(
+            group.max_allocated_blocks_per_request(vllm_config)
+            for group in mamba_groups
+        )
+        message += (
+            f" At max_model_len={vllm_config.model_config.max_model_len:,}, "
+            f"a request costs {blocks_per_request} Mamba block(s) across "
+            f"{len(mamba_groups)} device group(s)."
+        )
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.resolved_gpu_memory_utilization < 1.0
+            and cache_config.kv_cache_memory_bytes is None
+            and cache_config.num_gpu_blocks_override is None
+        ):
+            suggestions.append("increase --gpu-memory-utilization")
+        suggestions.append("reduce --max-model-len")
+    raise ValueError(f"{message} To proceed, {'; or '.join(suggestions)}.")
+
+
 @config
 class PassConfig:
     """Configuration for custom Inductor passes.
@@ -1542,6 +1598,8 @@ class CompilationConfig:
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
+        *,
+        vllm_config: "VllmConfig | None" = None,
     ) -> CUDAGraphMode:
         """Resolve the CUDA Graphs mode the attention backends can support.
 
@@ -1657,28 +1715,17 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # For Mamba models with FULL decode cudagraphs, each decode
-        # sequence needs one Mamba cache block. The decode cudagraph
-        # dispatcher already caps batch sizes at max_num_seqs, so we just
-        # need to verify that enough blocks exist. Raising here instead
-        # of silently capping cudagraph_capture_sizes avoids unintended
-        # restrictions on PIECEWISE (prefill) cudagraphs.
-        # See: https://github.com/vllm-project/vllm/issues/34094
         if (
             kv_cache_config is not None
             and max_num_reqs is not None
-            and cudagraph_mode.has_full_cudagraphs()
             and not is_profiling
-            and kv_cache_config.has_mamba_layers
-            and max_num_reqs > kv_cache_config.num_blocks
         ):
-            raise ValueError(
-                f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache "
-                f"blocks ({kv_cache_config.num_blocks}). Each decode sequence "
-                "requires one Mamba cache block, so CUDA graph capture cannot "
-                "proceed. Please lower max_num_seqs to at most "
-                f"{kv_cache_config.num_blocks} or increase "
-                "gpu_memory_utilization."
+            validate_mamba_cudagraph_capacity(
+                cudagraph_mode,
+                kv_cache_config,
+                max_num_reqs,
+                kv_cache_config.num_blocks,
+                vllm_config=vllm_config,
             )
 
         self.cudagraph_mode = cudagraph_mode

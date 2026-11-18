@@ -5,12 +5,14 @@ import hashlib
 import importlib
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
+from transformers import OPTConfig
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
@@ -26,6 +28,7 @@ from tests.v1.core.utils import (
 )
 from vllm.config import (
     CacheConfig,
+    CompilationConfig,
     KVTransferConfig,
     ModelConfig,
     ParallelConfig,
@@ -33,6 +36,11 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.config.compilation import (
+    CompilationMode,
+    CUDAGraphMode,
+    validate_mamba_cudagraph_capacity,
+)
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.lora.request import LoRARequest
@@ -44,7 +52,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
@@ -2263,103 +2271,185 @@ def test_null_head_len():
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
 
 
-class _FakeMambaSpec:
-    """Minimal Mamba-shaped spec for capacity-validation tests."""
-
-    def __init__(self, page_size_bytes: int = 1_622_016):
-        self.page_size_bytes = page_size_bytes
-
-
-class _FakeMambaGroup:
-    """Mamba-shaped group matching the KVCacheGroup surface this code uses."""
-
-    def __init__(self, blocks_per_req: int = 3, page_size_bytes: int = 1_622_016):
-        self._blocks = blocks_per_req
-        self._page = page_size_bytes
-        self.kv_cache_specs = {"mamba_layer": _FakeMambaSpec(page_size_bytes)}
-        self.host_resident = False
-
-    def max_allocated_blocks_per_request(self, vllm_config) -> int:
-        return self._blocks
-
-    @property
-    def page_size_bytes(self) -> int:
-        return self._page
+@pytest.fixture
+def mamba_capacity_model_config(tmp_path: Path) -> ModelConfig:
+    OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
+    return ModelConfig(model=str(tmp_path), max_model_len=1024)
 
 
-class _FakeAttentionGroup:
-    def __init__(self):
-        self.kv_cache_specs = {
-            "attn_layer": SimpleNamespace(
-                page_size_bytes=16, max_memory_usage_bytes=lambda cfg: 2656
-            )
-        }
-        self.host_resident = False
-
-    def max_allocated_blocks_per_request(self, vllm_config) -> int:
-        return 166
-
-    @property
-    def page_size_bytes(self) -> int:
-        return 16
-
-
-def _capacity_validation_setup(num_blocks: int, max_num_seqs: int):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
-        model_config=SimpleNamespace(max_model_len=262144),
-        cache_config=SimpleNamespace(resolved_gpu_memory_utilization=0.9),
+def _mamba_capacity_vllm_config(
+    model_config: ModelConfig, gpu_memory_utilization: float = 0.9
+) -> VllmConfig:
+    return VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+            max_num_seqs=256,
+        ),
+        cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
     )
-    kv_cache_config = SimpleNamespace(
-        num_blocks=num_blocks,
-        kv_cache_groups=[_FakeMambaGroup(), _FakeAttentionGroup()],
-    )
-    return vllm_config, kv_cache_config
 
 
-def test_mamba_block_capacity_raises_when_max_num_seqs_exceeds_blocks():
-    vllm_config, kv_cache_config = _capacity_validation_setup(
-        num_blocks=227, max_num_seqs=256
+@pytest.mark.parametrize(
+    ("graph_mode", "gpu_memory_utilization"),
+    [
+        (CUDAGraphMode.FULL, 0.9),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1.0),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, 0.9),
+    ],
+)
+def test_mamba_block_capacity_raises_when_max_num_seqs_exceeds_blocks(
+    mamba_capacity_model_config: ModelConfig,
+    graph_mode: CUDAGraphMode,
+    gpu_memory_utilization: float,
+):
+    vllm_config = _mamba_capacity_vllm_config(
+        mamba_capacity_model_config, gpu_memory_utilization
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=227,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["attention"], new_kv_cache_spec()),
+            new_kv_cache_group(["mamba"], new_mamba_layer(num_speculative_blocks=2)),
+        ],
+    )
+
+    kv_cache_utils.update_kv_cache_capacity(vllm_config, kv_cache_config)
+    compilation_config = CompilationConfig(cudagraph_mode=graph_mode)
     with pytest.raises(
-        ValueError,
-        match=r"max_num_seqs \(256\).*227.*--max-num-seqs 227 or lower, "
-        r"increase --gpu-memory-utilization",
-    ):
-        kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
+        ValueError, match=r"max_num_seqs \(256\).*Mamba cache blocks \(227\)"
+    ) as exc_info:
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            AttentionCGSupport.ALWAYS,
+            "test_backend",
+            kv_cache_config=kv_cache_config,
+            max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+            vllm_config=vllm_config,
+        )
 
-
-def test_mamba_block_capacity_passes_when_blocks_sufficient():
-    vllm_config, kv_cache_config = _capacity_validation_setup(
-        num_blocks=512, max_num_seqs=256
+    msg = str(exc_info.value)
+    assert "3 Mamba block(s) across 1 device group(s)" in msg
+    assert "--max-num-seqs to 227 or lower" in msg
+    assert "reduce --max-model-len" in msg
+    assert ("increase --gpu-memory-utilization" in msg) == (
+        gpu_memory_utilization < 1.0
     )
-    kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
 
 
-def test_mamba_block_capacity_ignores_non_mamba_and_host_groups():
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_seqs=256),
-        model_config=SimpleNamespace(max_model_len=4096),
-        cache_config=SimpleNamespace(resolved_gpu_memory_utilization=1.0),
+def test_mamba_block_capacity_passes_when_blocks_equal_max_num_seqs(
+    mamba_capacity_model_config: ModelConfig,
+):
+    vllm_config = _mamba_capacity_vllm_config(mamba_capacity_model_config)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=256,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["attention"], new_kv_cache_spec()),
+            new_kv_cache_group(["mamba"], new_mamba_layer(num_speculative_blocks=2)),
+        ],
     )
-    host_mamba = _FakeMambaGroup()
-    host_mamba.host_resident = True
-    kv_cache_config = SimpleNamespace(
-        num_blocks=8,
-        kv_cache_groups=[_FakeAttentionGroup(), host_mamba],
+
+    kv_cache_utils.update_kv_cache_capacity(vllm_config, kv_cache_config)
+
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+    resolved = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "test_backend",
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
     )
-    # No device-resident mamba groups -> no validation error despite tiny pool.
-    kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
+
+    assert resolved == CUDAGraphMode.FULL
+    # 64 attention blocks and 3 Mamba state blocks per request.
+    assert vllm_config.cache_config.kv_cache_max_concurrency == pytest.approx(256 / 67)
 
 
-def test_mamba_block_capacity_omits_utilization_hint_at_full_utilization():
-    vllm_config, kv_cache_config = _capacity_validation_setup(
-        num_blocks=227, max_num_seqs=256
+def test_mamba_block_capacity_ignores_non_mamba_and_host_groups(
+    mamba_capacity_model_config: ModelConfig,
+):
+    vllm_config = _mamba_capacity_vllm_config(mamba_capacity_model_config)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["attention"], new_kv_cache_spec()),
+            new_kv_cache_group(["mamba"], new_mamba_layer(), host_resident=True),
+        ],
+        hisparse_host_num_blocks=16,
     )
-    vllm_config.cache_config.resolved_gpu_memory_utilization = 1.0
-    with pytest.raises(
-        ValueError,
-        match=r"max_num_seqs \(256\).*--max-num-seqs 227 or lower, reduce",
-    ) as excinfo:
-        kv_cache_utils._validate_mamba_block_capacity(vllm_config, kv_cache_config)
-    assert "increase --gpu-memory-utilization" not in str(excinfo.value)
+
+    kv_cache_utils.update_kv_cache_capacity(vllm_config, kv_cache_config)
+
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+    resolved = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "test_backend",
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+    )
+
+    assert resolved == CUDAGraphMode.FULL
+    # The 128 device blocks cover two 64-block attention requests.
+    assert vllm_config.cache_config.kv_cache_max_concurrency == 2.0
+
+
+@pytest.mark.parametrize(
+    ("requested_mode", "backend_support", "expected_mode"),
+    [
+        (CUDAGraphMode.NONE, AttentionCGSupport.ALWAYS, CUDAGraphMode.NONE),
+        (CUDAGraphMode.PIECEWISE, AttentionCGSupport.ALWAYS, CUDAGraphMode.PIECEWISE),
+        (
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            AttentionCGSupport.NEVER,
+            CUDAGraphMode.PIECEWISE,
+        ),
+    ],
+    ids=["eager", "piecewise", "downgraded-to-piecewise"],
+)
+def test_mamba_block_capacity_does_not_reject_non_full_modes(
+    mamba_capacity_model_config: ModelConfig,
+    requested_mode: CUDAGraphMode,
+    backend_support: AttentionCGSupport,
+    expected_mode: CUDAGraphMode,
+):
+    vllm_config = _mamba_capacity_vllm_config(mamba_capacity_model_config)
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=requested_mode,
+        use_inductor_graph_partition=True,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=227,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["mamba"], new_mamba_layer())],
+    )
+
+    kv_cache_utils.update_kv_cache_capacity(vllm_config, kv_cache_config)
+    resolved = compilation_config.resolve_cudagraph_mode_and_sizes(
+        backend_support,
+        "test_backend",
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+    )
+
+    assert resolved == expected_mode
+    assert vllm_config.cache_config.kv_cache_max_concurrency == pytest.approx(227 / 3)
+
+
+def test_mamba_block_capacity_uses_measured_blocks_after_warmup():
+    kv_cache_config = KVCacheConfig(
+        num_blocks=256,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["mamba"], new_mamba_layer())],
+    )
+
+    with pytest.raises(ValueError, match=r"Mamba cache blocks \(227\)"):
+        validate_mamba_cudagraph_capacity(
+            CUDAGraphMode.FULL_DECODE_ONLY, kv_cache_config, 256, num_blocks=227
+        )
+    validate_mamba_cudagraph_capacity(
+        CUDAGraphMode.PIECEWISE, kv_cache_config, 256, num_blocks=227
+    )
+    assert kv_cache_config.num_blocks == 256
