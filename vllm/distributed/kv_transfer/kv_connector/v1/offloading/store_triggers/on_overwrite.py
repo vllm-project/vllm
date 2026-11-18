@@ -65,9 +65,17 @@ class OverwriteMap:
     def __init__(self) -> None:
         # block_id -> the group chunks that hold the block
         self.by_block: dict[int, list[GpuChunk]] = {}
+        # req_id -> the chunks of the load in flight of the request
+        self.pending_loads: dict[ReqId, list[GpuChunk]] = {}
+        # A chunk of a load in flight -> its request. The chunk is in by_block,
+        # so a reuse of its blocks before the load completes removes it. This
+        # dict makes that check one lookup per removed chunk, and pending_loads
+        # lets complete_load find the chunks without a scan of by_block.
+        self._loading: dict[GpuChunk, ReqId] = {}
 
-    def add(self, chunks: Iterable[GpuChunk]) -> None:
-        """Remember which chunks sit on each block."""
+    def add(self, chunks: Iterable[GpuChunk]) -> list[GpuChunk]:
+        """Remember which chunks sit on each block, and return the new ones."""
+        added: list[GpuChunk] = []
         for chunk in chunks:
             # A chunk with no non-null block has nothing to store.
             block_ids = [block_id for block_id in chunk.block_ids if block_id]
@@ -78,6 +86,27 @@ class OverwriteMap:
                 continue
             for block_id in block_ids:
                 self.by_block.setdefault(block_id, []).append(chunk)
+            added.append(chunk)
+        return added
+
+    def add_load(self, req_id: ReqId, chunks: Iterable[GpuChunk]) -> None:
+        """Add the chunks of a load, which hold no data until complete_load."""
+        # A second load would drop the marks of the first, and leave its chunks
+        # in the map forever. A request holds one load at a time.
+        assert req_id not in self.pending_loads, req_id
+        added = self.add(chunks)
+        self.pending_loads[req_id] = added
+        self._loading.update(dict.fromkeys(added, req_id))
+
+    def complete_load(self, req_id: ReqId, written: bool) -> None:
+        """Keep the chunks of the load if it wrote them, else remove them."""
+        for chunk in self.pending_loads.pop(req_id, ()):
+            # A chunk whose blocks were reused is already out of the map.
+            if self._loading.get(chunk) != req_id:
+                continue
+            del self._loading[chunk]
+            if not written:
+                self._remove(chunk)
 
     def take_overwritten(
         self, block_keys: dict[int, OffloadKey | None]
@@ -85,26 +114,33 @@ class OverwriteMap:
         """Remove and return the chunks whose blocks get different data.
 
         block_keys maps a block id to the key that its new owner expects, or
-        to None for new data.
+        to None for new data. A chunk of a load in flight is removed but not
+        returned, as the request no longer holds every block of it.
         """
         overwritten: list[GpuChunk] = []
         for block_id, expected_key in block_keys.items():
             for chunk in tuple(self.by_block.get(block_id, ())):
                 if chunk.block_keys[chunk.block_ids.index(block_id)] == expected_key:
                     continue
-                for chunk_block_id in chunk.block_ids:
-                    if not chunk_block_id:
-                        continue
-                    chunks = self.by_block[chunk_block_id]
-                    chunks.remove(chunk)
-                    if not chunks:
-                        del self.by_block[chunk_block_id]
-                overwritten.append(chunk)
+                self._remove(chunk)
+                if self._loading.pop(chunk, None) is None:
+                    overwritten.append(chunk)
         return overwritten
 
     def clear(self) -> None:
         """Forget every chunk."""
         self.by_block.clear()
+        self.pending_loads.clear()
+        self._loading.clear()
+
+    def _remove(self, chunk: GpuChunk) -> None:
+        for block_id in chunk.block_ids:
+            if not block_id:
+                continue
+            chunks = self.by_block[block_id]
+            chunks.remove(chunk)
+            if not chunks:
+                del self.by_block[block_id]
 
 
 class OnOverwriteStoreHandler(StoreTriggerHandler):
@@ -157,8 +193,6 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         self._overwrite_map = OverwriteMap()
         # req_id -> per group, the first chunk not recorded in the map yet.
         self._first_unrecorded_chunk_idxs: dict[ReqId, list[int]] = {}
-        # req_id -> the chunks of the scheduled load, added at its completion.
-        self._pending_loads: dict[ReqId, list[GpuChunk]] = {}
         # block_id -> the key that the new owner expects in the block, or None
         # for new data, for the blocks given out in this step. Rebuilt every
         # step, in on_request_blocks_allocated and on_blocks_allocated.
@@ -216,10 +250,10 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         load_chunk_ranges: Sequence[tuple[int, int]],
         load_block_ids: Sequence[Sequence[int]],
     ) -> None:
-        """Record the chunks a load brings in, to add when the load completes."""
-        # A load skips the computation of its chunks, so they come in the map
-        # when the load completes. A request has one load in flight, and the
-        # job completes before the next load of the request starts.
+        """Record the chunks a load brings in, as pending until it completes."""
+        # A load skips the computation of its chunks, so the load records them.
+        # A request has one load in flight, and the job completes before the
+        # next load of the request starts.
         req = req_status.req
         loaded_chunks: list[GpuChunk] = []
         for config_idx, (start, end) in enumerate(load_chunk_ranges):
@@ -235,7 +269,10 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
                         load_block_ids_of_group,
                     )
                 )
-        self._pending_loads[req.request_id] = loaded_chunks
+        # The blocks of a load are in this step's allocated block keys, and the
+        # chunk survives it: its block keys are the hashes of this request,
+        # which are the keys that on_request_blocks_allocated records for them.
+        self._overwrite_map.add_load(req.request_id, loaded_chunks)
         # A loaded chunk is not computed by this request. The request-level
         # policy stores the whole request anyway, so nothing is skipped there.
         if req_status.offloading_context.policy != OffloadPolicy.CHUNK_LEVEL:
@@ -262,23 +299,23 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
     @override
     def on_load_complete(self, job_status: TransferJobStatus) -> None:
         assert job_status.req_id is not None
-        loaded_chunks = self._pending_loads.pop(job_status.req_id, None)
         # A failed load never wrote the blocks, so they hold no chunk.
-        if loaded_chunks and not job_status.failed:
-            self._overwrite_map.add(loaded_chunks)
+        self._overwrite_map.complete_load(
+            job_status.req_id, written=not job_status.failed
+        )
 
     @override
     def on_request_removed(self, req_id: ReqId) -> None:
         """Forget where the request recorded; its chunks stay in the map."""
         self._first_unrecorded_chunk_idxs.pop(req_id, None)
-        self._pending_loads.pop(req_id, None)
+        self._overwrite_map.complete_load(req_id, written=False)
 
     @override
     def on_request_restarted(self, req_id: ReqId) -> None:
         """Record the request from chunk 0 again, as it recomputes them."""
         # The blocks of a pending load are gone with the preemption.
         self._first_unrecorded_chunk_idxs.pop(req_id, None)
-        self._pending_loads.pop(req_id, None)
+        self._overwrite_map.complete_load(req_id, written=False)
 
     @override
     def reset(self, req_states: Mapping[ReqId, RequestOffloadState]) -> None:
@@ -286,7 +323,6 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         # The tracked blocks belonged to the cache generation that was reset,
         # and no pending load will ever report.
         self._overwrite_map.clear()
-        self._pending_loads.clear()
         self._allocated_block_keys = {}
         self._first_unrecorded_chunk_idxs = {
             req_id: [0] * len(req_status.group_states)

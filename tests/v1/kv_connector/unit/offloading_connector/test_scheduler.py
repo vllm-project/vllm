@@ -74,6 +74,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers impo
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_overwrite import (  # noqa: E501
     GpuChunk,
     OnOverwriteStoreHandler,
+    OverwriteMap,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -4048,6 +4049,47 @@ def test_overwrite_takes_all_chunks_of_a_shared_block(request_runner):
     assert overwrite_handler._overwrite_map.by_block == {}
 
 
+def test_overwrite_map_drops_a_loading_chunk_whose_block_is_reused():
+    """A late load completion must not record a chunk on a reused block."""
+    overwrite_map = OverwriteMap()
+    loading = GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"))
+    overwrite_map.add_load("r", [loading])
+
+    assert overwrite_map.take_overwritten({10: None}) == []
+    overwrite_map.complete_load("r", written=True)
+    assert overwrite_map.by_block == {}
+    assert overwrite_map.pending_loads == {}
+    assert overwrite_map._loading == {}
+
+
+def test_overwrite_map_keeps_the_chunks_of_a_written_load():
+    """A completed load leaves its chunks in the map, to store at overwrite."""
+    overwrite_map = OverwriteMap()
+    chunk = GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"))
+    overwrite_map.add_load("r", [chunk])
+    assert overwrite_map.take_overwritten({10: "b10"}) == []
+
+    overwrite_map.complete_load("r", written=True)
+
+    assert overwrite_map.by_block == {10: [chunk], 11: [chunk]}
+    assert overwrite_map.pending_loads == {}
+    assert overwrite_map._loading == {}
+    assert overwrite_map.take_overwritten({10: None}) == [chunk]
+
+
+def test_overwrite_map_removes_the_chunks_of_a_failed_load():
+    """A failed load wrote nothing, so its chunks must not be stored."""
+    overwrite_map = OverwriteMap()
+    chunk = GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"))
+    overwrite_map.add_load("r", [chunk])
+
+    overwrite_map.complete_load("r", written=False)
+
+    assert overwrite_map.by_block == {}
+    assert overwrite_map.pending_loads == {}
+    assert overwrite_map._loading == {}
+
+
 def test_overwrite_map_skips_a_chunk_with_no_block(request_runner):
     """A chunk with only null blocks has nothing to store."""
     runner = request_runner(
@@ -4233,7 +4275,7 @@ def test_a_failed_load_is_not_offered_at_overwrite(
     runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
     assert loaded_keys
     # The load failed: its chunks did not go in the map, and none is pending.
-    assert _on_overwrite(scheduler)._pending_loads == {}
+    assert _on_overwrite(scheduler)._overwrite_map.pending_loads == {}
 
     del scheduler._maximal_prefix_lookup
     offers.clear()
@@ -4241,6 +4283,50 @@ def test_a_failed_load_is_not_offered_at_overwrite(
     runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
 
     assert not set(loaded_keys) & set(_offered_keys(offers, StoreTrigger.ON_OVERWRITE))
+
+
+def test_a_load_completing_after_its_blocks_were_reused_records_nothing(
+    request_runner,
+):
+    """A late load completion must not record its chunks on reused blocks.
+
+    Recording them would make a later store copy the new owner's data under
+    the loaded key. A request that waits for its load keeps its blocks, so the
+    reuse is injected here rather than driven by the scheduler.
+    """
+    runner, offers, _ = _make_lazy_runner(request_runner, False, num_gpu_blocks=8)
+    scheduler = runner.connector_scheduler
+    overwrite_map = _on_overwrite(scheduler)._overwrite_map
+    loaded_keys: list = []
+    prepare_load = runner.manager.prepare_load
+
+    def record_prepare_load(keys, req_context):
+        loaded_keys.extend(keys)
+        return prepare_load(keys, req_context)
+
+    runner.manager.prepare_load = record_prepare_load
+    scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.new_request(token_ids=list(range(12)))
+    # The load stays in flight, and holds the request in WAITING_FOR_REMOTE_KVS.
+    runner._run(decoded_tokens=[], complete_transfers=False)
+    assert loaded_keys
+    block_ids = list(runner.gpu_blocks)
+    assert block_ids
+
+    # The block pool gives the blocks to a request that writes new data.
+    offers.clear()
+    assert overwrite_map.take_overwritten(dict.fromkeys(block_ids)) == []
+
+    # The load completes after the reuse.
+    runner.offloading_spec.complete_transfers()
+    runner._run(decoded_tokens=[], complete_transfers=False)
+
+    recorded = {
+        chunk.key for chunks in overwrite_map.by_block.values() for chunk in chunks
+    }
+    assert not set(loaded_keys) & recorded
+    assert not set(loaded_keys) & set(_offered_keys(offers, StoreTrigger.ON_OVERWRITE))
+    assert overwrite_map.pending_loads == {}
 
 
 def _offers_per_trigger(
