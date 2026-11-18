@@ -424,11 +424,13 @@ class ShardedRDTWeightTransferEngine(
 
         components = router.components()
         unit_rank = _component_unit_rank(self._metas, self._units, router, components)
+        # Pieces adjacent in one storage (a fused tensor's slices, e.g.
+        # per-expert weights) go next to each other in the bucket and land
+        # with one copy. Storages rank by first use, not address, so every
+        # replica builds the same buckets.
+        storages: dict[int, int] = {}
         for pieces in groups.values():
-            # By destination address, so pieces adjacent in memory (one
-            # fused tensor's slices, e.g. per-expert weights) are adjacent in
-            # the bucket too and land with one copy.
-            pieces.sort(key=_by_destination)
+            pieces.sort(key=lambda piece: _by_destination(piece, storages))
         cap = self._bucket_cap(groups)
         buckets: list[_Bucket] = []
         for (producer, unit), pieces in groups.items():
@@ -743,9 +745,12 @@ def _resolve_producers(init_info: ShardedRDTWeightTransferInitInfo) -> list[Any]
     return actors
 
 
-def _by_destination(piece: _Piece) -> tuple[int, int]:
-    """Sort key: a piece with one contiguous destination of its dtype by that
-    destination's address; every other piece after them, in plan order."""
+def _by_destination(
+    piece: _Piece, storages: dict[int, int]
+) -> tuple[int, int, int]:
+    """Sort key: a piece with one contiguous destination of its dtype by its
+    storage's first-use rank and byte offset; every other piece after them,
+    in plan order."""
     _, _, dtype, dests = piece
     if len(dests) == 1:
         (dest,) = dests
@@ -754,8 +759,11 @@ def _by_destination(piece: _Piece) -> tuple[int, int]:
             and dest.is_contiguous()
             and dest.dtype == dtype
         ):
-            return (0, dest.data_ptr())
-    return (1, 0)
+            rank = storages.setdefault(
+                dest.untyped_storage().data_ptr(), len(storages)
+            )
+            return (0, rank, dest.storage_offset() * dest.element_size())
+    return (1, 0, 0)
 
 
 def _rows(piece: _Piece, cap: int) -> list[_Piece]:
