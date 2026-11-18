@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import PreTrainedConfig
 
@@ -43,7 +42,11 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.logprob import (
+    compute_topk_scores,
+    concat_logprob_stashes,
+    masked_stash_write,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
@@ -617,27 +620,6 @@ class NemotronLabsDiffusionModelState(ModelState):
     num_new_sampled_tokens_per_step: int = 0
 
 
-def _concat_logprobs(
-    parts: list[LogprobsTensors], cu_num_generated_tokens: list[int]
-) -> LogprobsTensors:
-    """Join per-request logprobs of different widths.
-
-    Pad the narrow ones the way compute_topk_scores pads a mixed batch: token
-    id 0 at -inf, which the output processor never reports.
-    """
-    width = max(p.logprob_token_ids.shape[1] for p in parts)
-
-    def pad(t: torch.Tensor, value: float) -> torch.Tensor:
-        return F.pad(t, (0, width - t.shape[1]), value=value)
-
-    return LogprobsTensors(
-        logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
-        logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
-        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
-        cu_num_generated_tokens=cu_num_generated_tokens,
-    )
-
-
 # Penalty stub for the diffusion path: the runner reads
 # penalties_state.output_bin_counts, and post_update treats None as
 # "no penalty bookkeeping".
@@ -657,9 +639,9 @@ class MaskedDiffusionSampler:
         sampler: Any,
         vocab_size: int,
         diffusion_states: NemotronLabsDiffusionRequestStates,
+        max_logprobs: int,
         selection_policy: str = "confidence_threshold",
         confidence_threshold: float = 0.9,
-        max_logprobs: int = 20,
     ):
         self.sampling_states = sampler.sampling_states
         self.req_states = sampler.req_states
@@ -783,31 +765,12 @@ class MaskedDiffusionSampler:
         `logits_3d` is [n, CL, vocab] and `canvas_rows` the converged canvases
         [n, CL]. Rows past a truncated canvas are never emitted.
         """
-        stash = self._topk_stash
-        assert stash is not None
+        assert self._topk_stash is not None
         n, CL, vocab = logits_3d.shape
         new = compute_topk_scores(
             logits_3d.reshape(n * CL, vocab), num_logprobs, canvas_rows.reshape(-1)
         )
-        # Pad to the stash width the way compute_topk_scores pads a mixed
-        # batch: token id 0 at -inf, which the output processor never reports.
-        pad = stash.logprobs.shape[-1] - new.logprobs.shape[-1]
-        keep_3d = keep.view(n, 1, 1)
-        stash.logprob_token_ids[slots] = torch.where(
-            keep_3d,
-            F.pad(new.logprob_token_ids.view(n, CL, -1), (0, pad)),
-            stash.logprob_token_ids[slots],
-        )
-        stash.logprobs[slots] = torch.where(
-            keep_3d,
-            F.pad(new.logprobs.view(n, CL, -1), (0, pad), value=float("-inf")),
-            stash.logprobs[slots],
-        )
-        stash.selected_token_ranks[slots] = torch.where(
-            keep.view(n, 1),
-            new.selected_token_ranks.view(n, CL),
-            stash.selected_token_ranks[slots],
-        )
+        masked_stash_write(self._topk_stash, slots, keep, new)
 
     def _pend_wide_logprobs(
         self,
@@ -951,7 +914,7 @@ class MaskedDiffusionSampler:
                 rows_np[req_idx] = part.logprobs.shape[0]
         if not parts:
             return None
-        return _concat_logprobs(parts, (np.cumsum(rows_np) - rows_np).tolist())
+        return concat_logprob_stashes(parts, (np.cumsum(rows_np) - rows_np).tolist())
 
     def _build_output(
         self,
