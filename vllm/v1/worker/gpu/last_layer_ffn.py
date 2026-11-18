@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Conservative complete-prefill support for last-layer FFN row pruning."""
+"""Prefill support for last-layer FFN row pruning."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +49,7 @@ class LastLayerFFNPruner:
         if (
             not self.enabled
             or dummy
+            or not runner.is_last_pp_rank
             or ubatch is not None
             or torch.version.cuda is None
         ):
@@ -67,10 +68,7 @@ class LastLayerFFNPruner:
             or config.quant_config is not None
             or config.aux_output_config.enabled
             or config.speculative_config is not None
-            or config.lora_config is not None
             or config.kv_transfer_config is not None
-            or parallel.tensor_parallel_size != 1
-            or parallel.pipeline_parallel_size != 1
             or parallel.data_parallel_size != 1
             or parallel.prefill_context_parallel_size != 1
             or parallel.decode_context_parallel_size != 1
@@ -89,8 +87,8 @@ class LastLayerFFNPruner:
             or batch.num_reqs > 16
             or batch.num_tokens <= batch.num_reqs
             or batch.num_draft_tokens != 0
-            or not np.all(batch.num_computed_tokens_np == 0)
-            or not np.all(batch.num_scheduled_tokens == batch.prefill_len_np)
+            or not batch.has_prefill
+            or batch.logits_indices.numel() != batch.num_reqs
         ):
             return None
         prompt = runner.prompt_logprobs_worker
@@ -104,7 +102,7 @@ class LastLayerFFNPruner:
         indices = self.indices[: batch.num_reqs]
         indices.copy_(batch.logits_indices)
         if self.batches == 0:
-            logger.info("Last-layer FFN pruning active on complete prefills")
+            logger.info("Last-layer FFN pruning active on prefills")
         self.batches += 1
         self.skipped_rows += batch.num_tokens - batch.num_reqs
         return indices
