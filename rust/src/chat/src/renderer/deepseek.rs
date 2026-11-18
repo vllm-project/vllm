@@ -11,10 +11,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use serde_json_fmt::JsonFormat;
 
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputConstraint;
 
 use super::MediaPartSource;
 use crate::EffortValue;
@@ -31,6 +32,9 @@ const DSML_TOKEN: &str = "｜DSML｜";
 const USER_SP_TOKEN: &str = "<｜User｜>";
 const SYSTEM_SP_TOKEN: &str = "<｜System｜>";
 const ASSISTANT_SP_TOKEN: &str = "<｜Assistant｜>";
+/// Reference `response_format_template`, without its `{schema}` placeholder.
+const RESPONSE_FORMAT_PREFIX: &str =
+    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n";
 const REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
@@ -108,7 +112,9 @@ pub(super) fn render_request_with_media_order(
     };
     let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
     let request_tools = request.initial_tools();
-    let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
+    let response_schema = response_schema(request);
+    let synthetic_tool_system =
+        needs_synthetic_tool_system(request, request_tools, response_schema.as_ref());
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
@@ -147,7 +153,14 @@ pub(super) fn render_request_with_media_order(
     let mut request_tools_attached = false;
     let mut render_index = 0isize;
     if synthetic_tool_system {
-        render_system_message(&mut out, None, request_tools, dialect, &mut media_order)?;
+        render_system_message(
+            &mut out,
+            None,
+            request_tools,
+            response_schema.as_ref(),
+            dialect,
+            &mut media_order,
+        )?;
         request_tools_attached = true;
         render_index += 1;
     }
@@ -172,16 +185,17 @@ pub(super) fn render_request_with_media_order(
                 if dialect == DsDialect::V41 && current_render_index > 0 {
                     out.push_str(SYSTEM_SP_TOKEN);
                 }
-                let tools = if !request_tools_attached {
+                let (tools, schema) = if !request_tools_attached {
                     request_tools_attached = true;
-                    request_tools
+                    (request_tools, response_schema.as_ref())
                 } else {
-                    &[]
+                    (&[][..], None)
                 };
                 render_system_message(
                     &mut out,
                     Some((message_index, content)),
                     tools,
+                    schema,
                     dialect,
                     &mut media_order,
                 )?;
@@ -337,9 +351,14 @@ fn invalid_v41_reasoning_effort() -> Error {
     )
 }
 
-/// Return whether request tools need a synthetic leading system entry.
-fn needs_synthetic_tool_system(request: &ChatRequest, request_tools: &[ChatTool]) -> bool {
-    !request_tools.is_empty()
+/// Return whether request tools or a response schema need a synthetic leading
+/// system entry.
+fn needs_synthetic_tool_system(
+    request: &ChatRequest,
+    request_tools: &[ChatTool],
+    response_schema: Option<&Value>,
+) -> bool {
+    (!request_tools.is_empty() || response_schema.is_some())
         && !request
             .messages
             .iter()
@@ -605,11 +624,13 @@ fn write_updated_tool_schemas(
     Ok(())
 }
 
-/// Render a system turn, optionally followed by the V4 tool preamble.
+/// Render a system turn, optionally followed by the V4 tool preamble and the
+/// reference response-format block.
 fn render_system_message(
     out: &mut String,
     content: Option<(usize, &ChatContent)>,
     tools: &[ChatTool],
+    response_schema: Option<&Value>,
     dialect: DsDialect,
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
@@ -620,7 +641,27 @@ fn render_system_message(
         out.push_str("\n\n");
         render_tools(out, tools, dialect)?;
     }
+    if let Some(schema) = response_schema {
+        out.push_str("\n\n");
+        out.push_str(RESPONSE_FORMAT_PREFIX);
+        out.push_str(&json_dumps(schema)?);
+    }
     Ok(())
+}
+
+/// The JSON schema a JSON constraint (`response_format` `json_schema` or
+/// `json_object`) puts on the answer, which the reference encoder renders into
+/// the system turn. JSON mode renders `{"type": "object"}`, the schema its
+/// grammar enforces. Other constraints have no reference rendering.
+fn response_schema(request: &ChatRequest) -> Option<Value> {
+    match &request.sampling_params.structured_outputs.as_ref()?.constraint {
+        StructuredOutputConstraint::Json(Value::String(schema)) => {
+            serde_json::from_str(schema).ok()
+        }
+        StructuredOutputConstraint::Json(schema) => Some(schema.clone()),
+        StructuredOutputConstraint::JsonObject => Some(json!({ "type": "object" })),
+        _ => None,
+    }
 }
 
 /// Developer messages are rendered as user-like turns with optional tools.
