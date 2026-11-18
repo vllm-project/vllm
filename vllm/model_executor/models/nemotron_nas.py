@@ -46,7 +46,13 @@ from vllm.model_executor.models.llama import LlamaAttention, LlamaMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import HasNoOps, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    HasNoOps,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -220,7 +226,7 @@ class DeciLMDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DeciModel(nn.Module):
+class DeciModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -283,7 +289,7 @@ class DeciModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -295,13 +301,26 @@ class DeciModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         kv_cache_index = 0
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             if not layer._is_no_op_attention:
                 hidden_states, residual = layer(positions, hidden_states, residual)
                 kv_cache_index += 1
             else:
                 hidden_states, residual = layer(positions, hidden_states, residual)
+            # No-op attention / FFN blocks keep `hidden_states + residual` equal to
+            # the residual stream, so the aux hidden state is well defined there.
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -309,10 +328,13 @@ class DeciModel(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
-class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
+class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3, HasNoOps):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
