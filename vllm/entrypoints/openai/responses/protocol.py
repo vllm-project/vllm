@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -62,6 +62,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     MMPayload,
     PerRequestMetrics,
     StopParam,
@@ -384,8 +386,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -522,6 +524,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -541,7 +544,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     """Parser-derived constraints that preserve the public request's text metadata."""
 
-    _DEFAULT_SAMPLING_PARAMS = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,

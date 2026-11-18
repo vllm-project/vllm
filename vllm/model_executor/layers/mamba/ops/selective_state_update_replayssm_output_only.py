@@ -433,7 +433,7 @@ def _replayssm_output_only_kernel(
                 tl.float32
             )
             if USE_RS_ROUNDING:
-                # Stochastic-round fp32->fp16 (Blackwell cvt.rs), mirroring the
+                # Stochastic-round fp32->fp16 (cvt.rs / v_cvt_sr), mirroring the
                 # baseline. Only the flush step stores state, so this runs at 1/L
                 # the baseline's per-step rate. Absolute per-element offsets seed
                 # the RNG so each state element draws independently.

@@ -562,6 +562,16 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            from vllm.v1.attention.ops.int4_per_token_head import init_rht_signs
+
+            init_rht_signs(
+                head_size,
+                torch.device(
+                    current_platform.device_type,
+                    torch.accelerator.current_device_index(),
+                ),
+            )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel XPU).  The dead branch
@@ -864,6 +874,8 @@ class TritonAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
@@ -888,4 +900,6 @@ class TritonAttentionImpl(AttentionImpl):
             layer._v_scale,
             flash_layout,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )
