@@ -63,6 +63,7 @@ NOT_COMPARED = (
     ".num_unpadded_tokens_tensors",
     "._ckpt_",
     "._direct_reload",
+    "._reloads_directly",
     "._aot_",
     ".compiled",
     ".was_aot_compile_fn_loaded_from_disk",
