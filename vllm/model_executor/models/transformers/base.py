@@ -69,6 +69,7 @@ from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
     get_feature_request_tip,
+    has_bidirectional_attention,
     init_on_device_without_buffers,
     log_replacement,
     maybe_disable_dynamic_rope_update,
@@ -156,12 +157,10 @@ class Base(
         `_create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
-        self._target_class: type[nn.Module] = nn.Module
-        """Target class for Eagle3 aux hidden state recording."""
         self._layer_names: dict[int, str] = {}
         """Mapping from layer index to layer name for Eagle3."""
-        self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
-        """Kwargs to pass to model forward for Eagle3 aux hidden states."""
+        self._aux_hidden_states: list[torch.Tensor] = []
+        """Eagle3 aux hidden states recorded by hooks during the forward pass."""
 
         self._pre_decoder_layer_replace: Callable[[nn.Module, str], None]
         """Called on each decoder layer before `recursive_replace` replaces it."""
@@ -590,9 +589,7 @@ class Base(
             """Build this rank's decoder layers one at a time and offload each as
             soon as it is built, as `make_layers` does."""
             # Record the layers for Eagle3
-            for name, layer in layers.named_children():
-                if not isinstance(layer, PPMissingLayer):
-                    self._target_class = type(layer)
+            for name, _ in layers.named_children():
                 self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
             # MTP weights should not be loaded into the base model
             num_layers = self.text_config.num_hidden_layers
@@ -781,11 +778,12 @@ class Base(
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
         """Return the `Attention` class to use for this model's layers."""
-        # In encoder models, the attention layers will have `is_causal=False`
-        is_encoder = lambda module: not getattr(module, "is_causal", True)
-        has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
+        # Some checkpoints make a decoder bidirectional in the config (gte-Qwen2)
+        is_bidirectional = getattr(self.text_config, "is_causal", True) is False
         # A VLM's text model may be bidirectional over the multimodal prefix
-        if has_encoder(self.model) and not self.model_config.is_multimodal_model:
+        is_prefix_lm = self.model_config.is_multimodal_model
+        has_encoder = has_bidirectional_attention(self.model) and not is_prefix_lm
+        if is_bidirectional or has_encoder:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(
@@ -861,7 +859,6 @@ class Base(
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -882,26 +879,19 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
+        self._aux_hidden_states.clear()
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
             position_ids=positions,
             return_dict=False,
-            **self._output_aux_hidden_states_kwargs,
             **kwargs,
         )
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
-        aux_hidden_states = []
-        if self._output_aux_hidden_states_kwargs:
-            # Layers on other PP ranks capture nothing
-            aux_hidden_states = [x[0][0, ...] for x in outputs[1:] if x]
-        # The input embedding isn't called when the caller passes `inputs_embeds`
-        caller_embeds = inputs_embeds if self.pp_group.is_first_rank else None
-        if 0 in self.aux_hidden_state_layers and caller_embeds is not None:
-            aux_hidden_states.insert(0, caller_embeds[0, ...])
+        aux_hidden_states = [x[0, ...] for x in self._aux_hidden_states]
 
         if not self.pp_group.is_last_rank:
             return IntermediateTensors(
@@ -911,7 +901,7 @@ class Base(
                 }
             )
 
-        if aux_hidden_states := remote_aux + aux_hidden_states:
+        if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
@@ -934,33 +924,26 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        from transformers.utils.output_capturing import (
-            OutputRecorder,
-            maybe_install_capturing_hooks,
-        )
-
-        # The default value in PreTrainedModel is None
-        if self.model._can_record_outputs is None:
-            self.model._can_record_outputs = {}
-
         self._set_aux_hidden_state_layers(layers)
         for layer in self.aux_hidden_state_layers:
-            # The input to a layer is the output of the module before it
+            # The input to a layer is the output of the layer before it
+            module = self.model.get_submodule(self._layer_names[max(layer - 1, 0)])
+            if isinstance(module, PPMissingLayer):
+                continue
             if layer == 0:
-                embeddings = self.model.get_input_embeddings()
-                target_class = type(embeddings)
-                modules = self.model.named_modules()
-                layer_name = next(n for n, m in modules if m is embeddings)
+                module.register_forward_pre_hook(
+                    self._record_layer_input, with_kwargs=True
+                )
             else:
-                target_class = self._target_class
-                layer_name = self._layer_names[layer - 1]
-            layer_key = f"aux_hidden_state_{layer}"
-            aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
-            self.model._can_record_outputs[layer_key] = aux_hidden_state_i
-            self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
+                module.register_forward_hook(self._record_layer_output)
 
-        # Ensure that the capture hooks are installed before dynamo traces the model
-        maybe_install_capturing_hooks(self.model)
+    def _record_layer_input(self, module, args, kwargs) -> None:
+        hidden_states = args[0] if args else kwargs["hidden_states"]
+        self._aux_hidden_states.append(hidden_states)
+
+    def _record_layer_output(self, module, args, output) -> None:
+        hidden_states = output[0] if isinstance(output, tuple) else output
+        self._aux_hidden_states.append(hidden_states)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers

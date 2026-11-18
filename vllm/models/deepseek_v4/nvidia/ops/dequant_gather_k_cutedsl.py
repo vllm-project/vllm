@@ -33,7 +33,7 @@ class DequantGatherKCacheKernel(
     tb_size = num_warps * 32
     num_stages = 4
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
         has_gather_lens: bool

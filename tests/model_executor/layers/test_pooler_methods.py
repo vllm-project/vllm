@@ -317,13 +317,13 @@ class TestGetSeqPoolingMethod:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _FakeSchedulerConfig:
     enable_chunked_prefill: bool = False
     async_scheduling: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class _FakeVllmConfig:
     scheduler_config: _FakeSchedulerConfig
 
