@@ -424,7 +424,8 @@ class SamplingParams(
     bad_words: list[str] | None = None
     """Words that are not allowed to be generated. More precisely, only the
     last token of a corresponding token sequence is not allowed when the next
-    generated token can complete the sequence."""
+    generated token can complete the sequence. Needs a tokenizer: a request
+    with `bad_words` is rejected under `--skip-tokenizer-init`."""
     _bad_words_token_ids: list[list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
