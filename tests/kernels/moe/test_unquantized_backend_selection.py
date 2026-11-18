@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -136,6 +138,11 @@ def test_arm_cpu_unquantized_kernel_selection(
     ],
 )
 @patch(
+    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe."
+    "has_flashinfer_cutedsl_moe_bf16",
+    return_value=False,
+)
+@patch(
     "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe."
     "has_flashinfer_cutlass_fused_moe",
     return_value=False,
@@ -153,6 +160,7 @@ def test_select_default_backend_by_platform(
     mock_aiter_enabled,
     mock_has_flashinfer_trtllm,
     mock_has_flashinfer_cutlass,
+    mock_has_flashinfer_cutedsl,
     monkeypatch,
     platform_method,
     expected_backend,
@@ -712,25 +720,8 @@ def test_quantization_only_backend_falls_back_to_auto(moe_backend):
     ) == select_unquantized_moe_backend(moe_config=make_dummy_moe_config())
 
 
-@pytest.mark.parametrize(
-    ("moe_backend", "has_bias", "expected_backend"),
-    [
-        ("auto", False, UnquantizedMoeBackend.TRITON),
-        ("flashinfer_cutedsl", False, UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
-        ("flashinfer_cutedsl", True, None),
-    ],
-)
-@patch(
-    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe."
-    "has_flashinfer_cutedsl_moe_bf16",
-    return_value=True,
-)
-def test_select_flashinfer_cutedsl_sm90_backend_is_opt_in(
-    mock_has_cutedsl_bf16, moe_backend, has_bias, expected_backend
-):
-    """On Hopper the SM90 CuTe-DSL experts are used only when requested with
-    `--moe-backend flashinfer_cutedsl`, and refuse expert biases."""
-    with (
+def _patch_hopper_cuda_platform(has_cutedsl_moe_bf16: bool = True):
+    return (
         patch.object(current_platform, "is_cuda", return_value=True),
         patch.object(current_platform, "is_rocm", return_value=False),
         patch.object(current_platform, "is_cpu", return_value=False),
@@ -742,13 +733,82 @@ def test_select_flashinfer_cutedsl_sm90_backend_is_opt_in(
             "is_device_capability_family",
             side_effect=lambda family: family == 90,
         ),
-    ):
-        moe_config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe."
+            "has_flashinfer_cutedsl_moe_bf16",
+            return_value=has_cutedsl_moe_bf16,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("moe_backend", "in_dtype", "has_bias", "expected_backend", "error"),
+    [
+        ("auto", torch.bfloat16, False, UnquantizedMoeBackend.FLASHINFER_CUTEDSL, None),
+        ("auto", torch.float16, False, UnquantizedMoeBackend.FLASHINFER_CUTEDSL, None),
+        ("auto", torch.float32, False, UnquantizedMoeBackend.TRITON, None),
+        ("auto", torch.bfloat16, True, UnquantizedMoeBackend.TRITON, None),
+        (
+            "flashinfer_cutedsl",
+            torch.bfloat16,
+            False,
+            UnquantizedMoeBackend.FLASHINFER_CUTEDSL,
+            None,
+        ),
+        ("flashinfer_cutedsl", torch.float32, False, None, "torch.float32"),
+        ("flashinfer_cutedsl", torch.bfloat16, True, None, "expert biases"),
+    ],
+)
+def test_select_flashinfer_cutedsl_sm90_backend(
+    moe_backend, in_dtype, has_bias, expected_backend, error
+):
+    """On Hopper the SM90 CuTe-DSL experts are the default for bf16/fp16
+    without expert biases; otherwise the default falls back to Triton and an
+    explicit `--moe-backend flashinfer_cutedsl` raises."""
+    with contextlib.ExitStack() as stack:
+        for p in _patch_hopper_cuda_platform():
+            stack.enter_context(p)
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128, intermediate_size=128, in_dtype=in_dtype
+        )
         moe_config.moe_backend = moe_backend
         moe_config.has_bias = has_bias
-        if expected_backend is None:
-            with pytest.raises(ValueError, match="expert biases"):
+        if error is not None:
+            with pytest.raises(ValueError, match=error):
                 select_unquantized_moe_backend(moe_config=moe_config)
             return
+        selected_backend, _ = select_unquantized_moe_backend(moe_config=moe_config)
+    assert selected_backend == expected_backend
+
+
+@pytest.mark.parametrize(
+    ("has_cutedsl_moe_bf16", "use_ep", "placement", "expected_backend"),
+    [
+        (True, True, "linear", UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
+        (True, False, "round_robin", UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
+        (True, True, "round_robin", UnquantizedMoeBackend.TRITON),
+        (False, False, "linear", UnquantizedMoeBackend.TRITON),
+    ],
+)
+def test_default_flashinfer_cutedsl_sm90_backend_fallback(
+    has_cutedsl_moe_bf16, use_ep, placement, expected_backend
+):
+    """The Hopper default falls back to Triton when FlashInfer lacks the
+    CuTe-DSL MoE or the expert placement is not linear under EP."""
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(expert_placement_strategy=placement)
+    )
+    with contextlib.ExitStack() as stack:
+        for p in _patch_hopper_cuda_platform(has_cutedsl_moe_bf16):
+            stack.enter_context(p)
+        stack.enter_context(
+            patch(
+                "vllm.model_executor.layers.fused_moe.oracle.unquantized."
+                "get_current_vllm_config_or_none",
+                return_value=vllm_config,
+            )
+        )
+        moe_config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+        moe_config.moe_parallel_config.use_ep = use_ep
         selected_backend, _ = select_unquantized_moe_backend(moe_config=moe_config)
     assert selected_backend == expected_backend

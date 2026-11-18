@@ -80,6 +80,8 @@ class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
         )
         if not supported:
             return False, reason
+        if moe_config.in_dtype not in (torch.bfloat16, torch.float16):
+            return False, f"kernel does not support {moe_config.in_dtype} activations"
         if moe_config.has_bias:
             return False, "kernel does not support expert biases"
         if (

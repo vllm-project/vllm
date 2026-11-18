@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -77,11 +78,23 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
 
-        # On Hopper (SM90), the FlashInfer unquantized MoE kernels are slower
-        # than Triton, so prefer Triton by default.
+        # On Hopper (SM90), prefer the FlashInfer CuTe-DSL kernels. The other
+        # FlashInfer unquantized MoE kernels are slower than Triton there.
         if current_platform.is_device_capability_family(90):
+            _AVAILABLE_BACKENDS.insert(0, UnquantizedMoeBackend.FLASHINFER_CUTEDSL)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+            # The CuTe-DSL kernels take a contiguous local expert shard, i.e.
+            # the linear expert placement.
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                moe_config.moe_parallel_config.use_ep
+                and vllm_config is not None
+                and vllm_config.parallel_config.expert_placement_strategy != "linear"
+            ):
+                _move_to_back(
+                    _AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTEDSL
+                )
 
         # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
         # Updating the oracle querying logic is out of the scope of this
