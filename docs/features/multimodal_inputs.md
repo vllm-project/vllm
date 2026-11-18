@@ -622,7 +622,7 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache. If several skipped items miss the cache, the error names all of them by modality and index.
 
 ??? code
 
