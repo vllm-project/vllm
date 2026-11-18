@@ -35,9 +35,6 @@ _SUPPORTED_SHAPE = (4096, 4096)
 # (N, K): N < 128, K < 128, K % 32 != 0.
 _UNSUPPORTED_SHAPES = [(64, 4096), (4096, 64), (4096, 4112)]
 
-# (N, K) with N % 8 != 0, which the CuTe-DSL kernel cannot store.
-_CUTEDSL_UNALIGNED_N_SHAPES = [(130, 256), (1036, 4096)]
-
 # (N, K) with N < 128 or K < 128, which only Marlin runs.
 _MARLIN_ONLY_SHAPES = [(32, 256), (64, 256), (96, 256), (256, 64)]
 # (N, K): N <= 0, K <= 0, K % 32 != 0.
@@ -45,16 +42,9 @@ _MARLIN_UNSUPPORTED_SHAPES = [(0, 256), (256, 0), (256, 100)]
 
 _SELECTION_CASES = [
     (100, (128, 128), FlashInferCutedslMxfp8LinearKernel),
-    (100, (136, 256), FlashInferCutedslMxfp8LinearKernel),
-    (100, (2072, 4096), FlashInferCutedslMxfp8LinearKernel),
+    (100, (130, 256), FlashInferCutedslMxfp8LinearKernel),
     (103, (128, 128), FlashInferCutedslMxfp8LinearKernel),
-    (103, (136, 256), FlashInferCutedslMxfp8LinearKernel),
-    (103, (2072, 4096), FlashInferCutedslMxfp8LinearKernel),
-    *[
-        (capability, shape, FlashInferCutlassMxfp8LinearKernel)
-        for capability in (100, 103)
-        for shape in _CUTEDSL_UNALIGNED_N_SHAPES
-    ],
+    (103, (130, 256), FlashInferCutedslMxfp8LinearKernel),
     (120, (128, 128), FlashInferCutlassMxfp8LinearKernel),
     (120, (130, 256), MarlinMxfp8LinearKernel),
     (121, (128, 128), FlashInferCutlassMxfp8LinearKernel),
@@ -79,14 +69,6 @@ def test_mm_mxfp8_kernels_accept_supported_shape(kernel_cls):
 def test_mm_mxfp8_kernels_reject_unsupported_shape(kernel_cls, weight_shape):
     config = Mxfp8LinearLayerConfig(weight_shape=weight_shape)
     can_implement, reason = kernel_cls.can_implement(config)
-    assert not can_implement
-    assert reason
-
-
-@pytest.mark.parametrize("weight_shape", _CUTEDSL_UNALIGNED_N_SHAPES)
-def test_cutedsl_mxfp8_rejects_unaligned_n(weight_shape):
-    config = Mxfp8LinearLayerConfig(weight_shape=weight_shape)
-    can_implement, reason = FlashInferCutedslMxfp8LinearKernel.can_implement(config)
     assert not can_implement
     assert reason
 

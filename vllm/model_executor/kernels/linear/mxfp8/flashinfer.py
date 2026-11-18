@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -20,8 +21,11 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
+from vllm.utils.math_utils import round_up
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+
+logger = init_logger(__name__)
 
 
 def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | None]:
@@ -36,6 +40,26 @@ def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | No
     if N < 128:
         return False, f"mm_mxfp8 requires N >= 128, got N={N}."
     return True, None
+
+
+def _pad_n(
+    weight: torch.Tensor, weight_scale: torch.Tensor, multiple: int, kernel: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero-pad N, the rows of `weight` [N, K] and of its unswizzled scale
+    [N, K / 32], to a multiple of `multiple`. The padded rows compute zeros,
+    which the kernel slices off its output."""
+    n = weight.shape[0]
+    padded_n = round_up(n, multiple)
+    if padded_n == n:
+        return weight, weight_scale
+    logger.info_once(
+        "Padding N from %d to %d for the %s MXFP8 linear kernel.", n, padded_n, kernel
+    )
+    padded_weight = weight.new_zeros((padded_n, weight.shape[1]))
+    padded_weight[:n] = weight
+    padded_scale = weight_scale.new_zeros((padded_n, weight_scale.shape[1]))
+    padded_scale[:n] = weight_scale
+    return padded_weight, padded_scale
 
 
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -72,8 +96,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
         return kMxfp8Dynamic
 
-    # The CUTLASS MXFP8 GEMM requires N (output features) to be a multiple of 32,
-    # which a tensor-parallel shard of a layer may not be.
+    # The CUTLASS MXFP8 GEMM requires N (output features) to be a multiple of 32.
     _N_ALIGNMENT = 32
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -82,20 +105,12 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
-
-        # Pad N with zero weight rows and zero scales; apply_weights slices the output
-        # back to the real N.
-        padded_n = -(-N // self._N_ALIGNMENT) * self._N_ALIGNMENT
-        if padded_n != N:
-            padded_weight = weight.new_zeros((padded_n, K))
-            padded_weight[:N] = weight
-            weight = padded_weight
-            padded_scale = weight_scale_2d.new_zeros((padded_n, scale_k))
-            padded_scale[:N] = weight_scale_2d
-            weight_scale_2d = padded_scale
-        layer.mxfp8_cutlass_out_features = N
-
-        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=padded_n, K=K)
+        weight, weight_scale_2d = _pad_n(
+            weight, weight_scale_2d, self._N_ALIGNMENT, "FlashInfer CUTLASS"
+        )
+        weight_scale_swizzled = swizzle_mxfp8_scale(
+            weight_scale_2d, M=weight.shape[0], K=K
+        )
 
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale_swizzled.contiguous())
@@ -106,14 +121,11 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        weight = layer.weight
+        weight = layer.weight  # [N padded to a multiple of 32, K]
         weight_scale = layer.weight_scale
         padded_n, K = weight.shape
-        N = getattr(layer, "mxfp8_cutlass_out_features", None)
-        if N is None:
-            # Pre-processed (cached) weights skip process_weights_after_loading, so the
-            # real output size comes from the layer instead.
-            N = getattr(layer, "output_size_per_partition", padded_n)
+        # Modules that are not linear layers (e.g. in tests) use the weight's N.
+        N = getattr(layer, "output_size_per_partition", padded_n)
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -165,31 +177,17 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "requires FlashInfer CuTe-DSL module"
         return True, None
 
-    # The CuTe-DSL MXFP8 GEMM stores its bf16/fp16 output with TMA, which needs
-    # 16-byte aligned rows, so N must be a multiple of 8, which a tensor-parallel
-    # shard of a layer may not be. Such layers fall back to
-    # FlashInferCutlassMxfp8LinearKernel, which pads N.
-    _N_ALIGNMENT = 8
-
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
-        if not can_implement:
-            return False, reason
-        N, _ = c.weight_shape
-        if N % cls._N_ALIGNMENT != 0:
-            return (
-                False,
-                (
-                    "mm_mxfp8 cute-dsl requires N to be divisible by "
-                    f"{cls._N_ALIGNMENT}, got N={N}."
-                ),
-            )
-        return True, None
+        return _check_mm_mxfp8_shape(c.weight_shape)
 
     def input_quant_key(self) -> QuantKey:
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
         return kMxfp8Dynamic
+
+    # The CuTe-DSL MXFP8 GEMM stores its bf16/fp16 output with TMA, which needs
+    # 16-byte aligned rows, so N must be a multiple of 8.
+    _N_ALIGNMENT = 8
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
@@ -197,7 +195,12 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
-        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
+        weight, weight_scale_2d = _pad_n(
+            weight, weight_scale_2d, self._N_ALIGNMENT, "FlashInfer CuTe-DSL"
+        )
+        weight_scale_swizzled = swizzle_mxfp8_scale(
+            weight_scale_2d, M=weight.shape[0], K=K
+        )
 
         # Store weight column-major [K, N] as mm_mxfp8 expects for operand B.
         replace_parameter(layer, "weight", weight.contiguous().t())
@@ -209,9 +212,11 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        weight = layer.weight  # [K, N], column-major
+        weight = layer.weight  # [K, N padded to a multiple of 8], column-major
         weight_scale = layer.weight_scale
-        K, N = weight.shape
+        K, padded_n = weight.shape
+        # Modules that are not linear layers (e.g. in tests) use the weight's N.
+        N = getattr(layer, "output_size_per_partition", padded_n)
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -232,12 +237,14 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             out_dtype=out_dtype,
             backend="cute-dsl",
         )
+        if padded_n != N:
+            output = output[:, :N]
 
         if bias is not None:
             output = output + bias
 
         output_shape = (*input_shape[:-1], N)
-        return output.view(output_shape)
+        return output.reshape(output_shape)
 
 
 class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -275,22 +282,13 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
 
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
-        padded_n = ((N + 127) // 128) * 128
-        if padded_n != N:
-            padded_weight = weight.new_zeros((padded_n, K))
-            padded_weight[:N] = weight
-            weight = padded_weight
-
-            padded_scale = weight_scale.new_zeros((padded_n, scale_k))
-            padded_scale[:N] = weight_scale
-            weight_scale = padded_scale
-        else:
-            weight = weight.contiguous()
+        weight, weight_scale = _pad_n(weight, weight_scale, 128, "FlashInfer TRT-LLM")
+        padded_n = weight.shape[0]
 
         replace_parameter(
             layer,
             "weight",
-            shuffle_matrix_a(weight, 128).reshape(padded_n, K),
+            shuffle_matrix_a(weight.contiguous(), 128).reshape(padded_n, K),
         )
         replace_parameter(
             layer,
