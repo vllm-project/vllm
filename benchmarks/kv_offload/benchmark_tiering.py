@@ -49,7 +49,7 @@ from urllib.request import urlopen
 Parts of the benchmark are built for the gpt-oss-120b model. 
  1. gpt-oss-120b has 2 attention groups FA and SWA.
  2. These attention groups have the same gpu block size (2.3M on H100).
-This fact is exploited in `per_group_per_group_block_bytes_from_engine` and 
+This fact is exploited in `per_group_block_bytes_from_engine` and 
 `Scenario::max_per_request_block_size` functions that used,
  - to determine the maximum KV cache memory that a benchmark
    run would require and subsequently,
@@ -68,7 +68,7 @@ BLOCK_SIZE = 64
 # size. This lets us use a single PER_GROUP_BLOCK_BYTES value for both
 # groups in the benchmark.
 # If unset via an environment variable, this is computed once at the
-# start of the function via `per_group_per_group_block_bytes_from_engine`.
+# start of the function via `per_group_block_bytes_from_engine`.
 # Note:
 # - This value is 2.3M on H100.
 # - With FS offloading, this value should match the offloaded file size.
@@ -99,7 +99,7 @@ def gib(n: float) -> int:
     return int(n * 1024**3)
 
 
-def per_group_per_group_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
+def per_group_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
     """Per Attention group block-size in bytes for the gptoss120b model.
 
     Create a dummy engine and infer block-sizes from that engine.
@@ -127,10 +127,10 @@ def per_group_per_group_block_bytes_from_engine(block_size: int = BLOCK_SIZE) ->
         worker = llm.llm_engine.engine_core.engine_core.model_executor.driver_worker
         runner = worker.model_runner
         cfg = runner.kv_cache_config
+        from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
         from vllm.v1.kv_cache_interface import (
-            FullAttentionSpec,
             KVCacheConfig,
-            SlidingWindowSpec,
+            KVCacheSpecKind,
         )
 
         assert isinstance(cfg, KVCacheConfig)
@@ -138,13 +138,14 @@ def per_group_per_group_block_bytes_from_engine(block_size: int = BLOCK_SIZE) ->
 
         group_per_group_block_bytes = []
         for group in cfg.kv_cache_groups:
-            spec = group.kv_cache_spec
-            assert isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)), (
-                f"Unexpected spec type: {type(spec)}"
+            spec_kind = get_kv_cache_kind(
+                group.manager_config, group.kv_cache_specs.values()
             )
-            group_per_group_block_bytes.append(
-                group.kv_cache_spec.page_size_bytes * len(group.layer_names)
-            )
+            assert spec_kind in {
+                KVCacheSpecKind.FULL_ATTENTION,
+                KVCacheSpecKind.SLIDING_WINDOW,
+            }, f"Unexpected spec kind: {spec_kind}"
+            group_per_group_block_bytes.append(group.page_size_bytes)
         assert len(set(group_per_group_block_bytes)) == 1, (
             f"attention groups disagree on block size: {group_per_group_block_bytes}"
         )
@@ -857,7 +858,7 @@ def _resolve_per_group_block_bytes() -> float:
     if PER_GROUP_BLOCK_BYTES is not None:
         return float(PER_GROUP_BLOCK_BYTES)
     print("PER_GROUP_BLOCK_BYTES not set; calibrating with a dummy engine...")
-    return per_group_per_group_block_bytes_from_engine()
+    return per_group_block_bytes_from_engine()
 
 
 def _main() -> None:
