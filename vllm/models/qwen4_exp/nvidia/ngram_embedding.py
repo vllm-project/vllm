@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
-from vllm.models.deepseek_v41.common.engram import engram_dp_peer_group
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
@@ -30,12 +29,12 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
-    Qwen4ExpPLEPeerEmbedding,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLESharedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from ..common.ops.ple import ple_ngram_ids
+from .ple_peer import Qwen4ExpPLEPeerEmbedding, get_ple_peer_group
 
 logger = init_logger(__name__)
 
@@ -436,9 +435,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
         peer_group = (
-            engram_dp_peer_group(engram_config.cpu_offload)
-            if engram_config is not None and not engram_config.disk_offload
-            else None
+            get_ple_peer_group(engram_config) if engram_config is not None else None
         )
         embedding_cls = (
             Qwen4ExpPLEDiskOffloadEmbedding

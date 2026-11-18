@@ -28,7 +28,6 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import timedelta
 from functools import cache
-from typing import Any
 
 import numpy as np
 import torch
@@ -523,17 +522,6 @@ _SORTED_IS_CONSTEXPR = tl.constexpr(
 )
 
 
-@triton.jit
-def engram_peer_row(slices, row, PEER_ROWS: tl.constexpr, mask):
-    """Address of the peer slice holding `row`, and `row`'s index in it.
-
-    A peer table splits its rows over the group in rank order, `PEER_ROWS` per
-    slice; `slices` holds the address of every slice.
-    """
-    owner = row // PEER_ROWS
-    return tl.load(slices + owner, mask=mask, other=0), row - owner * PEER_ROWS
-
-
 @triton.jit(
     do_not_specialize=[
         "vocab_start",
@@ -606,7 +594,9 @@ def _engram_lookup_kernel(
         ROW_BYTES: tl.constexpr = DIM // 2 if PACKED_FP4 else DIM
         if PEER_ROWS:
             # `weight` holds each rank's buffer: PEER_ROWS rows, then scales.
-            peer, local = engram_peer_row(weight, local, PEER_ROWS, owned)
+            owner = local // PEER_ROWS
+            peer = tl.load(weight + owner, mask=owned, other=0)
+            local -= owner * PEER_ROWS
             if PACKED_FP4 or SOFTWARE_FP8:
                 row_weight = peer.to(tl.pointer_type(tl.uint8))
             else:
@@ -1044,50 +1034,6 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     return tensor
 
 
-def engram_dp_peer_group(cpu_offload: bool) -> GroupCoordinator | None:
-    """The Engram DP group if it can split a GPU table's rows, each rank reading
-    the others' from their HBM: TP=1 and NVLink between its GPUs."""
-    group = get_engram_dp_group()
-    if cpu_offload or group is None or get_tensor_model_parallel_world_size() > 1:
-        return None
-    # Cross-node groups require embedding_across_dp's single NVLink domain;
-    # node-local groups without NVLink P2P keep their fallback.
-    if all(in_the_same_node_as(group.cpu_group, source_rank=0)):
-        physical_id = current_platform.visible_device_id_to_physical_device_id(
-            torch.accelerator.current_device_index()
-        )
-        physical_ids = [None] * group.world_size
-        torch.distributed.all_gather_object(
-            physical_ids, physical_id, group=group.cpu_group
-        )
-        if not current_platform.is_fully_connected(physical_ids):
-            return None
-    return group
-
-
-def engram_peer_rows(
-    num_rows: int, group: EngramPeerGroup | GroupCoordinator
-) -> tuple[int, int, int]:
-    """Rows per slice of a peer table, and this GPU's first row and row count."""
-    peer_rows = triton.cdiv(num_rows, group.world_size)
-    start = min(group.rank_in_group * peer_rows, num_rows)
-    return peer_rows, start, min(peer_rows, num_rows - start)
-
-
-def share_dp_peer_slice(
-    num_bytes: int, group: GroupCoordinator
-) -> tuple[torch.Tensor, Any]:
-    """Allocate this rank's slice of a peer table in symmetric memory.
-
-    The returned handle's `buffer_ptrs` address every rank's slice.
-    """
-    import torch.distributed._symmetric_memory as symm_mem
-
-    device = torch.device("cuda", torch.accelerator.current_device_index())
-    buffer = symm_mem.empty(num_bytes, dtype=torch.uint8, device=device)
-    return buffer, symm_mem.rendezvous(buffer, group.device_group)
-
-
 class ParallelEngramEmbedding(nn.Module):
     """Hash heads with FP8 or packed MXFP4 rows and per-block E8M0 scales.
 
@@ -1143,9 +1089,27 @@ class ParallelEngramEmbedding(nn.Module):
         self._peer_group: EngramPeerGroup | GroupCoordinator | None = peer_group
         if peer_group is not None:
             self.dp_size = 1
-        elif (group := engram_dp_peer_group(cpu_offload)) is not None:
-            # Without NVLink P2P, the DP group keeps the DP collectives.
-            self._peer_group, self.dp_size = group, 1
+        elif (
+            not cpu_offload
+            and self.dp_size > 1
+            and get_tensor_model_parallel_world_size() == 1
+        ):
+            group = get_engram_dp_group()
+            assert group is not None
+            # Cross-node groups require embedding_across_dp's single NVLink domain;
+            # node-local groups without NVLink P2P keep the DP collectives.
+            peer = not all(in_the_same_node_as(group.cpu_group, source_rank=0))
+            if not peer:
+                physical_id = current_platform.visible_device_id_to_physical_device_id(
+                    torch.accelerator.current_device_index()
+                )
+                physical_ids = [None] * group.world_size
+                torch.distributed.all_gather_object(
+                    physical_ids, physical_id, group=group.cpu_group
+                )
+                peer = current_platform.is_fully_connected(physical_ids)
+            if peer:
+                self._peer_group, self.dp_size = group, 1
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -1169,9 +1133,11 @@ class ParallelEngramEmbedding(nn.Module):
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         # Peer tables keep the full lookup range but store one row slice.
         self.peer_rows, row_start = 0, self.vocab_start_idx
-        if self._peer_group is not None:
-            self.peer_rows, row_start, self.part_num_embeddings = engram_peer_rows(
-                self.vocab_end_idx, self._peer_group
+        if (peers := self._peer_group) is not None:
+            self.peer_rows = triton.cdiv(self.vocab_end_idx, peers.world_size)
+            row_start = min(peers.rank_in_group * self.peer_rows, self.vocab_end_idx)
+            self.part_num_embeddings = min(
+                self.peer_rows, self.vocab_end_idx - row_start
             )
         self._num_sms = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
@@ -1244,8 +1210,11 @@ class ParallelEngramEmbedding(nn.Module):
                 buffer, self._peer_mappings = share_peer_table(num_bytes, peers)
                 pointers = self._peer_mappings.addresses
             else:
+                import torch.distributed._symmetric_memory as symm_mem
+
                 assert peers is not None
-                buffer, self._symm_handle = share_dp_peer_slice(num_bytes, peers)
+                buffer = symm_mem.empty(num_bytes, dtype=torch.uint8, device=device)
+                self._symm_handle = symm_mem.rendezvous(buffer, peers.device_group)
                 pointers = self._symm_handle.buffer_ptrs
             self.register_buffer(
                 "peer_ptrs",

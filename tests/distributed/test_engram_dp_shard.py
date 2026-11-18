@@ -58,6 +58,7 @@ from vllm.models.deepseek_v41.common.engram import (
     gather_engram_hashes,
 )
 from vllm.models.qwen4_exp.common import ngram_embedding as ple_ops
+from vllm.models.qwen4_exp.nvidia.ple_peer import Qwen4ExpPLEPeerEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -365,7 +366,7 @@ def _check_ple_peer_table(group):
     for method, checkpoint in formats.items():
         tables = []
         for cls, extra in (
-            (ple_ops.Qwen4ExpPLEPeerEmbedding, {"peer_group": group}),
+            (Qwen4ExpPLEPeerEmbedding, {"peer_group": group}),
             (ple_ops.Qwen4ExpPLEDeviceEmbedding, {}),
         ):
             with torch.device("cuda"):
@@ -391,6 +392,10 @@ def _check_ple_peer_table(group):
             tables.append(table)
         peer, whole = tables
         assert peer.weight.shape[0] == (13 if group.rank_in_group < 3 else 11)
+        # A reload loads whole tables into fresh tensors before copying them in.
+        fresh = torch.empty_like(peer.weight)
+        peer.weight_loader(fresh, checkpoint["weight"])
+        assert torch.equal(fresh.view(torch.uint8), peer.weight.view(torch.uint8))
         torch.testing.assert_close(
             peer(ids).view(torch.uint8), whole(ids).view(torch.uint8), atol=0, rtol=0
         )
