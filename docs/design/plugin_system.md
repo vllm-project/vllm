@@ -182,6 +182,8 @@ This interface changes size selection only. A platform must still supply a compa
 
 ROCm gfx10xx previously matched the shared capability-10 check intended for NVIDIA SM100. Its defaults now use the traditional shared grid (initial ceiling 512 tokens), instead of independent grids (prefill up to 8192 tokens, decode up to `max_num_seqs` requests, and an 8192-token decode budget). To retain that wider coverage explicitly, set `max_prefill_cudagraph_capture_tokens=8192`, `max_decode_cudagraph_capture_requests` to your `max_num_seqs`, and `max_decode_cudagraph_capture_tokens=8192`. These are the former values, not tuned recommendations for gfx10xx. Scheduler limits still apply.
 
+If you already set explicit prefill/decode grids, an unset `max_decode_cudagraph_capture_tokens` no longer supplies the former 8192-token budget on gfx10xx; set it to `8192` to preserve that bound.
+
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
