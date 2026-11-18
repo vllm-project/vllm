@@ -148,6 +148,20 @@ def test_parse_delta_tool_call(parser_cls, tok):
     assert json.loads(args) == {"path": "/etc/hostname"}
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A max_tokens cap that ends one token into the next markup must not
+        # swallow the held-back tail (non-streaming returns it as content).
+        "<",
+        "Probably",
+    ],
+)
+def test_parse_delta_user_body_cut_at_token_cap(parser_cls, tok, body):
+    reasoning, content, tools = _drive(parser_cls, tok, f" to=user<|message|>{body}")
+    assert (reasoning, content, tools) == ("", body, [])
+
+
 def test_parse_delta_truncated_cot_no_toolcall(parser_cls, tok):
     # Contemplated invoke inside an unterminated to=self block: no tool call,
     # no framing leak into content, partial reasoning recovered.

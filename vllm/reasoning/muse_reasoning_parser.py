@@ -283,7 +283,9 @@ class MuseReasoningParser(ReasoningParser):
         content_parts: list[str] = []
         if not cls._glimmer_compat:
             for recipient, body, closed, _ in _muse_messages(text):
-                if not closed:
+                # At `final` an open body can no longer grow into framing, so
+                # its held-back tail is body text (as in extract_reasoning).
+                if not closed and not final:
                     body = _trim_open_body(body)
                 if recipient in (None, "self"):
                     reasoning_parts.append(body)
