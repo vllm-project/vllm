@@ -75,6 +75,7 @@ def create_mock_model_params(
     for i in range(num_layers):
         params.append((f"layer{i}.weight", _randn(10, 20, dtype=dtype)))
         params.append((f"layer{i}.bias", _randn(10, dtype=dtype)))
+    params.append(("strided", _randn(20, 10, dtype=dtype).T))
     return params
 
 
@@ -196,7 +197,7 @@ class TestPackedBroadcastRoundtrip:
         "dtype", [torch.float32, torch.float16, torch.bfloat16, *QUANT_DTYPES]
     )
     def test_roundtrip_different_dtypes(self, dtype):
-        """Test roundtrip with different data types."""
+        """Test roundtrip with different data types, also strided."""
         params = create_mock_model_params(num_layers=2, dtype=dtype)
         roundtrip([(n, t.cuda()) for n, t in params], buffer_size_bytes=1000)
 
@@ -424,7 +425,7 @@ class TestPackedIpcProducer:
 
     def test_producer_ipc_handle_has_uuid(self):
         """The first chunk carries the handle, keyed by the given UUID; the
-        rest carry none."""
+        rest carry none. Only the last chunk is marked last."""
         params = [("w", torch.randn(10, dtype=torch.float32).cuda())]
 
         chunks = list(
@@ -439,6 +440,7 @@ class TestPackedIpcProducer:
         assert len(chunks) == 3
         assert list(chunks[0].ipc_handle) == ["my-gpu-uuid"]
         assert [c.ipc_handle for c in chunks[1:]] == [None, None]
+        assert [c.last for c in chunks] == [False, False, True]
 
     def test_producer_dtype_names_are_strings(self):
         """Test that dtype_names are string representations."""
@@ -458,17 +460,21 @@ class TestPackedIpcProducer:
 
         assert chunks[0].dtype_names == ["float32", "float16"]
 
-    def test_producer_empty_iterator(self):
-        """Test producer with empty iterator yields nothing."""
+    @pytest.mark.parametrize("names", [[], ["e"]])
+    def test_producer_without_bytes_exports_nothing(self, names):
+        """No tensors yield nothing; only empty ones, one chunk without a
+        handle."""
         chunks = list(
             packed_ipc_producer(
-                iterator=iter([]),
+                iterator=iter([(n, torch.empty(0, 3).cuda()) for n in names]),
                 gpu_uuid="uuid",
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=1000,
             )
         )
-        assert len(chunks) == 0
+        assert [(c.names, c.ipc_handle, c.last) for c in chunks] == [
+            (names, None, True)
+        ][: len(names)]
 
 
 # --- Integration Tests: IPC Producer-Consumer Roundtrip ---
@@ -495,6 +501,7 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
                 names=cd["names"],
                 shapes=cd["shapes"],
                 dtype_names=cd["dtype_names"],
+                last=cd["last"],
             )
             for name, tensor in result:
                 # independent storage: the producer reuses its IPC buffer
@@ -554,6 +561,7 @@ class TestPackedIpcRoundtrip:
                         "names": chunk.names,
                         "shapes": chunk.shapes,
                         "dtype_names": chunk.dtype_names,
+                        "last": chunk.last,
                     }
                 )
                 if ack_q.get(timeout=timeout) != "ack":
@@ -606,7 +614,7 @@ class TestPackedIpcRoundtrip:
         "dtype", [torch.float32, torch.float16, torch.bfloat16, *QUANT_DTYPES]
     )
     def test_roundtrip_dtypes(self, dtype):
-        """Test IPC roundtrip with different dtypes."""
+        """Test IPC roundtrip with different dtypes, also strided."""
         params = create_mock_model_params(num_layers=2, dtype=dtype)
         params_cuda = [(n, t.cuda()) for n, t in params]
         gpu_uuid = self._get_gpu_uuid()
@@ -736,6 +744,7 @@ class TestPackedIpcRoundtrip:
                 names=c.names,
                 shapes=c.shapes,
                 dtype_names=c.dtype_names,
+                last=c.last,
             )
 
 
@@ -837,16 +846,23 @@ class TestChunkedRoundtrip:
         group = roundtrip(params, buffer_size_bytes=512)
         assert max(t.numel() for t in group.broadcasted_tensors) <= 512
 
-    def test_roundtrip_ending_with_a_chunk_of_no_bytes(self):
-        """A chunk of only empty tensors is not broadcast; they still
-        arrive."""
+    @pytest.mark.parametrize(
+        "first, buffer_size_bytes, sent",
+        [
+            (torch.randn(8), 16, [16, 16]),  # two full chunks, then none
+            (torch.arange(10, dtype=torch.uint8), 64, [10]),  # no padding
+        ],
+    )
+    def test_roundtrip_ending_with_empty_tensors(self, first, buffer_size_bytes, sent):
+        """Trailing empty tensors add no padding, and a chunk of only empty
+        tensors is not broadcast; they still arrive."""
         params = [
-            ("full", torch.randn(8, device="cuda")),  # 32 B: two full chunks
+            ("first", first.cuda()),
             ("empty", torch.empty(0, 4, device="cuda")),
             ("none", torch.empty(0, device="cuda", dtype=torch.int8)),
         ]
-        group = roundtrip(params, buffer_size_bytes=16)
-        assert [t.numel() for t in group.broadcasted_tensors] == [16, 16]
+        group = roundtrip(params, buffer_size_bytes=buffer_size_bytes)
+        assert [t.numel() for t in group.broadcasted_tensors] == sent
 
     def test_unpack_waits_for_each_receive(self):
         """Each chunk is unpacked only after its (slow) receive ends."""

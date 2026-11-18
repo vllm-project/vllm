@@ -43,6 +43,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
+    WeightUpdateAborted,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -1809,20 +1810,21 @@ def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
     return engine, model
 
 
-def _packed_ipc_chunk(handle: dict, names: list[str], n: int):
+def _packed_ipc_chunk(handle: dict, names: list[str], n: int, last: bool = False):
     return IPCWeightTransferUpdateInfo(
         names=names,
         dtype_names=["float32"] * len(names),
         shapes=[[n]] * len(names),
         ipc_handles=handle,
+        last=last,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
     """Only the first chunk of a transfer carries the handle, also for a second
-    transfer in one update; finishing inside a split tensor raises, also when
-    retried."""
+    transfer in one update; finishing before the last chunk aborts the update,
+    also at a chunk boundary, and a new full update works."""
     bufs = [
         torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
         for k in (0, 4)
@@ -1830,7 +1832,7 @@ def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
     engine, model = _packed_ipc_engine(monkeypatch, bufs)
     uuid = str(torch.cuda.get_device_properties(0).uuid)
     starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
-    rest = _packed_ipc_chunk({}, [], 8)  # each transfer has 2 chunks
+    rest = _packed_ipc_chunk({}, [], 8, last=True)  # each transfer has 2 chunks
 
     with pytest.raises(RuntimeError, match="outside"):
         engine.receive_weights(starts[0])  # before start_weight_update
@@ -1846,11 +1848,23 @@ def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
 
     engine.start_weight_update()
     engine.receive_weights(starts[0])
-    with pytest.raises(RuntimeError, match="inside a split tensor"):
+    with pytest.raises(RuntimeError, match="before the previous one ended"):
         engine.receive_weights(starts[1])
-    for _ in range(2):
-        with pytest.raises(RuntimeError, match="inside a split tensor"):
-            engine.finish_weight_update()
+    with pytest.raises(WeightUpdateAborted, match="before its last chunk"):
+        engine.finish_weight_update()
+
+    engine.start_weight_update()  # a chunk ends with "a", a second one is lost
+    engine.receive_weights(_packed_ipc_chunk({uuid: (0, *range(7))}, ["a"], 4))
+    with pytest.raises(WeightUpdateAborted, match="before its last chunk"):
+        engine.finish_weight_update()
+
+    model.load_weights.reset_mock()
+    engine.start_weight_update()
+    engine.receive_weights(starts[1])
+    engine.receive_weights(rest)
+    engine.finish_weight_update()
+    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
+    assert loaded == [[4, 5, 6, 7] * 2]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

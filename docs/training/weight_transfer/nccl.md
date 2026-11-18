@@ -103,9 +103,11 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 `update_weights` fields.
 
 !!! note "Memory"
-    The rotating buffers are sized to the chunks they hold: up to
-    `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
-    defaults) for a transfer that size or larger. Lower
+    On the trainer, each rotating buffer starts at the size of the first bytes
+    packed into it and grows once, straight to `packed_buffer_size_bytes`, when
+    a chunk needs more; the workers size each receive buffer to its chunk. That
+    is up to `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB
+    at the defaults). Lower
     `packed_buffer_size_bytes` if that is too much headroom. A non-contiguous
     tensor split across chunks also needs a contiguous copy of its full size
     on the trainer while it is sent.
@@ -231,9 +233,9 @@ from several trainer ranks.
 - Packed: lay the tensors' `t.contiguous().view(-1).view(torch.uint8)` bytes
   out in `names` order as one stream, each tensor starting at a multiple of 16,
   and cut it every `packed_buffer_size_bytes` (rounded down to 16); a tensor
-  crossing a cut is split there. Broadcast each chunk as soon as it is full (or
-  only alignment padding would fit), without that trailing padding, then the
-  rest; a chunk of no bytes is not sent.
+  crossing a cut is split there; an empty tensor adds no padding. Broadcast
+  each chunk as soon as it is full (or only alignment padding would fit),
+  ending at its last byte, then the rest; a chunk of no bytes is not sent.
 
 Trainer-side communicators without vLLM:
 

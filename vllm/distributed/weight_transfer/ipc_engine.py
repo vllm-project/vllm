@@ -20,6 +20,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
+    WeightUpdateAborted,
 )
 
 if TYPE_CHECKING:
@@ -62,10 +63,12 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple] | None = None
     """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args.
     For non-packed mode: list of per-parameter handle dicts.
-    For packed mode: the packed buffer's handle dict, empty after the first
-    chunk."""
+    For packed mode: the packed buffer's handle dict in the first chunk of a
+    transfer with bytes, else empty."""
     ipc_handles_pickled: str | None = None
     """Base64-encoded pickled IPC handles, used for HTTP transport."""
+    last: bool = False
+    """Packed mode: whether this chunk ends the transfer."""
 
     def __post_init__(self):
         if self.ipc_handles_pickled is not None:
@@ -168,10 +171,13 @@ class IPCWeightTransferEngine(
         """Finish reloading after all weights have been received."""
         from vllm.model_executor.model_loader.reload import finish_reload
 
-        if self._packed_consumer is not None:
-            # raises if the transfer was cut short, again on a retry
-            self._packed_consumer.close()
-            self._packed_consumer = None
+        consumer, self._packed_consumer = self._packed_consumer, None
+        if consumer is not None:
+            try:
+                consumer.close()
+            except RuntimeError as e:
+                # nothing is finished: a new full update repairs the model
+                raise WeightUpdateAborted(str(e)) from e
         finish_reload(self.model, self.model_config, self.device)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
@@ -199,6 +205,7 @@ class IPCWeightTransferEngine(
                 names=update_info.names,
                 shapes=update_info.shapes,
                 dtype_names=update_info.dtype_names,
+                last=update_info.last,
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
@@ -403,6 +410,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
                 dtype_names=chunk.dtype_names,
                 shapes=chunk.shapes,
                 ipc_handles=handle,
+                last=chunk.last,
             )
             self._barrier()
 
@@ -412,6 +420,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         dtype_names: list[str],
         shapes: list[list[int]],
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
+        last: bool = False,
     ) -> None:
         """Build one update payload and ship it via the client. Only the sender
         ships (non-sender ranks already contributed to the handle all-gather).
@@ -426,5 +435,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             dtype_names=dtype_names,
             shapes=shapes,
             ipc_handles=ipc_handles,
+            last=last,
         )
         self.client.update_weights(asdict(update_info))

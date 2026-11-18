@@ -126,6 +126,7 @@ the first `/update_weights` returns 500. Reference:
 | ----- | ------- |
 | `names`, `dtype_names`, `shapes` | Checkpoint names, `torch` dtype attribute names (`"bfloat16"`), full shapes. Packed: only the tensors whose first bytes are in this chunk |
 | `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer in the first chunk, `{}` in the rest |
+| `last` | Packed: `true` on the chunk that ends the transfer, else `false` (the default) |
 
 - A handle dict is `{gpu_uuid: reduce_tensor(t)[1]}` with one entry per GPU the
   server uses (`torch.multiprocessing.reductions.reduce_tensor`).
@@ -140,7 +141,9 @@ the first `/update_weights` returns 500. Reference:
   `t.contiguous().view(-1).view(torch.uint8)` bytes out as one stream, each
   tensor starting at a multiple of 16, and send a chunk each time the buffer is
   full (or only alignment padding would fit), then the rest; a tensor crossing
-  a cut continues at offset 0 of the next chunk. Synchronize before each
+  a cut continues at offset 0 of the next chunk. Mark the last chunk `last`:
+  `/finish_weight_update` fails and ends the update if a transfer did not reach
+  it; a new full update repairs the model. Synchronize before each
   `/update_weights`; do not overwrite the buffer until the call returns.
 - Keep every exported tensor alive until `/finish_weight_update` returns, then
   drop the references and call `torch.cuda.ipc_collect()`.

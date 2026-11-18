@@ -71,6 +71,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
 )
+from vllm.distributed.weight_transfer.base import WeightUpdateAborted
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization.online.lm_head import (
@@ -1860,10 +1861,10 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             try:
                 self.weight_transfer_engine.finish_weight_update()
-            except BaseException:
-                if direct_reload_enabled():
-                    # a failed direct finish cannot be retried: end the
-                    # session so that a new full update can start
+            except BaseException as e:
+                if direct_reload_enabled() or isinstance(e, WeightUpdateAborted):
+                    # a failed direct or aborted finish cannot be retried: end
+                    # the session so that a new full update can start
                     self._end_weight_update(refresh=False)
                 raise
             finally:

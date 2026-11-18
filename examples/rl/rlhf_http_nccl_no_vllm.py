@@ -155,10 +155,12 @@ def main() -> None:
         buf = torch.empty(cap, dtype=torch.uint8, device=device)
         used = 0  # bytes of the current chunk taken
         for n in names:
-            used = (used + 15) // 16 * 16
             flat = weights[n].contiguous().view(-1).view(torch.uint8)
+            if flat.numel() == 0:
+                continue  # no bytes, so no padding either
+            used = (used + 15) // 16 * 16
             start = 0
-            while True:
+            while start < flat.numel():
                 end = min(flat.numel(), start + cap - used)
                 buf[used : used + end - start].copy_(flat[start:end])
                 used += end - start
@@ -166,8 +168,6 @@ def main() -> None:
                 if (used + 15) // 16 * 16 == cap:  # full: send it
                     broadcast(buf[:used])
                     used = 0
-                if start == flat.numel():
-                    break
         if used:
             broadcast(buf[:used])
     torch.accelerator.synchronize()

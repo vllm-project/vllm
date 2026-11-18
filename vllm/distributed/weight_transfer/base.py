@@ -410,6 +410,11 @@ class WeightTransferUpdateInfo(ABC):  # noqa: B024
     pass
 
 
+class WeightUpdateAborted(RuntimeError):
+    """A weight update that cannot finish, raised by `finish_weight_update`
+    before it changed anything; the worker ends the update session."""
+
+
 # API-level request classes (accept dicts for backend-agnostic serialization)
 @dataclass
 class WeightTransferInitRequest:
