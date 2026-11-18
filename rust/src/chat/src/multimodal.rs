@@ -26,6 +26,7 @@ use llm_multimodal::{
     TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -42,7 +43,6 @@ mod expand;
 mod image;
 mod input;
 mod item;
-mod kwargs;
 mod models;
 mod preprocessed;
 mod tensor;
@@ -344,6 +344,51 @@ fn load_preprocessor_config(
     Ok(Some(config))
 }
 
+/// Resolve startup options into an effective config without modifying the
+/// checkpoint config.
+fn resolve_processor_config_overrides(
+    checkpoint: &Value,
+    kwargs: &HashMap<String, Value>,
+    scope: &str,
+) -> Result<PreProcessorConfig> {
+    if kwargs.get("text_kwargs").is_some_and(|value| {
+        !value.is_null() && !value.as_object().is_some_and(|values| values.is_empty())
+    }) {
+        bail_multimodal!("mm_processor_kwargs.text_kwargs is not supported");
+    }
+    let flat = kwargs
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "images_kwargs" | "videos_kwargs" | "audio_kwargs" | "text_kwargs"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut effective = checkpoint.clone();
+    merge_processor_config(&mut effective, &Value::Object(flat));
+    if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
+        if !scoped.is_object() {
+            bail_multimodal!("mm_processor_kwargs.{scope} must be an object");
+        }
+        merge_processor_config(&mut effective, scoped);
+    }
+    PreProcessorConfig::from_value(effective)
+        .map_err(|error| multimodal!("failed to parse processor config: {error}"))
+}
+
+/// Recursively merge mappings; other values replace the checkpoint value.
+fn merge_processor_config(config: &mut Value, overrides: &Value) {
+    if let (Value::Object(config), Value::Object(overrides)) = (&mut *config, overrides) {
+        for (key, value) in overrides {
+            merge_processor_config(config.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    } else {
+        *config = overrides.clone();
+    }
+}
+
 /// Request-scoped fetched media, split per modality with tracker UUID
 /// metadata preserved in request order.
 struct FetchedMedia {
@@ -428,14 +473,18 @@ impl MultimodalModelInfo {
 
         Self::from_loaded(
             context,
-            kwargs::apply(preprocessor_config, mm_processor_kwargs, "images_kwargs")?,
-            kwargs::apply(
-                video_preprocessor_config,
+            resolve_processor_config_overrides(
+                &preprocessor_config,
+                mm_processor_kwargs,
+                "images_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                &video_preprocessor_config,
                 mm_processor_kwargs,
                 "videos_kwargs",
             )?,
-            kwargs::apply(
-                audio_preprocessor_config,
+            resolve_processor_config_overrides(
+                &audio_preprocessor_config,
                 mm_processor_kwargs,
                 "audio_kwargs",
             )?,
@@ -1169,6 +1218,8 @@ impl TokenResolver for TokenizerResolver {
 mod tests {
     use std::sync::Arc;
 
+    use expect_test::expect;
+    use serde_json::json;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -1775,6 +1826,52 @@ mod tests {
             "audio_config": {"patch_sizes": [16, 6, 5, 4]},
         });
         test_info("muse_spark", config, muse_spark_tokenizer())
+    }
+
+    #[test]
+    fn model_specific_values_survive_scoped_config_merging() {
+        let kwargs = serde_json::from_value(json!({
+            "custom_options": {"width": 512, "height": 256},
+            "images_kwargs": {"custom_options": {"width": 1024}},
+            "audio_kwargs": {"max_samples": 16000},
+        }))
+        .unwrap();
+        let checkpoint = json!({"custom_options": {"checkpoint": true}});
+        let config =
+            |scope| resolve_processor_config_overrides(&checkpoint, &kwargs, scope).unwrap().extra;
+        let mut configs = json!({
+            "audio": config("audio_kwargs"),
+            "image": config("images_kwargs"),
+            "video": config("videos_kwargs"),
+        });
+        assert_eq!(checkpoint, json!({"custom_options": {"checkpoint": true}}));
+        configs.sort_all_objects();
+        expect![[r#"
+            {
+              "audio": {
+                "custom_options": {
+                  "checkpoint": true,
+                  "height": 256,
+                  "width": 512
+                },
+                "max_samples": 16000
+              },
+              "image": {
+                "custom_options": {
+                  "checkpoint": true,
+                  "height": 256,
+                  "width": 1024
+                }
+              },
+              "video": {
+                "custom_options": {
+                  "checkpoint": true,
+                  "height": 256,
+                  "width": 512
+                }
+              }
+            }"#]]
+        .assert_eq(&serde_json::to_string_pretty(&configs).unwrap());
     }
 
     #[test]
