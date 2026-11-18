@@ -101,21 +101,67 @@ def test_drop_thinking_keeps_current_turn_across_tool_results():
 
 @pytest.mark.parametrize("role", ["user", "tool"])
 @pytest.mark.parametrize("as_part", [False, True])
-def test_rejects_image_placeholder_in_text(role, as_part):
+def test_allows_image_placeholder_in_text_without_images(role, as_part):
+    text = f"hi {IMAGE_PLACEHOLDER}"
+    content = [{"type": "text", "text": text}] if as_part else text
+    prompt = render(
+        [{"role": role, "tool_call_id": "c1", "content": content}],
+        thinking=False,
+    )
+    assert text in prompt
+
+
+@pytest.mark.parametrize("role", ["user", "tool"])
+@pytest.mark.parametrize("as_part", [False, True])
+def test_rejects_image_placeholder_in_text_with_images(role, as_part):
     text = f"hi {IMAGE_PLACEHOLDER}"
     content = [{"type": "text", "text": text}] if as_part else text
     with pytest.raises(ValueError, match="image special token"):
-        render([{"role": role, "tool_call_id": "c1", "content": content}])
+        render(
+            [
+                {"role": role, "tool_call_id": "c1", "content": content},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                        }
+                    ],
+                },
+            ]
+        )
 
 
 def test_rejects_image_placeholder_in_reasoning():
     with pytest.raises(ValueError, match="image special token"):
         render(
             [
-                {"role": "user", "content": "q"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "q"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                        },
+                    ],
+                },
                 {"role": "assistant", "content": "a", "reasoning": IMAGE_PLACEHOLDER},
             ]
         )
+
+
+def test_allows_image_placeholder_in_reasoning_without_images():
+    prompt = render(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a", "reasoning": IMAGE_PLACEHOLDER},
+        ],
+        thinking=False,
+    )
+
+    assert prompt.endswith("a<｜end▁of▁sentence｜><｜Assistant｜></think>")
 
 
 @pytest.mark.parametrize(
@@ -207,6 +253,18 @@ def test_request_content_iterator_can_be_rendered_repeatedly(content, stream):
     assert request.messages[0]["content"] == content
     request.model_dump_json()
     assert first == render(request.messages, thinking=False)
+
+
+def test_chat_request_with_text_only_image_placeholder_is_rendered():
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        messages=[{"role": "user", "content": IMAGE_PLACEHOLDER}],
+    )
+    kwargs = request.build_chat_params(None, "auto").get_apply_chat_template_kwargs()
+
+    prompt = render(request.messages, **kwargs)
+
+    assert prompt.endswith(f"{IMAGE_PLACEHOLDER}<｜Assistant｜><think>")
 
 
 @pytest.mark.parametrize(
