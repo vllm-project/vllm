@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 from tokenizers import AddedToken, Tokenizer, models
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -607,7 +607,7 @@ _RESERVED_TOKENS = [
 ]
 
 
-def _tiny_tokenizer(with_added: bool = True) -> PreTrainedTokenizerFast:
+def _tiny_tokenizer(with_added: bool = True) -> TokenizersBackend:
     """A tiny real BPE tokenizer with the reserved tokens as added tokens.
 
     Its merges cross the characters next to a reserved token ('a<', '>b', ...),
@@ -622,7 +622,7 @@ def _tiny_tokenizer(with_added: bool = True) -> PreTrainedTokenizerFast:
         tokenizer.add_tokens(
             [AddedToken(t, special=False, normalized=False) for t in _RESERVED_TOKENS]
         )
-    return PreTrainedTokenizerFast(tokenizer_object=tokenizer)
+    return TokenizersBackend(tokenizer_object=tokenizer)
 
 
 _ID = _tiny_tokenizer().get_added_vocab()
