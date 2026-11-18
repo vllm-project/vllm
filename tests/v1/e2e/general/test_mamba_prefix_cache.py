@@ -887,7 +887,6 @@ def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
 
 
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="SYCL GDN prefill needs XPU.")
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv2_async_sycl(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(
