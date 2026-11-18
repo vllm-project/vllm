@@ -13,10 +13,23 @@ from __future__ import annotations
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+# b and a arrive as contiguous [L, HV] tensors or as the halves of the packed
+# in_proj_ba output (row stride 2 * HV, a at offset HV), possibly sliced past
+# decode rows, so whether their strides and addresses are multiples of 16
+# varies with the layout, head count and batch. Each is read one element per
+# token, so the alignment hints change no code; without them every layout
+# reuses the warmed variants. ROCm only: run and measured there.
+_BA_ARGS_NOT_ALIGNMENT_SPECIALIZED = (
+    ("a_ptr", "b_ptr", "stride_a_tok", "stride_b_tok")
+    if current_platform.is_rocm()
+    else ()
+)
 
-@triton.jit
+
+@triton.jit(do_not_specialize_on_alignment=_BA_ARGS_NOT_ALIGNMENT_SPECIALIZED)
 def _fused_post_conv_kernel(
     # ---- inputs ----
     mixed_qkv_ptr,  # [L, qkv_dim] conv'd output (contiguous)
