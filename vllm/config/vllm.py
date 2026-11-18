@@ -1300,10 +1300,6 @@ class VllmConfig:
             # its load_weights runs a layerwise reload, and its post-load
             # processing replaces the weight parameter
             raise ValueError("Direct reload does not support torchao quantization.")
-        if self.lora_config is not None:
-            # LoRA wraps layers after cold start; their wrappers forward
-            # `quant_method`, so a rerun would process each base layer twice
-            raise ValueError("Direct reload does not support LoRA.")
         spec = self.speculative_config
         if spec is not None and spec.draft_lm_head_quantization is not None:
             # after `begin` the draft's quantized lm_head is a view of the target
