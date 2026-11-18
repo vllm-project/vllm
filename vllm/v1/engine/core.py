@@ -936,28 +936,6 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
-    def start_kv_peer_import(
-        self,
-        host: str,
-        port: int,
-        max_chunks: int | None = None,
-        timeout_s: float = 600.0,
-    ) -> dict[str, Any]:
-        """Start copying a peer's CPU-tier KV cache; port is its base P2P port."""
-        return self._kv_peer_import_scheduler().start_peer_import(
-            host, port, max_chunks, timeout_s
-        )
-
-    def kv_peer_import_status(self, import_id: str | None = None) -> list[dict]:
-        return self._kv_peer_import_scheduler().peer_import_status(import_id)
-
-    def _kv_peer_import_scheduler(self) -> Any:
-        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-            find_peer_import_scheduler,
-        )
-
-        return find_peer_import_scheduler(self.scheduler.get_kv_connector())
-
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

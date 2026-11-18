@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bulk import of a peer's CPU-tier cache over real P2P sessions."""
 
+import json
 import mmap
 import threading
 import time
@@ -448,33 +449,53 @@ def test_bad_listing_messages_are_rejected(msg_type, msg):
             msg_type.validate(msg, max_keys=2)
 
 
-def test_engine_core_finds_the_tiering_connector():
-    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-        MultiConnector,
+def test_connector_rpc_drives_an_import(pair):
+    """The import is reached through the generic connector RPC (on_rpc)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        OffloadingConnectorScheduler,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-        OffloadingConnector,
+
+    consumer, producer = pair
+    keys = [f"k{i}".encode() for i in range(6)]
+    _seed(producer, keys)
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = consumer
+    scheduler._step_region = None
+
+    def rpc(msg):
+        reply = scheduler.on_rpc(json.dumps(msg).encode())
+        return None if reply is None else json.loads(reply)
+
+    started = rpc({"op": "import_from_peer", "host": "B", "port": 2})
+    assert "import_id" in started, started
+    status = _run(consumer, producer, started["import_id"])
+    assert status["state"] == "done" and status["imported"] == len(keys), status
+    assert rpc({"op": "import_status", "import_id": started["import_id"]}) == [status]
+    assert all(_hits(consumer, keys))
+
+    assert "error" in rpc({"op": "import_from_peer", "host": "B", "port": 0})
+    # A JSON float must not reach the listing, where it would raise in the step.
+    for bad in (2.5, 20000.0, True):
+        msg = {"op": "import_from_peer", "host": "B", "port": 2, "max_chunks": bad}
+        assert "error" in rpc(msg), bad
+    # Not ours: a MultiConnector passes these to its next child.
+    assert rpc({"op": "migrate"}) is None
+    assert rpc([1, 2]) is None
+    assert rpc({"op": ["import_status"]}) is None
+    assert scheduler.on_rpc(b"\xff not json") is None
+
+
+def test_connector_rpc_without_tiering_replies_an_error():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        OffloadingConnectorScheduler,
     )
-    from vllm.v1.engine.core import EngineCore
 
-    def offloading(supports_peer_import):
-        connector = object.__new__(OffloadingConnector)
-        connector.connector_scheduler = SimpleNamespace(
-            supports_peer_import=supports_peer_import
-        )
-        return connector
-
-    def core_with(connector):
-        core = object.__new__(EngineCore)
-        core.scheduler = SimpleNamespace(get_kv_connector=lambda: connector)
-        return core
-
-    tiering = offloading(True)
-    multi = object.__new__(MultiConnector)
-    multi._connectors = [offloading(False), tiering]  # Skips the non-tiering one.
-    assert core_with(multi)._kv_peer_import_scheduler() is tiering.connector_scheduler
-    with pytest.raises(ValueError, match="TieringOffloadingSpec"):
-        core_with(offloading(False))._kv_peer_import_scheduler()
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = SimpleNamespace(lock=threading.Lock())  # Not tiering.
+    scheduler._step_region = None
+    for op in ("import_from_peer", "import_status"):
+        reply = json.loads(scheduler.on_rpc(json.dumps({"op": op}).encode()))
+        assert "TieringOffloadingSpec" in reply["error"], reply
 
 
 def test_rejected_handshake_reports_its_cause(pair, monkeypatch):

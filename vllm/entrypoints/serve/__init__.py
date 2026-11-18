@@ -39,12 +39,6 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
-    from vllm.entrypoints.serve.kv_offload.api_router import (
-        attach_router as attach_kv_offload_router,
-    )
-
-    attach_kv_offload_router(app)
-
 
 def register_vllm_dev_api_routers(app: FastAPI):
     logger.warning(

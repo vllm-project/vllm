@@ -410,8 +410,8 @@ class TieringOffloadingManager(OffloadingManager):
             raise ValueError("host is required")
         if not 0 < base_port < 65536:
             raise ValueError(f"invalid port {base_port}")
-        if max_chunks is not None and max_chunks < 1:
-            raise ValueError(f"max_chunks must be at least 1, got {max_chunks}")
+        if max_chunks is not None and (type(max_chunks) is not int or max_chunks < 1):
+            raise ValueError(f"max_chunks must be an int >= 1, got {max_chunks!r}")
         if not (math.isfinite(timeout_s) and 0 < timeout_s <= _MAX_IMPORT_TIMEOUT_S):
             raise ValueError(
                 f"timeout_s must be in (0, {_MAX_IMPORT_TIMEOUT_S:.0f}], "
