@@ -1219,6 +1219,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of stop strings allowed in a single request.
     "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of tokens allowed for /tokenize, /detokenize, and
+    # /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
+    # set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
     "VLLM_MAX_TOKENIZE_TOKENS": lambda: (
         int(val)
         if (val := os.environ.get("VLLM_MAX_TOKENIZE_TOKENS")) is not None
@@ -2559,6 +2562,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        "VLLM_MAX_TOKENIZE_TOKENS",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
