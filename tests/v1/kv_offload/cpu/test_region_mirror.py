@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the multi-node CPU offload region mirror."""
 
+import os
 import threading
 import time
 import uuid
-from unittest.mock import MagicMock, create_autospec
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -556,17 +557,100 @@ def test_shutdown_is_prompt_with_copies_waiting(events):
     assert client.shut_down
 
 
-def test_head_worker_leaves_transfers_to_its_inner_worker():
-    inner = create_autospec(CPUOffloadingWorker, instance=True)
-    inner.submit_store.return_value = True
-    head = create_autospec(RegionMirrorHead, instance=True)
+class _FakeNixlAgent:
+    """Stands in for `nixl_utils.NixlWrapper`, the NIXL agent: records the
+    memory registered and the peers added."""
+
+    def __init__(self, name: str, config):
+        self.registered: list[tuple[str, list]] = []
+        self.peers: list[str] = []
+
+    def create_backend(self, backend: str, params: dict) -> None:
+        pass
+
+    def register_memory(self, descs: list, mem_type: str):
+        self.registered.append((mem_type, [(addr, size) for addr, size, *_ in descs]))
+        return self.registered[-1]
+
+    def deregister_memory(self, registration) -> None:
+        self.registered.remove(registration)
+
+    def get_agent_metadata(self) -> bytes:
+        return b"head"
+
+    def add_remote_agent(self, metadata: bytes) -> str:
+        self.peers.append(metadata.decode())
+        return self.peers[-1]
+
+    def remove_remote_agent(self, peer: str) -> None:
+        self.peers.remove(peer)
+
+
+def test_head_worker_moves_rank_0_slots_and_releases_the_region(monkeypatch):
+    """Rank 0 keeps its own CPU worker for its slots of the head region, and
+    shutting down drops the region's NIXL registration and the region."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a GPU")
+    agents: list[_FakeNixlAgent] = []
+
+    def new_agent(name, config):
+        agents.append(_FakeNixlAgent(name, config))
+        return agents[-1]
+
+    monkeypatch.setattr(nixl_utils, "NixlWrapper", new_agent)
+    monkeypatch.setattr(nixl_utils, "nixl_agent_config", lambda **kwargs: None)
+    region = SharedOffloadRegion(
+        engine_id=f"mirror-head-worker-{uuid.uuid4().hex[:8]}",
+        num_chunks=NUM_CHUNKS,
+        rank=0,
+        kv_bytes_per_chunk=HEAD_LAYOUT.row_stride,
+        cpu_page_size=SLOT,
+    )
+    blocks = torch.zeros((16, SLOT), dtype=torch.int8, device="cuda")
+    kv_caches = CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(tensor=blocks, page_size_bytes=SLOT)],
+        group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=SLOT)]],
+    )
+    inner = CPUOffloadingWorker(
+        kv_caches=kv_caches,
+        blocks_per_chunk=1,
+        num_cpu_chunks=NUM_CHUNKS,
+        mmap_region=region,
+    )
+    head = RegionMirrorHead(region, HEAD_LAYOUT, "head")
+    head.add_peers([b"rank1"])
     worker = RegionMirrorHeadWorker(inner, head)
-    t = _Transfers()
-    device_ptrs, cpu_spec = t.gpu(0, 1), t.cpu(0, 1)
-    assert worker.submit_store(11, device_ptrs, cpu_spec)
-    inner.submit_store.assert_called_once_with(11, device_ptrs, cpu_spec)
+    assert region.mmap_obj is not None
+    rows = np.frombuffer(region.mmap_obj, dtype=np.int8).reshape(
+        NUM_CHUNKS, HEAD_LAYOUT.row_stride
+    )
+
+    def gpu(*ids: int):
+        spec = GPULoadStoreSpec(
+            np.array(ids), group_sizes=[len(ids)], block_indices=[0]
+        )
+        return resolve_device_pointers(spec, kv_caches)
+
+    blocks[4], blocks[5] = 40, 50
+    torch.accelerator.synchronize()
+    assert worker.submit_store(11, gpu(4, 5), BlockIDsLoadStoreSpec(np.array([2, 3])))
     worker.wait({11})
-    inner.wait.assert_called_once_with({11})
+    # Rank 0's slot of each stored chunk, and nothing in the other rank's.
+    assert (rows[2, :SLOT] == 40).all() and (rows[3, :SLOT] == 50).all()
+    assert (rows[:, SLOT:] == 0).all()
+
+    rows[6, :SLOT] = 60
+    assert worker.submit_load(12, BlockIDsLoadStoreSpec(np.array([6])), gpu(7))
+    worker.wait({12})
+    assert (blocks[7] == 60).all()
+    finished = [(r.job_id, r.success) for r in worker.get_finished()]
+    assert sorted(finished) == [(11, True), (12, True)]
+
+    (agent,) = agents
+    assert agent.registered == [("DRAM", [(head.base, region.total_size_bytes)])]
+    assert agent.peers == ["rank1"]
+    del rows
     worker.shutdown()
-    head.shutdown.assert_called_once()
-    inner.shutdown.assert_called_once()
+    assert agent.registered == [] and agent.peers == []
+    assert region.mmap_obj is None
+    assert not os.path.exists(region.mmap_path)
