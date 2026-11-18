@@ -2,6 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton kernel implementations."""
 
-from . import activation
+from . import activation, layernorm
 
-__all__ = ["activation"]
+__all__ = ["activation", "layernorm"]
