@@ -1292,6 +1292,31 @@ def test_session_turn_after_a_reset_keeps_the_products_first_produced():
     assert set(versions[:held]) == {1} and set(versions[held:]) == {2}
 
 
+def test_held_session_response_the_frontend_dropped_leaves_no_objects():
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    _run_turn(engine, 1, "first", 40, 5, hash_block_size=4, aux_held=0)
+    held = engine.segments["first"][-1][0]
+    outputs = _run_turn(
+        engine,
+        2,
+        "second",
+        held + 1 + 30,
+        3,
+        segments=engine.segments["first"],
+        hash_block_size=4,
+        aux_held=held,
+    )
+    assert sum("/tail/" not in key for key in engine.keys["second"]) >= 2
+    engine._stopped = [entry for entry in engine._stopped if entry[0] != "second"]
+    processed = OutputProcessor(None, log_stats=False).process_outputs(
+        [outputs["second"]]
+    )
+    assert not processed.request_outputs
+    engine.connector.release_unreturned(processed.unreturned_aux_keys)
+    engine.pause()
+    assert set(engine.client.objects) == set(engine.keys["first"])
+
+
 def test_session_retry_after_an_abort_keeps_the_products_of_the_aborted_attempt():
     engine = _tier_engine(connector=None, hash_block_size=4)
     scheduler = engine.scheduler

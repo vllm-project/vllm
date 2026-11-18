@@ -776,10 +776,14 @@ class OutputProcessor:
             if req_state is None:
                 if engine_core_output.aux_output_keys:
                     assert engine_core_output.aux_version_segments is not None
-                    unreturned_aux_keys[req_id] = aux_owned_keys(
-                        req_id,
-                        engine_core_output.aux_output_keys,
-                        engine_core_output.aux_version_segments,
+                    unreturned_aux_keys[req_id] = (
+                        list(engine_core_output.aux_output_keys)
+                        if engine_core_output.aux_keys_owned
+                        else aux_owned_keys(
+                            req_id,
+                            engine_core_output.aux_output_keys,
+                            engine_core_output.aux_version_segments,
+                        )
                     )
                 # Ignore output for already-aborted request.
                 continue

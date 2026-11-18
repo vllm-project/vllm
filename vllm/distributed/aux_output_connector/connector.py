@@ -616,6 +616,11 @@ class AuxOutputSchedulerConnector:
         self._listed[request.request_id] = set(keys)
         return keys, segments
 
+    def lists_written(self, request: Request) -> bool:
+        """Whether a request's response lists only objects it wrote."""
+        state = self._session_requests.get(request.request_id)
+        return state is not None and state.held is not None
+
     def take_abort_output(self, request: Request) -> None:
         """Before an aborted session request is freed, list the objects it
         wrote so that its partial output returns them."""

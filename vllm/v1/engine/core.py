@@ -2593,6 +2593,7 @@ class EngineCoreProc(EngineCore):
                         finish_reason=FinishReason.ABORT,
                         aux_output_keys=keys,
                         aux_version_segments=segments,
+                        aux_keys_owned=True,
                     )
                 )
             for client_index, outputs in by_client_outputs.items():

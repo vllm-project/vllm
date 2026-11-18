@@ -321,6 +321,7 @@ class EngineCoreOutput(
 
     aux_output_keys: list[str] | None = None
     aux_version_segments: list[tuple[int, str | None]] | None = None
+    aux_keys_owned: bool = False
 
     @property
     def finished(self) -> bool:

@@ -2572,6 +2572,9 @@ class Scheduler(SchedulerInterface):
                         watermarking=watermarking,
                         aux_output_keys=aux_output_keys,
                         aux_version_segments=aux_version_segments,
+                        aux_keys_owned=aux_output_keys is not None
+                        and self.aux_output_connector is not None
+                        and self.aux_output_connector.lists_written(request),
                     )
                 )
             else:
