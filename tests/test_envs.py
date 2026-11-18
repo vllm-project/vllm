@@ -63,6 +63,16 @@ def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
+def test_grammar_compile_worker_limit_preserves_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "1")
+    factors = envs.compile_factors()
+    monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "4")
+
+    assert envs.compile_factors() == factors
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
