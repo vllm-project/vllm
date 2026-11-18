@@ -674,7 +674,7 @@ def _config(**overrides) -> SimpleNamespace:
     "mode,overrides,match",
     [
         ("direct", {}, None),
-        ("layerwise", {"lora_config": object()}, None),
+        ("direct", {"lora_config": object()}, None),
         (
             "direct",
             {
@@ -713,7 +713,6 @@ def _config(**overrides) -> SimpleNamespace:
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
@@ -727,12 +726,11 @@ def _config(**overrides) -> SimpleNamespace:
     ],
     ids=[
         "defaults",
-        "layerwise-lora",
+        "lora",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
         "torchao",
-        "lora",
         "draft-lm-head-quant",
         "sharded-rdt",
     ],
