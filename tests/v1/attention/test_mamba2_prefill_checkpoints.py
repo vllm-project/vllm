@@ -10,6 +10,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     register_mamba_layers,
 )
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
@@ -70,6 +71,7 @@ def test_checkpoint_on_a_resumed_request_is_relative_to_the_query():
 
 MAMBA_BLOCK_SIZE = 256
 CHUNK_SIZE = 256
+SSM_STATE_SHAPE = (2, 64, 128)
 DEVICE = torch.device("cpu")
 
 
@@ -77,17 +79,19 @@ def _create_mamba2_builder(
     enable_prefix_caching: bool = True,
     num_prefill_checkpoint_blocks: int = 1,
     prefill_checkpoint_alignment: int | None = 1,
+    prefill_backend: MambaBackendEnum | None = None,
 ) -> Mamba2AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=MAMBA_BLOCK_SIZE
     )
     vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    vllm_config.mamba_config = MambaConfig(prefill_backend=prefill_backend)
     # get_mamba_chunk_size() reads `mamba_chunk_size` then `chunk_size`.
     vllm_config.model_config.hf_text_config.mamba_chunk_size = CHUNK_SIZE
     spec = MambaSpec(
         block_size=MAMBA_BLOCK_SIZE,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
+        shapes=((16, 64), SSM_STATE_SHAPE),
+        dtypes=(torch.float16, torch.float32),
     )
     register_mamba_layers(
         vllm_config,
@@ -137,6 +141,28 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
     # also proves the chunk split actually landed on the checkpoint.
     ckpt_chunk = meta.checkpoint_chunk_idx[0]
     assert meta.cu_chunk_seqlen_p[ckpt_chunk + 1].item() == 768
+
+
+def test_flashinfer_layout_captures_each_checkpoint_token():
+    """FlashInfer counterpart of the chunk split landing on the checkpoint.
+
+    Row 1 checkpoints 768 tokens in, at packed token 868: off FlashInfer's
+    128-token grid and not a sequence start. FlashInfer starts a segment at
+    each checkpoint token, so unless the row names that token, prefix caching
+    stores a wrong state.
+    """
+    builder = _create_mamba2_builder(prefill_backend=MambaBackendEnum.FLASHINFER)
+    meta = _build(builder, seq_lens=[100, 900], query_lens=[100, 900])
+
+    assert meta.checkpoint_token_indices_p.tolist() == [-1, 868]
+    # FlashInfer writes each row's checkpoint to that row of its buffer.
+    assert meta.checkpoint_chunk_idx.tolist() == [0, 1]
+    assert meta.checkpoint_states_p.shape == (2, *SSM_STATE_SHAPE)
+    assert meta.checkpoint_states_p.dtype == torch.float32
+    # No row has a cached state, and FlashInfer takes the state dtype from
+    # the initial states.
+    assert meta.zero_initial_states_p.shape == (2, *SSM_STATE_SHAPE)
+    assert not meta.zero_initial_states_p.any()
 
 
 def test_update_block_table_regathers_checkpoint_blocks():
