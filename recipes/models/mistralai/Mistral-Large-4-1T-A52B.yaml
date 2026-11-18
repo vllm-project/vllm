@@ -82,10 +82,8 @@ features:
       - "mistral"
   spec_decoding:
     description: "DSpark speculative decoding with the drafter shipped in both checkpoints. Depth 3 is fixed by the checkpoint."
-    # Not validated with pipeline parallelism, or on gfx942 (the MI325X runs
-    # served without a drafter).
-    hardware:
-      "arch:gfx942": unsupported
+    # Not validated with pipeline parallelism. Greedy DSpark at TP8 was run on
+    # 8× MI325X (block-FP8). Probabilistic drafting was not.
     strategies:
       - single_node_tp
       - multi_node_tp
@@ -102,6 +100,10 @@ features:
       dspark_probabilistic:
         label: "DSpark (probabilistic)"
         description: "Probabilistic drafting for sampled serving at T ≥ 1 without top-p: AL 2.04 → 2.36–2.53 at T=1.5."
+        # Measured on GB300. The MI325X run used greedy drafting only.
+        hardware:
+          mi325x: unsupported
+          mi300x: unsupported
         args:
           - "--speculative-config"
           - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
@@ -200,8 +202,10 @@ strategy_overrides:
   single_node_tp:
     hardware_overrides:
       # gfx942: the MI325X launcher. AITER's Triton sparse MLA is gfx950-only
-      # and warns if left on. Prefix caching and DSpark were not in that run.
-      # The vision encoder is small next to TP8, so it runs data-parallel.
+      # and warns if left on. Prefix caching was off in that run. Greedy
+      # DSpark (the default spec-decoding feature) was measured on top of
+      # these flags. The vision encoder is small next to TP8, so it runs
+      # data-parallel.
       mi325x: &gfx942_tp8
         extra_args:
           - "--no-enable-prefix-caching"
@@ -771,21 +775,26 @@ notes:
       gfx942 has no native MXFP4 MoE kernel, so this command keeps the
       checkpoint's block-FP8 experts and serves them with AITER at TP8 on one
       8-GPU node. The FP8 weights are about 1.06 TB (~133 GB per rank).
-      Validated on 8× MI325X (revision `b74ad8b5`): GSM8K, 1,319 questions,
-      5-shot, three runs, 91.8–93.2% strict-match and 94.9–95.6%
-      flexible-extract. Stop strings must not include `Question:` — the model
-      restates the problem inside its reasoning and the default GSM8K stop
-      cuts the answer off. MI300X is the same path and has not been
-      smoke-tested. DSpark is not offered here. Prefix caching was off in the
-      measured runs. Shared-expert fusion, tuned AITER GEMM tables and the
-      gfx942 specialized decode kernel are not part of this command.
-  - title: "AMD: TP8 with DSpark not yet validated"
+      Validated on 8× MI325X with greedy DSpark (depth 3) and without it.
+      GSM8K, 1,319 questions, 5-shot: 96.7% / 96.4% flexible / strict with
+      DSpark and 96.7% / 96.8% without; the two runs agree on 1,300 questions.
+      Draft acceptance was 80–86% (about 3.4 of 4 tokens per step). A single
+      greedy request decoded at 136–187 tok/s with DSpark and 60–71 tok/s
+      without. Stop strings must not include `Question:` — the model restates
+      the problem inside its reasoning and the default GSM8K stop cuts the
+      answer off. The run capped context at 64k tokens. Probabilistic drafting
+      was not run. MI300X is the same path and has not been smoke-tested.
+      Prefix caching was off. Shared-expert fusion, tuned AITER GEMM tables
+      and the gfx942 specialized decode kernel are not part of this command.
+  - title: "MI350 Series: TP8 with DSpark not yet validated"
     when:
-      hardware: [amd]
+      hardware: [mi350x, mi355x]
       features: [spec_decoding]
     body: |
-      DSpark was measured at TP4 on MI350X (see the TP4 presets). TP8 serves
-      without spec decoding; TP8 with DSpark has not been run yet.
+      DSpark was measured at TP4 on MI350X (see the TP4 presets). TP8 on
+      MI350 Series serves without spec decoding; TP8 with DSpark has not been
+      run there. On MI325X, greedy DSpark at TP8 has been run (see the gfx942
+      note).
   - title: "Pipeline parallelism needs a layer partition"
     when:
       strategies: [multi_node_tp_pp]
@@ -921,7 +930,7 @@ guide: |
 
   | Goal | Configuration | Why |
   |---|---|---|
-  | Default | TP8 | one replica per node; DSpark at TP8 not yet validated on ROCm |
+  | Default | TP8 | one replica per node; DSpark at TP8 not yet validated on MI350 Series |
   | Interactive, more replicas | TP4 + DSpark (preset) | AL 3.1; TPOT 2.7x / 1.9x / 1.8x lower than no spec at c1 / c8 / c32 |
   | Lowest latency, 1–4 users | TP4 specialized decode (preset) | one fused kernel per MoE layer: TPOT 1.5x lower at c1; 2.9x with DSpark |
 
@@ -930,16 +939,19 @@ guide: |
   On MI300 Series (gfx942) the FP8 checkpoint stays block-FP8. gfx942 has no
   native MXFP4 MoE kernel, so the builder does not re-quantize the experts, and
   TP8 is required (~133 GB of weights per rank; TP4 does not fit a 256 GB GPU).
-  One 8-GPU node, prefix caching off, vision encoder data-parallel. Validated
-  on 8× MI325X, checkpoint revision `b74ad8b5`. DSpark, the Quark MXFP4
-  checkpoint and the gfx950 specialized decode are not part of this path.
-  MI300X uses the same command and has not been smoke-tested.
+  One 8-GPU node, prefix caching off, vision encoder data-parallel, greedy
+  DSpark (depth 3, the drafter shipped in the checkpoint). Validated on 8×
+  MI325X. Probabilistic drafting, the Quark MXFP4 checkpoint and the gfx950
+  specialized decode are not part of this path. MI300X uses the same command
+  and has not been smoke-tested.
 
-  The MI325X accuracy runs scored 91.8–93.2% strict-match and 94.9–95.6%
-  flexible-extract on GSM8K (1,319 questions, 5-shot, three runs). Those runs
-  also fused the shared expert and, in the fastest configuration, used a
-  gfx942 specialized decode kernel and tuned AITER GEMM tables. None of those
-  three are flags in this recipe.
+  On that MI325X node, GSM8K (1,319 questions, 5-shot) scored 96.7% flexible /
+  96.4% strict with DSpark and 96.7% / 96.8% without it; the runs agree on
+  1,300 questions. Draft acceptance was 80–86%, about 3.4 of 4 tokens per
+  step. One greedy request decoded at 136–187 tok/s with DSpark and 60–71
+  tok/s without, and the 32-way GSM8K run finished in about 540 s versus
+  about 980 s. The run used a 64k context cap. Shared-expert fusion, tuned
+  AITER GEMM tables and a gfx942 specialized decode kernel were not used.
 
   ## Accuracy
 
@@ -984,9 +996,10 @@ guide: |
   - DSpark doesn't run on a DCP decode node in P/D yet.
   - DSpark wasn't validated with pipeline parallelism.
   - AMD: NVFP4 checkpoints, DCP / PCP, NIXL P/D and HiSparse aren't supported on
-    ROCm yet. TP8 with DSpark is not validated on ROCm. On gfx942, DSpark, the
-    Quark MXFP4 checkpoint and the gfx950 specialized decode are not offered.
-    MI300X has not been smoke-tested.
+    ROCm yet. TP8 with DSpark is not validated on MI350 Series. On gfx942,
+    probabilistic DSpark, the Quark MXFP4 checkpoint and the gfx950 specialized
+    decode are not offered. MI300X has not been smoke-tested. Greedy DSpark
+    on MI325X was run at a 64k context cap.
 
   ## References
 
