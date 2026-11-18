@@ -588,7 +588,6 @@ def _final_swa_tail_store_block_ids(
         give_away(finish, reusable)
     stores += stored_swa_block_ids(finish)
     return reusable, stores
-    return swa_block_ids, stored_swa_block_ids
 
 
 def test_create_req_context_preserves_kv_hints():
