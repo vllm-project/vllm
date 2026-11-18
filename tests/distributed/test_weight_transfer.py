@@ -3196,3 +3196,16 @@ def test_plugin_does_not_replace_native_backend(mx_client):
     register_plugin_weight_transfer_engine()
     assert WeightTransferEngineFactory._registry["modelexpress"] is native_loader
     assert type(_make_modelexpress_engine()) is ModelExpressWeightTransferEngine
+
+
+def test_deprecated_deferral_and_layer_groups_still_answer():
+    from vllm.distributed.weight_transfer.base import layerwise_groups
+
+    engine = object.__new__(WeightTransferEngineFactory._registry["nccl"]())
+    assert engine.defers_processing is False
+    with pytest.warns(DeprecationWarning):
+        engine.drain_pending()
+    names = ["embed", "model.layers.1.w", "model.layers.0.w", "norm"]
+    with pytest.warns(DeprecationWarning):
+        groups = layerwise_groups(names)
+    assert groups == [["embed"], ["model.layers.0.w"], ["model.layers.1.w"], ["norm"]]

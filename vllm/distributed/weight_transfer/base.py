@@ -3,6 +3,7 @@
 """Base class for weight transfer engines."""
 
 import math
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -30,6 +31,51 @@ TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
 TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
 WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
+
+
+def _stack_key(name: str) -> tuple[str, int] | None:
+    parts = name.split(".")
+    for i, part in enumerate(parts):
+        if part.isdigit():
+            return ".".join(parts[:i]), int(part)
+    return None
+
+
+def layerwise_groups(names: list[str]) -> list[list[str]]:
+    """Deprecated: no weight transfer backend groups by layer any more.
+
+    Partition parameter names into one group per decoder layer, keyed on the
+    outermost integer segment of each name; un-indexed names before the first
+    indexed one form a leading group, the rest a trailing one.
+    """
+    warnings.warn(
+        "layerwise_groups is deprecated and will be removed in a future "
+        "release: no weight transfer backend uses it.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    pre: list[str] = []
+    post: list[str] = []
+    stacks: dict[tuple[str, int], list[str]] = {}
+    order: list[tuple[str, int]] = []
+    for name in names:
+        key = _stack_key(name)
+        if key is None:
+            (post if order else pre).append(name)
+            continue
+        if key not in stacks:
+            stacks[key] = []
+            order.append(key)
+        stacks[key].append(name)
+    prefix_rank: dict[str, int] = {}
+    for key in order:
+        prefix_rank.setdefault(key[0], len(prefix_rank))
+    order.sort(key=lambda key: (prefix_rank[key[0]], key[1]))
+    groups: list[list[str]] = [pre] if pre else []
+    groups += [stacks[key] for key in order]
+    if post:
+        groups.append(post)
+    return groups
 
 
 def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -379,6 +425,19 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     supports_draft_weight_update: bool = True
+
+    defers_processing: bool = False
+    """Deprecated, always False: every engine applies its updates by the time
+    `update_weights` returns."""
+
+    def drain_pending(self) -> None:
+        """Deprecated no-op: no engine defers its updates any more."""
+        warnings.warn(
+            "WeightTransferEngine.drain_pending is deprecated and will be "
+            "removed in a future release: it has nothing to drain.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def __init__(
         self,
