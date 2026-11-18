@@ -9,9 +9,13 @@ metrics. The tier configuration is set with `--mode`:
 - `cpu`: GPU + CPU tiers; kv-transfer-config without secondary tiers.
 - `fs`: GPU + CPU + FS tiers (requires `--fs-dir`).
 
-Run all scenarios against the FS tier:
+Run the quick scenarios against the FS tier:
     python benchmarks/kv_offload/benchmark_tiering.py --mode fs \
         --fs-dir /mnt/nvme bench
+
+Run all scenarios against the FS tier:
+    python benchmarks/kv_offload/benchmark_tiering.py --mode fs \
+        --fs-dir /mnt/nvme bench --full
 
 Run selected scenarios CPU-only:
     python benchmarks/kv_offload/benchmark_tiering.py --mode cpu \
@@ -50,9 +54,9 @@ Parts of the benchmark are built for the gpt-oss-120b model.
  1. gpt-oss-120b has 2 attention groups FA and SWA.
  2. These attention groups have the same gpu block size (2.3M on H100).
 This fact is exploited in `KVCacheCalibration.from_engine` and
-`Scenario::max_per_request_block_size` functions that used,
- - to determine the maximum KV cache memory that a benchmark
-   run would require and subsequently,
+`Scenario::max_per_request_block_size` functions that are used,
+ - to determine the maximum KV cache memory that a benchmark run would 
+   require and subsequently,
  - to design GPU/CPU cache overflow scenarios.
 
  Updating to a different model, requires updating these functions.
@@ -68,8 +72,8 @@ BLOCK_SIZE = 64
 # size. This lets us use a single PER_GROUP_BLOCK_BYTES value for both
 # groups in the benchmark.
 # If unset via an environment variable, this is computed once at the
-# start of the function via `KVCacheCalibration.from_engine`.
-# Note:
+# start of the benchmark via `KVCacheCalibration.from_engine`.
+# Notes:
 # - This value is 2.3M on H100.
 # - With FS offloading, this value should match the offloaded file size.
 PER_GROUP_BLOCK_BYTES = os.environ.get("PER_GROUP_BLOCK_BYTES")
@@ -279,7 +283,7 @@ class Scenario:
         return (fa_blocks + swa_blocks) * per_group_block_bytes
 
     def materialize(self, per_group_block_bytes: float) -> None:
-        """Resolve each tier's bytes/requests; all four values set after."""
+        """Resolve each tier's bytes/requests"""
         self._per_group_block_bytes = per_group_block_bytes
         max_per_request = self.max_per_request_bytes(per_group_block_bytes)
         self.gpu.materialize(max_per_request)
@@ -909,12 +913,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bench = subparsers.add_parser(
-        "bench", help="run all scenarios, or just the QUICK set with --quick"
+        "bench", help="run the QUICK scenarios, or all scenarios with --full"
     )
     bench.add_argument(
-        "--quick",
+        "--full",
         action="store_true",
-        help="run only the QUICK scenarios",
+        help="run all scenarios instead of the QUICK scenarios",
     )
 
     bench_scenario = subparsers.add_parser(
@@ -1009,7 +1013,7 @@ def _main() -> None:
             )
         ]
     elif args.command == "bench":
-        specs = QUICK if args.quick else SCENARIOS
+        specs = SCENARIOS if args.full else QUICK
     else:
         assert args.command == "bench-scenario"
         specs = [by_name[n] for n in args.scenario]
