@@ -126,7 +126,6 @@ def _make_hybrid_kv_cache_manager(
         scheduler_block_size=MAMBA_BLOCK_SIZE,
         hash_block_size=ATTN_BLOCK_SIZE,
         enable_caching=True,
-        num_prefill_lookahead=num_hash_lookahead_tokens,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 

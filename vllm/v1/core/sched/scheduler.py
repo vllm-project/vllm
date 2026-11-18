@@ -342,7 +342,6 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
-            num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,

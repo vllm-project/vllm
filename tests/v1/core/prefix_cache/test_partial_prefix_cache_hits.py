@@ -150,7 +150,6 @@ def make_full_mamba_manager(
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
-        num_prefill_lookahead=num_hash_lookahead_tokens,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 

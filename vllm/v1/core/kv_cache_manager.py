@@ -137,7 +137,6 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         num_hash_lookahead_tokens: int = 0,
-        num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -174,7 +173,6 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
-            num_prefill_lookahead=num_prefill_lookahead,
         )
         # One predicate, read by both sides of the feature, so the scheduler
         # cannot end a chunk at a junction the manager would refuse -- a refused

@@ -182,6 +182,7 @@ def make_kv_cache_manager(
             kv_cache_config,
             prefix_cache_retention_interval=kwargs.pop("retention_interval"),
         )
+    num_reprefillable_tokens = kwargs.pop("num_reprefillable_tokens", None)
     manager = KVCacheManager(kv_cache_config, **kwargs)
     if kv_cache_config.hisparse_host_num_blocks is not None:
         if vllm_config is not None:
@@ -189,7 +190,9 @@ def make_kv_cache_manager(
                 vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
             ).bind_kv_cache_manager(manager)
         else:
-            get_hisparse_coordinator(manager)
+            get_hisparse_coordinator(
+                manager, num_reprefillable_tokens=num_reprefillable_tokens
+            )
     return manager
 
 
@@ -289,7 +292,7 @@ def make_hisparse_kv_cache_manager(
     max_model_len: int = 128,
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
-    num_prefill_lookahead: int = 0,
+    num_reprefillable_tokens: int = 0,
     num_hash_lookahead_tokens: int = 0,
     vllm_config: VllmConfig | None = None,
     **config_kwargs,
@@ -302,7 +305,7 @@ def make_hisparse_kv_cache_manager(
         max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
-        num_prefill_lookahead=num_prefill_lookahead,
+        num_reprefillable_tokens=num_reprefillable_tokens,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
@@ -347,7 +350,7 @@ def _resident_block_ids(manager: KVCacheManager, request_id: str) -> list[int]:
 
 def test_hisparse_does_not_write_back_reprefillable_tokens():
     """Multi-module MTP re-prefills the last tokens, so they are not final."""
-    manager = make_hisparse_kv_cache_manager(32, 16, num_prefill_lookahead=3)
+    manager = make_hisparse_kv_cache_manager(32, 16, num_reprefillable_tokens=2)
     request = make_request(
         "request", list(range(2 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
@@ -4497,7 +4500,6 @@ def test_lookahead_checkpoint_has_available_hash(
         max_model_len=4096,
         enable_caching=True,
         hash_block_size=64,
-        num_prefill_lookahead=lookahead,
         num_hash_lookahead_tokens=lookahead,
     )
     tokens = list(range(prompt_len))

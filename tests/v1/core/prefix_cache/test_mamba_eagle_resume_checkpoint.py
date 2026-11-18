@@ -33,7 +33,6 @@ def _manager(
     shared_prefix_checkpoint=True,
     num_blocks=8192,
     num_hash_lookahead_tokens=1,
-    num_prefill_lookahead=0,
 ):
     init_none_hash(sha256)
     config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
@@ -42,7 +41,6 @@ def _manager(
         max_model_len=1 << 20,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
@@ -340,8 +338,7 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
 
 
 @pytest.mark.parametrize("lookahead", [0, 1])
-@pytest.mark.parametrize("num_prefill_lookahead", [0, 2])
-def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
+def test_enabling_never_reduces_reuse(lookahead):
     """Eligible junctions improve reuse; other configurations are unchanged."""
     block_size, hash_block_size = 512, 32
 
@@ -351,7 +348,6 @@ def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
             hash_block_size,
             shared_prefix_checkpoint=shared_prefix_checkpoint,
             num_hash_lookahead_tokens=lookahead,
-            num_prefill_lookahead=num_prefill_lookahead,
         )
         assert manager.mamba_shared_prefix_checkpoint == (
             shared_prefix_checkpoint and lookahead > 0

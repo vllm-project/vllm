@@ -99,11 +99,13 @@ class HiSparseConnectorScheduler:
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
         import_step_tokens: int = 0,
+        num_reprefillable_tokens: int = 0,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.import_step_tokens = import_step_tokens
+        self.num_reprefillable_tokens = num_reprefillable_tokens
         self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
@@ -253,6 +255,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     if vllm_config.num_speculative_tokens
                     else 0
                 ),
+                # Multi-module MTP may still rewrite the trailing drafter KV.
+                num_reprefillable_tokens=max(
+                    0, vllm_config.num_prefill_lookahead_tokens - 1
+                ),
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(
@@ -277,6 +283,9 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             get_hisparse_coordinator(
                 kv_cache_manager,
                 import_step_tokens=self.connector_scheduler.import_step_tokens,
+                num_reprefillable_tokens=(
+                    self.connector_scheduler.num_reprefillable_tokens
+                ),
             )
         )
 

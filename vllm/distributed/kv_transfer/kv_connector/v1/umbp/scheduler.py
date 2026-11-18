@@ -321,8 +321,6 @@ class UMBPStoreConnectorScheduler:
                 ),
                 scheduler_block_size=self.block_size,
                 hash_block_size=self.hash_block_size,
-                # As core's scheduler builds its coordinator.
-                num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
                 allow_partial_hash_hits=self.enable_partial_hash_hits,
             )
             if lookup_groups
