@@ -484,6 +484,11 @@ def _check_sm90_modular_kernel(
     experts.process_weights_after_loading(layer)
     experts.keep_constants(layer)
     assert layer.w13_weight.dtype == kernel_dtype
+    # The layer's scales are the kernel's block scales: one per block as
+    # loaded, not the per-expert factor MXFP4 adds.
+    for name, loaded in (("w13", weights.w13_scale), ("w2", weights.w2_scale)):
+        scale = getattr(layer, f"{name}_weight_scale")
+        assert loaded is not None and scale.numel() == loaded.numel()
     kernel = mk.FusedMoEKernel(PassThroughPrepareAndFinalize(), experts)
 
     topk_ids, topk_weights = _routing(geometry, rank, device)
