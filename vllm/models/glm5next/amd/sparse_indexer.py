@@ -152,10 +152,10 @@ def sparse_attn_indexer_kpool(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
-    q_quant: torch.Tensor,
+    q_quant: torch.Tensor | None,
     q_scale: torch.Tensor | None,
     k: torch.Tensor,
-    weights: torch.Tensor,
+    weights: torch.Tensor | None,
     quant_block_size: int,
     scale_fmt: str | None,
     topk_tokens: int,
@@ -186,6 +186,8 @@ def sparse_attn_indexer_kpool(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # A profiling run scores, so it has the q side.
+        assert q_quant is not None
         # Reserve workspace for indexer during profiling run
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
@@ -341,6 +343,7 @@ def sparse_attn_indexer_kpool(
             scales_spec,
         )
         for chunk in prefill_metadata.chunks if not short_prefill else ():
+            assert q_quant is not None and weights is not None
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
@@ -585,6 +588,7 @@ def sparse_attn_indexer_kpool(
             topk_tokens,
         ):
             return topk_indices_buffer
+        assert q_quant is not None and weights is not None
         decode_lens = decode_metadata.decode_lens
         if decode_metadata.requires_padding:
             # Padding also covers short chunked prefills classified as decode.
@@ -780,9 +784,9 @@ class SparseAttnIndexerKpool(CustomOp):
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
         k: torch.Tensor,
-        weights: torch.Tensor,
+        weights: torch.Tensor | None,
         *,
         gate_score: torch.Tensor | None = None,
         compress_ape: torch.Tensor | None = None,
@@ -790,7 +794,8 @@ class SparseAttnIndexerKpool(CustomOp):
         positions: torch.Tensor | None = None,
     ):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
-        assert isinstance(q_quant, torch.Tensor), (
+        # q_quant and weights are None when every row is filled causally.
+        assert not isinstance(q_quant, tuple), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
         if not rocm_aiter_ops.is_enabled():
@@ -844,9 +849,9 @@ class SparseAttnIndexerKpool(CustomOp):
     def forward_native(
         self,
         hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
         k: torch.Tensor,
-        weights: torch.Tensor,
+        weights: torch.Tensor | None,
         *,
         gate_score: torch.Tensor | None = None,
         compress_ape: torch.Tensor | None = None,
