@@ -14,6 +14,7 @@ of `convert_to_unquantized_kernel_format`).
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -84,6 +85,13 @@ class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
             return False, f"kernel does not support {moe_config.in_dtype} activations"
         if moe_config.has_bias:
             return False, "kernel does not support expert biases"
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            moe_config.moe_parallel_config.use_ep
+            and vllm_config is not None
+            and vllm_config.parallel_config.expert_placement_strategy != "linear"
+        ):
+            return False, "kernel does not support non-linear expert placement"
         if (
             moe_config.activation == MoEActivation.SITU
             and moe_config.activation_situ_beta is None

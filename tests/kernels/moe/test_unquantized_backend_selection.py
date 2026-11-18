@@ -782,19 +782,21 @@ def test_select_flashinfer_cutedsl_sm90_backend(
 
 
 @pytest.mark.parametrize(
-    ("has_cutedsl_moe_bf16", "use_ep", "placement", "expected_backend"),
+    ("moe_backend", "has_cutedsl_moe_bf16", "use_ep", "placement", "expected"),
     [
-        (True, True, "linear", UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
-        (True, False, "round_robin", UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
-        (True, True, "round_robin", UnquantizedMoeBackend.TRITON),
-        (False, False, "linear", UnquantizedMoeBackend.TRITON),
+        ("auto", True, True, "linear", UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
+        ("auto", True, False, "round_robin", UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
+        ("auto", True, True, "round_robin", UnquantizedMoeBackend.TRITON),
+        ("auto", False, False, "linear", UnquantizedMoeBackend.TRITON),
+        ("flashinfer_cutedsl", True, True, "round_robin", None),
     ],
 )
-def test_default_flashinfer_cutedsl_sm90_backend_fallback(
-    has_cutedsl_moe_bf16, use_ep, placement, expected_backend
+def test_flashinfer_cutedsl_sm90_backend_parallel_fallback(
+    moe_backend, has_cutedsl_moe_bf16, use_ep, placement, expected
 ):
-    """The Hopper default falls back to Triton when FlashInfer lacks the
-    CuTe-DSL MoE or the expert placement is not linear under EP."""
+    """The SM90 CuTe-DSL experts refuse a non-linear expert placement under
+    EP, and the Hopper default then falls back to Triton, as it does when
+    FlashInfer lacks the CuTe-DSL MoE."""
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(expert_placement_strategy=placement)
     )
@@ -803,12 +805,17 @@ def test_default_flashinfer_cutedsl_sm90_backend_fallback(
             stack.enter_context(p)
         stack.enter_context(
             patch(
-                "vllm.model_executor.layers.fused_moe.oracle.unquantized."
-                "get_current_vllm_config_or_none",
+                "vllm.model_executor.layers.fused_moe.experts."
+                "flashinfer_cutedsl_sm90_moe.get_current_vllm_config_or_none",
                 return_value=vllm_config,
             )
         )
         moe_config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+        moe_config.moe_backend = moe_backend
         moe_config.moe_parallel_config.use_ep = use_ep
+        if expected is None:
+            with pytest.raises(ValueError, match="non-linear expert placement"):
+                select_unquantized_moe_backend(moe_config=moe_config)
+            return
         selected_backend, _ = select_unquantized_moe_backend(moe_config=moe_config)
-    assert selected_backend == expected_backend
+    assert selected_backend == expected
