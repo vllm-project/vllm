@@ -340,7 +340,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
     return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalFeatureSpec:
     """Represents a single multimodal input with its processed data and metadata.
 
@@ -386,7 +386,7 @@ class MultiModalFeatureSpec:
         return dict(kwargs)
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalFieldElem:
     """Represents a processed keyword argument to pass to a model for a
     [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem].
@@ -651,7 +651,7 @@ class MultiModalSharedField(BaseMultiModalField):
         return batch[0]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MultiModalFieldConfig:
     @staticmethod
     def batched(modality: str, *, keep_on_cpu: bool = False):

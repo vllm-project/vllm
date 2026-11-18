@@ -822,6 +822,7 @@ def _check_dummy_hash_model_forward(
     torch.nn.Module.__init__(model)
     model.parallel_config = vllm_config.parallel_config
     model.use_native_mega_moe = False
+    model.use_mega_gate = False
     model.use_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
@@ -834,6 +835,7 @@ def _check_dummy_hash_model_forward(
     model.end_layer = 1
     model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
+    model.pipeline_relay = None
     model.aux_hidden_state_layers = ()
     model.mhc_post = lambda hidden, *args: hidden
     metadata = (
