@@ -2580,3 +2580,142 @@ async def test_streaming_parallel_tool_calls(
         if event.type == "response.output_item.done"
     ] == args[:num_calls]
     assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
+
+
+class TestBackgroundResponseStatus:
+    """Status transitions of stored background /v1/responses requests.
+
+    The stored response must move from "queued" to "in_progress" once the
+    background task starts generating, so polling clients can distinguish
+    waiting requests from generating ones (issue #67619).
+    """
+
+    @pytest_asyncio.fixture
+    async def serving_responses(self):
+        engine_client = MagicMock()
+        model_config = MagicMock()
+        model_config.max_model_len = 100
+        model_config.hf_config.model_type = "test"
+        model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+        engine_client.input_processor = MagicMock()
+        engine_client.renderer = MagicMock()
+        return OpenAIServingResponses(
+            engine_client=engine_client,
+            models=MagicMock(),
+            online_renderer=MagicMock(),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            tool_server=MagicMock(spec=ToolServer),
+        )
+
+    @staticmethod
+    def _prepare_for_create(serving):
+        serving.enable_store = True
+        serving.models.model_name = MagicMock(return_value="test")
+        serving._check_model = AsyncMock(return_value=None)
+        serving._preflight = MagicMock()
+        serving._maybe_get_adapters = MagicMock(return_value=None)
+        serving._validate_generator_input = MagicMock(return_value=None)
+        serving._make_response_parser = MagicMock(return_value=None)
+        serving._get_trace_headers = AsyncMock(return_value=None)
+        serving.online_renderer.validate_chat_template.return_value = None
+        serving._render_resolved_response_inputs = AsyncMock(
+            return_value=SimpleNamespace(messages=[], engine_input=tokens_input([1, 2]))
+        )
+        serving.override_max_tokens = None
+        serving.tool_server = None
+
+    @staticmethod
+    def _install_blocked_generators(
+        serving, started: asyncio.Event, release: asyncio.Event
+    ):
+        """Swap in response generators that block mid-generation.
+
+        Like the real ones, they replace the stored response with the
+        completed one only after generation finishes, and never once the
+        response is cancelled.
+        """
+
+        async def finalize(request):
+            # Mimic the tail of the real generators: replace the stored
+            # response with the completed one only after generation finishes,
+            # and never once the response is cancelled.
+            final = ResponsesResponse.from_request(
+                request,
+                SamplingParams(),
+                model_name="test",
+                created_time=0,
+                output=[],
+                status="completed",
+                usage=None,
+            )
+            async with serving.response_store_lock:
+                stored = serving.response_store.get(final.id)
+                if stored is None or stored.status != "cancelled":
+                    serving.response_store[final.id] = final
+            return final
+
+        async def full_generator(request, *args, **kwargs):
+            started.set()
+            await release.wait()
+            return await finalize(request)
+
+        async def stream_generator(request, *args, **kwargs):
+            started.set()
+            await release.wait()
+            # The real stream generator finalizes via responses_full_generator.
+            await finalize(request)
+            yield SimpleNamespace(type="response.completed")
+
+        serving.responses_full_generator = full_generator
+        serving.responses_stream_generator = stream_generator
+
+    @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_background_status_transitions_to_in_progress(
+        self, serving_responses, stream
+    ):
+        serving = serving_responses
+        self._prepare_for_create(serving)
+        started, release = asyncio.Event(), asyncio.Event()
+        self._install_blocked_generators(serving, started, release)
+
+        raw_request = Request({"type": "http", "headers": []})
+        request = ResponsesRequest(input="hi", background=True, stream=stream)
+        await serving._create_responses(request, raw_request)
+
+        response_id = request.request_id
+        assert serving.response_store[response_id].status == "queued"
+
+        # The background task is generating; the stored response must say so.
+        await started.wait()
+        assert serving.response_store[response_id].status == "in_progress"
+
+        task = serving.background_tasks[response_id]
+        release.set()
+        await task
+        assert serving.response_store[response_id].status == "completed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    async def test_background_cancelled_status_not_overwritten(self, serving_responses):
+        serving = serving_responses
+        self._prepare_for_create(serving)
+        started, release = asyncio.Event(), asyncio.Event()
+        self._install_blocked_generators(serving, started, release)
+
+        raw_request = Request({"type": "http", "headers": []})
+        request = ResponsesRequest(input="hi", background=True)
+        await serving._create_responses(request, raw_request)
+
+        response_id = request.request_id
+        await started.wait()
+        cancelled = await serving.cancel_responses(response_id)
+        assert cancelled.status == "cancelled"
+
+        # A late in-progress/completed transition must not resurrect it.
+        release.set()
+        assert serving.response_store[response_id].status == "cancelled"
