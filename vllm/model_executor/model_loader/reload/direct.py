@@ -230,6 +230,11 @@ def _check_params_kept(model: torch.nn.Module) -> None:
         )
 
 
+def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
+    ckpt = getattr(t, "_ckpt", None)
+    return ckpt is not None and ckpt[0] is model._ckpt_owner
+
+
 def _undo_renames(model: torch.nn.Module) -> None:
     """Undo move_parameter/retire_parameter, as cold start registered them."""
     for prefix, module in model.named_modules():
@@ -241,11 +246,6 @@ def _undo_renames(model: torch.nn.Module) -> None:
             full = f"{prefix}.{name}" if prefix else name
             if hasattr(p, "_ckpt") and full not in model._ckpt_param_names:
                 del module._parameters[name]
-
-
-def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
-    ckpt = getattr(t, "_ckpt", None)
-    return ckpt is not None and ckpt[0] is model._ckpt_owner
 
 
 def _checkpoint_views(
