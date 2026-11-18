@@ -1,6 +1,6 @@
 ARG BASE_IMAGE=ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
 # Bump to rebuild the stack (changes its key and busts every layer); upstream drift alone never does.
-ARG REFRESH=2026-11-02
+ARG REFRESH=2026-10-12
 ARG PYTHON_VERSION=3.12
 # ROCm 10.2 is only published as nightlies; every version below is from the same nightly.
 ARG ROCM_SDK_VERSION=10.2.0a20261022
@@ -9,6 +9,8 @@ ARG TORCHVISION_VERSION=0.28.0+rocm${ROCM_SDK_VERSION}
 ARG TORCHAUDIO_VERSION=2.11.0.3+rocm${ROCM_SDK_VERSION}
 ARG TRITON_BRANCH="66b3f9ff" # release/internal/3.8.x as of 10/05/2026, the triton the 10.2 nightly torch pins
 ARG TRITON_VERSION=3.8.0+git66b3f9ff.rocm${ROCM_SDK_VERSION}
+ARG FA_BRANCH="4a948e9c"
+ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.29"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.2.5"
@@ -24,6 +26,8 @@ ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-nex
 # Build configuration
 ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
+# FlashAttention arches; empty: PYTORCH_ROCM_ARCH. CI builds only the arches it tests (bake file).
+ARG FA_ROCM_ARCH=""
 
 FROM ${BASE_IMAGE} AS base
 
@@ -180,6 +184,21 @@ RUN --mount=type=cache,target=/root/.cache/pip cd mori \
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 ###
+### FlashAttention Build
+###
+FROM base AS build_fa
+ARG FA_BRANCH
+ARG FA_REPO
+ARG FA_ROCM_ARCH
+RUN git clone ${FA_REPO}
+RUN cd flash-attention \
+    && git checkout ${FA_BRANCH} \
+    && git submodule update --init \
+    && GPU_ARCHS="${FA_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}" python3 setup.py bdist_wheel --dist-dir=dist
+RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
+
+
+###
 ### AITER Build
 ###
 FROM base AS build_aiter
@@ -190,10 +209,9 @@ RUN --mount=type=cache,target=/root/.cache/pip cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
 # AITER_USE_SYSTEM_TRITON keeps setup.py from resolving its own triton, which would
-# displace the pinned one already installed in base. PREBUILD_KERNELS=0: kernels are
-# JIT-compiled on first use, which keeps the build short.
+# displace the pinned one already installed in base.
 RUN --mount=type=cache,target=/root/.cache/pip pip install pyyaml && cd aiter \
-    && PREBUILD_KERNELS=0 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
@@ -275,6 +293,8 @@ RUN mkdir -p /staging/lib \
 # The stack's half of the release wheel index.
 FROM base AS wheels-build
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
@@ -327,7 +347,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgrpc++1 libprotobuf23 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN --mount=type=bind,from=build_aiter,src=/app/install,target=/i/aiter \
+RUN --mount=type=bind,from=build_fa,src=/app/install,target=/i/fa \
+    --mount=type=bind,from=build_aiter,src=/app/install,target=/i/aiter \
     --mount=type=bind,from=build_mori,src=/app/install,target=/i/mori \
     --mount=type=bind,from=build_amdsmi,src=/app/install,target=/i/amdsmi \
     --mount=type=cache,target=/root/.cache/pip \
@@ -361,6 +382,8 @@ ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
 ARG PYTORCH_ROCM_ARCH
 ARG AITER_ROCM_ARCH
+ARG FA_BRANCH
+ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG MORI_BRANCH
@@ -376,6 +399,8 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
     && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
     && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
+    && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
+    && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
