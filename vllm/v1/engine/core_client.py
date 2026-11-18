@@ -215,9 +215,6 @@ class EngineCoreClient(ABC):
     ) -> bool:
         raise NotImplementedError
 
-    def close_session(self, session_id: str) -> None:
-        raise NotImplementedError
-
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
@@ -474,9 +471,6 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
-
-    def close_session(self, session_id: str) -> None:
-        self.engine_core.close_session(session_id)
 
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
@@ -1136,9 +1130,6 @@ class SyncMPClient(MPClient):
         return self.call_utility(
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
-
-    def close_session(self, session_id: str) -> None:
-        self.call_utility("close_session", session_id)
 
     def reset_encoder_cache(self) -> None:
         self.call_utility("reset_encoder_cache")

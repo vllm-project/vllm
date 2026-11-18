@@ -7259,7 +7259,7 @@ def _run_turn(
 def _retained_blocks(manager: KVCacheManager) -> list[KVCacheBlock]:
     queue = manager.block_pool.free_block_queue
     blocks = []
-    block = queue.fake_retained_list_head.next_free_block
+    block = queue.fake_free_list_tail.next_free_block
     while block is not queue.fake_retained_list_tail:
         blocks.append(block)
         block = block.next_free_block
@@ -7398,9 +7398,11 @@ def test_session_end_stops_retaining_blocks(monkeypatch, end):
         assert _retained_blocks(manager) == []
     else:
         now += 1
-        # Takes the 4 never-used blocks, then an expired block (tail first)
-        # ahead of the other cached blocks.
-        manager.block_pool.get_new_blocks(5)
+        _run_turn(manager, "late", list(range(200, 200 + 16)))
+        # Takes the 3 never-used blocks and the 2 blocks cached before the
+        # session expired, then an expired block (tail first) ahead of the
+        # block freed after it expired.
+        manager.block_pool.get_new_blocks(6)
         assert len(_retained_blocks(manager)) == 3
     hit = _lookup(manager, make_request("r", tokens + [0], 16, sha256))[1]
     assert hit == (4 if end == "close" else 3) * 16

@@ -840,6 +840,7 @@ class BlockPool:
                     blocks_to_retain.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
+                    block.freed_at = now
                     blocks_to_evict_last.append(block)
 
         # Blocks to reuse first are prepended to the front of the free queue.

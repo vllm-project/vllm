@@ -24,6 +24,9 @@ from vllm.v1.core.kv_cache_utils import (
 if TYPE_CHECKING:
     from vllm.v1.request import Request
 
+# Sessions tracked before the oldest is dropped.
+MAX_SESSIONS = 65536
+
 
 @dataclass(slots=True)
 class _Session:
@@ -66,7 +69,6 @@ class KVCacheSessions:
         hash_block_size: Token granularity of request block hashes.
         lookup_block_sizes: Block size of each KV cache group whose lookup
             scans from the first block and so can start from a session's blocks.
-        max_sessions: Sessions tracked before the oldest is dropped.
 
     """
 
@@ -75,10 +77,8 @@ class KVCacheSessions:
         ttl: float,
         hash_block_size: int,
         lookup_block_sizes: dict[int, int],
-        max_sessions: int = 65536,
     ) -> None:
         self.ttl = ttl
-        self.max_sessions = max_sessions
         self.hash_block_size = hash_block_size
         self.lookup_block_sizes = lookup_block_sizes
         # Ordered by expiry. Keyed by session id and the request's first block
@@ -116,7 +116,7 @@ class KVCacheSessions:
                 block.num_sessions += 1
 
         self._sessions[session_key] = session
-        if len(self._sessions) > self.max_sessions:
+        if len(self._sessions) > MAX_SESSIONS:
             self._drop(next(iter(self._sessions)))
 
     def get_blocks(self, request: "Request") -> dict[int, list[KVCacheBlock]] | None:

@@ -207,19 +207,15 @@ class KVCacheManager:
         )
         self.kv_cache_config = kv_cache_config
 
-        self.session_ttl = session_ttl if enable_caching else 0
         # A TTL of 0 keeps the session table empty.
         self.sessions = KVCacheSessions(
-            ttl=self.session_ttl,
+            ttl=session_ttl if enable_caching else 0,
             hash_block_size=hash_block_size,
             # Only the full-attention lookup scans from the first block.
             lookup_block_sizes={
                 manager.kv_cache_group_id: manager.block_size
-                for manager, group in zip(
-                    self.coordinator.single_type_managers,
-                    kv_cache_config.kv_cache_groups,
-                )
-                if isinstance(manager, FullAttentionManager) and group.prefix_cacheable
+                for manager in self.coordinator.single_type_managers
+                if isinstance(manager, FullAttentionManager)
             },
         )
 
@@ -553,9 +549,9 @@ class KVCacheManager:
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
-        if request.session_id and self.session_ttl:
+        if request.session_id and self.sessions.ttl:
             # The blocks this request hits or caches are evicted after all others.
-            request.retain_until = time.monotonic() + self.session_ttl
+            request.retain_until = time.monotonic() + self.sessions.ttl
             for blocks in new_computed_block_list:
                 for block in blocks:
                     block.retain_until = request.retain_until

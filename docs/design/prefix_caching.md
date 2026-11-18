@@ -214,6 +214,8 @@ Requests that send a `session_id` (request body field or the `X-Session-ID` head
 * `--session-cache-ttl <seconds>`: how long a block stays retained after a session request last used it. The default is 600; `0` disables session retention.
 * `POST /close_session` with `{"session_id": "<id>"}`: ends a session early, for example at the end of an RL episode. Its blocks stay cached and are evicted in normal LRU order, except those another session shares, which stay retained.
 
+Retained blocks outlive every other cached block until their TTL runs out, so sessions that end without a `/close_session` take cache away from requests without a `session_id`. On a server that mixes short-lived sessions with other traffic that relies on the cache, close sessions when they end or lower the TTL.
+
 Requests that share a `session_id` but start differently, such as an agent's side calls or a different `cache_salt`, are tracked as separate sessions. With data parallel deployments, a session only helps when its requests reach the same engine.
 
 ## Example
