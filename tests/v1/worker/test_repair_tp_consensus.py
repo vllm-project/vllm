@@ -496,3 +496,243 @@ def test_single_rank_consensus_semantics():
     assert not _ranks_repair_agree(**_variant(backend_ok=False))
     assert not _ranks_repair_agree(**_variant(pre_write_ok=False))
     assert not _ranks_repair_agree(**_variant(executed_layers=3))
+
+
+# ---- The PRE-EXECUTION preflight consensus (A3: TP safety before native
+# ---- layer execution) ----
+
+
+def _preflight_setup(rank, world_size, refuse_rank=None, corrupt=None):
+    """Build the repair step whose ranks diverge: `refuse_rank`'s fence
+    refuses (a foreign slot mapping on that rank only), `corrupt` bends
+    one rank's work identity. The layers are REAL collectives: a
+    divergent-rank entry into the layer stream would deadlock the peers
+    inside all_gather."""
+    from types import SimpleNamespace
+
+    from vllm.v1.core.sched.output import (
+        CachedRequestData,
+        RepairWork,
+        SchedulerOutput,
+    )
+
+    span = (0, 8)
+    auth = (5,)
+    plan_id, epoch = 1, 3
+    corrupt_rank = world_size - 1
+    if rank == corrupt_rank:
+        # ONE rank only carries the divergent identity; its geometry
+        # stays self-consistent so its OWN fence passes -- only the
+        # all-gathered identity comparison can catch it.
+        if corrupt == "plan_id":
+            plan_id = 99
+        elif corrupt == "epoch":
+            epoch = 99
+        elif corrupt == "span":
+            span = (8, 16)
+        elif corrupt == "auth":
+            auth = (6,)
+    work = RepairWork(
+        request_id="req-a",
+        repair_span=span,
+        layer_end=1,
+        restored_extent=16,
+        plan_id=plan_id,
+        epoch=epoch,
+        expected_write_block_ids=auth,
+    )
+    sub = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={"req-a": 8},
+        total_num_scheduled_tokens=8,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+        repair_works={"req-a": work},
+    )
+    positions = torch.arange(8, dtype=torch.int64)
+    # The honest geometry: block 5, slots 40..47. A refusing rank points
+    # its slot window at a foreign block (6).
+    foreign = rank == refuse_rank
+    slots = (
+        torch.arange(6 * 8, 6 * 8 + 8, dtype=torch.int64)
+        if foreign
+        else torch.arange(5 * 8, 5 * 8 + 8, dtype=torch.int64)
+    )
+    table_row = torch.tensor([6]) if foreign else torch.tensor([5])
+
+    import torch.distributed as dist
+
+    class _CollectiveLayer:
+        """A layer whose forward enters a REAL collective: if any rank
+        enters the layer stream while a peer refuses, the peer must
+        either have finished its verdict collective (paired) or the
+        layer's collective blocks until the pg timeout."""
+
+        def __init__(self):
+            self.self_attn = SimpleNamespace(
+                attn=SimpleNamespace(
+                    kv_cache=torch.zeros(16, 8, 8),
+                    layer_name="model.layers.0",
+                )
+            )
+
+        def __call__(self, positions, hidden_states, residual):
+            t = torch.ones(1)
+            dist.all_reduce(t)
+            return hidden_states + 1.0, residual
+
+    model = SimpleNamespace(
+        model=SimpleNamespace(
+            layers=[_CollectiveLayer()],
+            embed_input_ids=lambda ids: torch.zeros(ids.shape[0], 8),
+        )
+    )
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionMetadata
+
+    meta = CPUAttentionMetadata(
+        num_actual_tokens=8,
+        max_query_len=8,
+        query_start_loc=torch.arange(2, dtype=torch.int32),
+        max_seq_len=8,
+        seq_lens=torch.full((1,), 8, dtype=torch.int32),
+        block_table=table_row.view(1, 1),
+        slot_mapping=slots,
+        scheduler_metadata=None,
+    )
+    return sub, positions, model, meta
+
+
+def _preflight_worker(rank, world_size, port, result_queue, refuse_rank, corrupt):
+    import os
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        "gloo",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=_PG_TIMEOUT_S),
+    )
+    try:
+        from tests.v1.kv_connector.unit.utils import create_vllm_config
+        from vllm.forward_context import set_forward_context
+        from vllm.v1.worker.gpu import repair_executor
+
+        sub, positions, model, meta = _preflight_setup(
+            rank, world_size, refuse_rank=refuse_rank, corrupt=corrupt
+        )
+        layer_calls = []
+        real_layer = model.model.layers[0]
+
+        class _CountingLayer:
+            """Delegates the cache views to the real layer and counts
+            calls, so the preflight's geometry derivation sees a layer
+            object (not a bare function)."""
+
+            self_attn = real_layer.self_attn
+
+            def __call__(self, positions, hidden_states, residual):
+                layer_calls.append(rank)
+                return real_layer(positions, hidden_states, residual)
+
+        model.model.layers[0] = _CountingLayer()
+        with set_forward_context(
+            {"model.layers.0": meta},
+            create_vllm_config(model="facebook/opt-125m"),
+        ):
+            results = repair_executor.execute_repair_only(
+                model, sub, positions.clone(), positions, ["req-a"]
+            )
+        verdicts = [
+            (
+                r.request_id,
+                r.aborted,
+                r.structural_check,
+                r.executed_layers,
+                (r.commit_check or {}).get("preflight_agree"),
+                (r.commit_check or {}).get("capability_ok"),
+            )
+            for r in results
+        ]
+        result_queue.put((rank, None, (len(layer_calls), verdicts)))
+    except BaseException as exc:  # noqa: BLE001 - recorded for the parent
+        result_queue.put((rank, f"{type(exc).__name__}: {exc}", None))
+    finally:
+        with contextlib.suppress(Exception):
+            dist.destroy_process_group()
+
+
+def _assert_preflight_abort(results, world_size, expect_calls):
+    """Every rank aborted with zero executed layers, the preflight
+    refused, and the layer stream ran exactly `expect_calls` times per
+    rank (0 everywhere on divergence, 1 everywhere on consensus)."""
+    for rank, err, payload in results:
+        assert err is None, f"rank {rank} raised: {err}"
+        n_calls, verdicts = payload
+        assert n_calls == expect_calls, (
+            f"rank {rank} entered the layer stream {n_calls} times "
+            f"(expected {expect_calls}): a rank-local refusal must abort "
+            "the layer execution on EVERY rank"
+        )
+        assert len(verdicts) == 1
+        (_rid, aborted, sc, layers, pf_agree, _cap) = verdicts[0]
+        assert aborted, f"rank {rank} must abort on preflight divergence"
+        assert not sc
+        assert layers == 0
+        assert pf_agree is False, f"rank {rank} preflight_agree must be False"
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+@pytest.mark.parametrize("refuse_rank", [0, 1])
+def test_preflight_fence_refusal_aborts_every_rank_before_layers(
+    world_size, refuse_rank
+):
+    """THE A3 defect: a rank whose pre-write fence refuses (a foreign
+    slot mapping on that rank only) must abort the step on EVERY rank
+    BEFORE any rank enters native layer execution. Pre-fix, the fence
+    was rank-local and the consensus post-execution: the refusing rank
+    skipped the layer collectives its passing peers entered, and the
+    passing peers blocked inside the layer all-reduce until the
+    process-group timeout (a TP hang)."""
+    if refuse_rank >= world_size:
+        pytest.skip("rank beyond world size")
+    results = _run_distributed(_preflight_worker, world_size, extra=(refuse_rank, None))
+    _assert_preflight_abort(results, world_size, expect_calls=0)
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+@pytest.mark.parametrize("corrupt", ["plan_id", "epoch", "span", "auth"])
+def test_preflight_identity_divergence_aborts_every_rank(world_size, corrupt):
+    """A rank executing a divergent work identity (plan_id, epoch, span,
+    or authorized write geometry) must abort the step on every rank
+    before any native execution -- the all-gathered operation identity,
+    not a boolean, is what consents."""
+    results = _run_distributed(_preflight_worker, world_size, extra=(None, corrupt))
+    _assert_preflight_abort(results, world_size, expect_calls=0)
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_preflight_consensus_allows_consented_execution(world_size):
+    """The positive control: with every rank's preflight green, all
+    ranks enter the layer stream together (the collective layer runs
+    once per rank), the verdict commits, and preflight_agree is True
+    on every rank."""
+    results = _run_distributed(_preflight_worker, world_size, extra=(None, None))
+    for rank, err, payload in results:
+        assert err is None, f"rank {rank} raised: {err}"
+        n_calls, verdicts = payload
+        assert n_calls == 1, f"rank {rank} layer calls: {n_calls}"
+        (_rid, aborted, sc, layers, pf_agree, cap_ok) = verdicts[0]
+        assert not aborted
+        assert sc, f"rank {rank} verdict must commit: {verdicts}"
+        assert layers == 1
+        assert pf_agree is True
+        assert cap_ok is True
