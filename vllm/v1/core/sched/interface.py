@@ -272,5 +272,9 @@ class SchedulerInterface(ABC):
     def get_ec_connector(self) -> "ECConnectorBase | None":
         return None
 
+    def publish_kv_events(self) -> None:
+        """Publish pending KV cache events without scheduling model execution."""
+        return None
+
     def get_kv_event_publisher_config(self) -> "KVEventsConfig | None":
         return None

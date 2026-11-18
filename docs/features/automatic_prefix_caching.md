@@ -13,6 +13,17 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## KV cache events while idle
+
+With KV cache events enabled, the engine process checks for pending events every
+100 ms while waiting for requests, including while paused or asleep. Connector
+events use the same publisher and ordering as events collected during inference;
+publishing them does not execute the model or start a data-parallel wave.
+
+Connectors must expose pending events through the scheduler-side `take_events()`
+hook. Events buffered only on a worker still require the connector to deliver
+them to the scheduler. With events disabled, the engine keeps its blocking wait.
+
 ## Hybrid Mamba models
 
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
