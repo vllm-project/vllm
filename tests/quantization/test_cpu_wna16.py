@@ -8,7 +8,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-from vllm._custom_ops import cpu_gemm_wna16  # noqa: E402
+from vllm._cpu_ops import cpu_gemm_wna16  # noqa: E402
 from vllm.model_executor.kernels.linear.mixed_precision.cpu import (  # noqa: E402
     _get_isa_hint,
 )

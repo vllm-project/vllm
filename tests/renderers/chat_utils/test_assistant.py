@@ -20,7 +20,7 @@ def _parse_one(message) -> ConversationMessage:
 
 
 def test_assistant_reasoning_is_mirrored_to_reasoning_content():
-    """``reasoning`` is mirrored to ``reasoning_content`` for legacy templates."""
+    """`reasoning` is mirrored to `reasoning_content` for legacy templates."""
     conv_msg = _parse_one(
         {
             "role": "assistant",

@@ -85,13 +85,12 @@ def _mla_layer(*, non_causal: bool = False) -> SimpleNamespace:
     )
 
 
-def _merged_mla_spec() -> MLAAttentionSpec:
+def _mla_spec() -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=64,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
-        non_causal_multi_token_decode=True,
     )
 
 
@@ -183,25 +182,8 @@ def test_noncausal_decode_metadata_keeps_live_request_buffers():
     )
 
 
-def test_mla_cache_marker_is_promoted_to_group_capability():
-    kwargs = {
-        "block_size": 64,
-        "num_kv_heads": 1,
-        "head_size": 576,
-        "dtype": torch.bfloat16,
-    }
-    marked = MLAAttentionSpec(**kwargs, non_causal_multi_token_decode=True)
-    unmarked = MLAAttentionSpec(**kwargs)
-
-    assert MLAAttentionSpec.merge([marked, marked]).non_causal_multi_token_decode
-    assert not MLAAttentionSpec.merge(
-        [unmarked, unmarked]
-    ).non_causal_multi_token_decode
-    assert MLAAttentionSpec.merge([unmarked, marked]).non_causal_multi_token_decode
-
-
 def test_builder_scopes_noncausal_capability_to_its_layers():
-    merged_spec = _merged_mla_spec()
+    spec = _mla_spec()
     static_forward_context = {
         "target": _mla_layer(non_causal=False),
         "draft": _mla_layer(non_causal=True),
@@ -213,7 +195,7 @@ def test_builder_scopes_noncausal_capability_to_its_layers():
 
     def _flag(layer_names: list[str]) -> bool:
         return _DcpCapableMLAMetadataBuilder(
-            merged_spec,
+            spec,
             layer_names,
             vllm_config,
             device,
@@ -226,21 +208,19 @@ def test_builder_scopes_noncausal_capability_to_its_layers():
     assert not _flag(["target", "indexer"])
 
 
-def test_merged_group_spec_does_not_mark_a_target_only_builder():
-    # Both builders receive the same merged spec; only the draft layer is
-    # non-causal. Constructing through __init__ would still fail DCP
-    # validation if the builder read the group flag.
-    merged_spec = _merged_mla_spec()
+def test_shared_group_does_not_mark_a_target_only_builder():
+    # Only the draft layer is non-causal. Constructing the target builder
+    # through __init__ would fail DCP validation if it were marked too.
+    spec = _mla_spec()
     static_forward_context = {
         "target": _mla_layer(non_causal=False),
         "draft": _mla_layer(non_causal=True),
     }
     vllm_config = _dspark_dcp_vllm_config(static_forward_context)
     device = torch.device("cpu")
-    assert merged_spec.non_causal_multi_token_decode
 
     target = _CausalOnlyMLAMetadataBuilder(
-        merged_spec,
+        spec,
         ["target"],
         vllm_config,
         device,
@@ -250,7 +230,7 @@ def test_merged_group_spec_does_not_mark_a_target_only_builder():
 
     with pytest.raises(ValueError, match="non-causal draft"):
         _DraftMLAMetadataBuilder(
-            merged_spec,
+            spec,
             ["draft"],
             vllm_config,
             device,

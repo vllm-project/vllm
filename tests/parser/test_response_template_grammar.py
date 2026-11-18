@@ -97,13 +97,17 @@ def call(*arguments):
         (CALL, True),
         (CALL.removesuffix("</call>"), True),
         (
-            '<call name="get.weather"><arg name="city">Paris</arg>\n'
-            '<arg name="days">3</arg></call>',
+            (
+                '<call name="get.weather"><arg name="city">Paris</arg>\n'
+                '<arg name="days">3</arg></call>'
+            ),
             True,
         ),
         (
-            '<call name="get.weather"><arg name="city">Paris</arg>'
-            '<arg name="days">soon</arg></call>',
+            (
+                '<call name="get.weather"><arg name="city">Paris</arg>'
+                '<arg name="days">soon</arg></call>'
+            ),
             False,
         ),
         ('<call name="get.weather"><arg name="days">3</arg></call>', False),

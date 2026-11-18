@@ -180,33 +180,33 @@ class BaseFrontendArgs:
     --enable-log-outputs is set.
     """
     cohere_is_reasoning_model: bool = True
-    """Cohere ``/cohere/v2/chat`` only. Whether the served model is a
+    """Cohere `/cohere/v2/chat` only. Whether the served model is a
     reasoning Command-family model. When True (default), the assistant's
-    chain-of-thought is surfaced as a ``thinking`` content block (or
-    ``content-*`` events on the stream). When False, reasoning is
-    surfaced as Cohere's ``tool_plan`` field (or ``tool-plan-delta``
+    chain-of-thought is surfaced as a `thinking` content block (or
+    `content-*` events on the stream). When False, reasoning is
+    surfaced as Cohere's `tool_plan` field (or `tool-plan-delta`
     events) whenever the model emits tool calls, matching older non-
     reasoning Command models. Has no effect on the non-Cohere
     endpoints."""
     cohere_format: str = "cmd4"
-    """Cohere ``--tokenizer-mode cohere`` only. Which Cohere prompt
-    format to render: ``cmd4`` (current Command A+ models; default) or
-    ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
+    """Cohere `--tokenizer-mode cohere` only. Which Cohere prompt
+    format to render: `cmd4` (current Command A+ models; default) or
+    `cmd3` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
     wrong format silently produces a prompt the model wasn't trained
     on, which most commonly manifests as the model emitting text but no
     citations / tool calls / thinking blocks. Equivalent to passing
-    ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
-    explicit request-level ``chat_template_kwargs.cohere_format`` takes
+    `--default-chat-template-kwargs '{"cohere_format": "..."}'` -- any
+    explicit request-level `chat_template_kwargs.cohere_format` takes
     priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
-    """The ``reasoning_effort`` used for Anthropic Messages, token counting,
-    and render requests with ``thinking: {"type": "disabled"}`` or
-    ``thinking: {"type": "between_tools"}``.
-    ``none`` turns thinking off for models that support it; ``low`` suits
+    """The `reasoning_effort` used for Anthropic Messages, token counting,
+    and render requests with `thinking: {"type": "disabled"}` or
+    `thinking: {"type": "between_tools"}`.
+    `none` turns thinking off for models that support it; `low` suits
     models that always think
-    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
-    ``low`` when the renderer rejects ``none`` or renders it the same as a
-    thinking effort, and ``none`` otherwise."""
+    (e.g. GLM-5.3) or reject `none` (e.g. gpt-oss). `auto` (default) uses
+    `low` when the renderer rejects `none` or renders it the same as a
+    thinking effort, and `none` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
@@ -214,25 +214,26 @@ class BaseFrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
-    enable_scale_out: bool = False
+    enable_scale_out: bool = envs.VLLM_SERVER_DEV_MODE
     """
     If set to True, register the scale-out endpoints (`/render`, `/derender`,
     `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    Defaults to `VLLM_SERVER_DEV_MODE`.
     Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
     always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
-    """Controls the ``system_fingerprint`` field on responses.
+    """Controls the `system_fingerprint` field on responses.
 
-    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+    - `full` (default): `vllm-<version>[-<parallelism>]-<hash8>`. Encodes
       server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
       8-char config hash.
-    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
-    - ``custom``: emits the literal string from ``--fingerprint-value``.
-    - ``none``: the field is omitted (serialized as ``null``).
+    - `hash`: `vllm-<version>-<hash8>`. Parallelism stripped.
+    - `custom`: emits the literal string from `--fingerprint-value`.
+    - `none`: the field is omitted (serialized as `null`).
     """
     fingerprint_value: str | None = None
-    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
+    """Literal fingerprint string used when `--fingerprint-mode=custom`."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -242,7 +243,7 @@ class BaseFrontendArgs:
         """Customize argparse kwargs before arguments are registered.
 
         Subclasses should override this and call
-        ``super()._customize_cli_kwargs(frontend_kwargs)`` first.
+        `super()._customize_cli_kwargs(frontend_kwargs)` first.
         """
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
@@ -265,7 +266,7 @@ class BaseFrontendArgs:
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Register CLI arguments for this frontend class.
 
-        Subclasses should override ``_customize_cli_kwargs`` instead of
+        Subclasses should override `_customize_cli_kwargs` instead of
         this method so that base-class postprocessing is always applied.
         """
         from vllm.engine.arg_utils import get_kwargs
@@ -337,11 +338,11 @@ class FrontendArgs(BaseFrontendArgs):
     """If provided, the server will require one of these keys to be presented in
     the header.
 
-    Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same server, including
-    `/invocations` (which exposes the same inference capabilities as `/v1`),
-    remain unauthenticated. Do not rely on `--api-key` alone to secure vLLM;
-    see
+    Warning: this only authenticates endpoints under the `/v1`, `/v2`,
+    `/inference`, and `/cohere` path prefixes. Other endpoints on the same
+    server, including `/invocations` (which exposes the same inference
+    capabilities as `/v1`), remain unauthenticated. Do not rely on `--api-key`
+    alone to secure vLLM; see
     https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
     for what it does and does not protect."""
     ssl_keyfile: str | None = None

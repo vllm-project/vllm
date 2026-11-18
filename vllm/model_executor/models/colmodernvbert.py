@@ -53,7 +53,7 @@ from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 class ColModernVBertConnector(nn.Module):
     """Pixel shuffle spatial reduction followed by a linear projection.
 
-    Reduces the vision encoder's token count by ``factor^2`` via pixel-shuffle
+    Reduces the vision encoder's token count by `factor^2` via pixel-shuffle
     spatial rearrangement, then projects the concatenated channels to the text
     encoder's hidden size with a single bias-free linear layer.
     """

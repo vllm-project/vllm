@@ -161,7 +161,7 @@ _REASONING_PARSERS_TO_REGISTER = {
         "MuseGlimmerReasoningParser",
     ),
     # Alias of "muse".
-    "musespark1x": (
+    "musespark": (
         "muse_reasoning_parser",
         "MuseReasoningParser",
     ),
