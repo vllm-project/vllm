@@ -152,10 +152,7 @@ _TEXT_GENERATION_MODELS = {
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "Lfm3ForCausalLM": ("lfm3", "Lfm3ForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
-    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
-    # For decapoda-research/llama-*
-    "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
     "LongcatFlashNgramForCausalLM": (
         "longcat_flash_ngram",
@@ -189,6 +186,14 @@ _TEXT_GENERATION_MODELS = {
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
+    "NemotronLabsDiffusionForCausalLM": (
+        "nemotron_dllm",
+        "NemotronLabsDiffusionForBlockDiffusion",
+    ),
+    "NemotronLabsDiffusionModel": (
+        "nemotron_dllm",
+        "NemotronLabsDiffusionForBlockDiffusion",
+    ),
     "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -232,14 +237,6 @@ _EMBEDDING_MODELS = {
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "Lfm2BidirectionalModel": ("lfm2", "Lfm2BidirectionalModel"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
-    "LlamaModel": ("llama", "LlamaForCausalLM"),
-    **{
-        # Multiple models share the same architecture, so we include them all
-        k: (mod, arch)
-        for k, (mod, arch) in _TEXT_GENERATION_MODELS.items()
-        if arch == "LlamaForCausalLM"
-    },
-    "MistralModel": ("llama", "LlamaForCausalLM"),
     "ModernBertModel": ("modernbert", "ModernBertModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
@@ -481,6 +478,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "Inkling2ForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2ForConditionalGeneration",
+    ),
     "KimiK31ForConditionalGeneration": (
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
@@ -498,6 +499,10 @@ _MULTIMODAL_MODELS = {
     "Lfm3AudioForConditionalGeneration": (
         "lfm3_audio",
         "Lfm3AudioForConditionalGeneration",
+    ),
+    "Lfm3OmniForConditionalGeneration": (
+        "lfm3_omni",
+        "Lfm3OmniForConditionalGeneration",
     ),
     "Lfm3VlForConditionalGeneration": ("lfm3_vl", "Lfm3VlForConditionalGeneration"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
@@ -623,6 +628,7 @@ _MULTIMODAL_MODELS = {
         "vllm.models.qwen3_5",
         "Qwen3_5ForConditionalGeneration",
     ),
+    "Qwen3_5ForSlotDecision": ("qwen3_5_slot", "Qwen3_5ForSlotDecision"),
     "Qwen3_5MoeForConditionalGeneration": (
         "vllm.models.qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
@@ -678,6 +684,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "ricursive_dflash2",
         "RicursiveDFlash2ForCausalLM",
     ),
+    "DSpineDraftModel": ("qwen3_dspine", "DSpineQwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
     # DFlash{arch} unless it already starts or ends with "DFlash" (see
@@ -706,6 +713,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
     ),
+    "Inkling2DSparkModel": ("vllm.models.inkling2", "Inkling2DSparkModel"),
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
@@ -779,6 +787,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Kolibri1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "LlamaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -795,6 +804,8 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Embedding models
+    "LlamaModel": ("transformers", "TransformersEmbeddingModel"),
+    "MistralModel": ("transformers", "TransformersEmbeddingModel"),
     "Qwen2Model": ("transformers", "TransformersEmbeddingModel"),
     # Multimodal models
     "AriaForConditionalGeneration": (
@@ -1598,46 +1609,6 @@ class _ModelRegistry:
         """Check support for HC SP without changing MoE parallelism."""
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_hc_sp
-
-    def model_has_inner_state(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.has_inner_state
-
-    def is_attention_free_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.is_attention_free
-
-    def is_hybrid_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.is_hybrid
-
-    def is_noops_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.has_noops
-
-    def is_transcription_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.supports_transcription
 
     def is_transcription_only_model(
         self,
