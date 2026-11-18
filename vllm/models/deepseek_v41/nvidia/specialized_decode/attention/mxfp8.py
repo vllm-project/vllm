@@ -29,7 +29,7 @@ the three projections, and skip the tuner.
 """
 
 import importlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from functools import cache
 from typing import TYPE_CHECKING
@@ -434,7 +434,7 @@ def compile_pinned(linear: nn.Module) -> None:
 
 
 @contextmanager
-def pinned_tactics() -> Iterator[None]:
+def pinned_tactics() -> Generator[None]:
     """Offer FlashInfer's tuner only the pinned tactic for pinned problems. The
     tuner's tactic list is a FlashInfer internal: when it has no
     `autotune_tactics` or does not list a pinned tactic, every tactic is

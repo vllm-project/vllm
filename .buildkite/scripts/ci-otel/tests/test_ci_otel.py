@@ -993,18 +993,24 @@ def _write_executable(path: Path, body: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "workspace_owner,expect_sampler",
-    [("997 996", True), ("0 0", False)],
+    "workspace_owner,has_workspace,expected_ids",
+    [
+        ("997 996", True, "997 996"),
+        # Kubernetes pods check out as root, or have no /workdir at all.
+        ("0 0", True, "65534 65534"),
+        ("997 996", False, "65534 65534"),
+    ],
 )
-def test_root_shell_runs_gpu_sampler_as_checkout_owner(
-    tmp_path, workspace_owner, expect_sampler
+def test_root_shell_runs_gpu_sampler_unprivileged(
+    tmp_path, workspace_owner, has_workspace, expected_ids
 ):
     bin_dir = tmp_path / "bin"
     workspace = tmp_path / "workdir"
     runtime = tmp_path / "runtime"
     log = tmp_path / "calls.log"
     bin_dir.mkdir()
-    workspace.mkdir()
+    if has_workspace:
+        workspace.mkdir()
 
     _write_executable(
         bin_dir / "id",
@@ -1056,14 +1062,61 @@ def test_root_shell_runs_gpu_sampler_as_checkout_owner(
 
     assert result.returncode == 0, result.stderr
     calls = log.read_text() if log.exists() else ""
-    if expect_sampler:
-        expected = "--reuid=997 --regid=996 --clear-groups --no-new-privs --"
-        assert calls.count("setpriv") == 2
-        assert calls.count(expected) == 2
-        assert "gpu" in calls
-    else:
-        assert calls == ""
-        assert "non-root GPU sampler unavailable" in result.stderr
+    uid, gid = expected_ids.split()
+    expected = f"--reuid={uid} --regid={gid} --clear-groups --no-new-privs --"
+    assert calls.count("setpriv") == 2
+    assert calls.count(expected) == 2
+    assert "gpu" in calls
+    assert "non-root GPU sampler unavailable" not in result.stderr
+
+
+def test_root_shell_skips_sampler_it_cannot_drop_privileges_for(tmp_path):
+    """Without setpriv the sampler would run as root, so it does not run."""
+    bin_dir = tmp_path / "bin"
+    log = tmp_path / "calls.log"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "id",
+        '[ "$1" = "-u" ] && { echo 0; exit 0; }; exec /usr/bin/id "$@"\n',
+    )
+    _write_executable(
+        bin_dir / "python3",
+        '[ "$1" = "-c" ] && exit 0\n'
+        '[ "$2" = "new-context" ] && {\n'
+        '  echo "01010101010101010101010101010101 0202020202020202 - 1"\n'
+        "  exit 0\n"
+        "}\n"
+        'case "$1" in *ci_gpu.py) echo gpu >> "$CI_OTEL_TEST_LOG";; esac\n'
+        "exit 0\n",
+    )
+    _write_executable(bin_dir / "nvidia-smi", "exit 0\n")
+    # A PATH without setpriv but with the coreutils the wrapper needs.
+    for tool in ("sh", "env", "mktemp", "mkdir", "rm", "ln", "readlink", "kill"):
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_start 1 {_quoted('true')}; ci_otel_finish 0"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir),
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(tmp_path / "runtime"),
+            "CI_OTEL_TEST_LOG": str(log),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not log.exists()
+    assert "non-root GPU sampler unavailable" in result.stderr
 
 
 @pytest.mark.parametrize("sampling", ["1", "0"])
