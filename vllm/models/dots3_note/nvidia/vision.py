@@ -13,6 +13,7 @@ from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .vision_attention import (
     VisionRMSNorm,
@@ -584,7 +585,9 @@ class DotsMoEVitModel(PreTrainedModel):
 
     def rot_pos_emb(self, grid_thw_cpu: torch.Tensor):
         pos_ids = torch.cat(self.get_pos_ids_by_grid(grid_thw_cpu), dim=0)
-        pos_ids = pos_ids.to(self.device, non_blocking=True)
+        # pos_ids is built on the host; stage it through pinned memory so the
+        # H2D copy stays asynchronous instead of stalling every vision step.
+        pos_ids = async_tensor_h2d(pos_ids, device=self.device)
         max_grid_size = int(grid_thw_cpu[:, 1:].max())
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
         return rotary_pos_emb_full[pos_ids].flatten(1)
@@ -602,7 +605,7 @@ class DotsMoEVitModel(PreTrainedModel):
             self.config.attn_implementation, eager_fallback="eager_v2"
         )
         return VitForwardMeta(
-            cu_seqlens=cu_seqlens_cpu.to(self.device, non_blocking=True),
+            cu_seqlens=async_tensor_h2d(cu_seqlens_cpu, device=self.device),
             max_seqlen=int(seq_per_frame.max()),
             rotary_pos_emb=prepare_rotary_pos_emb_vision(
                 self.rot_pos_emb(grid_thw_cpu)
