@@ -16,6 +16,7 @@ one Triton kernel, or fall back to NCCL when the TP group has no symmetric
 memory.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -105,13 +106,22 @@ class ShardQSplit(NamedTuple):
         return self.token_ids[start : start + self.num_tokens_per_rank[rank]]
 
 
+ShardQEligibility = Callable[
+    ["CommonAttentionMetadata", "VllmConfig", ShardQSplit], bool
+]
+
+
 def build_shardq_split(
-    common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
+    common_attn_metadata: "CommonAttentionMetadata",
+    vllm_config: "VllmConfig",
+    *,
+    eligibility: ShardQEligibility | None = None,
 ) -> ShardQSplit | None:
     """This step's `zigzag_split` over the TP group of the tokens after the
     decodes (requests of at most 1 + num_speculative_tokens tokens). None when
     too few tokens follow the decodes, none of their requests is longer than
-    the top-k, or a rank would own no tokens.
+    the top-k, a rank would own no tokens, or `eligibility` rejects the
+    split.
     """
     spec_config = vllm_config.speculative_config
     num_spec = spec_config.num_speculative_tokens if spec_config else 0
@@ -140,7 +150,12 @@ def build_shardq_split(
     # virtually never look like that.
     if num_tokens_per_rank.min() == 0:
         return None
-    return ShardQSplit(num_decode_tokens, token_ids, num_tokens_per_rank)
+    split = ShardQSplit(num_decode_tokens, token_ids, num_tokens_per_rank)
+    if eligibility is not None and not eligibility(
+        common_attn_metadata, vllm_config, split
+    ):
+        return None
+    return split
 
 
 @triton.jit
@@ -217,6 +232,59 @@ class ShardQWorkspace(DirectCPWorkspace):
 
 # Shared by every ShardQ layer; without it the exchanges use NCCL.
 _workspace: ShardQWorkspace | None = None
+# The exchange layout `_workspace` was allocated for.
+_workspace_signature: tuple[int | torch.dtype, ...] | None = None
+
+
+def _shardq_buffer_signature(
+    world_size: int,
+    device_index: int,
+    num_heads: int,
+    query_head_dim: int,
+    output_head_dim: int,
+    query_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+    max_num_tokens: int,
+    max_local_tokens: int,
+    num_ubatches: int,
+) -> tuple[int | torch.dtype, ...]:
+    """The exchange layout a workspace's buffers are sized for."""
+    return (
+        world_size,
+        device_index,
+        num_heads,
+        query_head_dim,
+        output_head_dim,
+        query_dtype,
+        output_dtype,
+        max_num_tokens,
+        max_local_tokens,
+        num_ubatches,
+    )
+
+
+def _check_shardq_workspace(
+    existing: tuple[int | torch.dtype, ...] | None,
+    requested: tuple[int | torch.dtype, ...],
+) -> None:
+    """Reject reusing the process-wide workspace for a different layout."""
+    if existing is not None and existing != requested:
+        raise RuntimeError(
+            f"ShardQ exchange buffers are already allocated for {existing}, not "
+            f"{requested}; models with different ShardQ layouts cannot share a process"
+        )
+
+
+def release_shardq_buffers() -> None:
+    """Drop the process-wide exchange workspace and its group-bound peer pointers.
+
+    The buffers and the peer pointers `symm_mem.rendezvous` returned belong to
+    the TP group that allocated them, so a later engine in the same process must
+    allocate its own instead of reusing them.
+    """
+    global _workspace, _workspace_signature
+    _workspace = None
+    _workspace_signature = None
 
 
 def allocate_shardq_buffers(
@@ -234,9 +302,9 @@ def allocate_shardq_buffers(
         "token (sparse_mla_shard_q).",
         vllm_config.attention_config.sparse_mla_shard_q_min_tokens,
     )
-    global _workspace
+    global _workspace, _workspace_signature
     group = get_tp_group()
-    if _workspace is not None or not direct_cp_enabled(group, torch.bfloat16, None):
+    if not direct_cp_enabled(group, torch.bfloat16, None):
         return
     max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     # A rank owns at most two chunks of ceil(n / (2 * world)) per request.
@@ -245,12 +313,27 @@ def allocate_shardq_buffers(
         + 2 * vllm_config.scheduler_config.max_num_seqs
     )
     num_ubatches = max(vllm_config.parallel_config.num_ubatches, 1)
-    device = torch.device(
-        current_platform.device_type, torch.accelerator.current_device_index()
+    device_index = torch.accelerator.current_device_index()
+    signature = _shardq_buffer_signature(
+        group.world_size,
+        device_index,
+        num_heads,
+        query_head_dim,
+        output_head_dim,
+        query_dtype,
+        output_dtype,
+        max_num_tokens,
+        max_local_tokens,
+        num_ubatches,
     )
+    if _workspace is not None:
+        # One workspace serves every ShardQ layer of a model; another model in
+        # the same process may only share it when it needs the same layout.
+        _check_shardq_workspace(_workspace_signature, signature)
+        return
     _workspace = ShardQWorkspace(
         group.device_group,
-        device,
+        torch.device(current_platform.device_type, device_index),
         num_ubatches,
         q=(
             (max_local_tokens, group.world_size * num_heads, query_head_dim),
@@ -258,6 +341,7 @@ def allocate_shardq_buffers(
         ),
         out=((max_num_tokens, num_heads, output_head_dim), output_dtype),
     )
+    _workspace_signature = signature
 
 
 def _all_to_all(
@@ -361,3 +445,23 @@ def unshard_out(
     if decode_out is not None:
         restored[: metadata.num_decode_tokens] = decode_out
     return restored
+
+
+def copy_shardq_out(
+    output: torch.Tensor,
+    restored: torch.Tensor,
+    num_decode_tokens: int,
+    local_heads: int,
+) -> None:
+    """Write the unsharded prefill rows into the caller's head-sharded output.
+
+    `output` may hold a padded batch (e.g. a PIECEWISE CUDA-graph bucket) while
+    the split restores only the step's tokens; write exactly the rows the split
+    covered and leave any padding after them untouched, as the head-sharded path
+    does.
+    """
+    active_end = restored.shape[0]
+    assert active_end <= output.shape[0]
+    output[num_decode_tokens:active_end, :local_heads].copy_(
+        restored[num_decode_tokens:]
+    )

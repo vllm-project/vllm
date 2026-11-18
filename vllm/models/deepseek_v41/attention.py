@@ -73,6 +73,7 @@ from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+from vllm.models.deepseek_v41.shardq import dsv41_shardq_eligible
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
@@ -1349,6 +1350,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
         self.candidate_indexer = False
+        self.use_shardq = False
         # aiter's paged MXFP4 kernels write this cache and read it in place.
         self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
             vllm_config
@@ -1404,6 +1406,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         )
         return FullAttentionManager.layer_config(spec)
 
+    # The attention path and the indexer must reject the same splits.
+    shardq_eligibility = staticmethod(dsv41_shardq_eligible)
+
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
@@ -1425,6 +1430,29 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                 return CandidateIndexerBackend
             return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
+
+
+def _short_context_topk_rows(
+    positions: torch.Tensor,
+    indexer_metadata: Any,
+) -> tuple[torch.Tensor, int]:
+    """Positions the short-context top-k fill reads, and how many rows.
+
+    ShardQ keeps the step's decodes in place and packs this rank's tokens
+    after them, so the fill must use those compact rows' positions instead of
+    the batch's first rows.
+    """
+    gather = (
+        indexer_metadata.prefill.shardq_gather_indices
+        if indexer_metadata.prefill is not None
+        else None
+    )
+    if gather is None:
+        return (
+            positions,
+            indexer_metadata.num_decode_tokens + indexer_metadata.num_prefill_tokens,
+        )
+    return positions[gather], gather.numel()
 
 
 class DeepseekV4Indexer(nn.Module):
@@ -1691,14 +1719,13 @@ class DeepseekV4Indexer(nn.Module):
                 if self.owns_k:
                     self._produce_k(cache_latent, cache_positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
-                num_tokens = (
-                    indexer_metadata.num_decode_tokens
-                    + indexer_metadata.num_prefill_tokens
+                short_positions, num_tokens = _short_context_topk_rows(
+                    positions, indexer_metadata
                 )
                 if num_tokens > 0:
                     fill_short_context_topk_indices[(num_tokens,)](
                         self.topk_indices_buffer,
-                        positions,
+                        short_positions,
                         TOP_K=self.topk_tokens,
                         COMPRESS_RATIO=self.compress_ratio,
                         PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),

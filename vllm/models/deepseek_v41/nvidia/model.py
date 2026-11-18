@@ -4,6 +4,7 @@ import typing
 from collections.abc import Callable, Iterable
 from functools import partial
 from itertools import islice
+from typing import Any
 
 import regex as re
 import torch
@@ -320,6 +321,64 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         and parallel_config.tensor_parallel_size > 1
         and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
     )
+
+
+def _finalize_shardq(layers: Iterable[nn.Module], enabled: bool) -> None:
+    """Apply the model-level ShardQ decision and allocate one workspace.
+
+    Each layer keeps its static `shardq_capable` (which also excludes the
+    candidate source/consumers); this applies the bounded-replay decision on
+    top.  A shared cache feeds one top-k layout to every main-batch consumer,
+    so a cache is enabled only when all of its main-batch consumers are;
+    disagreement disables the whole connected domain and falls back to the
+    head-sharded path.  Replay-only layers do not participate: their private
+    builders force the head-sharded path.
+    """
+    attentions: list[Any] = []
+    for layer in layers:
+        attn = getattr(layer, "attn", None)
+        if attn is None:
+            continue
+        set_enabled = getattr(attn, "set_shardq_enabled", None)
+        if set_enabled is None:
+            continue
+        set_enabled(enabled)
+        attentions.append(attn)
+
+    domains: dict[int, tuple[Any, list[Any]]] = {}
+    for attn in attentions:
+        if not getattr(attn, "shardq_main_batch", False):
+            continue
+        for cache in attn.shardq_shared_caches():
+            entry = domains.setdefault(id(cache), (cache, []))
+            entry[1].append(attn)
+
+    disabled = {
+        id(attn)
+        for attn in attentions
+        if getattr(attn, "shardq_main_batch", False) and not attn.use_shardq
+    }
+    changed = True
+    while changed:
+        changed = False
+        for _, users in domains.values():
+            if any(id(user) in disabled for user in users):
+                for user in users:
+                    if id(user) not in disabled:
+                        disabled.add(id(user))
+                        changed = True
+    for attn in attentions:
+        if id(attn) in disabled and attn.use_shardq:
+            attn.set_shardq_enabled(False)
+    for cache, users in domains.values():
+        cache.use_shardq = all(user.use_shardq for user in users)
+
+    workspace_allocator = next(
+        (attn.allocate_shardq_workspace for attn in attentions if attn.use_shardq),
+        None,
+    )
+    if workspace_allocator is not None:
+        workspace_allocator()
 
 
 def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
@@ -1103,6 +1162,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 cut + 1,
                 self.end_layer - 1,
                 config.sliding_window,
+            )
+        shardq_requested = vllm_config.attention_config.sparse_mla_shard_q
+        shardq_enabled = shardq_requested and self.decoder_replay_layers is not None
+        _finalize_shardq(self.layers, shardq_enabled)
+        if shardq_requested and not shardq_enabled:
+            # ShardQ's token-sharded prefill is validated on the replay split
+            # only; without bounded replay, fall back to the head-sharded path.
+            logger.info_once(
+                "ShardQ disabled for DeepSeek-V4.1: SWA bounded replay is off."
             )
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
@@ -2033,6 +2101,13 @@ class DeepseekV41LLMForCausalLM(
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
+        for layer in islice(
+            self.model.layers, self.model.start_layer, self.model.end_layer
+        ):
+            attn = getattr(layer, "attn", None)
+            prepare = getattr(attn, "prepare_shardq_sink", None)
+            if prepare is not None:
+                prepare()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.

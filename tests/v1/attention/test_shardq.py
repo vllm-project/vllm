@@ -266,3 +266,57 @@ def test_builder_selects_mqa_after_shardq_split():
     if not supported:
         pytest.skip(reason)
     mp.spawn(_check_builder_shardq_route, args=(world, get_open_port()), nprocs=world)
+
+
+def test_copy_shardq_out_leaves_padding_untouched():
+    """A padded batch (e.g. a PIECEWISE CUDA-graph bucket) sizes the caller's
+    output beyond the step's tokens; the restored rows are written without
+    requiring the padding to match, and the padding keeps its values."""
+    num_decode, prefill, padding, heads, dim = 2, 6, 8, 4, 8
+    restored = torch.randn(num_decode + prefill, heads, dim)
+    output = torch.full((num_decode + prefill + padding, 2 * heads, dim), -1.0)
+    shardq.copy_shardq_out(output, restored, num_decode, heads)
+    torch.testing.assert_close(
+        output[num_decode : num_decode + prefill, :heads], restored[num_decode:]
+    )
+    assert (output[:num_decode] == -1).all()
+    assert (output[num_decode + prefill :] == -1).all()
+    assert (output[:, heads:] == -1).all()
+
+
+def test_shardq_workspace_layout_guards_reuse():
+    """The exchange workspace is process-wide and sized for one layout: a second
+    model with different heads, dims or dtypes must not silently reuse it, and a
+    shutdown must let a later engine in the same process allocate its own."""
+    signature = shardq._shardq_buffer_signature(
+        world_size=8,
+        device_index=0,
+        num_heads=8,
+        query_head_dim=512,
+        output_head_dim=512,
+        query_dtype=torch.bfloat16,
+        output_dtype=torch.bfloat16,
+        max_num_tokens=16384,
+        max_local_tokens=2064,
+        num_ubatches=1,
+    )
+    shardq._check_shardq_workspace(None, signature)
+    shardq._check_shardq_workspace(signature, signature)
+    other = shardq._shardq_buffer_signature(
+        world_size=8,
+        device_index=0,
+        num_heads=8,
+        query_head_dim=576,
+        output_head_dim=512,
+        query_dtype=torch.float8_e4m3fn,
+        output_dtype=torch.bfloat16,
+        max_num_tokens=16384,
+        max_local_tokens=2064,
+        num_ubatches=1,
+    )
+    assert other != signature
+    with pytest.raises(RuntimeError, match="different ShardQ layouts"):
+        shardq._check_shardq_workspace(signature, other)
+    shardq.release_shardq_buffers()
+    shardq.release_shardq_buffers()
+    assert shardq._workspace is None and shardq._workspace_signature is None
