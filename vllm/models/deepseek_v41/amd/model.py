@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -83,6 +84,7 @@ from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.platforms.rocm import on_gfx942
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -171,10 +173,6 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the ROCm sparse-MLA implementation for DeepSeek V4.1."""
-    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-        raise NotImplementedError(
-            "DeepSeek-V4.1 PCP currently supports NVIDIA CUDA only."
-        )
     backend = vllm_config.attention_config.backend
     if backend is not None and backend not in (
         AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4,
@@ -192,6 +190,28 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
     return DeepseekV41ROCMAiterMLAAttention
+
+
+def _validate_pcp_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size <= 1:
+        return
+    if (
+        parallel_config.pipeline_parallel_size != 1
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+        or parallel_config.use_ubatching
+        or vllm_config.speculative_config is not None
+        or vllm_config.kv_transfer_config is not None
+        or vllm_config.cache_config.enable_prefix_caching
+        or vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
+        or vllm_config.kernel_config.monokernel
+    ):
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP on ROCm currently requires PP=DP=DCP=1, with no "
+            "microbatching, speculative decoding, KV transfer, prefix caching, "
+            "MegaMoE, or monokernel."
+        )
 
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
@@ -371,10 +391,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
             if out is not None:
                 return out
-        # Layer 0's attention seam projects the 2-D embedding with the folded
-        # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
-        # The fused kernel only takes the latter, so that seam keeps the
-        # separate attn_norm.
+        # Layer 0's attention seam keeps the separate attn_norm: where the fused
+        # kernel exists (gfx950), that seam projects the 2-D embedding with the
+        # folded hc_attn_fn_broadcast, which the fused kernel does not take.
         fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
         mhc_overlap = self.mhc_overlap
         if mhc_overlap is not None and (
@@ -397,18 +416,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             if x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
-                assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                # When layer 0 is a whole mono layer (gfx942), the
-                # entry seam projects the expanded residual with the
-                # unfolded hc_attn_fn, as K1 does, instead of the embedding
-                # with the folded copy. The hc copies are equal, so the
-                # products are the same and only their order of addition
-                # changes, and pre_mix None still selects copy 0 as the
-                # layer input. The AITER op mhc_pre_delayed_aiter takes this
-                # form. The folded form has no AITER kernel on gfx942 and runs
-                # the eager reference instead, about 120 small kernels a step.
-                unfolded = self.mono is not None and self.mono.unfolded_entry
+                # gfx942 projects the expanded residual with the unfolded hc_attn_fn,
+                # which AITER takes; the equal hc copies only reorder the additions.
+                unfolded = on_gfx942()
+                if not unfolded:
+                    assert self.hc_attn_fn_broadcast is not None
                 residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
@@ -578,6 +591,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        _validate_pcp_config(vllm_config)
         self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
@@ -863,6 +877,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
+
+        if (
+            input_ids is not None
+            and self.parallel_config.prefill_context_parallel_size > 1
+            and not self.parallel_config.enable_expert_parallel
+        ):
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
 
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
