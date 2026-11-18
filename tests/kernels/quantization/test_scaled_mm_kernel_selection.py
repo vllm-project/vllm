@@ -19,11 +19,11 @@ from vllm.model_executor.kernels.linear import (
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
@@ -115,8 +115,9 @@ def test_fp8_linear_backend_override(platform_mock, _, monkeypatch, strict):
 
 def test_is_supported_is_abstract():
     """Test that is_supported() is properly defined as abstract."""
-    assert issubclass(ScaledMMLinearKernel, ABC)
-    assert hasattr(ScaledMMLinearKernel, "is_supported")
+    for kernel_cls in (FP8ScaledMMLinearKernel, Int8ScaledMMLinearKernel):
+        assert issubclass(kernel_cls, ABC)
+        assert "is_supported" in kernel_cls.__abstractmethods__
 
 
 def test_cpu_kernel_implements_is_supported():

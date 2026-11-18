@@ -22,7 +22,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     LinearKernel,
     LinearKernelOracle,
-    MMLinearKernel,
     MMLinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.mixed_precision import (
@@ -193,7 +192,6 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
@@ -672,7 +670,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
 }
 
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
+_KernelT = TypeVar("_KernelT", bound=LinearKernel)
 _LinearKernelT = TypeVar("_LinearKernelT", bound=LinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
@@ -892,7 +890,6 @@ def init_fp8_linear_kernel(
                 scope="global",
             )
 
-        # TODO make scaled_mm kernels inherit from MMLinearKernel
         # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
         if issubclass(kernel_type, FP8ScaledMMLinearKernel):
             return kernel_type(
@@ -1493,10 +1490,8 @@ __all__ = [
     "init_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
-    "ScaledMMLinearKernel",
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
-    "ScaledMMLinearLayerConfig",
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",

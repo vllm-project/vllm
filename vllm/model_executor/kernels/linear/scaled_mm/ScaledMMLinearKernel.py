@@ -4,7 +4,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar
 
 import torch
 
@@ -56,26 +55,8 @@ _Int8ParamsT = tuple[
     torch.Tensor | None,  # azp_adj
 ]
 
-_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
-_ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
-
-class ScaledMMLinearKernel(LinearKernel[_ConfigT], Generic[_ConfigT, _ParamsT]):
-    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
-        assert self.can_implement(c)[0]
-        assert self.is_supported()[0]
-        self.config = c
-        self.layer_param_names = layer_param_names
-
-    # return a covariant type in the subclass
-    @abstractmethod
-    def _get_layer_params(self, layer) -> _ParamsT:
-        raise NotImplementedError
-
-
-class FP8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, _FP8ParamsT], ABC
-):
+class FP8ScaledMMLinearKernel(LinearKernel[FP8ScaledMMLinearLayerConfig], ABC):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
@@ -86,7 +67,8 @@ class FP8ScaledMMLinearKernel(
             num_token_padding=self.get_output_padding(),
         )
         self.fp8_dtype = current_platform.fp8_dtype()
-        super().__init__(c, layer_param_names)
+        super().__init__(c)
+        self.layer_param_names = layer_param_names
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
@@ -155,9 +137,13 @@ class FP8ScaledMMLinearKernel(
         return None
 
 
-class Int8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
-):
+class Int8ScaledMMLinearKernel(LinearKernel[Int8ScaledMMLinearLayerConfig], ABC):
+    def __init__(
+        self, c: Int8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c)
+        self.layer_param_names = layer_param_names
+
     def _get_layer_params(self, layer) -> _Int8ParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
         return (

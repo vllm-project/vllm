@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+
+from .layer_utils import replace_parameter
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        Int8ScaledMMLinearLayerConfig,
+    )
 
 
 def cutlass_fp8_supported() -> bool:
@@ -70,6 +79,70 @@ def convert_to_channelwise(
         start = end
 
     return weight_scale_channel
+
+
+def prepare_int8_scaled_mm_weights(
+    layer: torch.nn.Module,
+    config: "Int8ScaledMMLinearLayerConfig",
+    param_names: Sequence[str],
+) -> None:
+    """Convert int8 W8A8 weights on `layer` to the `cutlass_scaled_mm` layout.
+
+    The weight becomes `[K, N]`, fused-module weight scales become per-channel,
+    static asymmetric input scales and zero points collapse to one of each, and
+    `azp_adj` is computed for asymmetric activations (see
+    `csrc/quantization/w8a8/cutlass/Epilogues.md`). Input parameters the scheme
+    does not use are cleared.
+    """
+    w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = param_names
+    weight = getattr(layer, w_q_name)
+    replace_parameter(
+        layer, w_q_name, torch.nn.Parameter(weight.t().data, requires_grad=False)
+    )
+
+    weight_scale = getattr(layer, w_s_name)
+    if len(layer.logical_widths) > 1 and not config.is_channelwise:
+        weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
+    replace_parameter(
+        layer, w_s_name, torch.nn.Parameter(weight_scale.data, requires_grad=False)
+    )
+
+    if config.is_static_input_scheme:
+        input_scale = getattr(layer, i_s_name)
+        if config.input_symmetric:
+            replace_parameter(
+                layer,
+                i_s_name,
+                torch.nn.Parameter(input_scale.max(), requires_grad=False),
+            )
+        else:
+            # Reconstruct the ranges to find a single scale and zero point.
+            int8_traits = torch.iinfo(torch.int8)
+            azps = getattr(layer, i_zp_name).to(dtype=torch.int32)
+            range_max = (input_scale * (int8_traits.max - azps)).max()
+            range_min = (input_scale * (int8_traits.min - azps)).min()
+            scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
+            replace_parameter(
+                layer, i_s_name, torch.nn.Parameter(scale, requires_grad=False)
+            )
+            # The zero point loads as int8 but is used as int32.
+            azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
+            replace_parameter(
+                layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
+            )
+    else:
+        setattr(layer, i_s_name, None)
+        setattr(layer, i_zp_name, None)
+
+    if config.input_symmetric:
+        setattr(layer, azp_adj_name, None)
+    else:
+        weight = getattr(layer, w_q_name)
+        azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+        if config.is_static_input_scheme:
+            # Per-tensor zero points are folded into azp_adj.
+            azp_adj = getattr(layer, i_zp_name) * azp_adj
+        replace_parameter(layer, azp_adj_name, azp_adj)
 
 
 def requantize_with_max_scale(

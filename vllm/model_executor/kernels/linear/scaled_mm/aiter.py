@@ -18,6 +18,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTokenSym,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    prepare_int8_scaled_mm_weights,
+)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -25,18 +28,18 @@ from .BlockScaledMMLinearKernel import (
     FP8BlockParams,
     Fp8BlockScaledMMLinearKernel,
 )
-from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .rocm import ROCmFP8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
 
 logger = init_logger(__name__)
 
 
-class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
+class AiterInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -69,7 +72,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             return False, "supports symmetric quantization only."
         # AITER actually supports only per-token-per-channel GEMM.
         # Fused per-tensor weight scales become per-channel after loading
-        # (see CutlassInt8ScaledMMLinearKernel).
+        # (see `prepare_int8_scaled_mm_weights`).
         weight_per_channel = c.is_channelwise or c.is_fused_module
         if c.is_static_input_scheme or not weight_per_channel:
             return (
@@ -77,6 +80,9 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                 "supports only per-token activations with per-channel weights.",
             )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        prepare_int8_scaled_mm_weights(layer, self.config, self.layer_param_names)
 
     def apply_weights(
         self,
@@ -125,7 +131,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
         # a to be [M, K]
         # b to be [N, K]
-        # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+        # prepare_int8_scaled_mm_weights leaves `w_q` in [K, N] format
         return rocm_aiter_ops.w8a8_gemm(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
