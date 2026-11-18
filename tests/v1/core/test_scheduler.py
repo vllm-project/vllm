@@ -660,6 +660,45 @@ def test_prompt_embeds_waiting_request_is_not_starved():
     assert _new_req_ids(scheduler.schedule()) == ["b"]
 
 
+def test_prompt_embeds_budget_counts_only_uncached_rows():
+    """Workers get only the rows past a prefix-cache hit, so only those count
+    against the budget. B shares two cached 16-row blocks with A and sends 16
+    of its 48 rows, so B and C (40 rows) fit 64 rows together; B's full 48 rows
+    would not."""
+    scheduler = create_scheduler(
+        max_model_len=64, enable_prompt_embeds=True, enable_prefix_caching=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.max_num_prompt_embeds_tokens = 64
+    init_none_hash(sha256)
+    block_hasher = get_request_block_hasher(16, sha256)
+    shared = torch.randn(40, 8)
+
+    def request(request_id: str, prompt_embeds: torch.Tensor) -> Request:
+        sampling_params = SamplingParams(max_tokens=4)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            prompt_embeds=prompt_embeds,
+            block_hasher=block_hasher,
+        )
+
+    scheduler.add_request(request("a", torch.cat([shared, torch.randn(8, 8)])))
+    assert _new_req_ids(scheduler.schedule()) == ["a"]
+
+    scheduler.add_request(request("b", torch.cat([shared, torch.randn(8, 8)])))
+    scheduler.add_request(request("c", torch.randn(40, 8)))
+    output = scheduler.schedule()
+
+    assert _new_req_ids(output) == ["b", "c"]
+    new_b = output.scheduled_new_reqs[0]
+    assert new_b.prompt_embeds_offset == 32
+    assert new_b.prompt_embeds is not None and len(new_b.prompt_embeds) == 16
+
+
 def test_prompt_embeds_budget_released_on_preemption():
     """Preempting a request mid-prefill releases its rows (the workers drop
     them), so a waiting prompt_embeds request that did not fit is admitted."""

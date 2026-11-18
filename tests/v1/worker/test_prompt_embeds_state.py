@@ -38,6 +38,8 @@ class _NewReqData:
     req_id: str
     prompt_embeds: torch.Tensor | None
     prompt_is_token_ids: list[bool] | None = None
+    prompt_embeds_offset: int = 0
+    num_computed_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -200,3 +202,20 @@ def test_rows_over_budget_fail_loudly():
 
     state.remove_request("a")
     state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
+
+
+def test_overlay_reads_rows_past_the_offset():
+    """Rows below `prompt_embeds_offset` were computed before the request was
+    sent and are not sent; row 0 holds that prompt position."""
+    state = _make_state()
+    embeds = torch.randn(10, HIDDEN, dtype=torch.float32)
+    state.add_request(
+        0,
+        _NewReqData("a", embeds[6:], prompt_embeds_offset=6, num_computed_tokens=6),
+    )
+    state.apply_staged_writes()
+
+    out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[6], num_tokens=4)
+
+    torch.testing.assert_close(out, embeds[6:10].to(DEVICE))
+    assert "a" not in state.gpu_tensors
