@@ -230,7 +230,7 @@ async fn render_completion(
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let text_request = lower_completion_request(
+    let text_requests = lower_completion_request(
         body,
         &model_resolution(&state),
         request_context,
@@ -238,19 +238,28 @@ async fn render_completion(
     )?;
     // Lowering has checked that `n` is at least 1.
     validate_n_limit(n.unwrap_or(1), state.max_n_sequences)?;
-    validate_max_output_tokens(
-        "max_tokens",
-        text_request.sampling_params.max_tokens,
-        state.text.max_model_len(),
-    )?;
-    Ok(Json(vec![lower_render_request(
-        &state,
-        text_request,
-        model,
-        n,
-        stream,
-        stream_options,
-        return_token_ids,
-        MmPayload::Tensors,
-    )?]))
+    for text_request in &text_requests {
+        validate_max_output_tokens(
+            "max_tokens",
+            text_request.sampling_params.max_tokens,
+            state.text.max_model_len(),
+        )?;
+    }
+    // Like Python, one generate request per prompt.
+    let generate_requests = text_requests
+        .into_iter()
+        .map(|text_request| {
+            lower_render_request(
+                &state,
+                text_request,
+                model.clone(),
+                n,
+                stream,
+                stream_options.clone(),
+                return_token_ids,
+                MmPayload::Tensors,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Json(generate_requests))
 }
