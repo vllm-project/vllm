@@ -146,14 +146,6 @@ def xpu_gdn_kernel_available() -> bool:
     return hasattr(torch.ops._xpu_C, "gdn_attention")
 
 
-def xpu_gdn_kernel_supports_checkpoints() -> bool:
-    """Whether the SYCL GDN op writes internal prefill checkpoints itself."""
-    return xpu_gdn_kernel_available() and any(
-        arg.name == "checkpoint_offsets"
-        for arg in torch.ops._xpu_C.gdn_attention.default._schema.arguments
-    )
-
-
 def _aiter_flydsl_unsupported_reasons(
     vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
 ) -> list[str]:
@@ -859,10 +851,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
             elif self.gdn_prefill_backend == "triton" and current_platform.is_cuda():
                 self._checkpoint_alignment = FLA_CHUNK_SIZE
-            elif (
-                self.gdn_prefill_backend == "sycl"
-                and xpu_gdn_kernel_supports_checkpoints()
-            ):
+            elif self.gdn_prefill_backend == "sycl":
                 from vllm._xpu_ops import SYCL_GDN_CHECKPOINT_ALIGNMENT
 
                 self._checkpoint_alignment = SYCL_GDN_CHECKPOINT_ALIGNMENT
