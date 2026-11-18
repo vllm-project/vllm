@@ -34,7 +34,6 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.cuda_graph import cudagraph_wrappers_enabled
 from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.forward_context import (
@@ -339,8 +338,6 @@ class BreakableCUDAGraphWrapper:
             self.runtime_mode is not None
             and cudagraph_runtime_mode != self.runtime_mode
         ):
-            return self.runnable(*args, **kwargs)
-        if not cudagraph_wrappers_enabled():
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None

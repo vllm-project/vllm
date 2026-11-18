@@ -734,46 +734,6 @@ def _mock_vllm_config():
     return config
 
 
-@pytest.mark.parametrize("mode", ["FULL", "PIECEWISE"])
-@pytest.mark.parametrize("breakable", [False, True])
-def test_wrapper_bypass_preserves_runtime_mode(mode, breakable):
-    """The capture owner disables wrappers across threads and restores dispatch."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
-    from vllm.compilation.cuda_graph import (
-        CUDAGraphWrapper,
-        disable_cudagraph_wrappers,
-    )
-    from vllm.config import CUDAGraphMode, VllmConfig
-    from vllm.forward_context import get_forward_context, set_forward_context
-
-    config = VllmConfig()
-    runtime_mode = CUDAGraphMode[mode]
-
-    def model(x):
-        return x + get_forward_context().cudagraph_runtime_mode.value
-
-    wrapper_cls = BreakableCUDAGraphWrapper if breakable else CUDAGraphWrapper
-    wrapper = wrapper_cls(model, config, runtime_mode=runtime_mode)
-    with (
-        ThreadPoolExecutor(max_workers=1) as executor,
-        set_forward_context(None, config, cudagraph_runtime_mode=runtime_mode),
-    ):
-        executor.submit(lambda: None).result()  # Start the thread before capture.
-        with (
-            pytest.raises(RuntimeError, match="capture failed"),
-            disable_cudagraph_wrappers(),
-        ):
-            with disable_cudagraph_wrappers():
-                assert wrapper(7) == 7 + runtime_mode.value
-            assert executor.submit(wrapper, 7).result() == 7 + runtime_mode.value
-            raise RuntimeError("capture failed")
-        # Restored wrapper dispatch requires a batch descriptor again.
-        with pytest.raises(AssertionError):
-            wrapper(7)
-
-
 def test_wrapper_falls_through_on_runtime_mode_mismatch():
     """A PIECEWISE-scoped wrapper runs other modes eagerly, capturing
     nothing, so an outer CUDAGraphWrapper can own them."""

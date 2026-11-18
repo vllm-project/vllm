@@ -57,7 +57,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         )
         self.layers = layers
         self.breakable_cg_runner: BreakableCUDAGraphWrapper = BreakableCUDAGraphWrapper(
-            layers.run_layers, replay_config
+            layers.run_layers, replay_config, runtime_mode=CUDAGraphMode.PIECEWISE
         )
         config, act = vllm_config.model_config.hf_config, vllm_config.model_config.dtype
         assert isinstance(act, torch.dtype)
