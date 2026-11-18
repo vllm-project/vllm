@@ -991,7 +991,6 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
             str(model_path),
             dtype=dtype,
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             enforce_eager=True,
             enable_flashinfer_autotune=False,
             max_model_len=64,
@@ -1068,7 +1067,6 @@ def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
         with vllm_runner(
             str(model_path),
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             enforce_eager=True,
             enable_flashinfer_autotune=False,
             max_model_len=32,
@@ -1187,7 +1185,6 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
             str(target),
             speculative_config=speculation,
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             dtype="bfloat16",
             enforce_eager=True,
             enable_flashinfer_autotune=False,

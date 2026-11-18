@@ -1256,13 +1256,15 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Include encoder inputs needed to replay the prefix tail.
-                    ec_computed_tokens = num_computed_tokens
+                    # Computed tokens after the replay rewind applied later by
+                    # _mark_prefix_replay; must match its calculation.
+                    # Used for the encoder-input and prefill-deferral checks.
+                    effective_computed_tokens = num_computed_tokens
                     if not window_loaded:
-                        ec_computed_tokens = max(
+                        effective_computed_tokens = max(
                             0, num_computed_tokens - self.prefix_replay_tokens
                         )
-                    if self._ec_transfer_pending(request, ec_computed_tokens):
+                    if self._ec_transfer_pending(request, effective_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1285,8 +1287,9 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+                    effective_computed_tokens = num_computed_tokens
 
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    if self._ec_transfer_pending(request, effective_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1319,7 +1322,10 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                elif (
+                    defer_prefills
+                    and effective_computed_tokens < request.num_tokens - 1
+                ):
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
                     break
