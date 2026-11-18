@@ -3,7 +3,8 @@
 """LoRA on GTE (`bert_with_rope`) encoders: serving a PEFT adapter must match
 serving the base model with the LoRA delta merged into its weights. The MLP is
 the checkpoint's fused `up_gate_proj` (`[up; gate]`), so an adapter applied to
-the wrong half shows up here."""
+the wrong half shows up here. The reranker adapter also replaces the
+classification head through `modules_to_save`."""
 
 import json
 import shutil
@@ -37,10 +38,11 @@ MODELS = {  # task: (model, vLLM architecture for its generic `New*` name)
 }
 
 
-def _build(root: Path, model_id: str) -> tuple[str, str, str]:
+def _build(root: Path, task: str) -> tuple[str, str, str]:
     base = Path(
         hf_api().snapshot_download(
-            repo_id=model_id, allow_patterns=["*.json", "*.safetensors", "*.model"]
+            repo_id=MODELS[task][0],
+            allow_patterns=["*.json", "*.safetensors", "*.model"],
         )
     )
     merged, lora = root / "merged", root / "lora"
@@ -61,6 +63,14 @@ def _build(root: Path, model_id: str) -> tuple[str, str, str]:
             weight.dtype
         )
     assert len(adapter) == 2 * len(TARGETS) * 12  # 12 layers
+    # The reranker adapter also retrains its head (`modules_to_save`).
+    head = [n for n in weights if n.startswith("classifier.") and task == "classify"]
+    for name in head:
+        weight = weights[name]
+        noise = torch.randn(weight.shape, generator=gen) * 0.05
+        weights[name] = adapter[f"base_model.model.{name}"] = (
+            weight.float() + noise
+        ).to(weight.dtype)
     save_file(weights, merged / "model.safetensors", metadata={"format": "pt"})
 
     lora.mkdir()
@@ -72,6 +82,8 @@ def _build(root: Path, model_id: str) -> tuple[str, str, str]:
         "target_modules": list(TARGETS),
         "bias": "none",
     }
+    if head:
+        config["modules_to_save"] = ["classifier"]
     (lora / "adapter_config.json").write_text(json.dumps(config))
     return str(base), str(merged), str(lora)
 
@@ -111,7 +123,7 @@ def _outputs(task: str, model: str, lora: str | None = None) -> list[torch.Tenso
 
 @pytest.mark.parametrize("task", list(MODELS))
 def test_gte_lora_matches_merged(tmp_path, task):
-    base, merged, lora = _build(tmp_path, MODELS[task][0])
+    base, merged, lora = _build(tmp_path, task)
 
     base_out, lora_out = _outputs(task, base, lora)
     (merged_out,) = _outputs(task, merged)

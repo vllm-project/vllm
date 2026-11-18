@@ -199,7 +199,7 @@ class BertWithRopeGatedMLP(nn.Module):
         return hidden_states
 
 
-class BertWithRopeUpGateMLP(nn.Module):
+class GteNewMLP(nn.Module):
     """GTE's GeGLU MLP in the checkpoint's fused `[up; gate]` layout (no
     `up_gate_proj` bias), so LoRA adapters on `up_gate_proj` apply as trained."""
 
@@ -387,6 +387,7 @@ class BertWithRopeBlock(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         moe: bool = False,
+        fused_up_gate: bool = False,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
@@ -411,15 +412,15 @@ class BertWithRopeBlock(nn.Module):
                 hidden_act=config.hidden_act,
             )
         else:
-            if config.hidden_act == "geglu":
-                self.mlp = BertWithRopeUpGateMLP(
+            if fused_up_gate:
+                self.mlp = GteNewMLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     bias=bias,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp",
                 )
-            elif config.hidden_act == "silu":
+            elif config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
@@ -454,6 +455,7 @@ class BertWithRopeEncoder(nn.Module):
         self,
         vllm_config: VllmConfig,
         bias: bool = True,
+        fused_up_gate: bool = False,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
@@ -470,6 +472,7 @@ class BertWithRopeEncoder(nn.Module):
                     quant_config=quant_config,
                     bias=bias,
                     moe=every_n > 0 and (layer_idx % every_n == 1),
+                    fused_up_gate=fused_up_gate,
                     rotary_kwargs=rotary_kwargs,
                     prefix=f"{prefix}.layer.{layer_idx}",
                 )
@@ -491,6 +494,7 @@ class BertWithRopeEncoder(nn.Module):
 @default_pooling_type(seq_pooling_type="CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+    fused_up_gate = False
 
     def __init__(
         self,
@@ -508,6 +512,7 @@ class BertWithRope(nn.Module, SupportsQuant):
         self.encoder = BertWithRopeEncoder(
             vllm_config=vllm_config,
             bias=getattr(self.config, "bias", True),
+            fused_up_gate=self.fused_up_gate,
             rotary_kwargs=self.config.rotary_kwargs,
             prefix=f"{prefix}.encoder",
         )
@@ -539,7 +544,7 @@ class BertWithRope(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
 
-        if self.config.hidden_act == "silu":
+        if self.config.hidden_act in ["silu", "geglu"] and not self.fused_up_gate:
             stacked_params_mapping = [
                 # (param_name, shard_name, shard_id)
                 ("gate_up_proj", "gate_proj", 0),
@@ -603,6 +608,7 @@ class NomicBertModel(BertWithRope):
 class GteNewModel(BertWithRope, SupportsLoRA):
     # for https://huggingface.co/Alibaba-NLP/new-impl
 
+    fused_up_gate = True
     packed_modules_mapping = {
         "qkv_proj": ["qkv_proj"],
         "up_gate_proj": ["up_gate_proj"],
