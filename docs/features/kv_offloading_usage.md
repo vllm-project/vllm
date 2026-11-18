@@ -239,7 +239,7 @@ The filesystem and object-store tiers can publish hash-only `BlockStored` KV eve
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
-The `fs` and `obj` tiers accept an optional `access_mode` field that restricts the direction of traffic:
+Secondary tiers, such as `fs` and `obj`, accept an optional `access_mode` field that restricts the direction of traffic:
 
 | Value | Behavior |
 | --- | --- |
