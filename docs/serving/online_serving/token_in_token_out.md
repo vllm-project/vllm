@@ -185,10 +185,11 @@ turn2 = httpx.post(url, json={
 }).json()
 ```
 
-With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholders`: the processor cache key of each item, in the same order. Pass them back unchanged rather than building keys yourself, because the key format depends on the server's options and on whether the item was sent with a `uuid`. Send the item with `kwargs_data` instead in two cases:
+With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholders`: the processor cache key of each item, in the same order. Pass them back unchanged rather than building keys yourself because the key format depends on the server's options and on whether the item was sent with a `uuid`. Send the item with `kwargs_data` instead in three cases:
 
 - The item has been evicted from the cache, so a request by key fails.
 - The processor cache is disabled (`--mm-processor-cache-gb 0`), so the returned keys can't be reused.
+- The server runs the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) which doesn't support omitting `kwargs_data` yet. It still returns `mm_hashes`.
 
 ## Aborting requests
 
