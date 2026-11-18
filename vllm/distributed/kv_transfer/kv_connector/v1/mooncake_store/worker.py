@@ -112,7 +112,7 @@ MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _StoreGroupPlan:
     layer_specs: tuple[KVCacheSpec, ...]
     local_block_size: int
@@ -2831,7 +2831,7 @@ LOOKUP_BREAKER_COOLDOWN_S = 30.0
 RESET_TIMEOUT_S = 60.0
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, bytes]

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax-M3 NVFP4 index scorers (FlyDSL) against AITER's FP8 scorers and an
 fp32 reference over the same e4m3 keys; the context-parallel push scorer
-against the single-head scorer, bit for bit, on one GPU."""
+(4-row and 8-row request builds) against the single-head scorer, bit for bit,
+on one GPU."""
 
 import pytest
 import torch
@@ -385,6 +386,87 @@ def test_index_decode_cp_push_split_requests(num_reqs, grid):
     assert torch.equal(
         gathered[seen].view(torch.int32), expected[seen].view(torch.int32)
     )
+    ids = [torch.empty(heads, rows, 16, dtype=torch.int32, device="cuda") for _ in "ab"]
+    for score, out in zip((expected, gathered), ids):
+        minimax_m3_index_topk_decode_indices(
+            score, out, seq_lens, max_seq_len=max_seq_len, query_len=query_len
+        )
+    assert torch.equal(ids[0], ids[1])
+
+
+@pytest.mark.parametrize("num_reqs", [1, 3, 12, 20, 45])
+@pytest.mark.parametrize("page_step", [1, 2])
+@pytest.mark.parametrize(("init_blocks", "local_blocks"), [(0, 1), (1, 2)])
+@pytest.mark.parametrize("grid", [3, 512, 768])
+def test_index_decode_cp_push_8row_requests(
+    num_reqs, page_step, init_blocks, local_blocks, grid
+):
+    """DSpark 7's 8-row requests scored directly (both 4-row column groups per
+    page read, the host's 8-row build): per rank, the single-head scorer's bits
+    on every block of its runs, -inf past the length inside its last run,
+    nothing elsewhere; the four ranks cover every block once; top-k ids equal."""
+    from vllm.models.minimax_m3.amd.indexer_msa import _score_width
+
+    torch.manual_seed(1000 + num_reqs + grid)
+    query_len, heads = 8, cp.HEADS
+    lens = [s and max(s, query_len) for s in _lens(num_reqs, 40000)]  # 0: padding
+    if num_reqs > 1:
+        lens[0] = 16 * cp.CP_CH * BLOCK + 2  # the first rows' last block opens a run
+    table, num_blocks = _block_table(lens, share=True)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    cache = _index_cache(num_blocks, page_step)
+    rows = num_reqs * query_len
+    q = (torch.randn(rows, heads, D, device="cuda") * 0.5).to(torch.float8_e4m3fn)
+    max_seq_len = max(max(lens), 1)
+    width = _score_width(max_seq_len, BLOCK)
+    expected = torch.full((heads, rows, width), float("nan"), device="cuda")
+    for h in range(heads):
+        decode_host.minimax_m3_nvfp4_index_score_decode(
+            q[:, h : h + 1], cache, expected[h : h + 1], table, seq_lens,
+            init_blocks, local_blocks, query_len, max_seq_len,
+        )  # fmt: skip
+    ch = decode_host.CP8_CH
+    blocks = torch.arange(width, device="cuda")
+    nblk = ((seq_lens + BLOCK - 1) // BLOCK).repeat_interleave(query_len)[:, None]
+    seen = torch.zeros(heads, rows, width, dtype=torch.int32, device="cuda")
+    gathered = torch.full_like(expected, float("nan"))
+    for rank in range(cp.WORLD):
+        counts = torch.zeros(cp.CNT_WORDS, dtype=torch.int32, device="cuda")
+        flags = torch.zeros(cp.FLAG_BYTES // 4, dtype=torch.int32, device="cuda")
+        flags[cp.SC_FLAGS : cp.SC_FLAGS + cp.WORLD] = 1 << 30
+        flags[cp.SC_FLAGS + rank] = 0
+        iq_buf = torch.full((heads, rows, D), 0x7F, dtype=torch.uint8, device="cuda")
+        iq_buf = iq_buf.view(torch.float8_e4m3fn)
+        for p in range(heads):
+            if p != rank:
+                iq_buf[p] = q[:, p]
+                w = cp.SC_IQ + p * cp.SC_MAX_REQS
+                flags[w : w + cp.SC_MAX_REQS] = 1 << 30
+        outs = []
+        for _ in range(2):
+            actual = torch.full_like(expected, float("nan"))
+            dests = [actual[h].data_ptr() for h in range(heads)]
+            decode_host.minimax_m3_nvfp4_index_score_push_cp(
+                q[:, rank].contiguous(), cache, dests, width, rows * width * 4,
+                table, seq_lens, init_blocks, local_blocks, rank, counts,
+                [flags.data_ptr()] * 4, [iq_buf.data_ptr()] * 4, rows, grid=grid,
+                query_len=query_len,
+            )  # fmt: skip
+            outs.append(actual)
+        torch.accelerator.synchronize()
+        actual = outs[0]
+        assert torch.equal(actual.view(torch.int32), outs[1].view(torch.int32))
+        mine = (blocks // ch) % cp.WORLD == rank
+        in_runs = mine & (blocks // ch * ch < nblk)
+        inside = in_runs & (blocks < nblk)
+        assert actual[:, ~in_runs].isnan().all(), rank
+        assert (actual[:, in_runs & ~inside] == float("-inf")).all(), rank
+        assert torch.equal(
+            actual[:, inside].view(torch.int32), expected[:, inside].view(torch.int32)
+        ), rank
+        seen += inside.int()
+        gathered[:, :, mine] = actual[:, :, mine]
+    assert torch.equal(seen, (~expected.isnan()).int())
     ids = [torch.empty(heads, rows, 16, dtype=torch.int32, device="cuda") for _ in "ab"]
     for score, out in zip((expected, gathered), ids):
         minimax_m3_index_topk_decode_indices(
