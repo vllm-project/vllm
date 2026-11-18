@@ -53,6 +53,13 @@ layer's attention impl, and for sliding-window layers vLLM's window (2047, 0)
 to 1M keys a request; with a larger `max_model_len` every layer runs vLLM's
 op. 40-128 rows keep vLLM's op.
 
+Boundary attention (`VLLM_MUSE_MONO_BOUNDARY_FA=1`, default off): on the
+8-row build (one request), layers 1 and 61 (full attention) run their verify
+attention as standalone launches of the same fragment
+(`kernels/attn_frag_bnd.py`) instead of vLLM's op, with one descriptor table
+a layer. Layer 1's KV cache must then pass the same layout check as layers
+2-61.
+
 ## Contract with vLLM
 
 - Weights: read in place from vLLM's parameters (`kernels/` builds take

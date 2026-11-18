@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+import vllm.envs as envs
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -49,7 +50,7 @@ def _load_kernels() -> tuple[MonoKernels | None, str | None]:
     try:
         modules = {
             name: importlib.import_module(f"{__name__}.kernels.{name}")
-            for name in ("k3", "k5", "k5m", "attn_frag")
+            for name in ("k3", "k5", "k5m", "attn_frag", "attn_frag_bnd")
         }
     except ImportError as e:
         return None, f"needs FlyDSL and AITER's FlyDSL helpers ({e})"
@@ -134,6 +135,7 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         buckets=buckets,
         fused_attention=fused,
         kv_fp8=lm.vllm_config.cache_config.cache_dtype in FP8_KV_DTYPES,
+        boundary_attention=envs.VLLM_MUSE_MONO_BOUNDARY_FA,
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "

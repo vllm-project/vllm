@@ -571,7 +571,9 @@ class StockLaunches:
         self.calls: list[tuple[str, dict]] = []
         self.pending: dict[int, dict] = {}
         self.kernels = MonoKernels(
-            *(_Kernel(self, name) for name in ("k3", "k5", "k5m")), _AttnFrag()
+            *(_Kernel(self, name) for name in ("k3", "k5", "k5m")),
+            _AttnFrag(),
+            _AttnFragBoundary(self),
         )
 
     def launcher(self, name: str, params: list[str], run):
@@ -704,6 +706,11 @@ class _AttnFrag:
         return 4096
 
     @staticmethod
+    def make(NR, swa, kv_fp8=False):
+        assert not swa
+        return NR
+
+    @staticmethod
     def vllm_desc(
         q, kv_cache, block_table, seq_lens, out, part, nreq, scale, k_scale, v_scale
     ):
@@ -721,6 +728,25 @@ class _AttnFrag:
             k_scale.data_ptr(),
             v_scale.data_ptr(),
         ]
+
+
+class _AttnFragBoundary:
+    """The standalone fragment launch: layer `layer`'s attention from its
+    descriptor table."""
+
+    HEALTH_WORDS = 8 + 8 * _Kernel.BLOCKS
+
+    def __init__(self, owner: StockLaunches) -> None:
+        self.owner = owner
+
+    def standalone(self, nreq: int):
+        o = self.owner
+        rows = nreq * ROWS_PER_REQUEST
+
+        def run(a):
+            o._attention(a["layer"], a["dptr"], rows, nreq, fused=True)
+
+        return o.launcher("bnd", ["dptr", "health", "epoch", "layer"], run)
 
 
 def _run_k3(o: StockLaunches, key: _Key, a: dict) -> None:
@@ -819,7 +845,12 @@ class Step:
 
 
 def _run_mono(
-    tiny: TinyModel, step: Step, bnd: int, buckets: list[int], mode=CUDAGraphMode.NONE
+    tiny: TinyModel,
+    step: Step,
+    bnd: int,
+    buckets: list[int],
+    mode=CUDAGraphMode.NONE,
+    boundary_attention: bool = False,
 ):
     """The step with the monokernel attached, on the stock launches."""
     from vllm.distributed import get_tp_group
@@ -836,6 +867,7 @@ def _run_mono(
         fused_attention=fused_attention_layers(
             tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS
         ),
+        boundary_attention=boundary_attention,
     )
     try:
         return launches, step.run(tiny, mode)
@@ -886,6 +918,21 @@ def test_mono_step_matches_the_stock_loop(
     assert [a["layer"] for name, a in launches.calls if name in ("k3", "hb")] == list(
         range(FIRST_LAYER, LAST_LAYER + 1)
     )
+    _assert_same_step(stock, mono)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("num_reqs", [1, 2])
+def test_boundary_attention_runs_on_one_request_steps(tiny_model, num_reqs) -> None:
+    """VLLM_MUSE_MONO_BOUNDARY_FA: one-request steps run layers 1 and 61's
+    attention as fragment launches on their own KV caches; two-request steps
+    keep vLLM's op. Same hidden states, aux states and KV caches as stock."""
+    tiny_model.lm.set_aux_hidden_state_layers((1, 2, 60, 61, 62))
+    step = Step(tiny_model, [ROWS_PER_REQUEST] * num_reqs, seed=num_reqs)
+    stock = step.run(tiny_model)
+    launches, mono = _run_mono(tiny_model, step, 0, [8, 16], boundary_attention=True)
+    boundary = [a["layer"] for name, a in launches.calls if name == "bnd"]
+    assert boundary == ([FIRST_LAYER, LAST_LAYER + 1] if num_reqs == 1 else [])
     _assert_same_step(stock, mono)
 
 

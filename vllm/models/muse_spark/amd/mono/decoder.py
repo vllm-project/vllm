@@ -476,12 +476,14 @@ def batch_refusal(
 
 @dataclass(frozen=True, slots=True)
 class MonoKernels:
-    """The FlyDSL kernel modules (`kernels.k3`, `k5`, `k5m`, `attn_frag`)."""
+    """The FlyDSL kernel modules (`kernels.k3`, `k5`, `k5m`, `attn_frag`,
+    `attn_frag_bnd`)."""
 
     k3: ModuleType
     k5: ModuleType
     k5m: ModuleType
     attn_frag: ModuleType
+    attn_frag_bnd: ModuleType
 
 
 class _FusedAttention:
@@ -570,6 +572,111 @@ class _FusedAttention:
         return table.data_ptr() + i * self.af.DESC_WORDS * table.element_size()
 
 
+class _BoundaryAttention:
+    """The verify attention of `FIRST_LAYER` and `LAST_LAYER + 1` (both full
+    attention) as standalone fragment launches of a one-request build, in place
+    of vLLM's attention op.
+
+    Eager steps reuse one descriptor table a layer, rewritten when its
+    contents change (q is copied to a new tensor every step). A CUDA graph
+    capture writes its own table once, keyed by its contents.
+    """
+
+    def __init__(
+        self,
+        kernels: MonoKernels,
+        scales: dict[int, float],
+        rows: int,
+        dims: MonoDims,
+        device: torch.device,
+        kv_fp8: bool,
+    ) -> None:
+        af = kernels.attn_frag
+        self.af = af
+        self.launch = kernels.attn_frag_bnd.standalone(
+            af.make(rows // ROWS_PER_REQUEST, False, kv_fp8=kv_fp8)
+        )
+        self.scales = scales
+        self.out = torch.zeros(rows, dims.q_rows, dtype=torch.bfloat16, device=device)
+        self.part = torch.zeros(af.part_bytes() // 4, dtype=torch.int32, device=device)
+        self.health = torch.zeros(
+            kernels.attn_frag_bnd.HEALTH_WORDS, dtype=torch.int32, device=device
+        )
+        self.device = device
+        self.eager: dict[int, tuple[tuple, torch.Tensor]] = {}
+        self.captured: dict[tuple, torch.Tensor] = {}
+        # Pinned sources of the table copies captured in CUDA graphs.
+        self._pinned = [
+            torch.zeros(af.DESC_WORDS, dtype=torch.int64, pin_memory=True)
+            for _ in range(8)
+        ]
+        self._keep: list[torch.Tensor] = []
+
+    def _table(self, layers: Sequence[nn.Module], i: int, q: torch.Tensor):
+        md, attn, kv_cache, _ = get_attention_context(
+            layers[i].self_attn.attn.layer_name
+        )
+        words = self.af.vllm_desc(
+            q,
+            kv_cache,
+            md.block_table,
+            md.seq_lens,
+            self.out,
+            self.part,
+            q.shape[0] // ROWS_PER_REQUEST,
+            self.scales[i],
+            attn._k_scale,
+            attn._v_scale,
+        )
+        key = tuple(words)
+        host = torch.tensor(words, dtype=torch.int64)
+        if torch.cuda.is_current_stream_capturing():
+            table = self.captured.get(key)
+            if table is None:
+                if not self._pinned:
+                    raise RuntimeError(
+                        "Muse Spark monokernel: more boundary-attention tables "
+                        "than pinned buffers"
+                    )
+                pinned = self._pinned.pop()
+                pinned.copy_(host)
+                self._keep.append(pinned)
+                table = torch.empty_like(host, device=self.device)
+                table.copy_(pinned, non_blocking=True)
+                self.captured[key] = table
+            return table
+        slot = self.eager.get(i)
+        if slot is None:
+            table = host.to(self.device)
+        else:
+            table = slot[1]
+            if slot[0] != key:
+                table.copy_(host)
+        self.eager[i] = (key, table)
+        return table
+
+    def attend(
+        self,
+        layers: Sequence[nn.Module],
+        i: int,
+        q: torch.Tensor,
+        epoch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Layer i's attention output, `[rows, q_rows]` bf16."""
+        # The fragment reads q rows at a stride of q_rows; layer 1's q is a
+        # column slice of the QKV output.
+        q = q.contiguous()
+        table = self._table(layers, i, q)
+        self.launch(
+            table.data_ptr(),
+            self.health.data_ptr(),
+            epoch.data_ptr(),
+            i,
+            stream=torch.cuda.current_stream(),
+        )
+        return self.out
+
+
 class _Bucket:
     """Launchers and persistent buffers of one kernel build (row count)."""
 
@@ -593,6 +700,7 @@ class _Bucket:
         )
         self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
         self.fa: _FusedAttention | None = None
+        self.fa_bnd: _BoundaryAttention | None = None
 
     def _peer_slots(self) -> list[int]:
         """The launch signatures take 8 peer slots; a smaller group leaves 0s."""
@@ -871,6 +979,7 @@ class MuseSparkMono:
         buckets: Sequence[int],
         fused_attention: dict[int, str],
         kv_fp8: bool = False,
+        boundary_attention: bool = False,
     ) -> None:
         self.rank = rank
         self.dims = dims
@@ -905,6 +1014,21 @@ class MuseSparkMono:
                     sorted(set(layers.values())),
                     kv_fp8,
                 )
+            if boundary_attention and self._fuses_boundary(model, b, fused_attention):
+                boundary = (FIRST_LAYER, LAST_LAYER + 1)
+                scales = {
+                    i: float(model.layers[i].self_attn.attn.impl.scale)
+                    for i in boundary
+                }
+                self.buckets[b].fa_bnd = _BoundaryAttention(
+                    kernels, scales, b, dims, device, kv_fp8
+                )
+                logger.info(
+                    "Muse Spark monokernel: layers %d and %d attention as "
+                    "fragment launches at S=%d",
+                    *boundary,
+                    b,
+                )
         self._validated: set[int] = set()
         self._fallbacks: set[str] = set()
         self._engaged: set[int] = set()
@@ -913,7 +1037,29 @@ class MuseSparkMono:
             b: torch.zeros_like(buf.health, device="cpu").pin_memory()
             for b, buf in self.buckets.items()
         }
+        self._health_host_bnd = {
+            b: torch.zeros_like(buf.fa_bnd.health, device="cpu").pin_memory()
+            for b, buf in self.buckets.items()
+            if buf.fa_bnd is not None
+        }
         self._health_event: torch.cuda.Event | None = None
+
+    @staticmethod
+    def _fuses_boundary(
+        model: nn.Module, rows: int, fused_attention: dict[int, str]
+    ) -> bool:
+        """Whether build `rows` runs the boundary layers' attention as fragment
+        launches: one-request builds only (the standalone launch leaves the
+        rows of a second request zero), both boundary layers full attention,
+        and a deployment the fused attention covers."""
+        return (
+            rows == ROWS_PER_REQUEST
+            and bool(fused_attention)
+            and all(
+                attention_type(model.layers[i]) == "full"
+                for i in (FIRST_LAYER, LAST_LAYER + 1)
+            )
+        )
 
     def refresh_weights(self, model: nn.Module) -> None:
         """Re-take the views, e.g. after a weight reload replaced parameters."""
@@ -935,11 +1081,14 @@ class MuseSparkMono:
         reason = batch_refusal(rows, get_forward_context(), names)
         if reason is not None:
             return reason
-        if bucket_of(rows) not in self.buckets:
+        b = bucket_of(rows)
+        bucket = None if b is None else self.buckets.get(b)
+        if bucket is None:
             return f"rows:{rows}"
         if positions.dtype != torch.int64 or positions.shape != (rows,):
             return "positions"
-        for name in names[1:]:
+        # The boundary fragment reads layer 1's cache too.
+        for name in names[0 if bucket.fa_bnd is not None else 1 :]:
             _, _, kv_cache, slots = get_attention_context(name)
             reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads, self.kv_fp8)
             if reason is not None:
@@ -990,14 +1139,20 @@ class MuseSparkMono:
         )
         qkv, _ = attn.qkv_proj(attn_input)
         q, _, _, g = attn._qk_norm_rope_kv_insert(qkv, positions)
-        o = attn.attn(q, None, None)
+        if bucket.fa_bnd is not None:
+            o = bucket.fa_bnd.attend(layers, FIRST_LAYER, q, bucket.epoch)
+        else:
+            o = attn.attn(q, None, None)
         self._validate(o, g, stream)
         stream, q, g = bucket.run(
             self, layers, positions, o, g, stream, aux_layers, aux_hidden_states
         )
 
         last = layers[LAST_LAYER + 1]
-        o = last.self_attn.attn(q, None, None)
+        if bucket.fa_bnd is not None:
+            o = bucket.fa_bnd.attend(layers, LAST_LAYER + 1, q, bucket.epoch)
+        else:
+            o = last.self_attn.attn(q, None, None)
         y = last.after_attention(stream, last.self_attn.back(o, g))
         if LAST_LAYER + 2 in aux_layers:
             aux_hidden_states.append(norm_then_gated_residual(y))
@@ -1049,9 +1204,17 @@ class MuseSparkMono:
                         f"Muse Spark monokernel: rank {self.rank}, S={b}: a launch "
                         f"timed out waiting for a peer rank {stuck}"
                     )
+            for b, host in self._health_host_bnd.items():
+                if int(host[0]) != 0:
+                    raise RuntimeError(
+                        f"Muse Spark monokernel: rank {self.rank}, S={b}: a "
+                        "boundary attention launch timed out"
+                    )
         if self._health_event is None and self._steps % HEALTH_POLL_INTERVAL == 0:
             for b, buf in self.buckets.items():
                 self._health_host[b].copy_(buf.health, non_blocking=True)
+                if buf.fa_bnd is not None:
+                    self._health_host_bnd[b].copy_(buf.fa_bnd.health, non_blocking=True)
             self._health_event = torch.cuda.Event()
             self._health_event.record()
 
