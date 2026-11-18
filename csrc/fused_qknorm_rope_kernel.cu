@@ -243,7 +243,8 @@ __global__ void fusedQKNormRopeKernel(
     T_cache const* cos_ptr = cache_ptr;
     T_cache const* sin_ptr = cache_ptr + embed_dim;
     int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
-    if (laneId < rotary_lanes) {
+    // All lanes take the NeoX branch: its warp collectives use the full mask.
+    if (!interleave || laneId < rotary_lanes) {
       if constexpr (interleave) {
         // Perform interleaving. Use pre-computed cos/sin values.
 #pragma unroll
@@ -285,7 +286,9 @@ __global__ void fusedQKNormRopeKernel(
           float cos_val = CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
           float sin_val = CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
 
-          elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+          if (laneId < rotary_lanes) {
+            elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+          }
         }
         // __shfl_xor_sync does not provide memfence. Need to sync again.
         __syncwarp();
@@ -502,7 +505,8 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       if (k == 0) cp_async_wait_group<0>();
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
-      if (laneId < rotary_lanes) {
+      // All lanes take the NeoX branch: its warp collectives use the full mask.
+      if (!interleave || laneId < rotary_lanes) {
         if constexpr (interleave) {
 #pragma unroll
           for (int i = 0; i < numElemsPerThread / 2; ++i) {
@@ -529,7 +533,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             int const half_dim = dim_idx / 2;
             float const cos_val = CacheConverter::convert(cos_smem[half_dim]);
             float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
-            elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            if (laneId < rotary_lanes) {
+              elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            }
           }
           __syncwarp();
         }

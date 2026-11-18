@@ -57,6 +57,7 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("eps", EPS_VALUES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
+@pytest.mark.parametrize("token_heads_per_warp", [1, 4])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(
     default_vllm_config,
@@ -66,6 +67,7 @@ def test_fused_qk_norm_rope_matches_reference(
     eps: float,
     seed: int,
     rotary_ratio: float,
+    token_heads_per_warp: int,
 ):
     torch.set_default_device(device)
     set_random_seed(seed)
@@ -133,6 +135,7 @@ def test_fused_qk_norm_rope_matches_reference(
         rope.cos_sin_cache,
         is_neox,
         positions.view(-1),
+        token_heads_per_warp,
     )
 
     if dtype == torch.float16:
