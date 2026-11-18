@@ -143,6 +143,10 @@ class _Bucket:
     byte_srcs: list[tuple[int, int]] = field(default_factory=list)
     typed: list[tuple[int, torch.Tensor]] = field(default_factory=list)
     fallbacks: list[tuple[int, str | _Segment]] = field(default_factory=list)
+    # Per receive slot, built when the arena is: where the bucket lands, and
+    # the source views of its copy-out.
+    targets: list[torch.Tensor] = field(default_factory=list)
+    srcs: list[tuple] = field(default_factory=list)
 
     def _add_byte_copy(self, src: tuple[int, int], dest: torch.Tensor) -> None:
         """Copy bucket bytes `src` (offset, nbytes) into `dest`, extending
@@ -188,13 +192,11 @@ class _PullHooks:
     issue: "Callable[[_Bucket, int, torch.Tensor], Any]"
     # Block until at least one handle is ready; return every ready one.
     wait: "Callable[[list[Any]], list[Any]]"
-    # Fetch ready handles into their targets; return each one's tensors.
-    get: "Callable[[list[Any]], list[list[torch.Tensor]]]"
+    # Fetch ready handles into their targets (the same order); raise if one
+    # did not land there.
+    get: "Callable[[list[Any], list[torch.Tensor]], None]"
     # Send each producer (by index) this worker's buckets; wait for all.
     register: "Callable[[list[list[WireBucket]]], None]"
-    # Register (pin) or deregister (unpin) the receive arena with NIXL.
-    pin: "Callable[[torch.Tensor], None]"
-    unpin: "Callable[[torch.Tensor], None]"
 
 
 class ShardedRDTWeightTransferEngine(
@@ -249,8 +251,6 @@ class ShardedRDTWeightTransferEngine(
         # dropped.
         self._arena: torch.Tensor | None = None
         self._slot_bytes = 0
-        # (slot, bucket) -> the source views of its copy-out, built once
-        self._views: dict[tuple[int, int], tuple] = {}
         # fallback name -> its whole tensor and segments landed, while some
         # of its segments are still in flight. Freed once loaded, so the
         # caching allocator reuses it (e.g. for post-load processing).
@@ -470,16 +470,22 @@ class ShardedRDTWeightTransferEngine(
 
     def _pin_arena(self, buckets: list[_Bucket]) -> None:
         """Allocate and register the receive arena: per pull in flight, one
-        slot of the largest bucket (at most `buffer_bytes`)."""
-        assert self._hooks is not None
-        self._slot_bytes = max((b.nbytes for b in buckets), default=0)
-        if not self._slot_bytes:
+        slot of the largest bucket (at most `buffer_bytes`). Each bucket
+        lands at the start of a slot, so its targets and copy-out sources
+        are views built here, once."""
+        self._slot_bytes = slot = max((b.nbytes for b in buckets), default=0)
+        if not slot:
             return
         arena = torch.empty(
-            self._num_buffers * self._slot_bytes, dtype=torch.uint8, device=self.device
+            self._num_buffers * slot, dtype=torch.uint8, device=self.device
         )
-        self._hooks.pin(arena)
+        register_nixl_memory(arena)
         self._arena = arena
+        for b in buckets:
+            b.targets = [
+                arena[i * slot : i * slot + b.nbytes] for i in range(self._num_buffers)
+            ]
+            b.srcs = [self._source_views(b, target) for target in b.targets]
 
     def receive_weights(self, update_info: ShardedRDTWeightTransferUpdateInfo) -> None:
         """Pull every bucket of the plan, `num_buffers` in flight, and apply
@@ -496,10 +502,9 @@ class ShardedRDTWeightTransferEngine(
             )
         hooks, sync_idx = self._hooks, update_info.sync_idx
         todo = iter(self._buckets)
-        # handle -> (bucket, slot, target); slots free to land a pull in, and
-        # per slot the copy-out still reading it. Ray holds only a weak
-        # reference to a target, so `inflight` keeps it alive.
-        inflight: dict[Any, tuple[_Bucket, int, torch.Tensor]] = {}
+        # handle -> (bucket, slot); slots free to land a pull in, and per
+        # slot the copy-out still reading it
+        inflight: dict[Any, tuple[_Bucket, int]] = {}
         free = list(range(self._num_buffers))
         copied: list[torch.cuda.Event | None] = [None] * self._num_buffers
 
@@ -509,8 +514,8 @@ class ShardedRDTWeightTransferEngine(
                 if bucket is None:
                     return
                 slot = free.pop()
-                target = self._target(slot, bucket)
-                inflight[hooks.issue(bucket, sync_idx, target)] = (bucket, slot, target)
+                handle = hooks.issue(bucket, sync_idx, bucket.targets[slot])
+                inflight[handle] = (bucket, slot)
 
         # seconds spent waiting for producers, fetching, and applying
         spent = [0.0, 0.0, 0.0]
@@ -524,27 +529,17 @@ class ShardedRDTWeightTransferEngine(
                     copied[slot].synchronize()
                     copied[slot] = None
             t0 = time.perf_counter()
-            fetched = hooks.get(ready)
+            landed = [inflight.pop(handle) for handle in ready]
+            hooks.get(ready, [bucket.targets[slot] for bucket, slot in landed])
             t1 = time.perf_counter()
-            landed = []
-            for handle, tensors in zip(ready, fetched, strict=True):
-                bucket, slot, target = inflight.pop(handle)
-                if len(tensors) != 1 or tensors[0].data_ptr() != target.data_ptr():
-                    # Ray falls back to a buffer of its own, silently, when
-                    # it cannot use the target.
-                    raise RuntimeError(
-                        f"Sharded RDT: bucket {bucket.seq} of producer "
-                        f"{bucket.producer} did not land in its receive slot"
-                    )
-                landed.append((bucket, slot, target))
-                free.append(slot)
+            free.extend(slot for _, slot in landed)
             # Issue the next pulls before copying out, so `num_buffers` stay
-            # in flight meanwhile. Returning drops the handles, which frees
-            # the producers' arena blocks.
+            # in flight meanwhile. Dropping the handles frees the producers'
+            # arena blocks.
             refill()
             t2 = time.perf_counter()
-            for bucket, slot, target in landed:
-                self._apply(bucket, target, slot)
+            for bucket, slot in landed:
+                self._apply(bucket, slot)
                 if self.device.type == "cuda":
                     copied[slot] = torch.cuda.Event()
                     copied[slot].record()
@@ -558,8 +553,7 @@ class ShardedRDTWeightTransferEngine(
             ready = hooks.wait(list(inflight))
             spent[0] += time.perf_counter() - t0
             land(ready)
-            del ready
-            refill()
+            del ready  # the handles, before the next wait
         logger.info(
             "Sharded RDT sync %d: %d pulls in %.2f s (waiting %.2f s, fetching "
             "%.2f s, applying %.2f s)",
@@ -569,21 +563,11 @@ class ShardedRDTWeightTransferEngine(
             *spent,
         )
 
-    def _target(self, slot: int, bucket: _Bucket) -> torch.Tensor:
-        """Where `bucket` lands: the start of receive slot `slot`."""
-        assert self._arena is not None
-        start = slot * self._slot_bytes
-        return self._arena[start : start + bucket.nbytes]
-
-    def _apply(self, bucket: _Bucket, flat: torch.Tensor, slot: int) -> None:
-        """Copy a landed bucket into its destinations, the contiguous ones
-        with one fused byte copy, and load its fallbacks."""
-        # in its receive slot, so the source views are the same every sync
-        key = (slot, id(bucket))
-        views = self._views.get(key)
-        if views is None:
-            views = self._views[key] = self._source_views(bucket, flat)
-        byte_srcs, typed_srcs, fallback_srcs = views
+    def _apply(self, bucket: _Bucket, slot: int) -> None:
+        """Copy a bucket landed in receive slot `slot` into its destinations,
+        the contiguous ones with one fused byte copy, and load its
+        fallbacks."""
+        byte_srcs, typed_srcs, fallback_srcs = bucket.srcs[slot]
         if byte_srcs:
             torch._foreach_copy_(bucket.byte_dsts, byte_srcs)
         if typed_srcs:
@@ -636,14 +620,27 @@ class ShardedRDTWeightTransferEngine(
             ref = producers[bucket.producer].bucket.remote(
                 consumer_id, bucket.seq, sync_idx
             )
-            # A slice of the pinned arena: Ray registers nothing per pull.
+            # A slice of the pinned arena, so Ray registers nothing per pull.
+            # Ray limitation: it holds a target only weakly; the plan keeps
+            # every target alive.
             set_target_for_ref(ref, [target])
             return ref
 
         def wait(refs: list[Any]) -> list[Any]:
+            # Ray limitation: `ray.wait` returns at most `num_returns`, so
+            # block for one, then take every other one already ready.
             ray.wait(refs, num_returns=1)
             ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
             return ready
+
+        def get(refs: list[Any], targets: list[torch.Tensor]) -> None:
+            for tensors, target in zip(ray.get(refs), targets, strict=True):
+                # Ray limitation: it receives into a buffer of its own,
+                # silently, when it cannot use the target.
+                if len(tensors) != 1 or tensors[0].data_ptr() != target.data_ptr():
+                    raise RuntimeError(
+                        "Sharded RDT: a pull did not land in its receive slot"
+                    )
 
         def register(per_producer: list[list[WireBucket]]) -> None:
             ray.get(
@@ -653,23 +650,14 @@ class ShardedRDTWeightTransferEngine(
                 ]
             )
 
-        return _PullHooks(
-            issue=issue,
-            wait=wait,
-            get=ray.get,
-            register=register,
-            pin=register_nixl_memory,
-            unpin=deregister_nixl_memory,
-        )
+        return _PullHooks(issue=issue, wait=wait, get=get, register=register)
 
     def _drop_plan(self) -> None:
         self._plan = None
         self._buckets = []
-        self._views = {}
         self._joins = {}
         if self._arena is not None:
-            assert self._hooks is not None
-            self._hooks.unpin(self._arena)
+            deregister_nixl_memory(self._arena)
             self._arena = None
 
     def shutdown(self) -> None:

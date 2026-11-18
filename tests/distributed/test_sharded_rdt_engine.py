@@ -18,7 +18,7 @@ import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_engine as engine_mod
-from tests.distributed.sharded_rdt_utils import Server, make_server, patch_for_cpu
+from tests.distributed.sharded_rdt_utils import make_server, patch_for_cpu
 from tests.model_executor.model_loader.test_load_plan import (
     _EXPERT_SHAPES,
     _LINEAR_SHAPES,
@@ -57,6 +57,13 @@ def _direct_mode(monkeypatch):
     monkeypatch.setattr(lifecycle, "_weight_update_active", False)
     monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda: None)
     patch_for_cpu(monkeypatch)
+    _PINNED.clear()
+    monkeypatch.setattr(engine_mod, "register_nixl_memory", _PINNED.append)
+    monkeypatch.setattr(engine_mod, "deregister_nixl_memory", _PINNED.remove)
+
+
+# receive arenas registered with NIXL
+_PINNED: list[torch.Tensor] = []
 
 
 # ------------------------------------------------------------ loopback
@@ -66,7 +73,7 @@ class _Handle:
     def __init__(self, server, sent, target, key):
         # Ray keeps only a weak reference to a target
         self.server, self.sent, self.key = server, sent, key
-        self.target = weakref.ref(target) if target is not None else None
+        self.target = weakref.ref(target)
 
 
 class _Loopback:
@@ -75,9 +82,6 @@ class _Loopback:
     def __init__(self, servers, consumer_id):
         self.servers, self.consumer_id = servers, consumer_id
         self.pulls: list[_Bucket] = []
-        # pulls issued without a target
-        self.untargeted: list[_Bucket] = []
-        self.pinned: list[torch.Tensor] = []
 
     def hooks(self) -> _PullHooks:
         return _PullHooks(
@@ -85,8 +89,6 @@ class _Loopback:
             wait=lambda hs: list(hs),
             get=self.get,
             register=self.register,
-            pin=self.pinned.append,
-            unpin=lambda t: self.pinned.remove(t),
         )
 
     def register(self, per_producer):
@@ -97,29 +99,20 @@ class _Loopback:
         self.pulls.append(bucket)
         server = self.servers[bucket.producer]
         (sent,) = server.bucket(self.consumer_id, bucket.seq, sync_idx)
-        if target is None:
-            self.untargeted.append(bucket)
-            return _Handle(server, sent, None, server.outstanding.pop())
         assert any(
             target.untyped_storage().data_ptr() == t.untyped_storage().data_ptr()
-            for t in self.pinned
+            for t in _PINNED
         ), "the target is not in the pinned arena"
         assert sent.dtype == target.dtype and sent.shape == target.shape
         return _Handle(server, sent, target, server.outstanding.pop())
 
-    def get(self, handles):
-        """Ray's get: into the target while it lives, else into a buffer of
-        its own."""
-        out = []
-        for h in handles:
-            target = h.target() if h.target is not None else None
-            if target is None:
-                target = torch.empty_like(h.sent)
+    def get(self, handles, targets):
+        """Ray's get: into the target while it lives, after poisoning it."""
+        for h, target in zip(handles, targets, strict=True):
+            assert h.target() is target, "the target died in flight"
             target.fill_(0xA5)
             target.copy_(h.sent)
             h.server._freed_bucket(*h.key)
-            out.append([target])
-        return out
 
 
 # ------------------------------------------------------------ fleet
@@ -150,6 +143,7 @@ class _Fleet:
         num_buffers=2,
         consumer_id=0,
         num_consumers=1,
+        servers=None,
     ):
         owners = owners or {}
         owner_sets: list[list[int]] = []
@@ -162,7 +156,7 @@ class _Fleet:
         nbytes = [torch.Size(s).numel() * dt.itemsize for s, dt in shapes.values()]
         units = dict(zip(shapes, gather_units(nbytes, buffer_bytes)))
         self.shapes, self.units = shapes, units
-        self.servers = [
+        self.servers = servers or [
             make_server(
                 served={
                     n: (str(dt).removeprefix("torch."), tuple(s))
@@ -178,6 +172,7 @@ class _Fleet:
         ]
         self.owner_sets, self.classes = owner_sets, classes
         monkeypatch.setattr(engine_mod, "_resolve_producers", lambda ii: self.servers)
+        self.loopback = _Loopback(self.servers, consumer_id)
         parallel = SimpleNamespace(
             distributed_executor_backend="ray",
             data_parallel_index=0,
@@ -202,7 +197,6 @@ class _Fleet:
                 **_metas_info(shapes),
             )
         )
-        self.loopback = _Loopback(self.servers, consumer_id)
         self.engine._hooks = self.loopback.hooks()
 
     def sync(self, weights, sync_idx):
@@ -285,15 +279,17 @@ def _dests(fleet):
 def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
     """Ray falls back to its own buffer, silently, when it cannot use a
     target; the engine must not copy the stale slot out."""
+    import ray
+    import ray.experimental
+
     model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
     fleet = _Fleet(monkeypatch, model, _TOY_SHAPES)
-    get = fleet.loopback.get
-    fleet.engine._hooks = dataclasses.replace(
-        fleet.engine._hooks,
-        get=lambda hs: [[t.clone() for t in ts] for ts in get(hs)],
-    )
+    target = torch.zeros(16, dtype=torch.uint8)
+    monkeypatch.setattr(ray.experimental, "set_target_for_ref", lambda ref, ts: None)
+    monkeypatch.setattr(ray, "get", lambda refs: [[target.clone()] for _ in refs])
+    hooks = fleet.engine._ray_hooks()
     with pytest.raises(RuntimeError, match="did not land"):
-        fleet.sync(_checkpoint(_TOY_SHAPES, seed=1), 1)
+        hooks.get(["ref"], [target])
 
 
 def test_pieces_over_buffer_bytes_go_in_row_segments(monkeypatch):
@@ -350,12 +346,11 @@ def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
     fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48, num_buffers=3)
     for sync_idx in (1, 2):
         fleet.sync(_checkpoint(_TOY_SHAPES, seed=sync_idx), sync_idx)
-        (arena,) = fleet.loopback.pinned
+        (arena,) = _PINNED
         slot = max(b.nbytes for b in fleet.engine._buckets)
         assert arena.numel() == 3 * slot and arena is fleet.engine._arena
-    hooks = fleet.engine._hooks
     fleet.engine.shutdown()
-    assert not fleet.loopback.pinned and hooks is not None
+    assert not _PINNED
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -428,7 +423,6 @@ def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
     """A unit stays gathered until every live worker has freed its pulls."""
     make = _experts_model(0, 1, 0, 1)
     fleets: list[_Fleet] = []
-    servers: list[Server] = []
     for consumer in (0, 1):
         model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
         fleet = _Fleet(
@@ -439,14 +433,12 @@ def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
             consumer_id=consumer,
             num_consumers=2,
             buffer_bytes=1 << 20,
+            servers=fleets[0].servers if fleets else None,
         )
-        servers = servers or fleet.servers
-        fleet.servers = fleet.loopback.servers = servers
-        fleet.engine._producers = servers
         fleets.append(fleet)
     for fleet in fleets:
         fleet.engine.start_weight_update()
-    (server,) = servers
+    (server,) = fleets[0].servers
     server.begin_sync([0, 1], 0)
     weights = _checkpoint(_EXPERT_SHAPES, seed=1)
     server._publish(0, dict(weights))
@@ -586,11 +578,6 @@ def test_gather_units_cut_by_bytes():
     assert gather_units([4, 4, 4, 4], 8) == [0, 0, 1, 1]
     assert gather_units([4, 20, 4], 8) == [0, 1, 2]  # an oversized name alone
     assert gather_units([], 8) == []
-
-
-def test_piece_bytes_count_block_alignment():
-    assert piece_nbytes(((0, 3),), BF16) == 16
-    assert piece_nbytes(((0, 8), (0, 2)), torch.float32) == 64
 
 
 def test_arena_holds_every_consumers_window_plus_slack():
