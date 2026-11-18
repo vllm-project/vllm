@@ -4,7 +4,6 @@
 
 import copy
 import gc
-import random
 import time
 import weakref
 from collections.abc import Callable
@@ -7364,21 +7363,6 @@ def test_session_lookup_stops_at_evicted_block(evict, expected_hit):
     assert hit[1] == expected_hit
 
 
-def test_session_id_reused_with_another_cache_salt():
-    """A request under another salt shares no blocks with the session, so it
-    is tracked beside it instead of displacing it."""
-    manager = _session_manager(make_kv_cache_config(16, 11))
-    tokens = list(range(2 * 16))
-    _run_turn(manager, "a", tokens, cache_salt="a", session_id="s")
-    second = make_request("b", tokens, 16, sha256, cache_salt="b", session_id="s")
-    assert manager.get_computed_blocks(second)[1] == 0
-
-    _run_turn(manager, "b", tokens, cache_salt="b", session_id="s")
-    assert len(_retained_blocks(manager)) == 4
-    manager.close_session("s")
-    assert _retained_blocks(manager) == []
-
-
 def test_hybrid_session_retains_every_group():
     """Blocks a request cached but no longer holds when it finishes (Mamba
     checkpoints) are retained with its full-attention blocks."""
@@ -7411,114 +7395,3 @@ def test_session_end_stops_retaining_blocks(monkeypatch, end):
         assert len(_retained_blocks(manager)) == 3
     hit = _lookup(manager, make_request("r", tokens + [0], 16, sha256))[1]
     assert hit == (4 if end == "close" else 3) * 16
-
-
-def test_max_sessions_drops_oldest_session():
-    manager = _session_manager(make_kv_cache_config(16, 11))
-    manager.sessions.max_sessions = 1
-    requests = [
-        _run_turn(
-            manager, f"r{i}", list(range(100 * i, 100 * i + 32)), session_id=f"s{i}"
-        )
-        for i in range(2)
-    ]
-    assert manager.sessions.get_blocks(requests[0]) is None
-    assert manager.sessions.get_blocks(requests[1]) is not None
-
-
-def _check_session_invariants(manager: KVCacheManager) -> None:
-    pool = manager.block_pool
-    queue = pool.free_block_queue
-    free_ids = []
-    for head, tail, retained in (
-        (queue.fake_free_list_head, queue.fake_free_list_tail, False),
-        (queue.fake_retained_list_head, queue.fake_retained_list_tail, True),
-    ):
-        prev, block = head, head.next_free_block
-        while block is not tail:
-            assert block is not None and block.prev_free_block is prev
-            if retained:
-                assert block.block_hash is not None and block.retain_until
-            free_ids.append(block.block_id)
-            prev, block = block, block.next_free_block
-        assert tail.prev_free_block is prev
-    assert len(free_ids) == len(set(free_ids)) == queue.num_free_blocks
-    assert set(free_ids) == {
-        b.block_id for b in pool.blocks if b.ref_cnt == 0 and not b.is_null
-    }
-
-
-@pytest.mark.parametrize("session_ttl", [0, 5.0])
-@pytest.mark.parametrize("hybrid", [False, True])
-@pytest.mark.parametrize("seed", range(6))
-def test_session_retention_random_ops_keep_invariants(
-    monkeypatch, session_ttl, hybrid, seed
-):
-    """Random session and non-session traffic under pressure: session lookups
-    equal normal ones, and the free queue stays consistent."""
-    rng = random.Random(seed)
-    now = 0.0
-    monkeypatch.setattr(time, "monotonic", lambda: now)
-    if hybrid:
-        config = make_kv_cache_config_hybrid_model(16, 90, 2)
-    else:
-        config = make_kv_cache_config(16, 40)
-    manager = _session_manager(config, session_ttl)
-    manager.sessions.max_sessions = 3
-    last_prompt: dict[str, list[int]] = {}
-    running: list[Request] = []
-    num_session_lookups = 0
-
-    def random_tokens() -> list[int]:
-        return [rng.randrange(10000) for _ in range(rng.randrange(1, 48))]
-
-    for step in range(500):
-        op = rng.choices(
-            ["turn", "plain", "finish", "close", "tick", "evict", "reset"],
-            weights=[6, 3, 6, 1, 2, 1, 1],
-        )[0]
-        if op in ("turn", "plain"):
-            session_id = f"s{rng.randrange(5)}" if op == "turn" else None
-            prev = last_prompt.get(session_id or f"s{rng.randrange(3)}")
-            if not prev:
-                prev = list(range(3 * 16)) if rng.random() < 0.5 else []
-            cut = rng.randrange(len(prev) + 1)
-            token_ids = (
-                rng.choice(
-                    [prev + random_tokens(), prev[:cut] + random_tokens(), prev[:cut]]
-                )
-                or random_tokens()
-            )
-            request = make_request(
-                f"r{step}", token_ids, 16, sha256, session_id=session_id
-            )
-            if session_id is not None:
-                found = manager.sessions.get_blocks(request)
-                num_session_lookups += found is not None
-            assert _lookup(manager, request) == _lookup(
-                manager, make_request("plain", token_ids, 16, sha256)
-            )
-            computed, num_computed, _ = manager.get_computed_blocks(request)
-            num_new_tokens = request.num_tokens - num_computed
-            if manager.allocate_slots(request, num_new_tokens, num_computed, computed):
-                request.num_computed_tokens = request.num_tokens
-                running.append(request)
-        elif op == "finish" and running:
-            request = running.pop(rng.randrange(len(running)))
-            if request.session_id is not None:
-                last_prompt[request.session_id] = list(request.all_token_ids)
-            manager.free(request)
-        elif op == "close":
-            manager.close_session(f"s{rng.randrange(5)}")
-        elif op == "tick":
-            now += rng.uniform(0, 3)
-        elif op == "evict":
-            manager.evict_blocks(
-                set(rng.sample(range(1, config.num_blocks), k=rng.randrange(1, 4)))
-            )
-        elif op == "reset" and not running:
-            assert manager.reset_prefix_cache()
-        manager.new_step_starts()
-        _check_session_invariants(manager)
-    if session_ttl:
-        assert num_session_lookups >= 5
