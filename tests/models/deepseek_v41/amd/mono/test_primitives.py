@@ -13,12 +13,13 @@ this model's internals on purpose. It is not the numerical contract; that is
 `DecodeNumerics` (T2), at the decoder layer's public entry point.
 
 The model carries two copies of these helpers, one on the MoE and seam side
-and one on the attention side, and `attention/device.py` imports nothing from
-`common/`: a bug fixed in one is not fixed in the other. Each copy is
-therefore imported under its own name below and checked separately, and a test
-runs over only the copies that define what it checks. Collapsing the two
-copies belongs in the model, not here; when that lands, the tables below
-collapse with it.
+and one on the attention side. `attention/device.py` does take a few names
+from `common/gfx942.py`, but every helper in the tables below it defines
+again for itself, so a bug fixed in one copy is not fixed in the other. Each
+copy is therefore imported under its own name and checked separately, and a
+test runs over only the copies that define what it checks. Collapsing the two
+belongs in the model, not here; when that lands, the tables collapse with
+it.
 
 The machinery is in `tests/models/common/specialized_decode/`: `harness.py`
 runs a device helper, `inputs.py` builds what makes a rounding rule
@@ -101,6 +102,14 @@ _POW2: dict[str, tuple[H.DeviceFn | None, H.DeviceFn]] = {
     "dsv41_attn": (attn.pow2, attn.rcp_pow2),
 }
 _FP8_MAX: dict[str, float] = {"dsv41": mx.FP8_MAX, "dsv41_attn": attn.FP8_MAX}
+
+# Two columns only say something while they are two functions. If a copy ever
+# imports the other's helper instead of defining its own, the [dsv41] and
+# [dsv41_attn] ids would go on reporting two passes for one function, and this
+# is where that shows up.
+for _table in (_BF16, _FP8_PACK, _POW2):
+    _ids = [{id(f) for f in _table[c] if f} for c in ("dsv41", "dsv41_attn")]
+    assert not _ids[0] & _ids[1], "the two copies now share a helper"
 
 
 def _run(key: str, fn: H.DeviceFn, n_out: int, *cols: torch.Tensor) -> torch.Tensor:
@@ -194,9 +203,15 @@ def test_scale_codes(lib: str) -> None:
     edges = 448 * pow2s
     v = torch.cat([I.edge_floats(), I.neighbours(edges[edges < 3e38].float())])
     v = v[torch.isfinite(v) & (v >= 0)]
-    # 1 to 253. 0, 254 and 255 are left out on purpose: `rcp_pow2` computes
-    # 2^(127 - code) in f32, which is not representable for those three, and
-    # the rules above assert that no code the helpers produce lands there.
+    # 1 to 253, which is where `pow2` and `rcp_pow2` claim to be exact. They
+    # are the bit tricks `code << 23` and `(254 - code) << 23`, and the three
+    # codes outside that range are where a bit trick parts company with the
+    # E8M0 definition: pow2(0) is +0.0 for 2^-127, rcp_pow2(254) is +0.0 for
+    # 2^-127, and 255 is an infinity for both. Nothing here covers them, and
+    # nothing in the model reaches them either: both helpers are fed
+    # `code_ceil(amax / FP8_MAX)` or `mx_code(amax)`, and dividing a finite
+    # float32 by 224 caps the code at 248. `code_ceil` on its own does clamp
+    # to 254, which `_ceil_rule` holds it to on the `v` column above.
     code = torch.arange(v.numel(), device=DEV, dtype=I32) % 253 + 1
     got = _run(f"codes_{lib}", body, len(rules) + 2, v, code)
     for j, (name, _, rule) in enumerate(rules):

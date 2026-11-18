@@ -106,9 +106,11 @@ def run(
     """`fn` -- a device helper -- over the rows of the int32 / float32
     columns `cols`, on the GPU, one row per lane -> int32 [rows, n_out].
 
-    `key` names the kernel, so it has to be distinct per call site. `package`
-    is the model package the helper comes from; its sources key the compile
-    cache (see `_sources_digest`).
+    `key` has to be distinct per call site: it names the kernel, and FlyDSL
+    caches on that name and `package`'s digest, so two call sites sharing a
+    key would both get whichever kernel compiled first and the second would
+    quietly assert against the first one's helper. `package` is the model
+    package the helper comes from (see `_sources_digest`).
     """
     rows = len(cols[0])
     assert all(len(c) == rows for c in cols), (
