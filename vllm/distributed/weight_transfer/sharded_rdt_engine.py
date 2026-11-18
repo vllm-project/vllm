@@ -88,12 +88,17 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     num_buffers: int = DEFAULT_NUM_BUFFERS
     """Pulls each worker keeps in flight."""
 
+    workers_per_replica: int = 0
+    """Workers per inference deployment, from the trainer; 0 derives it from
+    `num_replicas`."""
+
     replica_rank: int = 0
-    """This inference deployment's index in a fleet of `num_replicas`
-    independent ones, whose worker indices each restart at 0."""
+    """This inference deployment's index in a fleet of independent ones,
+    whose worker indices each restart at 0; set per deployment."""
 
     num_replicas: int = 1
-    """Independent inference deployments in the fleet (uniform)."""
+    """Independent inference deployments in the fleet (uniform); used only
+    when `workers_per_replica` is 0."""
 
 
 @dataclass
@@ -288,8 +293,9 @@ class ShardedRDTWeightTransferEngine(
         num_consumers = init_info.num_consumers or (
             self.parallel_config.world_size_across_dp
         )
-        replicas = max(1, init_info.num_replicas)
-        per_replica = max(1, num_consumers // replicas)
+        per_replica = init_info.workers_per_replica or max(
+            1, num_consumers // max(1, init_info.num_replicas)
+        )
         if len(init_info.name_owner_class) not in (0, len(metas)):
             raise ValueError(
                 f"{len(init_info.name_owner_class)} owner classes for "
@@ -304,6 +310,21 @@ class ShardedRDTWeightTransferEngine(
             workers_per_replica=per_replica,
         )
         router.validate()
+        # distinct per worker of the fleet: deployment, DP index, rank in TP*PP
+        pc = self.parallel_config
+        local = pc.data_parallel_index * pc.world_size + pc.rank
+        consumer_id = init_info.replica_rank * per_replica + local
+        if (
+            init_info.replica_rank < 0
+            or local >= per_replica
+            or consumer_id >= num_consumers
+        ):
+            raise ValueError(
+                f"Sharded RDT: this worker is worker {local} of deployment "
+                f"{init_info.replica_rank}, but the trainer expects "
+                f"{num_consumers} workers, {per_replica} per deployment; check "
+                "num_consumers, workers_per_replica and replica_rank"
+            )
         producers = _resolve_producers(init_info)
 
         self._drop_plan()
@@ -314,13 +335,7 @@ class ShardedRDTWeightTransferEngine(
             for m, u in zip(metas, gather_units(nbytes, init_info.buffer_bytes))
         }
         self._router = router
-        # distinct per worker of one deployment: DP index, then rank in TP*PP
-        pc = self.parallel_config
-        self._consumer_id = (
-            max(0, init_info.replica_rank) * per_replica
-            + pc.data_parallel_index * pc.world_size
-            + pc.rank
-        )
+        self._consumer_id = consumer_id
         self._buffer_bytes = init_info.buffer_bytes
         self._num_buffers = init_info.num_buffers
         self._producers = producers
@@ -522,6 +537,9 @@ class ShardedRDTWeightTransferEngine(
                 "Sharded RDT: no load plan; call start_weight_update() first."
             )
         hooks, sync_idx = self._hooks, update_info.sync_idx
+        for bucket in self._buckets:  # a failed sync may have left some partial
+            for _, staging, _ in bucket.staged:
+                staging.landed, staging.tensor = 0, None
         todo = iter(self._buckets)
         # handle -> (bucket, slot); slots free to land a pull in; per slot,
         # an event recorded after its copy-out, and whether it is pending
@@ -555,10 +573,11 @@ class ShardedRDTWeightTransferEngine(
             landed = [inflight.pop(handle) for handle in ready]
             hooks.get(ready, [bucket.targets[slot] for bucket, slot in landed])
             t1 = time.perf_counter()
+            # The pulls are in our slots: drop their handles, which frees the
+            # producers' arena blocks, then issue the next pulls before
+            # copying out, so `num_buffers` stay in flight meanwhile.
+            ready.clear()
             free.extend(slot for _, slot in landed)
-            # Issue the next pulls before copying out, so `num_buffers` stay
-            # in flight meanwhile. Dropping the handles frees the producers'
-            # arena blocks.
             refill()
             t2 = time.perf_counter()
             for bucket, slot in landed:
@@ -576,7 +595,6 @@ class ShardedRDTWeightTransferEngine(
             ready = hooks.wait(list(inflight))
             spent[0] += time.perf_counter() - t0
             land(ready)
-            del ready  # the handles, before the next wait
         logger.info(
             "Sharded RDT sync %d: %d pulls in %.2f s (waiting %.2f s, fetching "
             "%.2f s, applying %.2f s)",

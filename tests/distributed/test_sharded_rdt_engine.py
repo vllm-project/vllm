@@ -68,6 +68,10 @@ class _Handle:
         self.server, self.sent, self.key = server, sent, key
         self.target = weakref.ref(target)
 
+    def __del__(self):
+        # dropping the last ref frees the object, and with it the block
+        self.server._freed_bucket(*self.key)
+
 
 class _Loopback:
     """Ray's part of a pull, in process."""
@@ -105,7 +109,6 @@ class _Loopback:
             assert h.target() is target, "the target died in flight"
             target.fill_(0xA5)
             target.copy_(h.sent)
-            h.server._freed_bucket(*h.key)
 
 
 # ------------------------------------------------------------ fleet
@@ -453,19 +456,53 @@ def test_init_and_receive_refusals(monkeypatch):
         _toy_fleet(monkeypatch)
 
 
-def test_consumer_id_offsets_independent_deployments(monkeypatch):
-    fleet = _toy_fleet(monkeypatch, num_consumers=4, consumer_id=1)
+@pytest.mark.parametrize(
+    "replica_rank,rank,expected",
+    [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3), (2, 0, None), (0, 2, None)],
+)
+def test_two_deployments_get_distinct_consumer_ids(
+    monkeypatch, replica_rank, rank, expected
+):
+    """Four workers in two deployments of two: the trainer ships
+    `workers_per_replica`, each deployment sets its `replica_rank`."""
+    fleet = _toy_fleet(monkeypatch, num_consumers=4)
     fleet.engine.parallel_config.world_size = 2
-    fleet.engine.init_transfer_engine(
-        ShardedRDTWeightTransferInitInfo(
-            trainer_actor_names=["p0", "p1"],
-            num_consumers=4,
-            replica_rank=1,
-            num_replicas=2,
-            **_metas_info(_TOY_SHAPES),
-        )
+    fleet.engine.parallel_config.rank = rank
+    info = ShardedRDTWeightTransferInitInfo(
+        trainer_actor_names=["p0", "p1"],
+        num_consumers=4,
+        workers_per_replica=2,
+        replica_rank=replica_rank,
+        **_metas_info(_TOY_SHAPES),
     )
-    assert fleet.engine._consumer_id == 2 + 1
+    if expected is None:
+        with pytest.raises(ValueError, match="2 per deployment"):
+            fleet.engine.init_transfer_engine(info)
+    else:
+        fleet.engine.init_transfer_engine(info)
+        assert fleet.engine._consumer_id == expected
+
+
+def test_a_failed_sync_leaves_no_partial_fallback(monkeypatch):
+    """A sync that fails between a fallback's segments; the next one must
+    load that fallback whole again."""
+    fleet = _toy_fleet(monkeypatch, buffer_bytes=24)
+    get = fleet.loopback.get
+
+    def get_then_fail(handles, targets):
+        stagings = [st for b in fleet.engine._buckets for _, st, _ in b.staged]
+        if any(st.landed for st in stagings):
+            raise RuntimeError("pull failed")
+        get(handles, targets)
+
+    fleet.loopback.get = get_then_fail
+    fleet.engine._hooks = fleet.loopback.hooks()
+    with pytest.raises(RuntimeError, match="pull failed"):
+        fleet.sync(_checkpoint(_TOY_SHAPES, seed=5), 5)
+    fleet.engine.finish_weight_update()
+    fleet.loopback.get = get
+    fleet.engine._hooks = fleet.loopback.hooks()
+    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
 
 
 # ------------------------------------------------------------ common
