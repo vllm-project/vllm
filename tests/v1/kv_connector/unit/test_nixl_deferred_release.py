@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Deferred block release on the D side with a host-pinned KV cache: blocks of a
-finished request are reported free only after the guard event recorded GUARD_AGE
-steps later has completed. Requests still receiving and CPU staging keep the
-upstream path."""
+finished request are reported free only after the guard event recorded when the
+release reached the worker has completed. Requests still receiving and CPU staging
+keep the upstream path."""
 
 import copy
 
@@ -46,21 +46,16 @@ def fake_events(monkeypatch):
 
 def test_release_waits_for_guard_event(fake_events):
     dbr = DeferredBlockRelease()
-    dbr.on_step(["a"])  # step 0: request a finished
-    assert dbr.ready() == set()
-    dbr.on_step([])  # step 1: too early for a guard
-    assert dbr.ready() == set() and fake_events.recorded == []
-    dbr.on_step(["b"])  # step 2: a gets its guard event, b arrives
+    dbr.on_step(["a", "b"])  # the release reaches the worker: one guard, recorded now
     assert len(fake_events.recorded) == 1
     assert dbr.ready() == set()  # guard not complete yet
-    fake_events.recorded[0].done = True
-    assert dbr.ready() == {"a"}
-    assert dbr.ready() == set()  # released once
-    dbr.on_step([])
-    dbr.on_step([])  # b's guard (one event shared by all requests guarded in a step)
+    dbr.on_step(["c"])  # a later release gets its own guard
     assert len(fake_events.recorded) == 2
+    fake_events.recorded[0].done = True
+    assert dbr.ready() == {"a", "b"}
+    assert dbr.ready() == set()  # released once
     fake_events.recorded[1].done = True
-    assert dbr.ready() == {"b"}
+    assert dbr.ready() == {"c"}
 
 
 def test_no_event_recorded_without_pending(fake_events):
