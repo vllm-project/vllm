@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
 )
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.models.mamba2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot

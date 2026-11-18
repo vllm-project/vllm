@@ -2264,6 +2264,7 @@ huggingface-hub==2.4.0 \
     #   accelerate
     #   datasets
     #   evaluate
+    #   kernels
     #   open-clip-torch
     #   peft
     #   segmentation-models-pytorch
@@ -2681,6 +2682,38 @@ kaleido==0.2.1 \
     --hash=sha256:ca6f73e7ff00aaebf2843f73f1d3bacde1930ef5041093fe76b83a15785049a7 \
     --hash=sha256:ecc72635860be616c6b7161807a65c0dbd9b90c6437ac96965831e2e24066552
     # via genai-perf
+kernels==0.18.3 \
+    --hash=sha256:03ec44bbf34f6eeabdfe49e36149e49e9400f6c1e94949009844ec33c72eb135 \
+    --hash=sha256:1662c771202e15eb7b65f50d31726bc905e5199fe8efb18585a5b539f52f5826 \
+    --hash=sha256:16fe60d47c29fed34c4ed994452dda5d46917c7c15bcddfb103bd729acb70625 \
+    --hash=sha256:1ca6cfa3a94400873cd9a22e9e188e5f8fb1f90503620bfef82a637fc6d25718 \
+    --hash=sha256:20adae9fe5b30ae051cf32c48b8f08cdd9185a4cb98491f3b4042aa43a5cae98 \
+    --hash=sha256:212955adf90c4ece927a605709a854de0b0e2bbad6334471cb8f14173f58a714 \
+    --hash=sha256:2be6e1dd8877211ab2cf20dcbc5d8bc1a60b2cb4d107715ce1059774dda1ca16 \
+    --hash=sha256:2defb5b9d23366acb8eb8b30ef905f53096959d0a0d776a853ab16f0bf7960a7 \
+    --hash=sha256:3737770cabaca09878575cf4c4c173a4c021513dfd4b14165ef11cedd603b564 \
+    --hash=sha256:553f354bee09bc20e28617437fc6d88f4547a44c0ff423f9e331375599d95080 \
+    --hash=sha256:66726077d80e7cbaa67f7238c593116a4adf9e4c8e725463b2c9cb797dde8b47 \
+    --hash=sha256:6d533866d9fff23653238bd5bcec58943c44d1ff4c4883ee7275b777def98718 \
+    --hash=sha256:7386f6eb1bec1b013f087e9682beeb218f4df06d0012054ef0564452ddc59a33 \
+    --hash=sha256:764030fa7e0b1dc93b85be92b8a09b17399bd8d00edc6fa2544fa8bdbf6d783e \
+    --hash=sha256:782d51a0983d4d62e831596585657052dd6da769a0a7a9d84654bc3ab513b665 \
+    --hash=sha256:788300d44497a82d19aee1fd1e1c07e851107b2e868d00f5a525cfa59a2020a8 \
+    --hash=sha256:83b6b96fc5d56e7a638226148a9d14f8f18aa5e83fb3a7183f56a0c4ef9a2db8 \
+    --hash=sha256:85742a73e5cf9a7af3e32c33dfd4131b92ab80843eb997546dc8c20a17b60e9d \
+    --hash=sha256:883f75ed56c92479a123889c52e5f88f24b4d01f68bef5c2be0d3222eebe599c \
+    --hash=sha256:888fda9ac55b918e961a6e8e85140f4adbb08ff64131339fbd009805010c09d9 \
+    --hash=sha256:9017a5003e764f68f2209286dd6c673ef2b8edef22a9dd9335a7cf86fbc81c52 \
+    --hash=sha256:9abd81f737142f07d145e2df8841e9e344983d74b158d42fb4b6862d3a5e1b77 \
+    --hash=sha256:a25ed5e15416c825eb80dc49429cc905a2aad7d1a7c2750d645657231863d89e \
+    --hash=sha256:a5bc0b984329bf520f386e21f6a8f830401b47e08140b2b6ed4a52c4525bc484 \
+    --hash=sha256:a6a8680ef0ae2bb55e2681f49b99f9f155f17cc649d9622618949632dedfa15c \
+    --hash=sha256:ae698ff78c603b40ecd6f587579e26ea53cd182faa5c1fa9237154b959dc5f2e \
+    --hash=sha256:b57922e5d44a64df87868248da8916c0372b946f3ed436492efd700b3ec00999 \
+    --hash=sha256:b6cc4718f46dc6c892b57e7d7a1debdf83c3065e2a401d027fb9283211857597 \
+    --hash=sha256:b957b4f63947f207877968b35c4791ec221eb73ec63a826572987762701f4fa9 \
+    --hash=sha256:fbd7f4d6fbf010c976bcaf7c4bdbeeeb1c028633957c5f8bb50da4a04bf724a8
+    # via transformers
 kiwisolver==1.4.7 \
     --hash=sha256:073a36c8273647592ea332e816e75ef8da5c303236ec0167196793eb1e34657a \
     --hash=sha256:08471d4d86cbaec61f86b217dd938a83d85e03785f51121e791a6e6689a3be95 \
@@ -3989,6 +4022,7 @@ packaging==26.3 \
     #   evaluate
     #   fastparquet
     #   huggingface-hub
+    #   kernels
     #   lazy-loader
     #   lm-format-enforcer
     #   matplotlib
@@ -5387,6 +5421,7 @@ pyyaml==6.0.2 \
     #   datasets
     #   genai-perf
     #   huggingface-hub
+    #   kernels
     #   lm-format-enforcer
     #   optuna
     #   peft
@@ -6716,6 +6751,10 @@ tokenizers==0.23.3 \
     #   -r requirements/test/../common.txt
     #   cohere
     #   transformers
+tomlkit==0.15.2 \
+    --hash=sha256:05562412163a3037b94497385fb7f9204c637bc605af7a48199e41cf2272f437 \
+    --hash=sha256:83e32755ba1d20d9340bd069ee97e9f6232ba2346b63ffcba425de01f7e327a6
+    # via kernels
 torch==2.14.0+cpu \
     --hash=sha256:019463a7566401db8b1ed142026086db8fa680abda49ec41a60a8718d88e891d \
     --hash=sha256:07aefe1a437b6f1b41b0cba15e16583e2f43549ec9d062fcea8e7981a78e014a \

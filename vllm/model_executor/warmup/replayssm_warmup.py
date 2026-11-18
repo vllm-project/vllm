@@ -64,12 +64,12 @@ def _temporary_replayssm_autotune_state(
     *,
     prepare_dummy_block_tables: bool = True,
 ) -> Generator[None]:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.mamba2_ssm import Mamba2SSM
 
     reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
-        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
+        if not isinstance(module, Mamba2SSM) or not module.use_replayssm:
             continue
         assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start

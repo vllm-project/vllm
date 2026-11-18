@@ -830,6 +830,15 @@ _TRANSFORMERS_BACKEND_MODELS = {
     # Text generation models
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "TransformersAttentionFreeForCausalLM": (
+        "transformers",
+        "TransformersAttentionFreeForCausalLM",
+    ),
+    "TransformersHybridForCausalLM": ("transformers", "TransformersHybridForCausalLM"),
+    "TransformersMoEHybridForCausalLM": (
+        "transformers",
+        "TransformersMoEHybridForCausalLM",
+    ),
     # Multi-token prediction draft models
     "TransformersForMTP": ("transformers", "TransformersForMTP"),
     "TransformersMoEForMTP": ("transformers", "TransformersMoEForMTP"),
@@ -845,6 +854,22 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersMultiModalMoEForCausalLM": (
         "transformers",
         "TransformersMultiModalMoEForCausalLM",
+    ),
+    "TransformersMultiModalMoEForTranscription": (
+        "transformers",
+        "TransformersMultiModalMoEForTranscription",
+    ),
+    "TransformersMultiModalHybridForCausalLM": (
+        "transformers",
+        "TransformersMultiModalHybridForCausalLM",
+    ),
+    "TransformersMultiModalMoEHybridForCausalLM": (
+        "transformers",
+        "TransformersMultiModalMoEHybridForCausalLM",
+    ),
+    "TransformersMultiModalMoEHybridForTranscription": (
+        "transformers",
+        "TransformersMultiModalMoEHybridForTranscription",
     ),
     # Embedding models
     "TransformersEmbeddingModel": ("transformers", "TransformersEmbeddingModel"),
@@ -1426,7 +1451,13 @@ class _ModelRegistry:
                 "is not compatible with vLLM."
             )
 
-        return model_config._get_transformers_backend_cls()
+        backend_cls = model_config._get_transformers_backend_cls()
+        if backend_cls not in self.models:
+            raise ValueError(
+                f"The Transformers modeling backend does not support "
+                f"{architecture!r} yet, because it has no {backend_cls!r} class."
+            )
+        return backend_cls
 
     def _normalize_arch(
         self,

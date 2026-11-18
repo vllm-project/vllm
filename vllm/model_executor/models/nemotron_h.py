@@ -54,7 +54,6 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -79,6 +78,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
     SupportsReplaySSM,
 )
+from vllm.model_executor.models.mamba2 import MambaMixer2
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,

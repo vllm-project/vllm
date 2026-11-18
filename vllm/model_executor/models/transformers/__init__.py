@@ -21,9 +21,13 @@ from typing import TYPE_CHECKING
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from vllm.model_executor.models.interfaces import IsAttentionFree, IsHybrid
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
+from vllm.model_executor.models.transformers.linear_attention import (
+    LinearAttentionMixin,
+)
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.mtp import MTPMixin
 from vllm.model_executor.models.transformers.multimodal import (
@@ -136,6 +140,19 @@ class TransformersForCausalLM(CausalMixin): ...
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin): ...
 
 
+class TransformersAttentionFreeForCausalLM(
+    CausalMixin, LinearAttentionMixin, IsAttentionFree
+): ...
+
+
+class TransformersHybridForCausalLM(CausalMixin, LinearAttentionMixin, IsHybrid): ...
+
+
+class TransformersMoEHybridForCausalLM(
+    MoEMixin, CausalMixin, LinearAttentionMixin, IsHybrid
+): ...
+
+
 # Multi-token prediction draft models
 class TransformersForMTP(MTPMixin): ...
 
@@ -168,6 +185,51 @@ class TransformersMultiModalForTranscription(
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
 class TransformersMultiModalMoEForCausalLM(MoEMixin, MultiModalMixin, CausalMixin): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalMoEForTranscription(
+    TranscriptionMixin, MoEMixin, MultiModalMixin, CausalMixin
+): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalHybridForCausalLM(
+    MultiModalMixin, CausalMixin, LinearAttentionMixin, IsHybrid
+): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalMoEHybridForCausalLM(
+    MoEMixin, MultiModalMixin, CausalMixin, LinearAttentionMixin, IsHybrid
+): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalMoEHybridForTranscription(
+    TranscriptionMixin,
+    MoEMixin,
+    MultiModalMixin,
+    CausalMixin,
+    LinearAttentionMixin,
+    IsHybrid,
+): ...
 
 
 # Embedding models

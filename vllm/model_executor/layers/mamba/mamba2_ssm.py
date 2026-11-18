@@ -3,6 +3,7 @@
 
 
 import itertools
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -11,7 +12,6 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
-    divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -19,12 +19,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp, PluggableLayer
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -57,13 +52,10 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
-    composed_weight_loader,
     sharded_weight_loader,
 )
-from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -264,38 +256,61 @@ def mamba_v2_sharded_weight_loader(
     return loader
 
 
-# Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
-# --8<-- [start:mamba_mixer2]
-@PluggableLayer.register("mamba_mixer2")
-class MambaMixer2(MambaBase, PluggableLayer):
-    """Compute ∆, A, B, C, and D the state space parameters and compute
-    the `contextualized_states`. A, D are input independent
-    (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
-    for why A isn't selective) ∆, B, C are input-dependent
-    (this is a key difference between Mamba and the linear time
-    invariant S4, and is why Mamba is called
-    **selective** state spaces)
+@dataclass
+class Mamba2StepContext:
+    """The state and metadata of a Mamba2 layer for one step, shared by the
+    convolution and the scan."""
+
+    attn_metadata: Mamba2AttentionMetadata
+    conv_state: torch.Tensor
+    ssm_state: torch.Tensor
+    x_cache: torch.Tensor | None
+    dt_cache: torch.Tensor | None
+    B_cache: torch.Tensor | None
+    ring_start: torch.Tensor | None
+    prev_num_accepted: torch.Tensor | None
+
+    def split_tokens(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the scheduled tokens of `x` into its decode and prefill tokens,
+        dropping any padding."""
+        num_decode_tokens = self.attn_metadata.num_decode_tokens
+        num_prefill_tokens = self.attn_metadata.num_prefill_tokens
+        d, p = torch.split(
+            x[: num_decode_tokens + num_prefill_tokens],
+            [num_decode_tokens, num_prefill_tokens],
+            dim=0,
+        )
+        return d, p
+
+
+class Mamba2SSM(MambaBase, nn.Module):
+    """The stateful core of a Mamba2 layer: causal convolution, SSD scan and
+    recurrent state handling.
+
+    It owns the layer's state but not its weights. Subclasses provide
+    `conv_weights`, `conv_bias`, `A`, `D` and `dt_bias`.
     """
 
-    # --8<-- [end:mamba_mixer2]
+    conv_weights: torch.Tensor
+    A: torch.Tensor
+    D: torch.Tensor
+    dt_bias: torch.Tensor
+
+    @property
+    def conv_bias(self) -> torch.Tensor | None:
+        raise NotImplementedError
 
     def __init__(
         self,
-        hidden_size: int,
         ssm_state_size: int,
         conv_kernel_size: int,
         intermediate_size: int,
-        use_conv_bias: bool,
-        use_bias: bool,
         n_groups: int = 1,
         num_heads: int = 128,
         head_dim: int = 64,
-        rms_norm_eps: float = 1e-5,
         activation: str = "silu",
-        use_rms_norm: bool = True,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -315,7 +330,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # - NOTE: currently for the world size DOES NOT divide groups
         #   case, we only support the case when n_groups == 1
         self.tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
 
         assert num_heads % self.tp_size == 0, (
             "Tensor parallel world size must divide num heads."
@@ -350,183 +364,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        if n_groups % self.tp_size == 0:
-            self.conv1d = MergedColumnParallelLinear(
-                input_size=conv_kernel_size,
-                output_sizes=[
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                ],
-                bias=use_conv_bias,
-                quant_config=None,
-                prefix=f"{prefix}.conv1d",
-            )
-
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[
-                    intermediate_size,
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                    self.num_heads,
-                ],
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
-            )
-        else:
-            # This is the n_groups == 1 case,
-            # where we need to duplicate groups if TP>1.
-
-            self.conv1d = ColumnParallelLinear(
-                input_size=conv_kernel_size,
-                output_size=self.conv_dim,
-                bias=use_conv_bias,
-                quant_config=None,
-                prefix=f"{prefix}.conv1d",
-            )
-
-            self.in_proj = ColumnParallelLinear(
-                input_size=hidden_size,
-                output_size=intermediate_size + self.conv_dim + self.num_heads,
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
-            )
-
-            # - because in_proj is a concatenation of 3 weights, we
-            #   need to interleave them before sharding
-            # - use the custom weight loader mamba_v2_sharded_weight_loader
-            #   for conv1d.bias, covn1d.weight and in_proj.weight
-            # - need to set these settings, to assign the groups
-            #   to the head shards
-            group_shard_settings = (
-                self.groups_ssm_state_size,  # expected model size
-                (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
-                n_groups == 1,  # if there was only one group
-            )
-            intermediate_settings = (intermediate_size, 0, False)
-            head_settings = (self.num_heads, 0, False)
-
-            # - the weight already has a "weight_loader" attribute
-            #   which set_weight_attrs will raise if we do not
-            #   delete before trying to override it
-            # - ditto for the other two weights below
-            delattr(self.conv1d.bias, "weight_loader")
-            set_weight_attrs(
-                self.conv1d.bias,
-                {
-                    "weight_loader": mamba_v2_sharded_weight_loader(
-                        [
-                            intermediate_settings,
-                            group_shard_settings,
-                            group_shard_settings,
-                        ],
-                        self.tp_size,
-                        tp_rank,
-                    )
-                },
-            )
-
-            delattr(self.conv1d.weight, "weight_loader")
-            set_weight_attrs(
-                self.conv1d.weight,
-                {
-                    "weight_loader": mamba_v2_sharded_weight_loader(
-                        [
-                            intermediate_settings,
-                            group_shard_settings,
-                            group_shard_settings,
-                        ],
-                        self.tp_size,
-                        tp_rank,
-                    )
-                },
-            )
-
-            # Create the custom weight loader for Mamba sharding with group
-            # replication. This handles the interleaved projections correctly.
-            mamba_loader = mamba_v2_sharded_weight_loader(
-                [
-                    intermediate_settings,  # for gate
-                    intermediate_settings,
-                    group_shard_settings,
-                    group_shard_settings,
-                    head_settings,  # for dt
-                ],
-                self.tp_size,
-                tp_rank,
-            )
-
-            # Apply the custom weight loader to in_proj.weight and its scales.
-            # Works for both non-quantized (Parameter) and quantized
-            # (ModelWeightParameter which extends BasevLLMParameter)
-            for attr_name in ("weight", "weight_scale", "input_scale"):
-                param = getattr(self.in_proj, attr_name, None)
-                if param is not None:
-                    if isinstance(param, BasevLLMParameter):
-                        param.weight_loader = mamba_loader
-                    else:
-                        if hasattr(param, "weight_loader"):
-                            delattr(param, "weight_loader")
-                        set_weight_attrs(param, {"weight_loader": mamba_loader})
-
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
-        # and `set_weight_attrs` doesn't allow to override it
-        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
-        self.register_buffer("conv_weights", conv_weights, persistent=False)
-
-        # - these are TPed by heads to reduce the size of the
-        #   temporal shape
-        self.A = nn.Parameter(
-            torch.empty(
-                divide(num_heads, self.tp_size),
-                dtype=torch.float32,
-            )
-        )
-        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
-        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
-        self.use_rms_norm = use_rms_norm
-
-        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
-        a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
-        )
-        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-
-        self.out_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=use_bias,
-            input_is_parallel=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
-
-        self.norm = Mixer2RMSNormGated(
-            intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
-        )
-
         self._ssd_kernels_warmed_up = False
-
-        # - get hidden_states, B and C after depthwise convolution.
-        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
@@ -602,47 +440,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        mup_vector: torch.Tensor | None = None,
-    ):
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
-
-        # 2. Prepare inputs for conv + SSM
-        ssm_output = torch.empty(
-            [
-                hidden_states.shape[0],
-                (self.num_heads // self.tp_size) * self.head_dim,
-            ],
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        # 3. conv + SSM
-        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
-        # ensure it is not treated as an intermediate tensor by torch compile)
-        torch.ops.vllm.mamba_mixer2(
-            projected_states,
-            ssm_output,
-            _encode_layer_name(self.prefix),
-        )
-
-        # 4. gated MLP
-        # GatedRMSNorm internally applying SiLU to the gate
-        # SiLU is applied internally before normalization, unlike standard
-        # norm usage
-        gate = projected_states[..., : self.tped_intermediate_size]
-        hidden_states = self.norm(ssm_output, gate)
-
-        # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
-
-        return output
-
     def D_bf16(self) -> torch.Tensor:
         """`D` cast to bfloat16 for FlashInfer's SSD, refreshed whenever the
         float32 parameter is (re)loaded."""
@@ -651,7 +448,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.D_bf16_version = self.D._version
         return self.D_bf16_cache
 
-    def _warmup_ssd_kernels(self, projected_states: torch.Tensor) -> None:
+    def _warmup_ssd_kernels(self, hidden_states_B_C: torch.Tensor) -> None:
         """Run a minimal SSD forward pass to trigger Triton autotuning
         while GPU memory is still plentiful (before SSM cache allocation).
         """
@@ -660,8 +457,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self._ssd_kernels_warmed_up = True
         logger.info_once("Warming up Mamba2 SSD Triton kernels...")
 
-        device = projected_states.device
-        dtype = projected_states.dtype
+        device = hidden_states_B_C.device
+        dtype = hidden_states_B_C.dtype
 
         nheads = self.num_heads // self.tp_size
         ngroups = self.n_groups // self.tp_size
@@ -779,6 +576,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
 
+    def forward_conv(self, hidden_states_B_C: torch.Tensor) -> torch.Tensor:
+        """Run the causal convolution, updating the conv state, and return its
+        output. Used by callers that split the conv and the scan, e.g. the
+        Transformers modeling backend."""
+        output = torch.empty_like(hidden_states_B_C)
+        torch.ops.vllm.mamba2_conv(
+            hidden_states_B_C, output, _encode_layer_name(self.prefix)
+        )
+        return output
+
+    def forward_scan(
+        self,
+        hidden_states: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        dt: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the SSD scan on the split output of `forward_conv`, updating the
+        SSM state, and return the scan output."""
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.mamba2_scan(
+            hidden_states, B, C, dt, output, _encode_layer_name(self.prefix)
+        )
+        return output
+
     def conv_ssm_forward(
         self,
         projected_states: torch.Tensor,
@@ -789,7 +611,74 @@ class MambaMixer2(MambaBase, PluggableLayer):
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
+        ctx = self._step_context()
+        if ctx is None:
+            # V1 profile run -- warm up SSD kernels so that autotuning
+            # completes before SSM cache allocation.
+            self._warmup_ssd_kernels(hidden_states_B_C)
+            return
 
+        hidden_states_B_C_d, raw_hidden_states_B_C_p = ctx.split_tokens(
+            hidden_states_B_C
+        )
+        # Decode convolves in place, as `hidden_states_B_C` is internal to the op
+        hidden_states_B_C_d, hidden_states_B_C_p = self._conv(
+            ctx, hidden_states_B_C_d, raw_hidden_states_B_C_p
+        )
+        hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(hidden_states_B_C_d)
+        hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(hidden_states_B_C_p)
+        dt_d, dt_p = ctx.split_tokens(dt)
+        self._scan(
+            ctx,
+            (hidden_states_d, B_d, C_d, dt_d),
+            (hidden_states_p, B_p, C_p, dt_p),
+            ctx.split_tokens(output),
+            raw_hidden_states_B_C_p=raw_hidden_states_B_C_p,
+        )
+
+    def conv_forward(self, hidden_states_B_C: torch.Tensor, output: torch.Tensor):
+        ctx = self._step_context()
+        if ctx is None:
+            output.copy_(hidden_states_B_C)
+            return
+        output_d, output_p = ctx.split_tokens(output)
+        hidden_states_B_C_d, hidden_states_B_C_p = ctx.split_tokens(hidden_states_B_C)
+        # Decode convolves in place, so do it in `output` to leave the input intact
+        output_d.copy_(hidden_states_B_C_d)
+        conv_d, conv_p = self._conv(
+            ctx, output_d, hidden_states_B_C_p, export_checkpoint=True
+        )
+        if conv_d.data_ptr() != output_d.data_ptr():
+            output_d.copy_(conv_d)
+        output_p.copy_(conv_p)
+
+    def scan_forward(
+        self,
+        hidden_states: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        dt: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        ctx = self._step_context()
+        if ctx is None:
+            # V1 profile run, see `conv_ssm_forward`
+            self._warmup_ssd_kernels(hidden_states)
+            return
+        hidden_states_d, hidden_states_p = ctx.split_tokens(hidden_states)
+        B_d, B_p = ctx.split_tokens(B)
+        C_d, C_p = ctx.split_tokens(C)
+        dt_d, dt_p = ctx.split_tokens(dt)
+        self._scan(
+            ctx,
+            (hidden_states_d, B_d, C_d, dt_d),
+            (hidden_states_p, B_p, C_p, dt_p),
+            ctx.split_tokens(output),
+        )
+
+    def _step_context(self) -> "Mamba2StepContext | None":
+        """The state and metadata of this layer for the current step, or `None`
+        during the profile run."""
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
@@ -798,84 +687,79 @@ class MambaMixer2(MambaBase, PluggableLayer):
         attn_metadata_raw = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        use_spec_decode = self.num_spec > 0
-        ring_start = prev_num_accepted = None
-
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
             attn_metadata = attn_metadata_raw.get(self.prefix)
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-            # conv_state must be (..., dim, width-1) for the conv kernels.
-            # DS layout stores it that way directly; SD layout needs a
-            # transpose (which keeps dim contiguous via stride tricks).
-            conv_state = (
-                self.kv_cache[0]
-                if is_conv_state_dim_first()
-                else self.kv_cache[0].transpose(-1, -2)
-            )
-            ssm_state = self.kv_cache[1]
-            if self.use_replayssm:
-                x_cache, dt_cache, B_cache = self.kv_cache[2:5]
-                ring_start = self._replayssm_ring_start
-                if self.use_replayssm_trackers:
-                    prev_num_accepted = self._replayssm_prev_num_accepted
-            else:
-                x_cache = dt_cache = B_cache = None
-            has_initial_states_p = attn_metadata.has_initial_states_p
-            prep_initial_states = attn_metadata.prep_initial_states
-            chunk_size = attn_metadata.chunk_size
-            seq_idx_p = attn_metadata.seq_idx_p
-            query_start_loc_p = attn_metadata.query_start_loc_p
-            cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
-            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
-            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
-            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
-            replayssm_state_indices_d = attn_metadata.replayssm_state_indices_d
-            num_accepted_tokens = attn_metadata.num_accepted_tokens
-            query_start_loc_d = attn_metadata.query_start_loc_d
-            num_decodes = attn_metadata.num_decodes
-            num_decode_tokens = attn_metadata.num_decode_tokens
-            checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
-            checkpoint_meta = attn_metadata.checkpoint_meta
-
         if attn_metadata is None:
-            # V1 profile run -- warm up SSD kernels so that autotuning
-            # completes before SSM cache allocation.
-            self._warmup_ssd_kernels(projected_states)
-            hidden_states_B_C = (
-                hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
-            ).contiguous()
-            hidden_states, _B, _C = self.split_hidden_states_B_C_fn(hidden_states_B_C)
-            return hidden_states
+            return None
+        assert isinstance(attn_metadata, Mamba2AttentionMetadata)
 
-        num_prefills = attn_metadata.num_prefills
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        has_prefill = num_prefills > 0
-        has_decode = num_decodes > 0
-        num_actual_tokens = num_prefill_tokens + num_decode_tokens
-
-        # Split along token dimension
-        hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
-            hidden_states_B_C[:num_actual_tokens],
-            [num_decode_tokens, num_prefill_tokens],
-            dim=0,
+        # conv_state must be (..., dim, width-1) for the conv kernels.
+        # DS layout stores it that way directly; SD layout needs a
+        # transpose (which keeps dim contiguous via stride tricks).
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
         )
-        dt_d, dt_p = torch.split(
-            dt[:num_actual_tokens],
-            [num_decode_tokens, num_prefill_tokens],
-            dim=0,
-        )
+        ring_start = prev_num_accepted = None
+        if self.use_replayssm:
+            x_cache, dt_cache, B_cache = self.kv_cache[2:5]
+            ring_start = self._replayssm_ring_start
+            if self.use_replayssm_trackers:
+                prev_num_accepted = self._replayssm_prev_num_accepted
+        else:
+            x_cache = dt_cache = B_cache = None
 
-        preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
-            output[:num_actual_tokens],
-            [num_decode_tokens, num_prefill_tokens],
-            dim=0,
+        return Mamba2StepContext(
+            attn_metadata=attn_metadata,
+            conv_state=conv_state,
+            ssm_state=self.kv_cache[1],
+            x_cache=x_cache,
+            dt_cache=dt_cache,
+            B_cache=B_cache,
+            ring_start=ring_start,
+            prev_num_accepted=prev_num_accepted,
         )
 
+    def _export_checkpoint(
+        self,
+        ctx: "Mamba2StepContext",
+        raw_hidden_states_B_C_p: torch.Tensor,
+        varlen_states: torch.Tensor | None = None,
+    ) -> None:
+        """Store the prefill checkpoints' pre-convolution windows and, given
+        the scan's per-chunk `varlen_states`, their SSM states."""
+        attn_metadata = ctx.attn_metadata
+        assert attn_metadata.checkpoint_meta is not None
+        assert attn_metadata.query_start_loc_p is not None
+        self._checkpoint_exporter.export(
+            attn_metadata.checkpoint_meta,
+            raw_qkv=raw_hidden_states_B_C_p,
+            conv_state=ctx.conv_state,
+            recurrent_checkpoint=varlen_states,
+            recurrent_state=None if varlen_states is None else ctx.ssm_state,
+            cu_seqlens=attn_metadata.query_start_loc_p,
+            recurrent_rows=attn_metadata.checkpoint_chunk_idx,
+        )
+
+    def _conv(
+        self,
+        ctx: "Mamba2StepContext",
+        hidden_states_B_C_d: torch.Tensor,
+        hidden_states_B_C_p: torch.Tensor,
+        export_checkpoint: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convolve the decode and prefill tokens, updating the conv state.
+        The decode tokens are convolved in place. `export_checkpoint` stores
+        the prefill checkpoints' conv windows, for callers whose scan cannot
+        see the pre-convolution input."""
+        attn_metadata = ctx.attn_metadata
         # Process prefill requests
-        if has_prefill:
+        if attn_metadata.num_prefills > 0:
+            if export_checkpoint and attn_metadata.checkpoint_chunk_idx is not None:
+                self._export_checkpoint(ctx, hidden_states_B_C_p)
             # 2. Convolution sequence transformation
             # - It will read the initial states for every sequence,
             #   that has "has_initial_states_p" == True,
@@ -888,18 +772,75 @@ class MambaMixer2(MambaBase, PluggableLayer):
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 self.conv_weights,
-                self.conv1d.bias,
+                self.conv_bias,
                 activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor_p,
+                conv_states=ctx.conv_state,
+                has_initial_state=attn_metadata.has_initial_states_p,
+                cache_indices=attn_metadata.state_indices_tensor_p,
                 metadata=attn_metadata,
-                query_start_loc=query_start_loc_p,
-            ).transpose(0, 1)[:num_prefill_tokens]
+                query_start_loc=attn_metadata.query_start_loc_p,
+            ).transpose(0, 1)[: attn_metadata.num_prefill_tokens]
 
-            hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
-                hidden_states_B_C_p
+        # Process decode requests
+        if attn_metadata.num_decodes > 0:
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+            assert state_indices_tensor_d is not None
+            # 2. Convolution sequence transformation
+            hidden_states_B_C_d = causal_conv1d_update(
+                hidden_states_B_C_d,
+                ctx.conv_state,
+                self.conv_weights,
+                self.conv_bias,
+                self.activation,
+                conv_state_indices=state_indices_tensor_d,
+                num_accepted_tokens=attn_metadata.num_accepted_tokens,
+                query_start_loc=attn_metadata.query_start_loc_d,
+                # ReplaySSM keeps one physical state block while a speculative
+                # decode call still processes the full target + draft window.
+                max_query_len=(
+                    1 + self.num_spec
+                    if self.use_replayssm and self.num_spec > 0
+                    else state_indices_tensor_d.size(-1)
+                ),
             )
+
+        return hidden_states_B_C_d, hidden_states_B_C_p
+
+    def _scan(
+        self,
+        ctx: "Mamba2StepContext",
+        decode_inputs: tuple[torch.Tensor, ...],
+        prefill_inputs: tuple[torch.Tensor, ...],
+        outputs: tuple[torch.Tensor, torch.Tensor],
+        raw_hidden_states_B_C_p: torch.Tensor | None = None,
+    ):
+        """Scan the decode and prefill tokens, given as `(hidden_states, B, C,
+        dt)`, into `outputs`, updating the SSM state. Without the prefill's
+        pre-convolution `raw_hidden_states_B_C_p`, only the checkpoints' SSM
+        states are stored and `_conv` must store their conv windows."""
+        attn_metadata = ctx.attn_metadata
+        ssm_state = ctx.ssm_state
+        ring_start = ctx.ring_start
+        prev_num_accepted = ctx.prev_num_accepted
+        use_spec_decode = self.num_spec > 0
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+        state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+        replayssm_state_indices_d = attn_metadata.replayssm_state_indices_d
+        preallocated_ssm_out_d, preallocated_ssm_out_p = outputs
+        x_cache, dt_cache, B_cache = ctx.x_cache, ctx.dt_cache, ctx.B_cache
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        query_start_loc_d = attn_metadata.query_start_loc_d
+
+        # Process prefill requests
+        if attn_metadata.num_prefills > 0:
+            hidden_states_p, B_p, C_p, dt_p = prefill_inputs
+            has_initial_states_p = attn_metadata.has_initial_states_p
+            prep_initial_states = attn_metadata.prep_initial_states
+            query_start_loc_p = attn_metadata.query_start_loc_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
 
             # 3. State Space Model sequence transformation
             # NOTE: final output is an in-place update of out tensor
@@ -946,13 +887,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     self.A,
                     B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
                     C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    chunk_size=chunk_size,
+                    chunk_size=attn_metadata.chunk_size,
                     D=self.D,
                     z=None,
                     dt_bias=self.dt_bias,
-                    seq_idx=seq_idx_p,
+                    seq_idx=attn_metadata.seq_idx_p,
                     cu_seqlens=query_start_loc_p,
-                    cu_chunk_seqlens=cu_chunk_seqlen_p,
+                    cu_chunk_seqlens=attn_metadata.cu_chunk_seqlen_p,
                     last_chunk_indices=last_chunk_indices_p,
                     initial_states=initial_states,
                     return_intermediate_states=has_checkpoints,
@@ -973,17 +914,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # - varlen state is a (num_chunks, nheads, headdim, dstate)
                 #   tensor
                 final_states = varlen_states[last_chunk_indices_p]
-                assert checkpoint_meta is not None
-                assert query_start_loc_p is not None
-                self._checkpoint_exporter.export(
-                    checkpoint_meta,
-                    raw_qkv=x.transpose(0, 1),
-                    conv_state=conv_state,
-                    recurrent_checkpoint=varlen_states,
-                    recurrent_state=ssm_state,
-                    cu_seqlens=query_start_loc_p,
-                    recurrent_rows=checkpoint_chunk_idx,
-                )
+                if raw_hidden_states_B_C_p is None:
+                    # `_conv` stored the conv windows; a zero-width input
+                    # skips them here.
+                    raw_hidden_states_B_C_p = hidden_states_p[:, :0]
+                self._export_checkpoint(ctx, raw_hidden_states_B_C_p, varlen_states)
                 ssm_state[state_indices_tensor_p] = final_states
             if (
                 ring_start is not None
@@ -994,31 +929,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 ring_start.index_fill_(0, state_indices_tensor_p.long(), 0)
 
         # Process decode requests
-        if has_decode:
+        if attn_metadata.num_decodes > 0:
+            hidden_states_d, B_d, C_d, dt_d = decode_inputs
             assert state_indices_tensor_d is not None
-
-            # 2. Convolution sequence transformation
-            hidden_states_B_C_d = causal_conv1d_update(
-                hidden_states_B_C_d,
-                conv_state,
-                self.conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=state_indices_tensor_d,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=query_start_loc_d,
-                # ReplaySSM keeps one physical state block while a speculative
-                # decode call still processes the full target + draft window.
-                max_query_len=(
-                    1 + self.num_spec
-                    if self.use_replayssm and use_spec_decode
-                    else state_indices_tensor_d.size(-1)
-                ),
-            )
-
-            hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
-                hidden_states_B_C_d
-            )
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
@@ -1251,19 +1164,41 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
 
 @eager_break_during_capture
-def mamba_mixer2(
-    projected_states: torch.Tensor,
+def mamba2_conv(
+    hidden_states_B_C: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.conv_ssm_forward(projected_states=projected_states, output=output)
+    self.conv_forward(hidden_states_B_C=hidden_states_B_C, output=output)
 
 
 direct_register_custom_op(
-    op_name="mamba_mixer2",
-    op_func=mamba_mixer2,
+    op_name="mamba2_conv",
+    op_func=mamba2_conv,
+    mutates_args=["output"],
+)
+
+
+@eager_break_during_capture
+def mamba2_scan(
+    hidden_states: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    dt: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self.scan_forward(hidden_states=hidden_states, B=B, C=C, dt=dt, output=output)
+
+
+direct_register_custom_op(
+    op_name="mamba2_scan",
+    op_func=mamba2_scan,
     mutates_args=["output"],
 )

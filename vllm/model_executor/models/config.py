@@ -1905,6 +1905,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
+    "TransformersAttentionFreeForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
