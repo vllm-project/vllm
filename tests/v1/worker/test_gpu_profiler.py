@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
@@ -101,12 +102,14 @@ def test_torch_profiler_rebuilds_one_shot_profiler_each_round(tmp_path):
 
 def test_torch_profiler_records_each_profile_round(tmp_path):
     trace_paths: list[str] = []
+    exported = threading.Event()
 
     def export_trace(prof: torch.profiler.profile) -> None:
         # Export as each round stops instead of parsing every round at the end.
         path = str(tmp_path / f"round_{len(trace_paths)}.json")
         prof.export_chrome_trace(path)
         trace_paths.append(path)
+        exported.set()
 
     wrapper = TorchProfilerWrapper(
         ProfilerConfig(
@@ -122,10 +125,12 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
     )
 
     for run in range(2):
+        exported.clear()
         wrapper.start()
         with torch.profiler.record_function(f"run_{run}"):
             pass
         wrapper.stop()
+        assert exported.wait(timeout=5)
 
     assert len(trace_paths) == 2
     for run, path in enumerate(trace_paths):
@@ -724,6 +729,112 @@ class TestAnnotateProfile:
         assert isinstance(context, nullcontext)
 
 
+@pytest.mark.skip_global_cleanup
+class TestTorchProfilerWrapperAsyncExport:
+    """Tests that trace export runs off the calling thread instead of
+    blocking stop()/step() (see TorchProfilerWrapper._async_trace_handler).
+    Uses CPU-only activities so these run without a GPU."""
+
+    def _make_wrapper(self, tmp_path, on_trace_ready):
+        config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir=str(tmp_path),
+            torch_profiler_dump_cuda_time_total=False,
+        )
+        return TorchProfilerWrapper(
+            profiler_config=config,
+            worker_name="test-worker",
+            local_rank=0,
+            activities=["CPU"],
+            on_trace_ready=on_trace_ready,
+        )
+
+    def test_stop_does_not_block_on_slow_export(self, tmp_path):
+        calling_thread = threading.current_thread()
+        handler_thread: dict[str, threading.Thread] = {}
+        handler_done = threading.Event()
+
+        def slow_handler(prof):
+            handler_thread["thread"] = threading.current_thread()
+            time.sleep(0.3)
+            handler_done.set()
+
+        wrapper = self._make_wrapper(tmp_path, slow_handler)
+        wrapper.start()
+
+        start = time.perf_counter()
+        wrapper.stop()
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.2, "stop() should not block on the trace export"
+        assert handler_done.wait(timeout=2.0), "background export never completed"
+        assert handler_thread["thread"] is not calling_thread
+
+    def test_export_errors_are_caught_not_raised(self, tmp_path):
+        handler_done = threading.Event()
+
+        def failing_handler(prof):
+            handler_done.set()
+            raise RuntimeError("boom")
+
+        wrapper = self._make_wrapper(tmp_path, failing_handler)
+        wrapper.start()
+
+        wrapper.stop()  # must not raise even though the handler will
+
+        assert handler_done.wait(timeout=2.0)
+
+    def test_renamed_trace_still_exports_on_background_thread(self, tmp_path):
+        exported = threading.Event()
+        export_details = []
+        calling_thread = threading.current_thread()
+
+        def make_handler(directory, worker_name, use_gzip):
+            def handle(prof):
+                export_details.append((worker_name, threading.current_thread()))
+                exported.set()
+
+            return handle
+
+        with patch(
+            "vllm.profiler.wrapper.torch.profiler.tensorboard_trace_handler",
+            side_effect=make_handler,
+        ):
+            config = ProfilerConfig(profiler="torch", torch_profiler_dir=str(tmp_path))
+            wrapper = TorchProfilerWrapper(
+                config, worker_name="initial", local_rank=0, activities=["CPU"]
+            )
+            wrapper.set_output_name("renamed")
+            wrapper.start()
+            wrapper.stop()
+
+        assert exported.wait(timeout=2.0)
+        assert export_details[0][0] == "renamed"
+        assert export_details[0][1] is not calling_thread
+
+    def test_shutdown_waits_for_trace_export(self, tmp_path):
+        export_started = threading.Event()
+        release_export = threading.Event()
+
+        def slow_handler(prof):
+            export_started.set()
+            release_export.wait(timeout=5)
+
+        wrapper = self._make_wrapper(tmp_path, slow_handler)
+        wrapper.start()
+        wrapper.stop()
+        assert export_started.wait(timeout=2)
+
+        shutdown_thread = threading.Thread(target=wrapper.shutdown)
+        shutdown_thread.start()
+        try:
+            assert shutdown_thread.is_alive()
+        finally:
+            release_export.set()
+            shutdown_thread.join(timeout=5)
+        assert not shutdown_thread.is_alive()
+
+
 def make_proton(session_id: int | None = 7):
     data = SimpleNamespace(
         advance_phase=Mock(side_effect=range(1, 100)),
@@ -1255,11 +1366,13 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
 
 @_requires_cuda_for_proton
 def test_gpu_worker_reuses_cuda_graph_proton_session():
-    worker = MagicMock()
+    worker = object.__new__(Worker)
     worker.rank = 1
     worker.profiler = MagicMock(spec=ProtonProfilerWrapper)
     worker.profiler.has_cuda_graph_session = True
-    worker.profiler_config.profiler = "proton"
+    worker.profiler_config = ProfilerConfig(
+        profiler="proton", proton_profiler_dir="/tmp/mock"
+    )
 
     with patch(
         "vllm.distributed.utils.get_worker_rank_suffix",
