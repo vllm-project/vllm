@@ -184,7 +184,7 @@ REGION_IDS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Build:
     S: int = 32  # rows (32 / 64 / 96 / 128)
     W: int = 8  # ranks in the TP = EP group (8, or 4 at S = 32)

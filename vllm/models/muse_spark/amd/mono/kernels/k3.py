@@ -445,7 +445,7 @@ REGION_IDS.update(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Build:
     S: int = 8  # rows (8 or 16)
     W: int = 8  # ranks in the TP = EP group (8 or 4)

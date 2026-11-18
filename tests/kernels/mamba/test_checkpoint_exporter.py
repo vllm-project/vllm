@@ -34,7 +34,7 @@ NUM_SLOTS = 8
 RECURRENT_SHAPES = {"narrow": (2, 16, 16), "wide": (4, 64, 128)}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Caller:
     exporter: MambaPrefillCheckpointExporter
     width: int
