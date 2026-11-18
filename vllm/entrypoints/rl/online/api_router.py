@@ -130,6 +130,9 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
                 *op.parent_requests.keys(),
             ]
             await engine.abort(request_ids, internal=True)
+            # Finished prefills are no longer tracked here, but their KV may
+            # still be kept for decoders that this abort stops as well.
+            await engine.engine_core.drop_retained_kv_exports_async()
         return JSONResponse(
             content={"status": "aborted", "aborted": len(request_ids)},
             status_code=HTTPStatus.OK.value,

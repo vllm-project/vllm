@@ -53,6 +53,8 @@ Resumes the scheduler after a pause. Any requests frozen with `mode="keep"` will
 
 Wait for `pause_generation()` to finish before resuming, since a data-parallel MoE engine can reject an early resume. Once generation resumes, calling `resume_generation()` again has no effect.
 
+If `resume_generation` is called while a `pause_generation` call is still waiting to complete (for example a `"wait"` pause that is still draining), that pause call fails with `Resumed before the pause completed.` (HTTP 500 over the HTTP endpoint) instead of returning later as if the pause had held.
+
 ### HTTP Endpoints
 
 With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionality via:
@@ -65,6 +67,23 @@ With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionali
 
 !!! note "Data Parallelism"
     When using data parallelism with vLLM's **internal load balancer** (i.e. `data_parallel_backend="ray"`), pause and resume are handled automatically across all DP ranks -- a single call is sufficient. When using an **external load balancer** (i.e. multiple independent vLLM instances behind a proxy), you must send pause and resume requests to **every** engine instance individually before and after the weight update, and set the weight version on every instance too.
+
+### Prefill/decode disaggregation
+
+With [disaggregated prefill](../features/disagg_prefill.md), every prefill (P) and decode (D) instance is paused and resumed on its own, as with an external load balancer. For continuous rollouts, pause each instance with `mode="keep", clear_cache=False`, in any order:
+
+- The pause completes once the instance has nothing left to compute. It does not wait for KV transfers: a P keeps the KV blocks a D has not read yet, and the transfer finishes after the pause or after resume.
+- A paused instance keeps stepping without running the model while transfers are in flight, so it can keep renewing KV leases and receiving KV. A pause therefore stops model execution, not KV cache changes.
+- While only D is paused, P keeps the blocks of every request D holds. If P keeps serving new requests, its KV cache can fill up until D resumes, so pause P too.
+- With `mode="abort"`, and on `POST /abort_requests` with no request ids, P stops keeping the blocks it keeps only for a remote reader (NIXL pull and Mooncake connectors) instead of waiting for the read. On Mooncake, reads that have not started fail at once, and the blocks are freed when the reads in flight end; on NIXL they are freed at once and a read is not revoked. Pause D with `mode="abort"` too, so that D does not read those requests' KV later. Blocks a connector keeps for local work, such as an offloading connector's async save, are still waited for.
+- When D aborts a request whose KV is still loading, Mooncake tells P to drop that KV, so the load fails quickly instead of waiting for P (which may be paused).
+
+`clear_cache=True` on a P/D pair needs every block back. With `mode="keep"`, the kept requests do not wait for their KV transfers:
+
+- P stops keeping the blocks of finished prefills for D, as with `mode="abort"`. D's later reads of them fail and are handled by `kv_load_failure_policy`.
+- On D, every request whose KV comes from P becomes a local prefill: it stays queued and, after resume, D prefills it with the new weights. The pause waits only for loads already in flight, then discards their KV. On Mooncake, D also tells P to drop the KV of these requests.
+
+`mode="wait"` with `clear_cache=True` waits for the transfers to finish.
 
 ## Typical Async RL Flow
 

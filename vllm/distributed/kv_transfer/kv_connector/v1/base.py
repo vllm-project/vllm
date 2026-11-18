@@ -145,6 +145,20 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
+class ExportRelease(enum.Enum):
+    """How the blocks of cancelled exports may be freed
+    (see `KVConnectorBase_V1.cancel_kv_transfers`)."""
+
+    # The connector still needs them (e.g. an async save): it reports each
+    # export in finished_sending as usual.
+    KEPT = enum.auto()
+    # Only remote readers needed them: the scheduler frees them now.
+    FREE_NOW = enum.auto()
+    # The connector fails the reads that have not started and reports each
+    # export in finished_sending once no read in flight uses its blocks.
+    FREE_ON_FINISHED_SENDING = enum.auto()
+
+
 class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """Metadata used for out of band connector handshake between
     P/D workers. This needs to serializable.
@@ -718,6 +732,28 @@ class KVConnectorBase_V1(ABC):
     def has_pending_block_frees(self) -> bool:
         """Whether pending transfers can release blocks instead of preemption."""
         return False
+
+    def cancel_kv_transfers(
+        self, exports: list["Request"], imports: list["Request"]
+    ) -> ExportRelease:
+        """The scheduler no longer wants these transfers (an abort, or a
+        pause that clears the cache).
+
+        Args:
+            exports: finished requests whose blocks were kept (delayed free
+                from `request_finished()`) for remote readers.
+            imports: requests whose remote KV is no longer wanted: aborted
+                while their load was in flight, or turned into local
+                prefills. The remote engine may stop holding it; a load in
+                flight still reports `finished_recving` (possibly as failed)
+                before its blocks are freed.
+
+        Returns:
+            How the exports' blocks may be freed. The default keeps them
+            until the connector reports them finished, as before.
+
+        """
+        return ExportRelease.KEPT
 
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires

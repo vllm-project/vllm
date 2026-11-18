@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
+    ExportRelease,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -404,6 +405,12 @@ class NixlPullConnector(NixlBaseConnector):
     def restore_kv_caches(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.restore_kv_caches()
+
+    def cancel_kv_transfers(
+        self, exports: list["Request"], imports: list["Request"]
+    ) -> ExportRelease:
+        # A remote read of a freed block is not prevented (no NIXL drop yet).
+        return ExportRelease.FREE_NOW
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None

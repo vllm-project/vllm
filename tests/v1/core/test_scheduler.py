@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.connector import (
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.base import ExportRelease
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -6673,6 +6674,125 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+@pytest.mark.parametrize("remote_readers_only", [True, False])
+def test_abort_drops_only_remote_read_exports(monkeypatch, remote_readers_only):
+    scheduler = create_scheduler(use_kv_connector=True)
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    num_free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+
+    # The connector keeps the blocks after the request finishes, either for a
+    # remote reader only or also for something local such as an async save.
+    for name in ("request_finished", "request_finished_all_groups"):
+        monkeypatch.setattr(
+            scheduler.connector, name, lambda *a, **k: (True, None), raising=False
+        )
+    release = ExportRelease.FREE_NOW if remote_readers_only else ExportRelease.KEPT
+    monkeypatch.setattr(
+        scheduler.connector, "cancel_kv_transfers", lambda exports, imports: release
+    )
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    assert scheduler.ledger.pins_blocks()
+
+    dropped = scheduler.drop_retained_exports()
+    freed = scheduler.kv_cache_manager.block_pool.get_num_free_blocks() > num_free
+    assert dropped == int(remote_readers_only)
+    assert freed == remote_readers_only
+    assert scheduler.ledger.pins_blocks() != remote_readers_only
+    assert (request.request_id in scheduler.requests) != remote_readers_only
+
+
+def test_abort_all_frees_dropped_exports_when_connector_reports(monkeypatch):
+    """Aborting everything drops the exports kept for remote readers. A
+    connector that fails the reads not started yet reports each export once
+    no read in flight uses it; its blocks stay pinned until then."""
+    scheduler = create_scheduler(use_kv_connector=True)
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    num_free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+
+    for name in ("request_finished", "request_finished_all_groups"):
+        monkeypatch.setattr(
+            scheduler.connector, name, lambda *a, **k: (True, None), raising=False
+        )
+    dropped: list[Request] = []
+    monkeypatch.setattr(
+        scheduler.connector,
+        "cancel_kv_transfers",
+        lambda exports, imports: (
+            dropped.extend(exports) or ExportRelease.FREE_ON_FINISHED_SENDING
+        ),
+    )
+    # The prefill finished; its blocks are kept for a remote reader.
+    scheduler.finish_requests(
+        (request.request_id,), RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    assert dropped == [request]
+    assert scheduler.ledger.pins_blocks()
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == num_free
+
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending={request.request_id}
+            ),
+        ),
+    )
+    assert not scheduler.ledger.pins_blocks()
+    assert request.request_id not in scheduler.requests
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() > num_free
+
+
+def test_retract_again_drops_late_exports_and_skips_retracted_loads(monkeypatch):
+    """A clearing keep pause retracts until it completes: a prefill in flight
+    at the pause opens its export later, and that export is dropped too. A
+    load already retracted is not withdrawn twice."""
+    scheduler = create_scheduler(use_kv_connector=True)
+    prefill, decode = create_requests(num_requests=2, req_ids=["prefill", "decode"])
+    for request in (prefill, decode):
+        scheduler.add_request(request)
+    scheduler.schedule()
+
+    for name in ("request_finished", "request_finished_all_groups"):
+        monkeypatch.setattr(
+            scheduler.connector, name, lambda *a, **k: (True, None), raising=False
+        )
+    dropped: list[Request] = []
+    withdrawn: list[Request] = []
+    monkeypatch.setattr(
+        scheduler.connector,
+        "cancel_kv_transfers",
+        lambda exports, imports: (
+            dropped.extend(exports)
+            or withdrawn.extend(imports)
+            or ExportRelease.FREE_NOW
+        ),
+    )
+    # The decode's remote load is in flight.
+    scheduler.ledger.import_started(decode)
+
+    scheduler.retract_kv_transfers()
+    assert dropped == [] and withdrawn == [decode]
+    assert scheduler.ledger.is_retracted(decode.request_id)
+
+    # The prefill in flight at the pause finishes; its KV is kept for a reader.
+    scheduler.finish_requests(
+        (prefill.request_id,), RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+    assert scheduler.ledger.is_referenced(prefill.request_id)
+
+    scheduler.retract_kv_transfers()
+    assert dropped == [prefill] and withdrawn == [decode]
+    assert not scheduler.ledger.is_referenced(prefill.request_id)
+    assert prefill.request_id not in scheduler.requests
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
@@ -6685,6 +6805,9 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     request.status = RequestStatus.FINISHED_STOPPED
     scheduler.requests[request.request_id] = request
     scheduler.finished_req_ids = set()
+    # The connector asked to delay the free: the export is recorded in the
+    # transfer ledger (what request_finished() -> _free_request() does).
+    scheduler.ledger.open_export(request)
 
     assert scheduler.has_finished_requests()
     assert scheduler.has_requests()

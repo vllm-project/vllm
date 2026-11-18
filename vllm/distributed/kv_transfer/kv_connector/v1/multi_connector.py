@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
+    ExportRelease,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -678,6 +679,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_block_frees(self) -> bool:
         return any(c.has_pending_block_frees() for c in self._connectors)
+
+    def cancel_kv_transfers(
+        self, exports: list["Request"], imports: list["Request"]
+    ) -> ExportRelease:
+        # The blocks are freed only once no child needs them any more.
+        releases = {c.cancel_kv_transfers(exports, imports) for c in self._connectors}
+        for release in (ExportRelease.KEPT, ExportRelease.FREE_ON_FINISHED_SENDING):
+            if release in releases:
+                return release
+        return ExportRelease.FREE_NOW
 
     def has_pending_push_work(self) -> bool:
         return any(c.has_pending_push_work() for c in self._connectors)

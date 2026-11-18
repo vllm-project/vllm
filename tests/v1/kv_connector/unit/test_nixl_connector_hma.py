@@ -1677,9 +1677,11 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     the valid prefix; they must be zeroed before local recompute."""
     from unittest.mock import MagicMock
 
+    from vllm.v1.core.sched.kv_transfer_ledger import KVTransferLedger
     from vllm.v1.core.sched.scheduler import Scheduler
 
     scheduler = object.__new__(Scheduler)
+    scheduler.ledger = KVTransferLedger()
     scheduler.connector = MagicMock()
     scheduler.num_hash_lookahead_tokens = 0
     scheduler.needs_kv_cache_zeroing = True

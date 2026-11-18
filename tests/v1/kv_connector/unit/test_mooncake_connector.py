@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1479,6 +1480,7 @@ async def test_prefill_early_abort_cleanup_is_idempotent():
 
     unrelated = pending("unrelated")
     worker.reqs_need_send = {"recorded": pending("recorded"), "unrelated": unrelated}
+    worker._expired_transfer_ids = OrderedDict()
 
     metadata = MooncakeConnectorMetadata()
     metadata.reqs_not_processed = {"never-recorded", "recorded"}
@@ -1487,6 +1489,8 @@ async def test_prefill_early_abort_cleanup_is_idempotent():
     for _ in range(2):
         await worker.record_send_reqs(metadata)
         assert worker.reqs_need_send == {"unrelated": unrelated}
+        # Later pulls of both transfers fail at once.
+        assert set(worker._expired_transfer_ids) == {"never-recorded", "recorded"}
 
 
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
@@ -2173,6 +2177,40 @@ def test_decode_renews_lease_until_pull_settles(settled_by):
     }
 
 
+@pytest.mark.parametrize("settled_by", ["abort", "retract"])
+def test_decode_withdraws_pulls_it_no_longer_waits_for(settled_by):
+    """Without leases too, D tells P to drop KV it no longer wants: the load
+    in flight of an aborted request, or every remote load that a clearing
+    keep pause turns into a local prefill."""
+    scheduler, block_size = _lease_decode_scheduler(None)
+    loading = _remote_prefill_request(1, block_size)
+    scheduler.add_request(loading)
+    output = scheduler.schedule()
+    assert (
+        loading.request_id in output.kv_connector_metadata.reqs_to_recv["my-engine-id"]
+    )
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
+    queued = _remote_prefill_request(2, block_size)
+    scheduler.add_request(queued)
+
+    if settled_by == "abort":
+        scheduler.finish_requests(loading.request_id, RequestStatus.FINISHED_ABORTED)
+        withdrawn = ["xfer-1"]
+    else:
+        scheduler.retract_kv_transfers()
+        withdrawn = ["xfer-1", "xfer-2"]
+    meta = scheduler.schedule().kv_connector_metadata
+    assert meta.withdrawals == {
+        "my-engine-id": LeaseHeartbeat(
+            remote_bootstrap_addr="http://prefill:8998",
+            transfer_ids=withdrawn,
+            withdraw=True,
+        )
+    }
+    assert not meta.lease_heartbeats
+    assert not scheduler.schedule().kv_connector_metadata.withdrawals
+
+
 @pytest.mark.asyncio
 async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
     """A renewal for a request still queued on D queries P's bootstrap first."""
@@ -2290,6 +2328,17 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
                 assert producer.reqs_need_send["xfer-1"].expire_time == renewed + 100
                 expired = {"p-req-2"}
 
+            # D withdraws a transfer, with or without leases: P frees it and
+            # fails later pulls for it.
+            withdrawal = MooncakeLeaseHeartbeat(
+                lease_transfer_ids=["xfer-1"], withdraw=True
+            )
+            response = await request(withdrawal)
+            assert response.status == MooncakeXferResponseStatus.FINISH
+            assert "xfer-1" not in producer.reqs_need_send
+            assert "xfer-1" in producer._expired_transfer_ids
+            expired = expired | {"p-req-1"}
+
             # Pulls on the same channel still reach the sender workers.
             pull = _xfer_meta(
                 [_region(0x2000)], {"d-req-1": ("xfer-1", [[1]])}, remote_tp_rank=1
@@ -2309,9 +2358,12 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("freed_by", ["expiry", "send"])
 @pytest.mark.parametrize("with_live_req", [False, True])
-async def test_pull_after_expiry_fails_without_waiting(with_live_req):
-    """A pull for KV that P already freed must not wait for a prefill."""
+async def test_pull_after_expiry_fails_without_waiting(with_live_req, freed_by):
+    """A pull for KV that P already freed (expired, or sent: e.g. the release
+    pull of a request rejected after admission) must not wait for a
+    prefill."""
     vllm_config = _make_worker_vllm_config("kv_producer")
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         producer = MooncakeConnector(
@@ -2325,13 +2377,23 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
         sender_loop = producer.sender_loop
         producer.sender_loop = asyncio.get_running_loop()
 
-        producer.reqs_need_send["xfer-expired"] = SendBlockMeta(
+        freed = SendBlockMeta(
             p_req_id="p-req-expired",
             transfer_id="xfer-expired",
             local_block_ids=[[1]],
             ready=asyncio.Event(),
             expire_time=time.perf_counter() - 1,
         )
+        producer.reqs_need_send["xfer-expired"] = freed
+        if freed_by == "send":
+            freed.ready.set()
+            first = _xfer_meta(
+                [_region(0x2000, row_offset=-1, layer_name="model.layers.0.self_attn")],
+                {"d-req-first": ("xfer-expired", [[100]])},
+            )
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with patch.object(producer, "_send_blocks", return_value=0):
+                await producer.send_kv_to_decode(b"consumer", sock, first)
         assert await producer.fetch_finished_sending_reqs() == {"p-req-expired"}
 
         req_blocks = {"d-req-expired": ("xfer-expired", [[100]])}
@@ -2480,6 +2542,63 @@ def test_worker_publishes_and_clears_shared_engine():
         assert replaced.engine is replacement
         clear_shared_transfer_engine(replacement)
         assert get_shared_transfer_engine() is None
+
+
+@pytest.mark.asyncio
+async def test_producer_frees_dropped_exports_after_reads_in_flight():
+    """P frees a dropped export once no send reads it, and fails later pulls
+    for it. A transfer D withdrew while P was still prefilling is freed as
+    soon as P exports it."""
+    vllm_config = _make_worker_vllm_config("kv_producer")
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+
+        def meta(**kwargs) -> MooncakeConnectorMetadata:
+            m = MooncakeConnectorMetadata()
+            for k, v in kwargs.items():
+                setattr(m, k, v)
+            return m
+
+        # xfer-live is still in prefill; xfer-idle and xfer-busy are exported,
+        # and a send reads xfer-busy.
+        await producer.record_send_reqs(
+            meta(
+                reqs_to_send={
+                    f"p-{x}": (f"xfer-{x}", []) for x in ("live", "idle", "busy")
+                }
+            )
+        )
+        await producer.record_send_reqs(
+            meta(
+                reqs_to_send={f"p-{x}": (f"xfer-{x}", [[1]]) for x in ("idle", "busy")}
+            )
+        )
+        producer.reqs_need_send["xfer-busy"].sending = 1
+
+        await producer.record_send_reqs(
+            meta(exports_to_drop={"xfer-idle", "xfer-busy"})
+        )
+        assert {"xfer-idle", "xfer-busy"} <= set(producer._expired_transfer_ids)
+        assert await producer.fetch_finished_sending_reqs() == {"p-idle"}
+        assert set(producer.reqs_need_send) == {"xfer-live", "xfer-busy"}
+        producer.reqs_need_send["xfer-busy"].sending = 0
+        assert await producer.fetch_finished_sending_reqs() == {"p-busy"}
+
+        live = producer.reqs_need_send["xfer-live"]
+        producer._drop_transfers(["xfer-live"])
+        # A pull waiting for the prefill is woken and finds it gone.
+        assert live.ready.is_set()
+        assert not producer.reqs_need_send
+        await producer.record_send_reqs(
+            meta(reqs_to_send={"p-live": ("xfer-live", [[2]])})
+        )
+        assert not producer.reqs_need_send
+        assert await producer.fetch_finished_sending_reqs() == {"p-live"}
+        # Dropped exports are not counted as expired leases.
+        assert producer.get_kv_connector_stats() is None
+        producer.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -3725,3 +3844,40 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.asyncio
+async def test_abort_before_export_answers_waiting_pull_and_tombstones():
+    """A request aborted before its KV was exported must wake a pull that is
+    already waiting on it, leave a tombstone so a later pull fails fast, and
+    not raise for a transfer this worker never saw."""
+    vllm_config = _make_worker_vllm_config(
+        "kv_producer", kv_connector_extra_config={"kv_lease_duration": 30}
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+    ):
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+
+        # Allocation reported; prefill never finishes.
+        meta = MooncakeConnectorMetadata()
+        meta.reqs_to_send = {"p-req-1": ("xfer-1", [])}
+        await producer.record_send_reqs(meta)
+        send_meta = producer.reqs_need_send["xfer-1"]
+        waiter = asyncio.create_task(send_meta.ready.wait())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        meta = MooncakeConnectorMetadata()
+        meta.reqs_not_processed = {"xfer-1", "xfer-never-seen"}
+        await producer.record_send_reqs(meta)
+
+        await asyncio.wait_for(waiter, timeout=1)
+        assert "xfer-1" not in producer.reqs_need_send
+        assert "xfer-never-seen" not in producer.reqs_need_send
+        assert {"xfer-1", "xfer-never-seen"} <= set(producer._expired_transfer_ids)
+        producer.shutdown()

@@ -207,6 +207,21 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    def quiesced(self, mode: str, clear_cache: bool) -> bool:
+        """Whether a pause of `mode` may complete, as far as the scheduler is
+        concerned. The default waits for the scheduler to be empty."""
+        return not self.has_requests()
+
+    def drop_retained_exports(self) -> int:
+        """Free blocks kept only for remote readers (abort-mode pause).
+        Returns how many requests' blocks were released."""
+        return 0
+
+    def retract_kv_transfers(self) -> None:
+        """Release the blocks KV transfers hold for a pause that keeps
+        requests but clears the cache (see Scheduler.retract_kv_transfers)."""
+        return
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:

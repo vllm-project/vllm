@@ -27,7 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    ExportRelease,
+    KVConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -44,6 +47,11 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.kv_transfer_ledger import (
+    KVTransferLedger,
+    TransferDirection,
+    TransferState,
+)
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -259,6 +267,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # Every transfer that pins this engine's blocks or needs it to keep
+        # stepping, as explicit entries instead of queue-length arithmetic.
+        self.ledger = KVTransferLedger()
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -1559,6 +1570,7 @@ class Scheduler(SchedulerInterface):
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     num_async_kv_loads += 1
+                    self.ledger.import_started(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -3047,6 +3059,8 @@ class Scheduler(SchedulerInterface):
                     # Count P/D requests on arrival: connector matching is
                     # skipped while all run slots are taken.
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
+                    # A remote engine holds KV for this request from now on.
+                    self.ledger.open_import(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -3066,6 +3080,7 @@ class Scheduler(SchedulerInterface):
 
         """
         assert RequestStatus.is_finished(finished_status)
+        finish_all = request_ids is None
         if isinstance(request_ids, str):
             request_ids = (request_ids,)
         elif request_ids is not None:
@@ -3102,6 +3117,7 @@ class Scheduler(SchedulerInterface):
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
+        loads_in_flight: list[Request] = []
         for request in valid_requests:
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -3112,11 +3128,22 @@ class Scheduler(SchedulerInterface):
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
+                if delay_free_blocks:
+                    loads_in_flight.append(request)
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
             if delay_free_blocks:
                 self._aborted_kv_loads.add(request.request_id)
+
+        if loads_in_flight and self.connector is not None:
+            # The remote need not hold (or wait to produce) KV nobody wants:
+            # the load then settles quickly and frees its blocks.
+            self.connector.cancel_kv_transfers([], loads_in_flight)
+        if finish_all and finished_status == RequestStatus.FINISHED_ABORTED:
+            # Aborting everything also stops holding finished requests' blocks
+            # for remote readers, which may be paused or gone as well.
+            self.drop_retained_exports()
 
         return valid_requests
 
@@ -3130,13 +3157,15 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         self._unreserve_parked(request)
         self._set_kv_fetch_stage(request, None)
-        connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        kv_delay_free, kv_xfer_params = self._connector_finished(request)
+        connector_delay_free_blocks = kv_delay_free
 
         # EC Connector: mirror the KV hook. The contract requires firing
         # before the encoder cache is freed so the connector can inspect
         # per-request state (e.g. which mm_hashes it recorded during
         # save_caches()) and emit ec_transfer_params for the response body.
         ec_xfer_params: dict[str, Any] | None = None
+        ec_delay_free = False
         if self.ec_connector is not None:
             ec_delay_free, ec_xfer_params = self.ec_connector.request_finished(request)
             connector_delay_free_blocks |= ec_delay_free
@@ -3148,6 +3177,17 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        if connector_delay_free_blocks:
+            # A remote reader (or an async save) still needs the blocks.
+            self.ledger.open_export(
+                request, droppable=not ec_delay_free and self.connector is not None
+            )
+        if delay_free_blocks:
+            # An import is in flight; its completion frees the blocks.
+            self.ledger.mark_finished(request)
+        else:
+            # A pending or already-consumed import pins nothing any more.
+            self.ledger.close(request_id, TransferDirection.IMPORT)
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -3156,8 +3196,18 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
+        self.ledger.drop_request(request.request_id)
         self._free_request_blocks(request)
-        del self.requests[request.request_id]
+        self.requests.pop(request.request_id, None)
+
+    def _free_if_unreferenced(self, request: Request) -> bool:
+        """Free a finished request's blocks unless another transfer still
+        pins them (e.g. a save still in flight after its load completed)."""
+        assert request.is_finished()
+        if self.ledger.is_referenced(request.request_id):
+            return False
+        self._free_blocks(request)
+        return True
 
     @property
     def pause_state(self) -> PauseState:
@@ -3250,23 +3300,148 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         if self.finished_req_ids:
             return True
-        if self.connector is None:
-            return False
-        # Finished requests waiting on delayed connector cleanup remain in
-        # self.requests after they have been removed from scheduling queues.
-        num_running, num_waiting = self.get_request_counts()
-        return len(self.requests) > (num_running + num_waiting)
+        # Finished requests whose blocks a transfer still pins (a retained
+        # export, or an import that was in flight when they finished).
+        return self.ledger.has_retained()
 
     def has_requests(self) -> bool:
-        # Override the interface default to also keep the engine alive while a
-        # connector still has pending push work (e.g. push-mode WRITE transfers
-        # in flight after all "live" requests have finished). Without this hook
-        # the engine would quiesce before the connector can drain completions.
-        # TODO: replace with a more general mechanism for connectors to keep
-        # the scheduler alive.
+        # The engine keeps stepping while there is anything to schedule, any
+        # finished request to flush, or any KV transfer to drive. Transfers
+        # need steps even when nothing is schedulable: a paused decoder must
+        # keep renewing its leases and collecting completions, a paused
+        # prefiller must keep observing the reads of its retained exports.
+        # has_pending_push_work() covers push-mode WRITEs the connector tracks
+        # on its own.
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
+            or self.ledger.needs_driving()
+            or (self.connector is not None and self.connector.has_pending_push_work())
+            or (
+                self.ec_connector is not None
+                and self.ec_connector.has_pending_push_work()
+            )
+        )
+
+    def drop_retained_exports(self) -> int:
+        """Stop holding finished requests' blocks for remote readers (an abort
+        of all requests, or a pause that clears the cache). Exports a
+        connector also holds for other reasons (e.g. an async save) are kept.
+
+        The connector decides how their blocks are freed (`ExportRelease`).
+        Freed now, a completion it reports later is ignored (no entry).
+        Returns how many exports were dropped."""
+        entries = self.ledger.droppable_exports()
+        if not entries:
+            return 0
+        assert self.connector is not None
+        release = self.connector.cancel_kv_transfers([e.request for e in entries], [])
+        if release == ExportRelease.KEPT:
+            for entry in entries:
+                entry.droppable = False
+            return 0
+        for entry in entries:
+            entry.state = TransferState.DROPPING
+        if release == ExportRelease.FREE_ON_FINISHED_SENDING:
+            return len(entries)
+        for entry in entries:
+            self.ledger.close(entry.request_id, TransferDirection.EXPORT)
+            if entry.request.request_id in self.requests:
+                self._free_if_unreferenced(entry.request)
+        return len(entries)
+
+    def retract_kv_transfers(self) -> None:
+        """The action of a pause that keeps requests but clears the cache: the
+        reset needs every block back, and KV that a transfer moves was
+        computed with the weights being replaced.
+
+        Exports kept for remote readers are dropped. Every import of a live
+        request becomes a local prefill: the remote is told to drop the KV, a
+        load not started is cancelled, and a load in flight is waited for and
+        then discarded, as its blocks may still be written. The requests stay
+        queued and prefill with the new weights after the pause.
+
+        Called again until the pause completes, for the exports of prefills
+        that were in flight and the imports of requests added since.
+        """
+        self.drop_retained_exports()
+        retracted: list[Request] = []
+        for entry in self.ledger.live_imports():
+            if entry.retracted:
+                continue
+            request = entry.request
+            request_id = request.request_id
+            retracted.append(request)
+            if request.kv_transfer_params is not None:
+                request.kv_transfer_params["do_remote_prefill"] = False
+            if entry.state == TransferState.PENDING:
+                # Nothing allocated yet; it simply prefills locally.
+                self.ledger.close(request_id, TransferDirection.IMPORT)
+                self._set_kv_fetch_stage(request, None)
+                if request in self.async_kv_waiting:
+                    self.async_kv_waiting.remove_request(request)
+                    self.waiting.add_request(request)
+            elif entry.state == TransferState.CLOSING or (
+                self.deferred_loads.pop(request_id, None) is not None
+            ):
+                # Received but not promoted yet, or allocated but its load
+                # never started: nothing writes the blocks any more.
+                self._restart_import_locally(request)
+            else:
+                # The load is in flight; restart once it settles.
+                self.ledger.retract(request_id)
+        if retracted and self.connector is not None:
+            self.connector.cancel_kv_transfers([], retracted)
+
+    def _restart_import_locally(self, request: Request) -> None:
+        """Discard a retracted import's KV and queue its request to prefill
+        locally from scratch."""
+        request_id = request.request_id
+        self.ledger.close(request_id, TransferDirection.IMPORT)
+        self.finished_recving_kv_req_ids.discard(request_id)
+        self.failed_recving_kv_req_ids.discard(request_id)
+        self._set_kv_fetch_stage(request, None)
+        self.deferred_waiting.discard(request)
+        self._release_waiting_blocks([request])
+
+    def _release_waiting_blocks(self, requests: list[Request]) -> None:
+        """Free the blocks of waiting requests and queue them to recompute."""
+        self.kv_holding_waiting.remove_requests(requests)
+        for request in requests:
+            self._free_request_blocks(request)
+            request.num_computed_tokens = 0
+            request.status = (
+                RequestStatus.PREEMPTED
+                if request.num_preemptions
+                else RequestStatus.WAITING
+            )
+            self.waiting.prepend_request(request)
+
+    def quiesced(self, mode: str, clear_cache: bool) -> bool:
+        """Whether a pause of this mode may complete, as far as the scheduler
+        is concerned (the engine core adds the device-side conditions).
+
+        mode   compute            outputs   KV transfers (ledger)
+        keep   nothing scheduled  flushed   ignored: they outlive the pause
+        wait   drained            flushed   nothing pins a block
+        abort  drained            flushed   nothing pins a block (remote-read
+                                            exports dropped, loads of aborted
+                                            requests withdrawn)
+        keep+clear behaves like wait here: a cache reset needs every block
+        back. Its action (retract_kv_transfers) drops remote-read exports
+        and turns imports into local prefills, so only the transfers in
+        flight are waited for.
+        """
+        if self.finished_req_ids:
+            return False
+        if mode == "keep" and not clear_cache:
+            return True
+        # Nothing schedulable under this pause state, no block pinned by a
+        # transfer, no push-mode write in flight. Pending imports (requests
+        # not yet allocated) pin nothing and keep waiting through the pause.
+        return not (
+            self.has_unfinished_requests()
+            or self.ledger.pins_blocks()
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -3295,15 +3470,20 @@ class Scheduler(SchedulerInterface):
             while self.running:
                 request = self.running.pop()
                 self._preempt_request(request, timestamp, drop_stale_output=True)
-
-        reset_successful = self.kv_cache_manager.reset_prefix_cache()
-        if reset_running_requests and not reset_successful:
-            raise RuntimeError(
-                "Failed to reset KV cache even when all the running requests are "
-                "preempted and moved to the waiting queue. This is likely due to "
-                "the presence of running requests waiting for remote KV transfer, "
-                "which is not supported yet."
+            # Waiting requests can hold blocks too, e.g. a received remote
+            # load that the token budget has not admitted yet.
+            self._release_waiting_blocks(
+                [
+                    request
+                    for request in self.kv_holding_waiting
+                    if request.status
+                    in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+                ]
             )
+
+        # KV transfers can still hold blocks (see retract_kv_transfers); the
+        # caller may retry once they settle.
+        reset_successful = self.kv_cache_manager.reset_prefix_cache()
 
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
@@ -3618,6 +3798,7 @@ class Scheduler(SchedulerInterface):
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
+        self.ledger.close(request.request_id, TransferDirection.IMPORT)
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
@@ -3672,19 +3853,41 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
-            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            entry = self.ledger.complete(req_id, TransferDirection.IMPORT)
+            req = entry.request if entry is not None else self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Ignoring finished_recving for unknown request %s", req_id
+                )
+                continue
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS and (
+                entry is not None and entry.retracted
+            ):
+                # Retracted by a clearing pause: its KV is discarded.
+                self._restart_import_locally(req)
+            elif req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._aborted_kv_loads.discard(req_id)
-                self._free_blocks(self.requests[req_id])
+                # The request finished while loading; the load no longer pins
+                # its blocks, but a save (export) still might.
+                self.ledger.close(req_id, TransferDirection.IMPORT)
+                self._free_if_unreferenced(req)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            entry = self.ledger.close(req_id, TransferDirection.EXPORT)
+            if entry is None:
+                # Already released (expired, aborted) or never ours: nothing pins
+                # blocks for it, so there is nothing to free.
+                logger.warning(
+                    "Ignoring finished_sending for request %s without a retained "
+                    "export",
+                    req_id,
+                )
+                continue
+            self._free_if_unreferenced(entry.request)
 
     def _update_requests_with_invalid_blocks(
         self,
@@ -3798,6 +4001,8 @@ class Scheduler(SchedulerInterface):
             if (
                 request is not None
                 and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                # A retracted load is discarded whether or not it succeeded.
+                and not self.ledger.is_retracted(req_id)
             ):
                 affected_req_ids.add(req_id)
                 if self.recompute_kv_load_failures:
@@ -3832,6 +4037,7 @@ class Scheduler(SchedulerInterface):
             req
             for req in self.kv_holding_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            and not self.ledger.is_retracted(req.request_id)
         )
         async_failed_req_ids, num_failed_tokens, _ = (
             self._update_requests_with_invalid_blocks(

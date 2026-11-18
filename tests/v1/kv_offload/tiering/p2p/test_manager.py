@@ -1275,6 +1275,7 @@ class TestHasPendingWork:
             OffloadingConnector,
         )
         from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.kv_transfer_ledger import KVTransferLedger
         from vllm.v1.core.sched.scheduler import Scheduler
         from vllm.v1.engine.core import EngineCoreProc
         from vllm.v1.kv_offload.tiering.manager import (
@@ -1309,12 +1310,13 @@ class TestHasPendingWork:
             scheduler.requests = {}
             scheduler.connector = connector
             scheduler.ec_connector = None
+            scheduler.ledger = KVTransferLedger()
             core = object.__new__(EngineCoreProc)
             core.scheduler = scheduler
             core.engines_running = False
             core.batch_queue = None
 
-            assert core._pause_complete() is True
+            assert core._pause_ready("wait", clear_cache=False) is True
         finally:
             manager.shutdown()
 
@@ -1331,6 +1333,7 @@ class TestHasPendingWork:
             OffloadingConnector,
         )
         from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.kv_transfer_ledger import KVTransferLedger
         from vllm.v1.core.sched.scheduler import Scheduler
         from vllm.v1.engine.core import EngineCoreProc
         from vllm.v1.kv_offload.tiering.manager import (
@@ -1367,12 +1370,13 @@ class TestHasPendingWork:
             scheduler.requests = {}
             scheduler.connector = connector
             scheduler.ec_connector = None
+            scheduler.ledger = KVTransferLedger()
             core = object.__new__(EngineCoreProc)
             core.scheduler = scheduler
             core.engines_running = False
             core.batch_queue = None
 
-            assert core._pause_complete() is False
+            assert core._pause_ready("wait", clear_cache=False) is False
         finally:
             manager.shutdown()
 
