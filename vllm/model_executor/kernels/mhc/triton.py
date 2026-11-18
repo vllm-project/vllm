@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from vllm import envs
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -117,6 +118,10 @@ def _hc_head_reduce_store_kernel(
 
 def hc_collapse_triton(x: Tensor, pre_mix: Tensor) -> Tensor:
     """Collapse BF16 residual streams with FP32 pre-mix coefficients."""
+    if envs.VLLM_BATCH_INVARIANT and x.is_cuda:
+        from vllm.model_executor.kernels.batch_invariant import hc_collapse
+
+        return hc_collapse(x, pre_mix)
     assert x.ndim == 3 and x.dtype == torch.bfloat16
     num_tokens, hc_mult, hidden_size = x.shape
     assert pre_mix.shape == (num_tokens, hc_mult)
