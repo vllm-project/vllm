@@ -1,0 +1,22 @@
+# Hash-locked cmake for the (CPU) Params, Env, Tokenizers, Parser job.
+#
+# tests/test_cmake_utils.py shells out to `cmake -P`, and the CPU test image
+# ships no cmake: it is only in requirements/build/cpu.txt, which the
+# vllm-build and vllm-test-deps stages install and the vllm-test stage does not
+# inherit. Installing it at job time is why #63609 disabled that job.
+#
+# Stays in the 3.x line: CMakeLists.txt declares
+# cmake_minimum_required(VERSION 3.26) and requirements/build/cpu.txt asks for
+# cmake>=3.26.1, so 3.31.6 is both compatible and a deliberate pin rather than
+# whatever the index resolves to.
+#
+# Regenerate with:
+#   uv pip compile --generate-hashes --no-annotate --python-version 3.12 \
+#     --python-platform x86_64-manylinux_2_28 <<< 'cmake==3.31.6'
+#
+# Only the linux wheels the CPU images can run on are pinned; --require-hashes
+# makes an unpinned platform a hard error rather than a silent download.
+cmake==3.31.6 \
+    --hash=sha256:2297e9591307d9c61e557efe737bcf4d7c13a30f1f860732f684a204fee24dca \
+    --hash=sha256:1c8b05df0602365da91ee6a3336fe57525b137706c4ab5675498f662ae1dbcec \
+    --hash=sha256:42d9883b8958da285d53d5f69d40d9650c2d1bcf922d82b3ebdceb2b3a7d4521

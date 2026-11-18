@@ -430,6 +430,23 @@ class MistralParser(ParserEngine):
                     request.response_format = None
             return request
 
+        # A grammar only constrains tool calls or a structured response. A plain
+        # text request (no tools, no structured response_format, no
+        # structured_outputs) needs none; building one anyway would force the
+        # model onto a lark grammar for free-form text. Leave such requests
+        # untouched so structured_outputs stays None.
+        has_structured_response_format = (
+            request.response_format is not None
+            and request.response_format.type in ("json_object", "json_schema")
+        )
+        needs_grammar = bool(
+            request.tools
+            or request.structured_outputs is not None
+            or has_structured_response_format
+        )
+        if not needs_grammar:
+            return request
+
         response_format = _mistral_response_format(request)
         # The grammar replaces response_format as the engine constraint.
         request.response_format = None
@@ -609,6 +626,55 @@ class MistralParser(ParserEngine):
             tool_calls=mistral_tool_calls,
             content=content if content and content.strip() else None,
         )
+
+    def parse_delta(
+        self,
+        delta_text: str,
+        delta_token_ids: list[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+        prompt_token_ids: list[int] | None = None,
+        *,
+        finished: bool = False,
+    ) -> DeltaMessage | None:
+        """Route pre-v11 tool-call streaming through the legacy state machine.
+
+        Pre-v11 Mistral emits tool calls as a `[TOOL_CALLS][{...}]` JSON array,
+        handled by `_extract_tool_calls_streaming_pre_v11_tokenizer` via the
+        latch in `extract_tool_calls_streaming`. The declarative engine that
+        backs `ParserEngine.parse_delta` only models the v11+ `name{args}`
+        form, so on the engine streaming path it would wrongly split the array,
+        dropping every tool call and leaking a bare `}` as an argument delta.
+        Delegate to the same legacy extractor the ToolParser path uses so both
+        streaming paths behave identically; the engine (never fed on this path)
+        is not finished here, which also avoids that stray `}`.
+        """
+        if not self._is_pre_v11:
+            return super().parse_delta(
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids,
+                finished=finished,
+            )
+        # The pre-v11 extractor is stateful across deltas and uses only
+        # delta_text/delta_token_ids/request; previous/current are ignored.
+        return self.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=delta_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=list(delta_token_ids),
+            delta_token_ids=delta_token_ids,
+            request=request,
+        )
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Pre-v11 streaming never feeds the declarative engine, so there is
+        nothing to flush; returning None avoids emitting a stray `}`.
+        """
+        if self._is_pre_v11:
+            return None
+        return super().finish_streaming()
 
     def extract_tool_calls_streaming(
         self,
