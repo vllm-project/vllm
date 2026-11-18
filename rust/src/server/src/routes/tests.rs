@@ -854,44 +854,58 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> (axum::Router, MockEn
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn chat_completions_with_tools_returns_400_when_tool_parser_disabled() {
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-tool-parser-disabled",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let mut app = build_router_with_gates(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat.with_tool_call_parser(ParserSelection::None),
-        )),
-        RouteGates::default(),
-    );
+async fn chat_completions_with_tools_returns_400_without_tool_parser() {
+    // `auto` resolves no tool parser for `test-model`.
+    let cases = [
+        (
+            ParserSelection::None,
+            "tool parsing is disabled by frontend configuration",
+        ),
+        (
+            ParserSelection::Auto,
+            "tool parsing is not available for model `test-model`",
+        ),
+    ];
+    for (tool_call_parser, message) in cases {
+        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-no-tool-parser",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat.with_tool_call_parser(tool_call_parser),
+            )),
+            RouteGates::default(),
+        );
 
-    let (status, json) = post_json(
-        &mut app,
-        "/v1/chat/completions",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"city": {"type": "string"}},
-                        "required": ["city"]
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"]
+                        }
                     }
-                }
-            }]
-        }),
-    )
-    .await;
+                }]
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{message}");
+        assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(json["error"]["message"], message);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3872,6 +3886,7 @@ async fn http_metrics_record_list_models_requests() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
 
     let after = METRICS.render().unwrap();
     assert_eq!(
@@ -6373,6 +6388,38 @@ async fn happy_path_returns_sse_stream() {
         Some("text/event-stream")
     );
 
+    let after_headers = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after_headers,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"2xx\",handler=\"/v1/chat/completions\""),
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after_headers,
+            "http_request_duration_seconds_count",
+            Some("method=\"POST\",handler=\"/v1/chat/completions\""),
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after_headers,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        0.0
+    );
+
+    // The recorded duration must cover the time the body is still being read.
+    let body_gap = Duration::from_millis(50);
+    tokio::time::sleep(body_gap).await;
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
@@ -6415,6 +6462,77 @@ async fn happy_path_returns_sse_stream() {
             &after,
             "http_request_duration_seconds_count",
             Some("method=\"POST\",handler=\"/v1/chat/completions\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        1.0
+    );
+    assert!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_sum",
+            None,
+        ) >= body_gap.as_secs_f64()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn http_metrics_record_request_cancelled_before_response() {
+    async fn pending_handler(
+        axum::extract::State(started): axum::extract::State<Arc<tokio::sync::Notify>>,
+    ) -> StatusCode {
+        started.notify_one();
+        std::future::pending::<StatusCode>().await
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let mut app = axum::Router::new()
+        .route("/pending", axum::routing::get(pending_handler))
+        .with_state(started.clone())
+        .layer(axum::middleware::from_fn(
+            crate::middleware::track_http_metrics,
+        ));
+    let before = METRICS.render().unwrap();
+
+    let request_task = tokio::spawn(async move {
+        app.call(
+            Request::builder()
+                .method("GET")
+                .uri("/pending")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+    });
+    started.notified().await;
+    request_task.abort();
+    assert!(request_task.await.expect_err("request should be cancelled").is_cancelled());
+
+    let after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"GET\",status=\"2xx\",handler=\"/pending\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"GET\",handler=\"/pending\""),
         ),
         1.0
     );
@@ -6503,6 +6621,7 @@ async fn http_metrics_group_error_statuses() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
 
     let after = METRICS.render().unwrap();
     assert_eq!(
@@ -7091,8 +7210,22 @@ async fn stream_without_include_usage_keeps_existing_shape() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
+    let chunks = sse_json_payloads(&text);
+    let (final_chunk, non_final_chunks) = chunks.split_last().expect("stream must contain chunks");
+
+    assert!(!non_final_chunks.is_empty());
+
+    for chunk in non_final_chunks {
+        let choice = &chunk["choices"][0];
+        assert_eq!(
+            choice.get("finish_reason"),
+            Some(&serde_json::Value::Null),
+            "non-final choice must include finish_reason: null: {choice}",
+        );
+    }
+
+    assert_eq!(final_chunk["choices"][0]["finish_reason"], "stop");
     assert!(!text.contains("\"usage\":"), "{text}");
-    assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 
@@ -8950,11 +9083,23 @@ async fn completions_happy_path_returns_sse_stream() {
         payloads.iter().any(|payload| payload.contains("\"text\":\"h\"")),
         "{text}"
     );
-    assert!(
-        payloads.iter().any(|payload| payload.contains("\"finish_reason\":\"stop\"")),
-        "{text}"
-    );
     assert!(usage_index < done_index, "{text}");
+
+    let chunks = sse_json_payloads(&text);
+    let choice_chunks: Vec<_> =
+        chunks.iter().filter(|chunk| chunk["choices"] != json!([])).collect();
+    let (final_chunk, non_final_chunks) =
+        choice_chunks.split_last().expect("stream must contain choice chunks");
+    assert!(!non_final_chunks.is_empty(), "{text}");
+    for chunk in non_final_chunks {
+        let choice = &chunk["choices"][0];
+        assert_eq!(
+            choice.get("finish_reason"),
+            Some(&serde_json::Value::Null),
+            "non-final choice must include finish_reason: null: {choice}",
+        );
+    }
+    assert_eq!(final_chunk["choices"][0]["finish_reason"], "stop");
 
     let usage_chunk: serde_json::Value =
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
@@ -10640,6 +10785,7 @@ async fn release_kv_cache_memory_error_records_http_status_and_operation_duratio
         .await
         .expect("call app");
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let after = METRICS.render().expect("render metrics");
     assert_eq!(
