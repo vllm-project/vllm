@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cgroup memory readers and SHM allocation preflight checks."""
 
+import os
 import sys
 from io import StringIO
 from types import SimpleNamespace
@@ -313,3 +314,58 @@ def test_omp_manager_sim_multi_numa_requires_auto_binding(monkeypatch):
         omp.OMPProcessManager(
             SimpleNamespace(parallel_config=parallel_config, kv_transfer_config=None)
         )
+
+
+def _iomp_manager(monkeypatch):
+    """OMPProcessManager for one worker bound to CPUs 0-3, with Intel OpenMP."""
+    monkeypatch.setattr(
+        omp,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: True, get_cpu_architecture=lambda: CpuArchEnum.X86
+        ),
+    )
+    monkeypatch.setenv("LD_PRELOAD", "/opt/venv/lib/libiomp5.so")
+    monkeypatch.setenv("VLLM_CPU_OMP_THREADS_BIND", "0-3")
+    monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+    parallel_config = SimpleNamespace(
+        local_world_size=1,
+        data_parallel_rank_local=None,
+        _api_process_count=1,
+        assigned_physical_gpu_ids=None,
+    )
+    return omp.OMPProcessManager(
+        SimpleNamespace(parallel_config=parallel_config, kv_transfer_config=None)
+    )
+
+
+@pytest.mark.parametrize("unset", [None, ""], ids=["missing", "empty"])
+def test_omp_envs_set_kmp_defaults(monkeypatch, unset):
+    for key in ("KMP_BLOCKTIME", "KMP_TPAUSE"):
+        if unset is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, unset)
+    manager = _iomp_manager(monkeypatch)
+    with manager.configure_omp_envs(rank=0, local_rank=0):
+        assert os.environ["KMP_AFFINITY"] == (
+            "granularity=fine,explicit,proclist=[0,1,2,3]"
+        )
+        assert os.environ["KMP_BLOCKTIME"] == "5"
+        assert os.environ["KMP_TPAUSE"] == "0"
+    # The previous state (missing or empty) is restored.
+    assert os.environ.get("KMP_BLOCKTIME") == unset
+    assert os.environ.get("KMP_TPAUSE") == unset
+
+
+def test_omp_envs_keep_user_kmp_settings(monkeypatch):
+    """KMP_BLOCKTIME / KMP_TPAUSE exported by the user reach the worker."""
+    monkeypatch.setenv("KMP_BLOCKTIME", "0")
+    monkeypatch.setenv("KMP_TPAUSE", "1")
+    manager = _iomp_manager(monkeypatch)
+    with manager.configure_omp_envs(rank=0, local_rank=0):
+        assert os.environ["KMP_BLOCKTIME"] == "0"
+        assert os.environ["KMP_TPAUSE"] == "1"
+        assert os.environ["OMP_NUM_THREADS"] == "4"
+    assert os.environ["KMP_BLOCKTIME"] == "0"
+    assert os.environ["KMP_TPAUSE"] == "1"
