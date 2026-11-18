@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_only, requires_fp8
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 
@@ -220,7 +221,12 @@ async def test_thinking_token_budget_limits_reasoning_with_metrics(
         f"thinking_token_budget ({THINK_BUDGET})"
     )
     assert metrics is not None
-    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
+    # Content timing is currently supported by the Python frontend only.
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        assert (
+            metrics["time_to_first_content_token_ms"]
+            > metrics["time_to_first_token_ms"]
+        )
 
 
 @pytest.mark.asyncio
