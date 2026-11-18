@@ -96,6 +96,10 @@ before broadcasting. This cuts the number of NCCL operations and uses
 double/triple buffering with dedicated CUDA streams to overlap packing,
 broadcasting, and unpacking.
 
+Packed transfers support mixed dtypes, including odd-sized byte tensors followed
+by wider types. Misaligned tensors require an additional copy on the receiving
+GPU; aligned tensors remain views of the received buffer.
+
 You set `packed`, `packed_buffer_size_bytes`, and `packed_num_buffers` **only on
 `NCCLTrainerInitInfo`**. The trainer propagates them to the worker inside
 `trainer_init`, the worker records them at the handshake, and `receive_weights`
