@@ -1069,6 +1069,41 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
         )
 
 
+@skip_unsupported
+def test_processed_logprobs_do_not_depend_on_batch_logits_processing():
+    """With processed logprobs, a greedy request's logprobs must not change
+    next to a request whose logits need processing (here a penalty)."""
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    prompts = [_random_prompt(10, 50) for _ in range(4)]
+    sp = SamplingParams(temperature=0.0, max_tokens=32, logprobs=5)
+    penalized = SamplingParams(temperature=0.0, max_tokens=32, repetition_penalty=1.3)
+    llm = LLM(
+        model=TEST_MODEL,
+        max_model_len=2048,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+        logprobs_mode="processed_logprobs",
+    )
+    try:
+        alone = [llm.generate([p], sp, use_tqdm=False)[0] for p in prompts]
+        batched = llm.generate(
+            prompts + prompts[:1], [sp] * len(prompts) + [penalized], use_tqdm=False
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, (alone_out, batched_out) in enumerate(zip(alone, batched)):
+        a, b = alone_out.outputs[0], batched_out.outputs[0]
+        assert a.token_ids == b.token_ids, f"Prompt {i}: tokens differ"
+        assert a.logprobs is not None and b.logprobs is not None
+        for step, (pos_a, pos_b) in enumerate(zip(a.logprobs, b.logprobs)):
+            assert pos_a is not None and pos_b is not None
+            x = [(t, lp.logprob) for t, lp in pos_a.items()]
+            y = [(t, lp.logprob) for t, lp in pos_b.items()]
+            assert x == y, f"Prompt {i}, step {step}: {x} alone vs {y} batched"
+
+
 def LLM_with_max_seqs(
     model: str,
     max_num_seqs: int,
