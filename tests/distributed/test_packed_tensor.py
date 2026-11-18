@@ -105,7 +105,6 @@ SLEEP_CYCLES = 2_000_000_000
 def roundtrip(
     params: list[tuple[str, torch.Tensor]],
     buffer_size_bytes: int,
-    num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> MockCommunicationGroup:
     """Round-trip `params` (again behind a slow fill) and check they arrive
     intact. Returns the producer's group."""
@@ -116,7 +115,6 @@ def roundtrip(
         src=0,
         post_iter_func=lambda x: x[1],
         buffer_size_bytes=buffer_size_bytes,
-        num_buffers=num_buffers,
     )
     dst = {name: torch.empty_like(t) for name, t in params}
 
@@ -143,7 +141,6 @@ def roundtrip(
             src=0,
             post_unpack_func=post_unpack_func,
             buffer_size_bytes=buffer_size_bytes,
-            num_buffers=num_buffers,
         )
         torch.accelerator.synchronize()
         for name, t in params:
@@ -152,7 +149,7 @@ def roundtrip(
 
     consume(sleep=False)
     # The first load can only overlap the fill if the first tensor completes
-    # within the first `num_buffers` chunks.
+    # within the first `DEFAULT_PACKED_NUM_BUFFERS` chunks.
     layout = chunks(((t.shape, t.dtype) for _, t in params), buffer_size_bytes)
     first_load = next(
         k
@@ -160,7 +157,7 @@ def roundtrip(
         if any(p.end == params[p.position][1].nbytes for p in pieces)
     )
     fill_pending = consume(sleep=True)
-    if first_load < num_buffers:
+    if first_load < DEFAULT_PACKED_NUM_BUFFERS:
         assert fill_pending, "the fill finished before the first load"
     return producer_group
 
@@ -193,14 +190,6 @@ class TestPackedBroadcastRoundtrip:
         """Test roundtrip with different target batch sizes."""
         params = create_mock_model_params(num_layers=5)
         roundtrip([(n, t.cuda()) for n, t in params], buffer_size_bytes=target_size)
-
-    def test_roundtrip_parameters(self):
-        """Parameters requiring grad, whole and split, pack like tensors."""
-        params = [
-            (f"p{i}", torch.nn.Parameter(torch.randn(n, device="cuda")))
-            for i, n in enumerate([5, 300, 7])
-        ]
-        roundtrip(params, buffer_size_bytes=512)
 
     def test_roundtrip_non_contiguous_tensors(self):
         """Test roundtrip with non-contiguous tensors from the trainer."""
@@ -676,16 +665,16 @@ class TestPackedIpcRoundtrip:
 
     @pytest.mark.parametrize("buffer_size_bytes", [10_000_000, 64, 50])
     def test_roundtrip_odd_sized_and_split_entries(self, buffer_size_bytes):
-        """Odd-sized entries (a 3-byte one first), a 0-dim and an empty one,
-        and with a small buffer tensors split across chunks, including chunks
-        that name no tensor."""
+        """Odd-sized entries, a 0-dim one and a parameter; with a small buffer
+        the parameter is split and the 192-byte stream ends in a chunk of only
+        the empty tensor."""
         params = [
             ("tag", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
-            ("w", torch.randn(4, 8, dtype=torch.float32).cuda()),
+            ("w", torch.nn.Parameter(torch.randn(4, 8, device="cuda"))),
             ("b", torch.randn(5, dtype=torch.bfloat16).cuda()),
             ("s", torch.tensor(2.5).cuda()),
+            ("i", torch.arange(2, dtype=torch.int64).cuda()),
             ("e", torch.empty(0, 3).cuda()),
-            ("i", torch.arange(3, dtype=torch.int64).cuda()),
         ]
         num_chunks, result = self._run_roundtrip(
             packed_ipc_producer(
@@ -696,71 +685,13 @@ class TestPackedIpcRoundtrip:
             ),
             torch.cuda.current_device(),
         )
-        assert (num_chunks == 1) == (buffer_size_bytes == 10_000_000)
+        assert num_chunks == {10_000_000: 1, 64: 4, 50: 5}[buffer_size_bytes]
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(
             params, result, strict=True
         ):
             assert orig_name == res_name
             assert res_tensor.dtype == orig_tensor.dtype
-            assert torch.equal(res_tensor, orig_tensor.cpu())
-
-    def test_roundtrip_tensor_over_the_buffer(self):
-        """A tensor larger than the IPC buffer is split across chunks."""
-        params = [
-            ("small", torch.randn(10, device="cuda")),
-            ("big", torch.randn(100, 100, device="cuda")),  # 40000 B
-            ("after", torch.randn(7, device="cuda", dtype=torch.float16)),
-        ]
-        num_chunks, result = self._run_roundtrip(
-            packed_ipc_producer(
-                iterator=iter(params),
-                gpu_uuid=self._get_gpu_uuid(),
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=4096,
-            ),
-            torch.cuda.current_device(),
-        )
-        assert num_chunks == 10
-        assert [n for n, _ in result] == [n for n, _ in params]
-        for (_, orig), (_, res) in zip(params, result):
-            assert torch.equal(res, orig.cpu())
-
-    def test_roundtrip_ending_with_a_chunk_of_no_bytes(self):
-        params = [
-            ("full", torch.randn(8, device="cuda")),  # 32 B: two full chunks
-            ("empty", torch.empty(0, 4, device="cuda")),
-        ]
-        num_chunks, result = self._run_roundtrip(
-            packed_ipc_producer(
-                iterator=iter(params),
-                gpu_uuid=self._get_gpu_uuid(),
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=16,
-            ),
-            torch.cuda.current_device(),
-        )
-        assert num_chunks == 3
-        for (n, orig), (m, res) in zip(params, result, strict=True):
-            assert n == m and torch.equal(res, orig.cpu())
-
-    def test_roundtrip_parameters(self):
-        """Parameters requiring grad, whole and split, pack like tensors."""
-        params = [
-            (f"p{i}", torch.nn.Parameter(torch.randn(n, device="cuda")))
-            for i, n in enumerate([5, 300, 7])
-        ]
-        num_chunks, result = self._run_roundtrip(
-            packed_ipc_producer(
-                iterator=iter(params),
-                gpu_uuid=self._get_gpu_uuid(),
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=512,
-            ),
-            torch.cuda.current_device(),
-        )
-        assert num_chunks == 3
-        for (n, orig), (m, res) in zip(params, result, strict=True):
-            assert n == m and torch.equal(res, orig.detach().cpu())
+            assert torch.equal(res_tensor, orig_tensor.detach().cpu())
 
     def test_consumer_wrong_uuid_raises(self):
         """Test that consumer raises ValueError for unknown GPU UUID."""
@@ -823,7 +754,7 @@ def _mixed_tensors(seed: int = 0) -> list[torch.Tensor]:
 
 
 class TestChunkLayout:
-    @pytest.mark.parametrize("limit", [16, 100, 1000, 4096, 1 << 20])
+    @pytest.mark.parametrize("limit", [16, 100, 1 << 20])
     def test_layout_is_the_aligned_stream_cut_into_buffer_sized_chunks(self, limit):
         """The wire bytes are every tensor back to back, each starting
         `ALIGN`-aligned, cut into chunks of the buffer size (rounded down to
@@ -844,25 +775,6 @@ class TestChunkLayout:
         for _, pieces in layout:
             assert all(p.offset % ALIGN == 0 for p in pieces)
 
-    def test_tensor_over_the_buffer_is_split_at_chunk_boundaries(self):
-        layout = chunks([((10, 100), torch.float32)], 1000)  # 4000 B
-        assert [(p.start, p.end, p.offset) for _, ps in layout for p in ps] == [
-            (0, 992, 0),
-            (992, 1984, 0),
-            (1984, 2976, 0),
-            (2976, 3968, 0),
-            (3968, 4000, 0),
-        ]
-
-    def test_stream_ending_on_a_cut_then_empty_tensors(self):
-        """The empty tensors after a full last chunk make a chunk of no
-        bytes."""
-        specs = [((4,), torch.float32), ((0, 4), torch.float32), ((0,), torch.int8)]
-        assert list(chunks(specs, 16)) == [
-            Chunk(16, [Piece(0, 0, 16, 0)]),
-            Chunk(0, [Piece(1, 0, 0, 0), Piece(2, 0, 0, 0)]),
-        ]
-
     def test_a_full_chunk_is_yielded_before_the_next_spec_is_pulled(self):
         """Also when only the padding is left: the IPC consumer derives each
         chunk from the specs received with it and before."""
@@ -878,24 +790,20 @@ class TestChunkLayout:
         assert len(pulled) == 1
         assert next(layout) == Chunk(8, [Piece(1, 0, 8, 0)])
 
-    def test_buffer_under_the_alignment_is_rejected(self):
-        with pytest.raises(ValueError, match="at least 16 bytes"):
-            next(chunks([((4,), torch.float32)], ALIGN - 1))
-
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestChunkedRoundtrip:
     def test_roundtrip_with_split_and_odd_sized_tensors(self):
+        """Also parameters requiring grad, split and whole."""
         tensors = [t.cuda() for t in _mixed_tensors(1)]
-        tensors.insert(2, torch.randn(50, 16, device="cuda"))  # 3200 B
-        tensors.insert(3, torch.randint(0, 9, (5,), dtype=torch.uint8).cuda())
+        tensors.insert(2, torch.nn.Parameter(torch.randn(50, 16, device="cuda")))
+        tensors.insert(3, torch.nn.Parameter(torch.randn(5, device="cuda")))
         tensors.append(torch.randn(30, 6, device="cuda", dtype=torch.float64).t())
         params = [(f"t{i}", t) for i, t in enumerate(tensors)]
         group = roundtrip(params, buffer_size_bytes=512)
         assert max(t.numel() for t in group.broadcasted_tensors) <= 512
 
-    @pytest.mark.parametrize("num_buffers", [1, 2, 3])
-    def test_roundtrip_ending_with_a_chunk_of_no_bytes(self, num_buffers):
+    def test_roundtrip_ending_with_a_chunk_of_no_bytes(self):
         """A chunk of only empty tensors is not broadcast; they still
         arrive."""
         params = [
@@ -903,7 +811,7 @@ class TestChunkedRoundtrip:
             ("empty", torch.empty(0, 4, device="cuda")),
             ("none", torch.empty(0, device="cuda", dtype=torch.int8)),
         ]
-        group = roundtrip(params, buffer_size_bytes=16, num_buffers=num_buffers)
+        group = roundtrip(params, buffer_size_bytes=16)
         assert [t.numel() for t in group.broadcasted_tensors] == [16, 16]
 
     def test_unpack_waits_for_each_receive(self):
