@@ -35,13 +35,15 @@ from .decoder import (
     HEALTH_POLL_INTERVAL,
     NUM_CUS,
     SLIDING_WINDOW,
-    WORLD_SIZE,
     MonoDims,
     _FusedAttention,
     kv_cache_refusal,
     register_health_check,
 )
 from .peer import PeerBuffer
+
+# The draft launch runs at TP = EP 8 only (the target's decoder also covers 4).
+WORLD_SIZE = 8
 
 logger = init_logger(__name__)
 
