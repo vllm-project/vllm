@@ -29,15 +29,6 @@ async def init_app_state(
 ) -> None:
     vllm_config = engine_client.vllm_config
 
-    # CLI --max-tokenize-tokens (FrontendArgs) overrides the value resolved
-    # at engine startup (which only reads the env var).
-    if getattr(args, "max_tokenize_tokens", None) is not None:
-        vllm_config.model_config.max_tokenize_tokens = (
-            None
-            if args.max_tokenize_tokens <= 0
-            else args.max_tokenize_tokens
-        )
-
     if args.tool_call_parser is not None:
         from vllm.parser.metrics import init_parser_metrics
 
@@ -140,6 +131,7 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+        max_tokenize_tokens=getattr(args, "max_tokenize_tokens", None),
     )
 
     if "generate" in supported_tasks:

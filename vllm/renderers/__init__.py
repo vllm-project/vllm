@@ -6,6 +6,7 @@ from .params import (
     ChatParams,
     ReasoningEffort,
     TokenizeParams,
+    apply_max_tokenize_tokens,
     map_reasoning_effort,
     merge_kwargs,
     resolve_max_tokenize_tokens,
@@ -22,4 +23,5 @@ __all__ = [
     "merge_kwargs",
     "ReasoningEffort",
     "map_reasoning_effort",
+    "apply_max_tokenize_tokens",
 ]

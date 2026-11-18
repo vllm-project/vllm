@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,16 @@ import requests
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.common.cli_args import BaseFrontendArgs
-from vllm.entrypoints.serve.tokenize.protocol import TokenizeCompletionRequest
-from vllm.renderers.params import resolve_max_tokenize_tokens
+from vllm.entrypoints.serve.tokenize.protocol import (
+    DetokenizeRequest,
+    TokenizeChatRequest,
+    TokenizeCompletionRequest,
+)
+from vllm.exceptions import VLLMValidationError
+from vllm.renderers.params import (
+    apply_max_tokenize_tokens,
+    resolve_max_tokenize_tokens,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
@@ -39,17 +48,17 @@ def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expe
     cli_args = [] if cli_value is None else ["--max-tokenize-tokens", cli_value]
     args = parser.parse_args(cli_args)
 
-    # The explicit ModelConfig field is populated from FrontendArgs when set;
-    # otherwise the resolver consults the environment and then the fallback.
-    model_config = SimpleNamespace(
-        max_tokenize_tokens=args.max_tokenize_tokens,
-        max_model_len=100,
+    model_config = SimpleNamespace(max_model_len=100)
+    resolved = resolve_max_tokenize_tokens(
+        args.max_tokenize_tokens, model_config.max_model_len
     )
-    tok_params = TokenizeCompletionRequest(
-        model="test-model", prompt="hello"
-    ).build_tok_params(model_config)
-
-    assert resolve_max_tokenize_tokens(model_config) == expected
+    tok_params = apply_max_tokenize_tokens(
+        TokenizeCompletionRequest(model="test-model", prompt="hello").build_tok_params(
+            model_config
+        ),
+        resolved,
+    )
+    assert resolved == expected
     assert tok_params.max_total_tokens == expected
 
 
@@ -65,10 +74,51 @@ def test_max_tokenize_tokens_default_uses_model_length_floor(
 ):
     envs.disable_envs_cache()
     monkeypatch.delenv("VLLM_MAX_TOKENIZE_TOKENS", raising=False)
-    model_config = SimpleNamespace(
-        max_tokenize_tokens=None, max_model_len=max_model_len
+    assert resolve_max_tokenize_tokens(None, max_model_len) == expected
+
+
+def test_tokenize_request_models_respect_max_total_tokens():
+    model_config = SimpleNamespace(max_model_len=100)
+
+    # 1. TokenizeCompletionRequest
+    req_cmpl = TokenizeCompletionRequest(model="test-model", prompt="hello")
+    params_cmpl = req_cmpl.build_tok_params(model_config)
+    assert apply_max_tokenize_tokens(params_cmpl, 42).max_total_tokens == 42
+    assert (
+        apply_max_tokenize_tokens(
+            replace(params_cmpl, max_total_tokens=10), 42
+        ).max_total_tokens
+        == 10
     )
-    assert resolve_max_tokenize_tokens(model_config) == expected
+
+    # 2. TokenizeChatRequest
+    req_chat = TokenizeChatRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    params_chat = req_chat.build_tok_params(model_config)
+    assert apply_max_tokenize_tokens(params_chat, 42).max_total_tokens == 42
+    assert (
+        apply_max_tokenize_tokens(
+            replace(params_chat, max_total_tokens=10), 42
+        ).max_total_tokens
+        == 10
+    )
+
+    # 3. DetokenizeRequest
+    req_detok = DetokenizeRequest(model="test-model", tokens=[1, 2, 3])
+    params_detok = req_detok.build_tok_params(model_config)
+    assert apply_max_tokenize_tokens(params_detok, 42).max_total_tokens == 42
+    assert (
+        apply_max_tokenize_tokens(
+            replace(params_detok, max_total_tokens=10), 42
+        ).max_total_tokens
+        == 10
+    )
+
+    # 4. Exceeding max_tokenize_tokens raises VLLMValidationError
+    with pytest.raises(VLLMValidationError):
+        apply_max_tokenize_tokens(replace(params_cmpl, max_total_tokens=50), 42)
 
 
 def test_tokenize_request_rejects_over_limit_requests():

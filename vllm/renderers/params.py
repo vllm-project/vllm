@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 import vllm.envs as envs
@@ -14,7 +14,6 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config.model import ModelConfig
     from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
@@ -163,7 +162,7 @@ class TokenizeParams:
     max_total_tokens: int | None
     """
     Maximum allowed number of input + output tokens.
-    
+
     Usually, this refers to the model's context length.
     """
 
@@ -615,13 +614,40 @@ class TokenizeParams:
         return prompt
 
 
-def resolve_max_tokenize_tokens(model_config: "ModelConfig") -> int | None:
-    if getattr(model_config, "_max_tokenize_tokens_resolved", False):
-        return model_config.max_tokenize_tokens
-    limit = model_config.max_tokenize_tokens
-    if limit is not None:
-        return None if limit <= 0 else limit
+def resolve_max_tokenize_tokens(
+    max_tokenize_tokens: int | None,
+    max_model_len: int,
+) -> int | None:
+    if max_tokenize_tokens is not None:
+        return None if max_tokenize_tokens <= 0 else max_tokenize_tokens
     env_limit = envs.VLLM_MAX_TOKENIZE_TOKENS
     if env_limit is not None:
         return None if env_limit <= 0 else env_limit
-    return max(model_config.max_model_len * 2, 131072)
+    return max(max_model_len * 2, 131072)
+
+
+def apply_max_tokenize_tokens(
+    tok_params: TokenizeParams,
+    max_tokenize_tokens: int | None,
+) -> TokenizeParams:
+    """Validate and apply the server's max_tokenize_tokens limit to TokenizeParams."""
+    if max_tokenize_tokens is None:
+        return tok_params
+
+    if (
+        tok_params.max_total_tokens is not None
+        and tok_params.max_total_tokens > max_tokenize_tokens
+    ):
+        raise VLLMValidationError(
+            f"Requested token limit ({tok_params.max_total_tokens}) "
+            f"cannot be greater than max_tokenize_tokens={max_tokenize_tokens}.",
+            parameter=tok_params.max_total_tokens_param,
+            value=tok_params.max_total_tokens,
+        )
+
+    new_limit = (
+        max_tokenize_tokens
+        if tok_params.max_total_tokens is None
+        else min(tok_params.max_total_tokens, max_tokenize_tokens)
+    )
+    return replace(tok_params, max_total_tokens=new_limit)

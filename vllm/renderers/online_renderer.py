@@ -244,6 +244,7 @@ class OnlineRenderer:
         request: ChatCompletionRequest,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -324,6 +325,7 @@ class OnlineRenderer:
                 tool_dicts=tool_dicts,
                 parser=self.parser,
                 skip_mm_cache=skip_mm_cache,
+                tok_params=tok_params,
             )
         else:
             # For GPT-OSS.
@@ -737,6 +739,7 @@ class OnlineRenderer:
         prompt_embeds: bytes | list[bytes] | None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> list[EngineInput]:
         """Copied from GenerateBaseServing._preprocess_completion."""
         prompts = list[SingletonPrompt | bytes]()
@@ -744,7 +747,9 @@ class OnlineRenderer:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self.preprocess_cmpl(request, prompts, skip_mm_cache=skip_mm_cache)
+        return await self.preprocess_cmpl(
+            request, prompts, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+        )
 
     async def preprocess_cmpl(
         self,
@@ -752,6 +757,7 @@ class OnlineRenderer:
         prompts: Sequence[PromptType | bytes],
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> list[EngineInput]:
         """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
@@ -770,7 +776,8 @@ class OnlineRenderer:
             )
             for prompt in prompts
         ]
-        tok_params = request.build_tok_params(model_config)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
 
         return await renderer.render_cmpl_async(
             parsed_prompts,
@@ -794,6 +801,7 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -815,7 +823,8 @@ class OnlineRenderer:
             ),
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
         build_kwargs: dict[str, Any] = {}
         if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
             build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
