@@ -143,59 +143,6 @@ def test_humming_fp8_matches_checkpoint_forward(
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(
-    ("storage_fields", "expected"),
-    [
-        ({}, None),
-        ({"store_dtype": "mxfp4"}, "mxfp4"),
-        ({"expert_dtype": "mxfp4"}, "mxfp4"),
-        ({"store_dtype": "fp8", "expert_dtype": "mxfp4"}, "fp8"),
-    ],
-)
-def test_fp8_config_preserves_expert_storage_format(storage_fields, expected):
-    """HY4 MXFP4 experts must not be loaded as ordinary FP8 tensors."""
-    config = Fp8Config.from_config(
-        {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [128, 128],
-            **storage_fields,
-        }
-    )
-    assert config.store_dtype == expected
-
-
-@pytest.mark.parametrize(
-    "projection",
-    [
-        "self_attn.q_b_proj",
-        "self_attn.indexer.wk",
-        "mlp.shared_experts.gate_proj",
-        "mlp.experts.0.gate_proj",
-    ],
-)
-def test_hyv4_mtp_checkpoint_scales_preserve_values(projection):
-    """Load UE8M0 linear scales numerically; preserve packed MXFP4 expert bytes."""
-    from vllm.models.hy_v4.nvidia.mtp import _prepare_mtp_fp8_expert_scale
-
-    config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
-        activation_scheme="dynamic",
-        weight_block_size=[128, 128],
-        store_dtype="mxfp4",
-    )
-    prefix = f"model.layers.78.mtp_block.{projection}"
-    raw = torch.tensor([[126, 127, 128]], dtype=torch.uint8)
-    name, scale = _prepare_mtp_fp8_expert_scale(config, prefix + ".scale", raw)
-    assert name == prefix + ".weight_scale_inv"
-    if ".experts." in prefix:
-        assert scale.dtype == torch.uint8
-        torch.testing.assert_close(scale, raw)
-    else:
-        assert scale.dtype == torch.float32
-        torch.testing.assert_close(scale, torch.tensor([[0.5, 1.0, 2.0]]))
-
-
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
 )

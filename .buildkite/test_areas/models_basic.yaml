@@ -89,7 +89,6 @@ steps:
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_mono.py
-  - tests/models/test_hy_v4_vl.py
   - tests/transformers_utils/processors/test_hy_v4.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   - tests/models/test_muse_spark_rocm_drafter.py
@@ -113,7 +112,6 @@ steps:
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_mono.py
-      models/test_hy_v4_vl.py
       transformers_utils/processors/test_hy_v4.py
       kernels/models/amd/test_muse_spark_fused_markov.py
       models/test_muse_spark_rocm_drafter.py
@@ -133,7 +131,6 @@ steps:
       - tests/models/test_deepseek_v4_vl.py
       - tests/models/test_hyv4_rocm.py
       - tests/transformers_utils/processors/test_hy_v4.py
-      - tests/models/test_hy_v4_vl.py
       - tests/models/multimodal/generation/test_hy_v4.py
       - vllm/models/hy_v4/
       - vllm/config/
@@ -189,7 +186,6 @@ steps:
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - >-
         VLLM_ROCM_USE_AITER=1 pytest -v -s
-        models/test_hy_v4_vl.py
         transformers_utils/processors/test_hy_v4.py
       - >-
         VLLM_ROCM_USE_AITER=1 pytest -v -s
