@@ -1201,7 +1201,7 @@ class ModelConfig:
                 cls += "EmbeddingModel"
             elif task == "classify":
                 cls += "ForSequenceClassification"
-        elif cls == "TransformersMultiModal" and processor_has_attr(
+        elif self.hf_config is not self.hf_text_config and processor_has_attr(
             self.model,
             self.hf_config.model_type,
             "apply_transcription_request",

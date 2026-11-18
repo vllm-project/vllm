@@ -187,6 +187,51 @@ class TransformersMultiModalForTranscription(
 class TransformersMultiModalMoEForCausalLM(MoEMixin, MultiModalMixin, CausalMixin): ...
 
 
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalMoEForTranscription(
+    TranscriptionMixin, MoEMixin, MultiModalMixin, CausalMixin
+): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalHybridForCausalLM(
+    MultiModalMixin, CausalMixin, LinearAttentionMixin, IsHybrid
+): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalMoEHybridForCausalLM(
+    MoEMixin, MultiModalMixin, CausalMixin, LinearAttentionMixin, IsHybrid
+): ...
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
+class TransformersMultiModalMoEHybridForTranscription(
+    TranscriptionMixin,
+    MoEMixin,
+    MultiModalMixin,
+    CausalMixin,
+    LinearAttentionMixin,
+    IsHybrid,
+): ...
+
+
 # Embedding models
 class TransformersEmbeddingModel(EmbeddingMixin, LegacyMixin): ...
 

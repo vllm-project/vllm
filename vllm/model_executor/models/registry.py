@@ -849,6 +849,22 @@ _TRANSFORMERS_BACKEND_MODELS = {
         "transformers",
         "TransformersMultiModalMoEForCausalLM",
     ),
+    "TransformersMultiModalMoEForTranscription": (
+        "transformers",
+        "TransformersMultiModalMoEForTranscription",
+    ),
+    "TransformersMultiModalHybridForCausalLM": (
+        "transformers",
+        "TransformersMultiModalHybridForCausalLM",
+    ),
+    "TransformersMultiModalMoEHybridForCausalLM": (
+        "transformers",
+        "TransformersMultiModalMoEHybridForCausalLM",
+    ),
+    "TransformersMultiModalMoEHybridForTranscription": (
+        "transformers",
+        "TransformersMultiModalMoEHybridForTranscription",
+    ),
     # Embedding models
     "TransformersEmbeddingModel": ("transformers", "TransformersEmbeddingModel"),
     "TransformersMoEEmbeddingModel": ("transformers", "TransformersMoEEmbeddingModel"),
