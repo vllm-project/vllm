@@ -84,13 +84,22 @@ def make_copy_and_call(
         list_args = list(args)
         for i, index in enumerate(sym_tensor_indices):
             runtime_tensor = list_args[index]
-            runtime_shape = runtime_tensor.shape[0]
 
             # lazy initialization of buffer on first call
             if input_buffers[i] is None:
                 input_buffers[i] = runtime_tensor.clone()
 
-            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
+            # The symbolic dim is not always dim 0: the Transformers backend
+            # passes [1, num_tokens] inputs.
+            static_tensor = input_buffers[i][  # type: ignore[index]
+                tuple(slice(0, size) for size in runtime_tensor.shape)
+            ]
+            if not static_tensor.is_contiguous():
+                raise RuntimeError(
+                    "cudagraph_copy_inputs needs the symbolic dims of each input "
+                    f"to be leading, got a {tuple(runtime_tensor.shape)} input "
+                    f"for a {tuple(input_buffers[i].shape)} buffer."  # type: ignore[union-attr]
+                )
             static_tensor.copy_(runtime_tensor)
             list_args[index] = static_tensor
         return callable_fn(*list_args)

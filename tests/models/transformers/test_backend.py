@@ -256,6 +256,26 @@ def test_whole_graph_compile(
     )
 
 
+def test_cudagraph_copy_inputs(
+    vllm_runner: type[VllmRunner], example_prompts: list[str]
+) -> None:
+    """Inputs are [1, num_tokens], so the static input buffers must be sliced
+    along the token dim, not dim 0."""
+    kwargs_ref = {"model_impl": "transformers", "max_model_len": 2048}
+    kwargs_test = {
+        **kwargs_ref,
+        "compilation_config": {"cudagraph_copy_inputs": True},
+    }
+    check_implementation(
+        vllm_runner,
+        vllm_runner,
+        example_prompts,
+        model="Qwen/Qwen3-0.6B",
+        kwargs_ref={**kwargs_ref, "enforce_eager": True},
+        kwargs_test=kwargs_test,
+    )
+
+
 def get_sinks(model) -> dict[int, torch.Tensor]:
     """The sink tensor each attention layer was handed, keyed by layer index."""
     sinks = {}
