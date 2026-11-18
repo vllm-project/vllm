@@ -8,17 +8,22 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     get_masked_input_and_mask,
 )
+from vllm.model_executor.utils import refill_derived
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
+from .qwen3_dspine_injection import fused_adjacent_injection
 from .utils import WeightsMapper, maybe_prefix
 
 _BRIDGE_METADATA = (
@@ -78,6 +83,28 @@ class AdjacentCausalInjection(nn.Module):
         self.gate_bias = nn.Parameter(
             torch.empty(message_dim, dtype=params_dtype), requires_grad=False
         )
+        self._packed_gate_message: torch.Tensor | None = None
+
+    def _can_use_fused_kernels(self) -> bool:
+        return (
+            HAS_TRITON
+            and current_platform.is_cuda()
+            and self.gate_bias.is_cuda
+            and self.gate_bias.dtype == torch.bfloat16
+            and not envs.VLLM_BATCH_INVARIANT
+        )
+
+    @torch.no_grad()
+    def prepare_injection_weights(self) -> None:
+        gates = (self.receiver_gate, self.predecessor_gate, self.message)
+        if self._can_use_fused_kernels() and all(
+            isinstance(gate.quant_method, UnquantizedLinearMethod) for gate in gates
+        ):
+            refill_derived(
+                self, "_packed_gate_message", torch.cat([gate.weight for gate in gates])
+            )
+        else:
+            refill_derived(self, "_packed_gate_message", None)
 
     @staticmethod
     def rms(states: torch.Tensor) -> torch.Tensor:
@@ -140,6 +167,23 @@ class AdjacentCausalInjection(nn.Module):
         *,
         anchor_features: torch.Tensor,
     ) -> torch.Tensor:
+        if (
+            self._packed_gate_message is not None
+            and pre_injection_states.device == self._packed_gate_message.device
+            and pre_injection_states.dtype == torch.bfloat16
+            and pre_injection_states.ndim == 2
+            and pre_injection_states.shape[0] > 0
+        ):
+            return fused_adjacent_injection(
+                pre_injection_states,
+                anchor_features,
+                self.readouts[layer_idx],
+                self._packed_gate_message,
+                self.gate_bias,
+                self.writes[layer_idx],
+                self.block_size,
+                self.eps,
+            )
         blocks = pre_injection_states.reshape(-1, self.block_size, self.hidden_size)
         features = self.project(layer_idx, blocks)
         predecessor = torch.cat((anchor_features[:, None, :], features[:, 1:-1]), dim=1)
@@ -351,6 +395,10 @@ class DSpineQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         target_vocab_size = vllm_config.model_config.get_vocab_size()
         if self.config.draft_vocab_size != target_vocab_size:
             raise ValueError("DSpine requires the full target vocabulary.")
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        self.model.injection.prepare_injection_weights()
 
     def compute_candidates(
         self, hidden_states: torch.Tensor
