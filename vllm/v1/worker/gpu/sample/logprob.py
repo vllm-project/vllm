@@ -58,27 +58,41 @@ def _topk_log_softmax_kernel(
         tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["output_stride", "token_ids_stride"])
 def _ranks_kernel(
     output_ptr,
+    output_stride,
     logits_ptr,
     logits_stride,
     token_ids_ptr,
+    token_ids_stride,
+    expanded_idx_mapping_ptr,  # [batch_size] -> req_state_idx, or None
+    num_per_req_token_ids_ptr,  # [max_num_reqs], or None to rank column 0 only
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0).to(tl.int64)
-    row_ptr = logits_ptr + req_idx * logits_stride
+    col = tl.program_id(1)
 
-    token_id = tl.load(token_ids_ptr + req_idx)
-    x = tl.load(row_ptr + token_id)
+    # Column 0 is the sampled token. The per-request token ids that follow it
+    # are in request order, so they are ranked too; topk columns are not.
+    num_ranked_cols = 1
+    if num_per_req_token_ids_ptr is not None:
+        req_state_idx = tl.load(expanded_idx_mapping_ptr + req_idx)
+        num_ranked_cols += tl.load(num_per_req_token_ids_ptr + req_state_idx)
 
-    n = 0
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        n += tl.sum((logits >= x).to(tl.int32))
-    tl.store(output_ptr + req_idx, n)
+    if col < num_ranked_cols:
+        row_ptr = logits_ptr + req_idx * logits_stride
+        token_id = tl.load(token_ids_ptr + req_idx * token_ids_stride + col)
+        x = tl.load(row_ptr + token_id)
+
+        n = 0
+        for i in range(0, vocab_size, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < vocab_size
+            logits = tl.load(row_ptr + block, mask=mask)
+            n += tl.sum(((logits >= x) & mask).to(tl.int32))
+        tl.store(output_ptr + req_idx * output_stride + col, n)
 
 
 def compute_token_logprobs(
@@ -131,6 +145,8 @@ def compute_topk_scores(
             scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
         else:
             scores = compute_token_logprobs(logits, logprob_token_ids)
+        token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
+        num_per_req_token_ids: torch.Tensor | None = None
     else:
         # Some requests specified logprob_token_ids. Build the [batch_size,
         # 1 + max_cols] token_ids matrix and validity mask on the GPU via a
@@ -169,13 +185,21 @@ def compute_topk_scores(
         else:
             scores = compute_token_logprobs(logits, logprob_token_ids)
         scores = scores.masked_fill(~valid_mask, float("-inf"))
+        # One rank per column. Topk columns keep their positions as ranks.
+        token_ranks = torch.arange(1 + num_cols, device=logits.device).repeat(
+            batch_size, 1
+        )
+        num_per_req_token_ids = logprob_token_ids_state.num_token_ids.gpu
 
-    token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
-    _ranks_kernel[(batch_size,)](
+    _ranks_kernel[(batch_size, 1 + max_per_req_token_ids)](
         token_ranks,
+        token_ranks.stride(0),
         logits,
         logits.stride(0),
-        sampled_token_ids,
+        logprob_token_ids,
+        logprob_token_ids.stride(0),
+        expanded_idx_mapping if num_per_req_token_ids is not None else None,
+        num_per_req_token_ids,
         vocab_size,
         BLOCK_SIZE=8192,  # type: ignore
     )

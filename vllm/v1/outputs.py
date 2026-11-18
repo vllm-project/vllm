@@ -36,7 +36,9 @@ class LogprobsLists(NamedTuple):
     logprob_token_ids: np.ndarray
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: np.ndarray
-    # [num_reqs x num_generated_tokens]
+    # [num_reqs x num_generated_tokens], or
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1] when the
+    # columns are not the topk in rank order (logprob_token_ids).
     sampled_token_ranks: np.ndarray
     # [num_reqs]
     # Used for slicing the logprobs in cases like speculative
@@ -91,7 +93,9 @@ class LogprobsTensors(NamedTuple):
     logprob_token_ids: torch.Tensor
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: torch.Tensor
-    # [num_reqs x num_generated_tokens]
+    # [num_reqs x num_generated_tokens], or
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1] when the
+    # columns are not the topk in rank order (logprob_token_ids).
     selected_token_ranks: torch.Tensor
     # [num_reqs + 1]
     cu_num_generated_tokens: list[int] | None = None

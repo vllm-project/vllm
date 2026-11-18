@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 
 from vllm.logprobs import (
     FlatLogprobs,
@@ -101,6 +102,28 @@ def test_append_logprobs_for_next_position_flat() -> None:
     assert logprobs.logprobs == [0.1, 0.2, 0.3]
     assert logprobs.ranks == [10, 11, 1]
     assert logprobs.decoded_tokens == ["1", "2", "3"]
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_append_logprobs_for_next_position_per_entry_ranks(
+    flat_logprobs: bool,
+) -> None:
+    """Per-entry ranks (logprob_token_ids, in request order) are kept as is
+    rather than replaced by topk positions; padding past num_logprobs is
+    dropped."""
+    logprobs = create_sample_logprobs(flat_logprobs=flat_logprobs)
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[7, 5, 7, 0],
+        logprobs=[-0.1, -2.0, -0.1, float("-inf")],
+        decoded_tokens=["7", "5", "7", "0"],
+        rank=[1, 9, 1, 3],
+        num_logprobs=2,
+    )
+    assert logprobs[0] == {
+        7: Logprob(logprob=-0.1, rank=1, decoded_token="7"),
+        5: Logprob(logprob=-2.0, rank=9, decoded_token="5"),
+    }
 
 
 LOGPROBS_ONE_POSITION_0: LogprobsOnePosition = {
