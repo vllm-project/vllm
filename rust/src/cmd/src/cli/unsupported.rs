@@ -202,13 +202,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
 
-    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
-    /// used with `--generation-config auto`, the override parameters will be
-    /// merged with the default config from the model. If used with
-    /// `--generation-config vllm`, only the override parameters are used.
-    #[arg(long)]
-    pub override_generation_config: Option<Unsupported>,
-
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
     pub io_processor_plugin: Option<Unsupported>,
@@ -373,10 +366,6 @@ pub struct ServerUnsupportedArgs {
     /// information.
     #[arg(long)]
     pub tool_server: Option<Unsupported>,
-
-    /// Path to logging config JSON file for both vllm and uvicorn
-    #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
-    pub log_config_file: Option<Unsupported>,
 
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
