@@ -3369,14 +3369,6 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
-        elif KVCacheAccess.REGISTERS_WITH_PEERMEM in kv_cache_access:
-            unsupported = (
-                "Mooncake uses nvidia-peermem (WITH_NVIDIA_PEERMEM), which "
-                "cannot register driver-mapped memory. Use "
-                "--no-enable-extensible-kv-cache or DMA-BUF registration"
-            )
-            if requested is None:
-                logger.info("Extensible KV cache off: %s.", unsupported)
         elif KVCacheAccess.LEGACY_IPC in kv_cache_access:
             unsupported = (
                 "a KV connector (e.g. LMCacheMPConnector) shares the KV cache "

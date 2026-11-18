@@ -761,8 +761,13 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         ("no VMM support", True, "no VMM support"),
     ],
 )
+@pytest.mark.parametrize("peermem", [False, True])
 def test_ranks_agree_on_extensible_kv_cache(
-    monkeypatch: pytest.MonkeyPatch, local_reason, any_rank_unsupported, expected
+    monkeypatch: pytest.MonkeyPatch,
+    local_reason,
+    any_rank_unsupported,
+    expected,
+    peermem,
 ):
     """Every rank in the world group (this engine's, and with MoE data
     parallelism or the external launcher, its peers') must decide alike: one
@@ -770,6 +775,7 @@ def test_ranks_agree_on_extensible_kv_cache(
     that dropped it."""
     import torch.distributed as dist
 
+    from vllm.config import KVTransferConfig
     from vllm.v1.worker.gpu_worker import Worker
 
     reduced: list[tuple[int, object]] = []
@@ -778,14 +784,18 @@ def test_ranks_agree_on_extensible_kv_cache(
         reduced.append((value, op))
         return int(any_rank_unsupported)
 
-    monkeypatch.setattr(
-        gpu_worker, "vmm_unavailable_reason", lambda export_handle_types: local_reason
-    )
+    def probe(export_handle_types, *, require_gpudirect_rdma):
+        assert require_gpudirect_rdma is peermem
+        return local_reason
+
+    monkeypatch.setenv("WITH_NVIDIA_PEERMEM", str(int(peermem)))
+    monkeypatch.setattr(gpu_worker, "vmm_unavailable_reason", probe)
     monkeypatch.setattr(gpu_worker, "all_reduce_int", all_reduce_int)
     monkeypatch.setattr(
         gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
     )
-    worker = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=None))
+    transfer = KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_consumer")
+    worker = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=transfer))
     assert Worker.extensible_kv_cache_unsupported_reason(worker) == expected
     assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
 

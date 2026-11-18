@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit import utils as connector_utils
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig
 from vllm.config.kv_transfer import KVCacheAccess, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.engine.arg_utils import EngineArgs
@@ -261,44 +261,6 @@ requires_cuda_not_rocm = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.version.hip is not None,
     reason="requires CUDA, not ROCm",
 )
-
-
-@requires_cuda_not_rocm
-@pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize(
-    ("peermem", "requested", "enabled"),
-    [
-        (None, None, True),
-        ("0", None, True),
-        ("1", None, False),
-        ("true", None, False),
-        ("1", False, False),
-        ("1", True, None),
-    ],
-)
-def test_mooncake_extensible_kv_cache(monkeypatch, multi, peermem, requested, enabled):
-    if peermem is None:
-        monkeypatch.delenv("WITH_NVIDIA_PEERMEM", raising=False)
-    else:
-        monkeypatch.setenv("WITH_NVIDIA_PEERMEM", peermem)
-
-    mooncake = {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
-    transfer = (
-        KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_consumer",
-            kv_connector_extra_config={"connectors": [mooncake]},
-        )
-        if multi
-        else KVTransferConfig(**mooncake)
-    )
-    cache = CacheConfig(enable_extensible_kv_cache=requested)
-    if enabled is None:
-        with pytest.raises(ValueError, match="WITH_NVIDIA_PEERMEM"):
-            VllmConfig(cache_config=cache, kv_transfer_config=transfer)
-    else:
-        config = VllmConfig(cache_config=cache, kv_transfer_config=transfer)
-        assert config.cache_config.enable_extensible_kv_cache is enabled
 
 
 @requires_cuda

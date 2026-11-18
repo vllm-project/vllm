@@ -57,10 +57,9 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Once registration attempts are exhausted the caller raises instead of blocking, so failures surface rather than hanging
     - Metadata queries reuse the same timeout and 3-attempt limit, with a fixed 100ms delay between attempts. If all attempts fail, the error is logged and waiting queries are notified
 
-- `WITH_NVIDIA_PEERMEM`: Selects how Mooncake registers GPU memory for RDMA.
+- `WITH_NVIDIA_PEERMEM`: Selects how mooncake registers GPU memory for RDMA. Read by mooncake, not vLLM.
     - Default: 1, which uses `ibv_reg_mr()` and requires the `nvidia-peermem` kernel module to be loaded
     - Set to 0 to use the DMA-BUF path, which does not need that module. Required on hosts where `nvidia-peermem` is not loaded, such as GB200
-    - Any value other than `0` disables the default extensible KV cache for the P/D MooncakeConnector. Explicitly passing `--enable-extensible-kv-cache` with that setting raises a configuration error. When the variable is unset and the extensible KV cache is enabled, vLLM selects DMA-BUF registration.
     - With the container image, pass it at run time: `docker run -e WITH_NVIDIA_PEERMEM=0 ...`
     - Symptom when left unset on such a host: `Failed to register memory <addr>: Bad address [14]` from `rdma_context.cpp`, and KV transfers fail
 
