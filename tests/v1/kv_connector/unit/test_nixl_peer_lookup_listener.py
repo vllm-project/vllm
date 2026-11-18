@@ -4,7 +4,6 @@
 
 import threading
 import time
-from types import SimpleNamespace
 
 import msgspec
 import pytest
@@ -21,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
 from vllm.utils.network_utils import get_open_port, make_zmq_path
+from vllm.v1.core.sched.output import SchedulerOutput
 
 from .test_nixl_peer_pins import (
     COMPAT,
@@ -69,7 +69,7 @@ def recv_reply(sock, timeout_ms: int = 5000) -> LookupPinReply:
 
 def cycle(connector) -> NixlConnectorMetadata:
     """One schedule (build_connector_meta) + processed (take_events) tick."""
-    meta = connector.build_connector_meta(SimpleNamespace())
+    meta = connector.build_connector_meta(SchedulerOutput.make_empty())
     assert isinstance(meta, NixlConnectorMetadata)
     list(connector.take_events())
     return meta
@@ -205,7 +205,7 @@ def test_lookup_before_binding_is_refused_not_stuck():
     sched = make_wired_scheduler(manager)
     sched._lookup.inbox.put((b"id", lookup(hashes)))
     assert sched.has_pending_push_work()
-    make_wired_connector(sched).build_connector_meta(SimpleNamespace())
+    make_wired_connector(sched).build_connector_meta(SchedulerOutput.make_empty())
     identity, reply = sched._lookup.outbox.get_nowait()
     assert identity == b"id"
     assert reply.miss_reason == PeerMissReason.IDENTITY_MISMATCH
@@ -226,16 +226,16 @@ def test_pending_pin_times_out_with_pin_refused():
 
     sched._lookup.inbox.put((b"id", lookup(hashes)))
     # Scheduled but never processed (a stalled step): the fence cannot pass.
-    connector.build_connector_meta(SimpleNamespace())
+    connector.build_connector_meta(SchedulerOutput.make_empty())
     assert manager.num_pinned_blocks == len(hashes)
     assert sched._lookup.outbox.empty()
 
     clock.now += 4.0
-    connector.build_connector_meta(SimpleNamespace())
+    connector.build_connector_meta(SchedulerOutput.make_empty())
     assert manager.num_pinned_blocks == len(hashes)
 
     clock.now += 2.0
-    meta = connector.build_connector_meta(SimpleNamespace())
+    meta = connector.build_connector_meta(SchedulerOutput.make_empty())
     assert meta.reqs_to_send == {}
     assert manager.num_pinned_blocks == 0
     identity, reply = sched._lookup.outbox.get_nowait()

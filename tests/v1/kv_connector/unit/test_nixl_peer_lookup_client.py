@@ -221,7 +221,6 @@ def test_cancel_in_flight_closes_socket_and_counts_lost(client, peer):
     wait_for(lambda: client.num_lost_after_cancel == 1)
     assert not client.has_in_flight()
     peer.reply(identity, hit())  # Too late: the socket is gone.
-    time.sleep(0.2)
     assert client.poll("a") is None
     assert client.take_orphaned_pins() == []
     assert client.num_lost_after_cancel == 1

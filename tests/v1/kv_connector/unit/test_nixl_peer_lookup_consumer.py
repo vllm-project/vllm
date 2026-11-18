@@ -31,6 +31,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.peer_lookup_client import
     LookupResult,
     PeerLookupClient,
 )
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.output import SchedulerOutput
 
 from .test_nixl_peer_lookup_listener import cycle, served, wait_for  # noqa: F401
 from .test_nixl_peer_pins import (
@@ -215,7 +217,7 @@ def test_miss_computes_locally(reply, error, reason):
     assert sched.peer_lookup_stats.misses == {reason: 1}
     # Later calls (and a preempted retry) take the stock "no remote" path.
     assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
-    sched.update_state_after_alloc(request, SimpleNamespace(blocks=((),)), 0)
+    sched.update_state_after_alloc(request, KVCacheBlocks(blocks=((),)), 0)
     assert sched._reqs_need_recv == {}
     assert len(sched._lookup_client.submits) == 1
 
@@ -285,13 +287,13 @@ def test_hit_below_threshold_only_releases_the_pin():
     # Stays a remote prefill so that update_state_after_alloc frees the pin.
     assert request.kv_transfer_params["do_remote_prefill"] is True
 
-    sched.update_state_after_alloc(request, SimpleNamespace(blocks=((),)), 0)
+    sched.update_state_after_alloc(request, KVCacheBlocks(blocks=((),)), 0)
     _, local_ids, cached, awaiting = recv_entry(sched, request)
     assert not any(local_ids) and awaiting is False
     assert sched.peer_lookup_stats.notify_only_releases == 1
     assert sched._heartbeat_by_engine == {}
 
-    meta = sched.build_connector_meta(SimpleNamespace())
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
     recv = meta.reqs_to_recv[request.request_id]
     assert recv.remote.request_id == PIN
     assert recv.remote.engine_id == ENGINE
@@ -305,9 +307,9 @@ def test_local_hit_covering_the_peer_hit_only_releases_the_pin():
     # A pinned 2 blocks; B already has 3 in its own cache.
     assert finish_hit(sched, request, 2, num_computed=3 * BLOCK_SIZE) == (0, False)
 
-    sched.update_state_after_alloc(request, SimpleNamespace(blocks=((),)), 0)
+    sched.update_state_after_alloc(request, KVCacheBlocks(blocks=((),)), 0)
     assert not any(recv_entry(sched, request)[1])
-    meta = sched.build_connector_meta(SimpleNamespace())
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
     assert meta.reqs_to_recv[request.request_id].remote.request_id == PIN
 
 
@@ -417,7 +419,9 @@ def test_abort_before_reply_cancels_without_a_recv():
     params = request.kv_transfer_params
     assert params["peer_lookup"] is False and params["do_remote_prefill"] is False
     assert sched.peer_lookup_stats.cancelled == 1
-    sched.build_connector_meta(SimpleNamespace())  # must not trip on the request
+    sched.build_connector_meta(
+        SchedulerOutput.make_empty()
+    )  # must not trip on the request
 
 
 def test_abort_before_the_lookup_was_submitted():
@@ -425,7 +429,7 @@ def test_abort_before_the_lookup_was_submitted():
     request = peer_request()
     assert sched.request_finished(request, ((),)) == (False, None)
     assert sched._reqs_need_recv == {}
-    meta = sched.build_connector_meta(SimpleNamespace())
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
     assert meta.reqs_to_recv == {}
 
 
@@ -448,7 +452,7 @@ def test_abort_after_hit_before_alloc_releases_the_pin():
     _, local_ids, _, awaiting = recv_entry(sched, request)
     assert not any(local_ids) and awaiting is False
     assert sched.peer_lookup_stats.notify_only_releases == 1
-    meta = sched.build_connector_meta(SimpleNamespace())
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
     recv = meta.reqs_to_recv[request.request_id]
     assert recv.remote.request_id == PIN
     assert recv.remote.block_ids == [[100, 101, 102, 103]]
@@ -461,7 +465,7 @@ def test_orphaned_pin_is_released_with_a_notify_only_recv():
     sched.request_finished(request, ((),))
     sched._lookup_client.orphans.append((HOST, PORT, hit_reply(3, pin="peer-pin-o")))
 
-    meta = sched.build_connector_meta(SimpleNamespace())
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
 
     assert isinstance(meta, NixlConnectorMetadata)
     (req_id, recv) = next(iter(meta.reqs_to_recv.items()))
@@ -476,7 +480,7 @@ def test_orphaned_pin_is_released_with_a_notify_only_recv():
     assert (recv.tp_size, recv.dcp_size, recv.pp_size) == (1, 2, 3)
     assert sched.peer_lookup_stats.orphans_released == 1
     # Drained: not released twice.
-    assert sched.build_connector_meta(SimpleNamespace()).reqs_to_recv == {}
+    assert sched.build_connector_meta(SchedulerOutput.make_empty()).reqs_to_recv == {}
 
 
 @pytest.mark.parametrize("endpoint", [None, PeerEndpoint(ENGINE, None)])
@@ -485,7 +489,7 @@ def test_orphan_without_known_peer_topology_is_left_to_its_lease(endpoint):
     if endpoint is not None:
         sched._peer_endpoints[(HOST, PORT)] = endpoint
     sched._lookup_client.orphans.append((HOST, PORT, hit_reply(2, pin="peer-pin-o")))
-    meta = sched.build_connector_meta(SimpleNamespace())
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
     assert meta.reqs_to_recv == {}
     assert sched.peer_lookup_stats.orphans_released == 0
     assert sched.peer_lookup_stats.orphans_unreleased == 1
@@ -494,7 +498,7 @@ def test_orphan_without_known_peer_topology_is_left_to_its_lease(endpoint):
 def test_orphan_release_does_not_touch_a_missing_client():
     sched = make_consumer()
     sched._lookup_client = None
-    assert sched.build_connector_meta(SimpleNamespace()).reqs_to_recv == {}
+    assert sched.build_connector_meta(SchedulerOutput.make_empty()).reqs_to_recv == {}
     assert not sched.has_pending_push_work()
 
 
@@ -629,7 +633,7 @@ def test_realloc_after_preemption_computes_locally():
     assert params["do_remote_prefill"] is False
     # Rescheduled from scratch: no second lookup, no second pull.
     assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
-    sched.update_state_after_alloc(request, SimpleNamespace(blocks=((),)), 0)
+    sched.update_state_after_alloc(request, KVCacheBlocks(blocks=((),)), 0)
     assert len(sched._lookup_client.submits) == 1
     assert params["remote_block_ids"] == [[100, 101, 102, 103]]
 
