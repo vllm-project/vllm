@@ -151,15 +151,16 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 @dataclass(kw_only=True, slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
-    lora_request: Sequence[LoRARequest | None] | None
-    priorities: int | Sequence[int] | None
+    lora_request: Sequence[LoRARequest | None] | None = None
+    priorities: int | Sequence[int] | None = None
     late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
 
     # tok_params:
-    tokenization_kwargs: dict[str, Any] | None
-    # add_special_tokens: bool | None = None
+    tokenization_kwargs: dict[str, Any] | None = None
+    # Tri-state: `None` means "not specified" and falls back to the per-path default
+    add_special_tokens: bool | None = None
 
-    # chat_template_kwargs
+    # chat_template_kwargs:
     # Tri-state: `None` means "not specified" and falls back to the per-path default
     add_generation_prompt: bool | None = None
     continue_final_message: bool | None = None
@@ -180,13 +181,25 @@ class OfflineInputsContext:
             )
 
     def build_prompt_extras(self) -> dict[str, Any] | None:
-        """Pack the renderer-side `prompt_extras` payload."""
         extras: dict[str, Any] = {}
         if self.mm_processor_kwargs is not None:
             extras["mm_processor_kwargs"] = self.mm_processor_kwargs
         if self.cache_salt is not None:
             extras["cache_salt"] = self.cache_salt
         return extras or None
+
+    def build_tok_params(
+        self,
+        default_tok_params: TokenizeParams,
+    ) -> TokenizeParams:
+        # User-provided `tokenization_kwargs` still wins over the default.
+        tok_kwargs: dict[str, Any] = {}
+        if self.add_special_tokens is not None:
+            tok_kwargs["add_special_tokens"] = self.add_special_tokens
+        tok_kwargs.update(self.tokenization_kwargs or {})
+        if not tok_kwargs:
+            return default_tok_params
+        return default_tok_params.with_kwargs(**tok_kwargs)
 
     def to_encode_context(
         self,
@@ -198,14 +211,17 @@ class OfflineInputsContext:
             prompts=prompts,
             pooling_params=pooling_params,
             pooling_task=self.pooling_task,
-            tokenization_kwargs=self.tokenization_kwargs,
             lora_request=self.lora_request,
             priorities=self.priorities,
+            tokenization_kwargs=self.tokenization_kwargs,
+            add_special_tokens=self.add_special_tokens,
             add_generation_prompt=self.add_generation_prompt,
             continue_final_message=self.continue_final_message,
             chat_template=self.chat_template,
             chat_template_kwargs=self.chat_template_kwargs,
             chat_template_content_format=self.chat_template_content_format,
+            mm_processor_kwargs=self.mm_processor_kwargs,
+            cache_salt=self.cache_salt,
         )
 
 

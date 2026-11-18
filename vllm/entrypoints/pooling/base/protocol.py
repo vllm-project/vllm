@@ -110,50 +110,43 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     def _build_pooling_tok_params(
         self,
         model_config: ModelConfig,
+        default_tok_params: TokenizeParams,
         *,
-        add_special_tokens: bool,
+        add_special_tokens: bool | None,
         max_total_tokens: int | None,
         max_output_tokens: int,
         max_total_tokens_param: str = "max_model_len",
         max_output_tokens_param: str | None = None,
     ) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-        if max_output_tokens_param is None:
-            tok_params = TokenizeParams(
-                max_total_tokens=max_total_tokens,
-                max_output_tokens=max_output_tokens,
-                truncate_prompt_tokens=self.truncate_prompt_tokens,
-                truncation_side=self.truncation_side,
-                do_lower_case=encoder_config.get("do_lower_case", False),
-                add_special_tokens=add_special_tokens,
-                max_total_tokens_param=max_total_tokens_param,
-            )
-        else:
-            tok_params = TokenizeParams(
-                max_total_tokens=max_total_tokens,
-                max_output_tokens=max_output_tokens,
-                truncate_prompt_tokens=self.truncate_prompt_tokens,
-                truncation_side=self.truncation_side,
-                do_lower_case=encoder_config.get("do_lower_case", False),
-                add_special_tokens=add_special_tokens,
-                max_total_tokens_param=max_total_tokens_param,
-                max_output_tokens_param=max_output_tokens_param,
-            )
+        tok_kwargs = {
+            "max_total_tokens": max_total_tokens,
+            "max_output_tokens": max_output_tokens,
+            "truncate_prompt_tokens": self.truncate_prompt_tokens,
+            "truncation_side": self.truncation_side,
+            "max_total_tokens_param": max_total_tokens_param,
+        }
 
-        if self.padding is None:
-            return tok_params
+        if add_special_tokens is not None:
+            tok_kwargs["add_special_tokens"] = add_special_tokens
 
-        return tok_params.with_kwargs(padding=self.padding)
+        if max_output_tokens_param is not None:
+            tok_kwargs["max_output_tokens_param"] = max_output_tokens_param
+
+        if self.padding is not None:
+            tok_kwargs["padding"] = self.padding
+        return default_tok_params.with_kwargs(**tok_kwargs)
 
 
 class PoolingTokenizeParamsMixin:
-    add_special_tokens: bool
+    # Tri-state: `None` means "not specified" and falls back to the per-path default
+    add_special_tokens: bool | None = None
 
     def _build_pooling_tok_params(
         self,
         model_config: ModelConfig,
+        default_tok_params: TokenizeParams,
         *,
-        add_special_tokens: bool,
+        add_special_tokens: bool | None,
         max_total_tokens: int | None,
         max_output_tokens: int,
         max_total_tokens_param: str = "max_model_len",
@@ -163,9 +156,12 @@ class PoolingTokenizeParamsMixin:
 
 
 class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
+            default_tok_params,
             add_special_tokens=self.add_special_tokens,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
@@ -175,7 +171,9 @@ class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
     padding: Literal["max_length", "do_not_pad"] | None
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
         default_max_total_tokens = model_config.max_model_len
         max_total_tokens: int | None = default_max_total_tokens
         max_output_tokens = 0
@@ -191,6 +189,7 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 
         tok_params = self._build_pooling_tok_params(
             model_config,
+            default_tok_params,
             add_special_tokens=self.add_special_tokens,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
@@ -217,11 +216,12 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-params]
 
     # --8<-- [start:completion-extra-params]
-    add_special_tokens: bool = Field(
-        default=True,
+    add_special_tokens: bool | None = Field(
+        default=None,
         description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."
+            "If true, special tokens (e.g. BOS) will be added to the prompt. "
+            "If unset (`None`), the model/tokenizer default is used, which for "
+            "some multimodal models is `False` to avoid a duplicate BOS."
         ),
     )
     # --8<-- [end:completion-extra-params]
@@ -229,33 +229,33 @@ class CompletionRequestMixin(OpenAIBaseModel):
 
 class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
-    add_generation_prompt: bool | None = Field(
-        default=None,
+    add_generation_prompt: bool = Field(
+        default=False,
         description=(
             "If true, the generation prompt will be added to the chat template. "
             "This is a parameter used by chat template in tokenizer config of the "
-            "model. If unset (`None`), the chat template's own default is used."
+            "model."
         ),
     )
-    continue_final_message: bool | None = Field(
-        default=None,
+    continue_final_message: bool = Field(
+        default=False,
         description=(
             "If this is set, the chat will be formatted so that the final "
             "message in the chat is open-ended, without any EOS tokens. The "
             "model will continue this message rather than starting a new one. "
             'This allows you to "prefill" part of the model\'s response for it. '
-            "Cannot be used at the same time as `add_generation_prompt`. "
-            "If unset (`None`), the chat template's own default is used."
+            "Cannot be used at the same time as `add_generation_prompt`."
         ),
     )
-    add_special_tokens: bool = Field(
-        default=False,
+    add_special_tokens: bool | None = Field(
+        default=None,
         description=(
             "If true, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false (as is the "
-            "default)."
+            "special tokens so this should be set to false. "
+            "If unset (`None`), the per-path default is used: `False` for the "
+            "chat path, and the model/tokenizer default for the completion path."
         ),
     )
     chat_template: str | None = Field(
@@ -281,9 +281,7 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
         default=None,
         description=(
             "Additional keyword args to pass to the template renderer. "
-            "Will be accessible by the chat template. Top-level flags such as "
-            "`add_generation_prompt` and `continue_final_message` take "
-            "precedence over the same keys set here when they are not `None`."
+            "Will be accessible by the chat template."
         ),
     )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(

@@ -196,7 +196,7 @@ class TokenizeParams:
     do_lower_case: bool = False
     """Whether to normalize text to lower case before tokenization."""
 
-    add_special_tokens: bool = True
+    add_special_tokens: bool| None = True
     """Whether to add special tokens."""
 
     return_token_offsets: bool = False
