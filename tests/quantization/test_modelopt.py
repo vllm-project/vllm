@@ -20,6 +20,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
@@ -138,7 +139,9 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     assert method.spec.activation is kNvfp4Dynamic
 
 
-def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(monkeypatch):
     """Standard MXFP8 checkpoints already have one scale row per weight row."""
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
@@ -909,7 +912,9 @@ def _pack_int8_pb_wo_weight(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="WNA16 kernels are CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="WNA16 kernels are CUDA and ROCm"
+)
 @pytest.mark.parametrize(
     ("quant_algo", "dtype"),
     [
@@ -991,7 +996,6 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
             str(model_path),
             dtype=dtype,
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             enforce_eager=True,
             enable_flashinfer_autotune=False,
             max_model_len=64,
@@ -1068,7 +1072,6 @@ def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
         with vllm_runner(
             str(model_path),
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             enforce_eager=True,
             enable_flashinfer_autotune=False,
             max_model_len=32,
@@ -1187,7 +1190,6 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
             str(target),
             speculative_config=speculation,
             skip_tokenizer_init=True,
-            trust_remote_code=False,
             dtype="bfloat16",
             enforce_eager=True,
             enable_flashinfer_autotune=False,
