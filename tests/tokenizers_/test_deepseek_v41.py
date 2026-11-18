@@ -4,11 +4,14 @@
 import asyncio
 import copy
 import json
+import string
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from tokenizers import AddedToken, Tokenizer, models
+from transformers import PreTrainedTokenizerFast
 
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -588,44 +591,46 @@ def test_deepseek_v41_unknown_role_raises_value_error():
         )
 
 
-class _AddedTokenTokenizer:
-    """Fake tokenizer that matches added tokens in text, like the real one."""
+_TINY_CHARS = sorted(
+    set(string.ascii_letters + string.digits + " \n\"'`\\(){}[]:,.-_=*#!?/<>|｜▁")
+)
+_RESERVED_TOKENS = [
+    IMAGE_PLACEHOLDER,
+    "<think>",
+    "</think>",
+    "<｜User｜>",
+    "<｜Assistant｜>",
+    "<｜begin▁of▁sentence｜>",
+    "<｜end▁of▁sentence｜>",
+    "｜DSML｜",
+    "<｜ref｜>",
+]
 
-    vocab_size = 100
-    IMAGE_ID = 1_000_000
-    THINK_ID = 1_000_001
-    END_THINK_ID = 1_000_002
-    USER_ID = 1_000_003
-    EOS_ID = 1_000_004
-    REF_ID = 1_000_005
 
-    def get_added_vocab(self) -> dict[str, int]:
-        return {
-            IMAGE_PLACEHOLDER: self.IMAGE_ID,
-            "<think>": self.THINK_ID,
-            "</think>": self.END_THINK_ID,
-            "<｜User｜>": self.USER_ID,
-            "<｜end▁of▁sentence｜>": self.EOS_ID,
-            "<｜ref｜>": self.REF_ID,
-        }
+def _tiny_tokenizer(with_added: bool = True) -> PreTrainedTokenizerFast:
+    """A tiny real BPE tokenizer with the reserved tokens as added tokens.
 
-    def encode(self, text: str, add_special_tokens: bool = False, **kwargs):
-        added = self.get_added_vocab()
-        ids: list[int] = []
-        while text:
-            hits = [(text.find(t), t) for t in added if t in text]
-            if not hits:
-                ids += [ord(c) for c in text]
-                break
-            idx, tok = min(hits)
-            ids += [ord(c) for c in text[:idx]] + [added[tok]]
-            text = text[idx + len(tok) :]
-        return ids
+    Its merges cross the characters next to a reserved token ('a<', '>b', ...),
+    like a real BPE, so the ids of a text depend on the text around the token.
+    """
+    merges = [("a", "<"), (">", "b"), (" ", "<"), ("\n", "<")]
+    vocab = {"<unk>": 0, **{c: i + 1 for i, c in enumerate(_TINY_CHARS)}}
+    for left, right in merges:
+        vocab[left + right] = len(vocab)
+    tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=merges, unk_token="<unk>"))
+    if with_added:
+        tokenizer.add_tokens(
+            [AddedToken(t, special=False, normalized=False) for t in _RESERVED_TOKENS]
+        )
+    return PreTrainedTokenizerFast(tokenizer_object=tokenizer)
+
+
+_ID = _tiny_tokenizer().get_added_vocab()
+_TOK = get_deepseek_v41_tokenizer(_tiny_tokenizer())
 
 
 def _tokenize(messages):
-    tok = get_deepseek_v41_tokenizer(_AddedTokenTokenizer())
-    return tok.apply_chat_template(messages, tokenize=True)
+    return _TOK.apply_chat_template(messages, tokenize=True)
 
 
 @pytest.mark.parametrize("role", ["user", "assistant"])
@@ -636,7 +641,7 @@ def test_image_placeholder_in_text_is_not_encoded_as_special_token(role):
         messages.append({"role": "user", "content": "q2"})
     else:
         messages[0]["content"] = f"q {IMAGE_PLACEHOLDER}"
-    assert _AddedTokenTokenizer.IMAGE_ID not in _tokenize(messages)
+    assert _ID[IMAGE_PLACEHOLDER] not in _tokenize(messages)
 
 
 def test_image_part_still_encodes_special_token():
@@ -651,19 +656,20 @@ def test_image_part_still_encodes_special_token():
             }
         ]
     )
-    assert ids.count(_AddedTokenTokenizer.IMAGE_ID) == 1
+    assert ids.count(_ID[IMAGE_PLACEHOLDER]) == 1
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        f"x {IMAGE_PLACEHOLDER}",
-        "x <think>",
-        "x </think>",
-        "x <｜User｜>",
-        "x <｜end▁of▁sentence｜>",
-    ],
-)
+REF = "<｜ref｜>"
+RESERVED = [
+    IMAGE_PLACEHOLDER,
+    "<think>",
+    "</think>",
+    "<｜User｜>",
+    "<｜end▁of▁sentence｜>",
+]
+
+
+@pytest.mark.parametrize("text", [f"x {t}" for t in RESERVED])
 def test_renderer_keeps_reserved_tokens_as_text(text):
     # The online renderer passes tokenize=False; the V4.1 renderer must still
     # return token ids, otherwise the engine tokenizes the text again and
@@ -678,8 +684,7 @@ def test_renderer_keeps_reserved_tokens_as_text(text):
         is_multimodal_model=False,
         hf_config=SimpleNamespace(),
     )
-    tokenizer = get_deepseek_v41_tokenizer(_AddedTokenTokenizer())
-    renderer.tokenizer = tokenizer
+    renderer.tokenizer = _TOK
     messages = [{"role": "user", "content": text}]
     params = ChatParams(chat_template_kwargs={"tokenize": False})
     _, prompt = renderer.render_messages(messages, params)
@@ -687,31 +692,8 @@ def test_renderer_keeps_reserved_tokens_as_text(text):
     ids = cast(dict[str, Any], prompt)["prompt_token_ids"]
     base = cast(dict[str, Any], baseline)["prompt_token_ids"]
     # The chat template adds its own '<think>'; the text must add nothing.
-    for special in (
-        _AddedTokenTokenizer.IMAGE_ID,
-        _AddedTokenTokenizer.THINK_ID,
-        _AddedTokenTokenizer.END_THINK_ID,
-        _AddedTokenTokenizer.USER_ID,
-        _AddedTokenTokenizer.EOS_ID,
-    ):
-        assert ids.count(special) == base.count(special)
-
-
-REF = "<｜ref｜>"
-RESERVED = [
-    IMAGE_PLACEHOLDER,
-    "<think>",
-    "</think>",
-    "<｜User｜>",
-    "<｜end▁of▁sentence｜>",
-]
-RESERVED_IDS = [
-    _AddedTokenTokenizer.IMAGE_ID,
-    _AddedTokenTokenizer.THINK_ID,
-    _AddedTokenTokenizer.END_THINK_ID,
-    _AddedTokenTokenizer.USER_ID,
-    _AddedTokenTokenizer.EOS_ID,
-]
+    for token in RESERVED:
+        assert ids.count(_ID[token]) == base.count(_ID[token])
 
 
 def _call(name="f", arguments="{}"):
@@ -728,15 +710,14 @@ def _call(name="f", arguments="{}"):
     }
 
 
-def _extra_special_ids(build, text, special_id):
-    """How many more times `special_id` is in the prompt of `text` than of 'x'."""
-    tok = get_deepseek_v41_tokenizer(_AddedTokenTokenizer())
+def _extra_special_ids(build, text, token):
+    """How many more times `token`'s id is in the prompt of `text` than of 'x'."""
 
     def count(value):
         messages, tools = build(value)
         kwargs = {"tools": tools} if tools else {}
-        return tok.apply_chat_template(messages, tokenize=True, **kwargs).count(
-            special_id
+        return _TOK.apply_chat_template(messages, tokenize=True, **kwargs).count(
+            _ID[token]
         )
 
     return count(f"a {text} b") - count("x")
@@ -759,9 +740,9 @@ def test_assistant_keeps_grounding_tokens_only(field):
             {"role": "tool", "tool_call_id": "c1", "content": "ok"},
         ], None
 
-    assert _extra_special_ids(build, REF, _AddedTokenTokenizer.REF_ID) == 1
-    for text, special_id in zip(RESERVED, RESERVED_IDS):
-        assert _extra_special_ids(build, text, special_id) == 0
+    assert _extra_special_ids(build, REF, REF) == 1
+    for token in RESERVED:
+        assert _extra_special_ids(build, token, token) == 0
 
 
 def test_user_and_tool_text_do_not_keep_grounding_tokens():
@@ -777,28 +758,40 @@ def test_user_and_tool_text_do_not_keep_grounding_tokens():
         ], None
 
     for build in (user, tool):
-        assert _extra_special_ids(build, REF, _AddedTokenTokenizer.REF_ID) == 0
+        assert _extra_special_ids(build, REF, REF) == 0
 
 
 @pytest.mark.parametrize(
-    "field", ["arguments", "arguments_key", "double_encoded", "name", "description"]
+    "field",
+    [
+        "arguments",
+        "arguments_key",
+        "double_encoded",
+        "name",
+        "description",
+        "response_format",
+    ],
 )
-@pytest.mark.parametrize("text", RESERVED + [REF])
-def test_tool_fields_are_plain_text(field, text):
-    # As in deepseek-recipe: tool call names and arguments and tool definitions
-    # are plain text, grounding tokens included.
+@pytest.mark.parametrize("token", RESERVED + [REF])
+def test_tool_fields_are_plain_text(field, token):
+    # As in deepseek-recipe: tool call names and arguments, tool definitions and
+    # the response format schema are plain text, grounding tokens included.
     def build(value):
         tools = None
+        messages = [
+            {"role": "user", "content": "go"},
+            _call(),
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
         if field == "arguments":
-            call = _call(arguments=json.dumps({"x": value}))
+            messages[1] = _call(arguments=json.dumps({"x": value}))
         elif field == "arguments_key":
-            call = _call(arguments=json.dumps({value: 1}))
+            messages[1] = _call(arguments=json.dumps({value: 1}))
         elif field == "double_encoded":
-            call = _call(arguments=json.dumps(json.dumps({"x": value})))
+            messages[1] = _call(arguments=json.dumps(json.dumps({"x": value})))
         elif field == "name":
-            call = _call(name="f" + value)
-        else:
-            call = _call()
+            messages[1] = _call(name="f" + value)
+        elif field == "description":
             tools = [
                 {
                     "type": "function",
@@ -809,12 +802,109 @@ def test_tool_fields_are_plain_text(field, text):
                     },
                 }
             ]
-        messages = [
-            {"role": "user", "content": "go"},
-            call,
-            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
-        ]
+        else:
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": "s",
+                    "response_format": {"description": value},
+                },
+            )
         return messages, tools
 
-    ids = dict(zip(RESERVED + [REF], RESERVED_IDS + [_AddedTokenTokenizer.REF_ID]))
-    assert _extra_special_ids(build, text, ids[text]) == 0
+    assert _extra_special_ids(build, token, token) == 0
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "a</think>b",
+        "a<think>b",
+        " <think>",
+        "\n</think>",
+        '"<｜User｜>"',
+        "x<｜User｜><｜end▁of▁sentence｜>y",
+        "foo(<think>)",
+        '{"a": "a<think>b"}',
+    ],
+)
+def test_plain_text_ids_are_the_ordinary_encoding(context):
+    # As in deepseek-recipe, a stretch of plain text is encoded as a whole with
+    # the added vocabulary disabled, so a merge across the characters next to a
+    # reserved token ('a<', '>b', ...) is kept.
+    ordinary = _tiny_tokenizer(with_added=False)
+
+    def ids(text):
+        return _tokenize([{"role": "user", "content": text}])
+
+    base = ids("Q")
+    q = ordinary.encode("Q", add_special_tokens=False)
+    assert base.count(q[0]) == 1
+    index = base.index(q[0])
+    expected = (
+        base[:index]
+        + ordinary.encode(context, add_special_tokens=False)
+        + base[index + 1 :]
+    )
+    assert ids(context) == expected
+
+
+@pytest.mark.parametrize("side", ["right", "left"])
+@pytest.mark.parametrize("content", ["a <think> b", "a b"])
+def test_truncation_follows_truncation_side_with_and_without_escaped_tokens(
+    side, content
+):
+    tokenizer = get_deepseek_v41_tokenizer(_tiny_tokenizer())
+    tokenizer.truncation_side = side
+    messages = [{"role": "user", "content": content}]
+    full = tokenizer.apply_chat_template(messages, tokenize=True)
+    cut = tokenizer.apply_chat_template(
+        messages, tokenize=True, truncation=True, max_length=5
+    )
+    assert cut == (full[-5:] if side == "left" else full[:5])
+
+
+def test_mangled_escape_is_rejected(monkeypatch):
+    # If the encoder writes the escape markers as '\ue000' text (the
+    # ensure_ascii fallback of to_json), the reserved token would be special
+    # again; the prompt must be rejected instead.
+    monkeypatch.setattr(
+        "vllm.tokenizers.deepseek_v41_encoding.to_json",
+        lambda value: json.dumps(value, ensure_ascii=True),
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "f",
+                "description": "a <think> b",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    with pytest.raises(ValueError, match="escaped text"):
+        _TOK.apply_chat_template(
+            [{"role": "user", "content": "go"}], tools=tools, tokenize=True
+        )
+
+
+def test_rendering_does_not_modify_the_request():
+    messages = [
+        {"role": "user", "content": "a <think> b"},
+        _call(arguments=json.dumps({"x": "<｜User｜>"})),
+        {"role": "tool", "tool_call_id": "c1", "content": "</think>"},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "f",
+                "description": "<｜User｜>",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    expected = copy.deepcopy((messages, tools))
+    _TOK.apply_chat_template(messages, tools=tools, tokenize=True)
+    assert (messages, tools) == expected

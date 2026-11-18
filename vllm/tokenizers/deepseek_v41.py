@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import functools
 import json
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import regex as re
+import tokenizers
 from transformers import TokenizersBackend
 
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
@@ -216,7 +218,23 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     assistant_tokens_re = tokens_re(
         [t for t in added_vocab if t not in _ASSISTANT_SPECIAL_TOKENS]
     )
-    plain_token_ids: dict[str, list[int]] = {}
+
+    @functools.cache
+    def plain_tokenizer() -> tokenizers.Tokenizer:
+        # A copy of the backend without the added vocabulary, so reserved
+        # tokens in a text are encoded as the ordinary text they spell, as in
+        # deepseek-recipe.
+        backend = getattr(tokenizer, "_tokenizer", None)
+        if backend is None:
+            raise RuntimeError(
+                "DeepSeek V4.1 needs a tokenizers-backed tokenizer to encode "
+                "reserved tokens in text as plain text"
+            )
+        spec = json.loads(backend.to_str())
+        spec["added_tokens"] = []
+        spec["truncation"] = None
+        spec["padding"] = None
+        return tokenizers.Tokenizer.from_str(json.dumps(spec))
 
     class _DeepseekV41Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
@@ -290,6 +308,16 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             sentinel_re = re.compile(
                 f"{_ESCAPE_OPEN}{nonce}:(.*?){_ESCAPE_CLOSE}", re.DOTALL
             )
+            if nonce in prompt and nonce in sentinel_re.sub("", prompt):
+                # e.g. the ensure_ascii fallback of to_json wrote the markers
+                # as text: the reserved token would be special again.
+                raise ValueError(
+                    "DeepSeek V4.1 could not render the escaped text of a "
+                    "message, tool or response format as plain text"
+                )
+            # A text prompt spells the escaped tokens, so whatever tokenizes it
+            # again matches them as special tokens: ask for ids to keep them
+            # plain text.
             if not kwargs.get("tokenize", True):
                 return sentinel_re.sub(lambda m: m.group(1), prompt)
 
@@ -301,36 +329,42 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             if not sentinel_re.search(prompt):
                 return self.encode(prompt, add_special_tokens=False, **tokenizer_kwargs)
 
-            def encode_plain(token: str) -> list[int]:
-                # Encode an added-token string as ordinary text by splitting it
-                # so the tokenizer cannot match the added token.
-                if token not in plain_token_ids:
-                    ids = self.encode(
-                        token[:1], add_special_tokens=False
-                    ) + self.encode(token[1:], add_special_tokens=False)
-                    if added_vocab.get(token) in ids:
-                        ids = [
-                            i
-                            for c in token
-                            for i in self.encode(c, add_special_tokens=False)
-                        ]
-                    plain_token_ids[token] = ids
-                return plain_token_ids[token]
-
+            # As in deepseek-recipe, only the added tokens outside a sentinel
+            # are special tokens; every stretch of text between two of them,
+            # escaped tokens included, is encoded as a whole without the added
+            # vocabulary.
+            assert added_tokens_re is not None
             ids: list[int] = []
-            pos = 0
-            for m in sentinel_re.finditer(prompt):
-                if m.start() > pos:
-                    ids += self.encode(
-                        prompt[pos : m.start()], add_special_tokens=False
+            run: list[str] = []
+
+            def flush() -> None:
+                if run:
+                    encoding = plain_tokenizer().encode(
+                        "".join(run), add_special_tokens=False
                     )
-                ids += encode_plain(m.group(1))
-                pos = m.end()
-            if pos < len(prompt):
-                ids += self.encode(prompt[pos:], add_special_tokens=False)
+                    ids.extend(encoding.ids)
+                    run.clear()
+
+            # Splitting on the sentinel pattern alternates the text outside a
+            # sentinel (even indices) with the escaped text (odd indices).
+            for index, part in enumerate(sentinel_re.split(prompt)):
+                if index % 2:
+                    run.append(part)
+                    continue
+                pos = 0
+                for m in added_tokens_re.finditer(part):
+                    run.append(part[pos : m.start()])
+                    flush()
+                    ids.append(added_vocab[m.group(0)])
+                    pos = m.end()
+                run.append(part[pos:])
+            flush()
             max_length = tokenizer_kwargs.get("max_length")
             if tokenizer_kwargs.get("truncation") and max_length is not None:
-                ids = ids[:max_length]
+                if getattr(self, "truncation_side", "right") == "left":
+                    ids = ids[max(len(ids) - max_length, 0) :]
+                else:
+                    ids = ids[:max_length]
             return ids
 
         def num_special_tokens_to_add(self) -> int:
