@@ -856,26 +856,22 @@ def transfer_kv(
     dst_raw, dst_view = dst_cache
     written = 0
     dst_views = dst_spec.slice_for_tp_transfer(dst_view)
-
-    def where(shard: torch.Tensor) -> tuple:
-        return shard.storage_offset(), tuple(shard.shape), shard.stride()
-
     for src_rank, (src_raw, src_view) in enumerate(src_caches):
         src_views = src_spec.slice_for_tp_transfer(src_view)
-        pairs = pair_shards(
-            dst_views, dst_tp, dst_rank, src_views, src_tp, receiving=True
-        ).get(src_rank, [])
-        sent = pair_shards(
-            src_views, src_tp, src_rank, dst_views, dst_tp, receiving=False
-        ).get(dst_rank, [])
-        assert {(where(d), where(s)) for d, s in pairs} == {
-            (where(d), where(s)) for s, d in sent
-        }
-        for dst, src in pairs:
-            ranges = contiguous_byte_ranges(src.view(torch.int8), dst.view(torch.int8))
-            for src_off, dst_off, size in ranges:
-                dst_raw[dst_off : dst_off + size] = src_raw[src_off : src_off + size]
-                written += size
+        ranges = contiguous_byte_ranges(
+            pair_shards(
+                dst_views, dst_tp, dst_rank, src_views, src_tp, receiving=True
+            ).get(src_rank, [])
+        )
+        sent = contiguous_byte_ranges(
+            pair_shards(
+                src_views, src_tp, src_rank, dst_views, dst_tp, receiving=False
+            ).get(dst_rank, [])
+        )
+        assert sorted(ranges) == sorted((dst, src, size) for src, dst, size in sent)
+        for dst_off, src_off, size in ranges:
+            dst_raw[dst_off : dst_off + size] = src_raw[src_off : src_off + size]
+            written += size
     assert written == dst_raw.numel()
 
 

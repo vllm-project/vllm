@@ -469,11 +469,10 @@ def _make_hybrid_gdn_kv_cache_config(
     conv_shape = (6 * local_factor, 3)
     if conv_layout == "SD":
         conv_shape = conv_shape[::-1]
-    shapes = (conv_shape, (local_factor, 2, 2))
     gdn = mamba_layer(
         spec_cls=gdn_spec,
         block_size=16,
-        shapes=shapes,
+        shapes=(conv_shape, (local_factor, 2, 2)),
         conv_dim=int(conv_layout == "SD"),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,

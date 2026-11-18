@@ -1451,12 +1451,6 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-        self.kv_cache_spec = MambaSpec(
-            block_size=16,
-            shapes=self.get_state_shape(),
-            dtypes=self.get_state_dtype(),
-            state_alignment=self.state_alignment,
-        )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return ((2,), (3,), (4,), (5,), (6,))

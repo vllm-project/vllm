@@ -548,70 +548,94 @@ def pair_shards(
             )
         ours, theirs = cut(view, tp_size), cut(other_views[name], other_tp_size)
         count, other_count = tp_size * len(ours), other_tp_size * len(theirs)
-        for index, shard in enumerate(ours, tp_rank * len(ours)):
-            for other_index in range(other_count):
-                reader, source = (index, count), (other_index, other_count)
-                if not receiving:
-                    reader, source = source, reader
-                if reader[0] * source[1] // reader[1] != source[0]:
-                    continue
-                other_rank, i = divmod(other_index, len(theirs))
-                if shard.shape != theirs[i].shape:
-                    raise NotImplementedError(
-                        f"Shard {index} of {count} of {name!r} is "
-                        f"{tuple(shard.shape)} here but shard {other_index} of "
-                        f"{other_count} is {tuple(theirs[i].shape)} on the other "
-                        "rank: the two do not shard this layer the same way."
-                    )
-                pairs[other_rank].append((shard, theirs[i]))
+        readers, sources = (count, other_count) if receiving else (other_count, count)
+        for reader in range(readers):
+            source = reader * sources // readers
+            index, other_index = (reader, source) if receiving else (source, reader)
+            rank, i = divmod(index, len(ours))
+            other_rank, j = divmod(other_index, len(theirs))
+            if rank != tp_rank:
+                continue
+            if ours[i].shape != theirs[j].shape:
+                raise NotImplementedError(
+                    f"Shard {index} of {count} of {name!r} is "
+                    f"{tuple(ours[i].shape)} here but shard {other_index} of "
+                    f"{other_count} is {tuple(theirs[j].shape)} on the other "
+                    "rank: the two do not shard this layer the same way."
+                )
+            pairs[other_rank].append((ours[i], theirs[j]))
     return pairs
 
 
 def contiguous_byte_ranges(
-    src: torch.Tensor, dst: torch.Tensor
+    pairs: Iterable[tuple[torch.Tensor, torch.Tensor]],
 ) -> list[tuple[int, int, int]]:
-    """Split two same-shape views into byte ranges contiguous in both.
+    """The `(offset, other_offset, num_bytes)` byte ranges of `pair_shards`
+    pairs that are contiguous on both sides. The two views of a pair have
+    the same shape but may be stored in different orders; offsets are in
+    bytes from the start of each view's storage."""
+    ranges = []
+    for src, dst in pairs:
+        if src.shape != dst.shape or src.element_size() != dst.element_size():
+            raise ValueError(
+                f"Cannot pair {tuple(src.shape)} x {src.element_size()}B with "
+                f"{tuple(dst.shape)} x {dst.element_size()}B."
+            )
+        if src.numel() == 0:
+            continue
+        # Coalesce the pair: the fewest dims, outermost first, that address
+        # the same bytes of both views.
+        dims: list[tuple[int, int, int]] = []
+        for s, d, size in sorted(
+            zip(src.stride(), dst.stride(), src.shape), reverse=True
+        ):
+            if size == 1:
+                continue
+            if dims and dims[-1][:2] == (s * size, d * size):
+                size *= dims.pop()[2]
+            dims.append((s, d, size))
+        contiguous = dims.pop()[2] if dims and dims[-1][:2] == (1, 1) else 1
 
-    Pairs views returned by `KVCacheSpec.slice_for_tp_transfer` on either
-    side, which may differ in physical layout. Returns `(src_offset,
-    dst_offset, num_bytes)` per range, with offsets in bytes from the start of
-    each view's storage, in row-major order of the logical shape.
-    """
-    if src.shape != dst.shape or src.element_size() != dst.element_size():
-        raise ValueError(
-            f"Cannot pair {tuple(src.shape)} x {src.element_size()}B with "
-            f"{tuple(dst.shape)} x {dst.element_size()}B."
+        src_offsets = torch.tensor(
+            [src.storage_offset()], dtype=torch.int64, device="cpu"
         )
-    if src.numel() == 0:
-        return []
-    elem = src.element_size()
-    dims = [
-        (size, s, d)
-        for size, s, d in zip(src.shape, src.stride(), dst.stride())
-        if size != 1
-    ]
-    contiguous = 1
-    while dims and dims[-1][1] == contiguous and dims[-1][2] == contiguous:
-        contiguous *= dims.pop()[0]
-
-    src_offsets = torch.tensor([src.storage_offset()], dtype=torch.int64, device="cpu")
-    dst_offsets = torch.tensor([dst.storage_offset()], dtype=torch.int64, device="cpu")
-    for size, s, d in dims:
-        idx = torch.arange(size, dtype=torch.int64, device="cpu")
-        src_offsets = (src_offsets[:, None] + idx * s).flatten()
-        dst_offsets = (dst_offsets[:, None] + idx * d).flatten()
-    return [
-        (s * elem, d * elem, contiguous * elem)
-        for s, d in zip(src_offsets.tolist(), dst_offsets.tolist())
-    ]
+        dst_offsets = torch.tensor(
+            [dst.storage_offset()], dtype=torch.int64, device="cpu"
+        )
+        for s, d, size in dims:
+            idx = torch.arange(size, dtype=torch.int64, device="cpu")
+            src_offsets = (src_offsets[:, None] + idx * s).flatten()
+            dst_offsets = (dst_offsets[:, None] + idx * d).flatten()
+        elem = src.element_size()
+        ranges += [
+            (s * elem, d * elem, contiguous * elem)
+            for s, d in zip(src_offsets.tolist(), dst_offsets.tolist())
+        ]
+    return ranges
 
 
 def coalesce_byte_ranges(
     ranges: Iterable[tuple[int, int, int]],
+    views: dict[str, torch.Tensor],
+    other_views: dict[str, torch.Tensor],
+    block_len: int | None = None,
 ) -> list[tuple[int, int, int]]:
-    """Merge `(src_offset, dst_offset, num_bytes)` ranges that follow each
-    other on both sides, e.g. the shards of a layer that one rank holds
-    together on either side."""
+    """Merge the `contiguous_byte_ranges` of a block that follow each other
+    on both sides.
+
+    A block both sides hold alike, i.e. with the same `views`, moves whole:
+    all `block_len` bytes, padding included. Pass no `block_len` for a block
+    whose padding stays behind.
+    """
+
+    def layout(views: dict[str, torch.Tensor]) -> dict[str, tuple]:
+        return {
+            name: (view.storage_offset(), view.shape, view.stride())
+            for name, view in views.items()
+        }
+
+    if block_len is not None and layout(views) == layout(other_views):
+        return [(0, 0, block_len)]
     merged: list[tuple[int, int, int]] = []
     for src, dst, size in sorted(ranges):
         if merged:

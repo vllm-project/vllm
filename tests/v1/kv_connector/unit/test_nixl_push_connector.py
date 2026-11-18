@@ -1769,6 +1769,17 @@ def test_layer_metadata_round_trip():
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
 
 
+def test_push_requires_identical_block_sizes():
+    worker = _layer_routing_worker([["L0"]], {"L0": 0})
+    worker.pcp_size = 1
+    worker._physical_blocks_per_logical_kv_block = 1
+    metadata = _agent_metadata([["L0"]], [0x10000], [128])
+    worker._validate_remote_parallel_config(metadata)
+    metadata.block_size = 32
+    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
+        worker._validate_remote_parallel_config(metadata)
+
+
 def test_pairing_keeps_a_pp_stage_s_regions():
     worker = _layer_routing_worker([["l2"], ["l3"]], {"l2": 0, "l3": 1})
     worker.block_len_per_layer = [65536, 32768]

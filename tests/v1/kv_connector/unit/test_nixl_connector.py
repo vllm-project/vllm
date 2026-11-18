@@ -2869,8 +2869,8 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
     [
         # V4 record: padded pages, so a layer view is not a contiguous page.
         pytest.param([(_dsv4_mla_spec(584, 576, 4), 4)], id="v4-padded-pages"),
-        # V4.1 MXFP8 record: unpadded pages that the compressed caches and a
-        # compressor-state ring alias.
+        # V4.1 MXFP8 record: unpadded pages in rows that the compressed caches
+        # and a compressor-state ring alias.
         pytest.param(
             [
                 (_dsv4_mla_spec(528, 512, 2), 2),

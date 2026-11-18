@@ -9,6 +9,7 @@ descriptor lists from the KV cache specs. No GPU or NIXL required.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -406,6 +407,26 @@ def test_smaller_remote_blocks_cannot_be_read_by_head():
     worker = _worker(0, 1, _GQA)
     with pytest.raises(NotImplementedError, match="remote blocks are smaller"):
         _map(worker, 2, block_size_ratio=2)
+
+
+def test_smaller_remote_blocks_fill_a_rank_with_fewer_heads():
+    """A rank holding half the remote's heads reads them into whole
+    sub-blocks of its own, as on main."""
+    worker = _worker(1, 2, _GQA)
+    meta = _remote_meta(worker, 1)
+    meta.block_lens = [block_len // 2 for block_len in meta.block_lens]
+    ranges = worker._tp_byte_ranges(meta, [(0, 0, 0)], 1, 1, 2, receiving=True)
+    sub_block = worker.block_len_per_layer[0] // 2
+    assert ranges == [{0: [(0, sub_block, sub_block)]}]
+
+
+def test_padded_state_page_moves_without_its_padding():
+    """As on main, a recurrent state page moves its states, not the page
+    padding after them."""
+    mamba = replace(_sharded_state_spec(), page_size_padded=1024)
+    worker = _worker(0, 1, {"mamba": mamba})
+    assert _map(worker, 1) == (0,)
+    assert worker._byte_ranges[_ENGINE] == [{0: [(0, 0, 400)]}]
 
 
 @pytest.mark.parametrize(

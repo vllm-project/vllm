@@ -164,13 +164,12 @@ def _spec(layer: Layer, num_heads: int, tp_size: int):
         return MLAAttentionSpec(
             block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
         )
-    shapes = (
-        ((2 * KEY_DIM + V_HEADS * V_DIM) // tp_size, CONV_ROWS),
-        (V_HEADS // tp_size, V_DIM, K_DIM),
-    )
     return gdn_spec(
         block_size=BLOCK_SIZE,
-        shapes=shapes,
+        shapes=(
+            ((2 * KEY_DIM + V_HEADS * V_DIM) // tp_size, CONV_ROWS),
+            (V_HEADS // tp_size, V_DIM, K_DIM),
+        ),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )

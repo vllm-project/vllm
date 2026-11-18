@@ -408,7 +408,7 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 def _register_overlaid_mla_worker(
     *, push_pp: bool = False, tail_bytes: int = 0, page_covers_view: bool = True
 ):
-    """Register two MLA layers, each a cache group, overlaid on one allocation.
+    """Register two MLA layers overlaid on one allocation.
 
     `tail_bytes` leaves spare bytes past the last block, the way an allocation
     rounded up to a page boundary does. Clearing `page_covers_view` narrows
@@ -644,12 +644,11 @@ def _make_mla_hybrid_worker(
         dtype=torch.float16,
     )
     unified_page = mla_spec.page_size_bytes
-    # Q|K|V = 8|8|8 conv channels and 8 heads (48 + 64 bytes), so the state
-    # shards evenly up to TP8.
-    kda_shapes = ((24, 1), (8, 1, 2))
     kda_spec = gdn_spec(
         block_size=local_block_size,
-        shapes=kda_shapes,
+        # Q|K|V = 8|8|8 conv rows and 8 heads (48 + 64 bytes), so the state
+        # shards evenly up to TP8.
+        shapes=((24, 1), (8, 1, 2)),
         dtypes=(torch.float16, torch.float32),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -768,9 +767,9 @@ def _own_pairs(worker) -> tuple[list[int], list[int]]:
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kda_only_tensor", [False, True])
 def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
-    """Each layer is a region of its cache group's blocks, so MLA reads skip
-    a KDA-only tensor (e.g. GLM-5.3-Flash) and a KDA group skips the tensors
-    holding none of its layers."""
+    """A KDA-only tensor is a region without MLA pages: MLA reads of it would
+    only re-read bytes aliased by other groups (e.g. GLM-5.3-Flash). Likewise a
+    KDA group skips SSM regions holding none of its layers."""
     worker = _make_mla_hybrid_worker(
         local_block_size=16,
         kernel_block_size=16,
@@ -1650,9 +1649,9 @@ def _region_of(worker, layer_name) -> int:
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("scratch_aliases", ["compressed", "main_kv"])
 def test_csa_linear_scratch_follows_the_pages_it_overlays(scratch_aliases):
-    """The scratch ring is read in the regions it registered in, at the pages
-    it overlays, not by inferring that it must sit on the MLA blocks; the Mamba
-    and PLE states are regions of their own blocks."""
+    """The scratch ring is read in the regions it registered in, not by
+    inferring that it must sit on the MLA blocks; the Mamba and PLE states are
+    regions of their own blocks."""
     worker = _make_csa_linear_ple_worker(scratch_aliases=scratch_aliases)
     regions = _regions_by_group(worker)
     bases = worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank]

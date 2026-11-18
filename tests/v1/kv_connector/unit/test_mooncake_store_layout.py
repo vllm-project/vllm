@@ -89,10 +89,9 @@ def _make_gdn_store_layout(
     conv_shape = (6 * local_factor, 3)
     if os.environ.get("VLLM_SSM_CONV_STATE_LAYOUT") == "SD":
         conv_shape = conv_shape[::-1]
-    shapes = (conv_shape, (local_factor, 2, 2))
     spec = gdn_spec(
         block_size=16,
-        shapes=shapes,
+        shapes=(conv_shape, (local_factor, 2, 2)),
         conv_dim=int(conv_shape[0] == 3),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -111,10 +110,12 @@ def _make_mamba2_store_layout(
     conv_shape = ((8 + 2 * effective_groups * 2) // local_tp_size, 3)
     if os.environ.get("VLLM_SSM_CONV_STATE_LAYOUT") == "SD":
         conv_shape = conv_shape[::-1]
-    shapes = (conv_shape, (local_heads, 2, 2))
     spec = mamba2_spec(
         block_size=16,
-        shapes=shapes,
+        shapes=(
+            conv_shape,
+            (local_heads, 2, 2),
+        ),
         conv_dim=int(conv_shape[0] == 3),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
