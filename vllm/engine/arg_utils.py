@@ -399,6 +399,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "save_sharded_state_max_size",
                 "max_num_queued_tokens",
             }
             if name == "max_model_len":
@@ -834,6 +835,9 @@ class EngineArgs:
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
     shuffle_safetensors_files: bool = LoadConfig.shuffle_safetensors_files
+    save_sharded_state_path: str | None = LoadConfig.save_sharded_state_path
+    save_sharded_state_pattern: str | None = LoadConfig.save_sharded_state_pattern
+    save_sharded_state_max_size: int | None = LoadConfig.save_sharded_state_max_size
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
@@ -1109,6 +1113,17 @@ class EngineArgs:
         load_group.add_argument(
             "--shuffle-safetensors-files",
             **load_kwargs["shuffle_safetensors_files"],
+        )
+        load_group.add_argument(
+            "--save-sharded-state-path", **load_kwargs["save_sharded_state_path"]
+        )
+        load_group.add_argument(
+            "--save-sharded-state-pattern",
+            **load_kwargs["save_sharded_state_pattern"],
+        )
+        load_group.add_argument(
+            "--save-sharded-state-max-size",
+            **load_kwargs["save_sharded_state_max_size"],
         )
 
         # Attention arguments
@@ -2121,6 +2136,9 @@ class EngineArgs:
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
             shuffle_safetensors_files=self.shuffle_safetensors_files,
+            save_sharded_state_path=self.save_sharded_state_path,
+            save_sharded_state_pattern=self.save_sharded_state_pattern,
+            save_sharded_state_max_size=self.save_sharded_state_max_size,
         )
 
     def create_speculative_config(

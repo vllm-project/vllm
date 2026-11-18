@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import os
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
@@ -20,6 +21,9 @@ from vllm.model_executor.model_loader.reload.direct import (
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
+)
+from vllm.model_executor.model_loader.weight_tying import (
+    maybe_retie_word_embeddings,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -105,6 +109,7 @@ class BaseModelLoader(ABC):
             if direct_reload_enabled():
                 track_loaded_params(model)  # what every update must load again
             self.load_weights(model, model_config)
+            self._maybe_save_sharded_state(model, model_config)
 
             # Release transient tensors held by PyTorch's caching allocator
             # before weight post-processing and raw CUDA driver allocations.
@@ -132,6 +137,33 @@ class BaseModelLoader(ABC):
             torch.accelerator.empty_cache()
 
         return model.eval()
+
+    def _maybe_save_sharded_state(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> None:
+        path = self.load_config.save_sharded_state_path
+        if path is None:
+            return
+        from vllm.compilation import backends
+        from vllm.model_executor.model_loader.sharded_state_loader import (
+            ShardedStateLoader,
+        )
+
+        if backends.model_tag != "backbone":
+            return
+        if _has_online_quant(model):
+            raise ValueError(
+                "save_sharded_state_path is not supported with online quantization"
+            )
+        maybe_retie_word_embeddings(model, model_config)
+        os.makedirs(path, exist_ok=True)
+        logger.info("Saving sharded state before weight post-processing to %s", path)
+        ShardedStateLoader.save_model(
+            model,
+            path,
+            pattern=self.load_config.save_sharded_state_pattern,
+            max_size=self.load_config.save_sharded_state_max_size,
+        )
 
 
 def log_model_inspection(model: nn.Module) -> None:

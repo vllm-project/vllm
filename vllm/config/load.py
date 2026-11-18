@@ -126,6 +126,19 @@ class LoadConfig:
     load different files in a randomized order.
     Set to True to enable shuffling. Default is False.
     """
+    save_sharded_state_path: str | None = None
+    """If set, each worker saves its loaded weights to this directory before
+    quantization or kernel-specific post-processing, as a checkpoint for
+    `--load-format sharded_state`. Unlike `save_sharded_state()` on a running
+    engine, which saves the post-processed weights, the checkpoint can be
+    reloaded even when post-processing repacks weights. Not supported with
+    online quantization."""
+    save_sharded_state_pattern: str | None = None
+    """Filename pattern of the files written to `save_sharded_state_path`.
+    Defaults to the pattern that `--load-format sharded_state` reads."""
+    save_sharded_state_max_size: int | None = Field(default=None, gt=0)
+    """Maximum size in bytes of each file written to
+    `save_sharded_state_path`."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.

@@ -60,15 +60,11 @@ def main(args):
     model_path = engine_args.model
     if not Path(model_path).is_dir():
         raise ValueError("model path must be a local directory")
-    # Create LLM instance from arguments
-    llm = LLM.from_engine_args(engine_args)
-    # Prepare output directory
-    Path(args.output).mkdir(exist_ok=True)
     # Dump worker states to output directory
-
-    llm.llm_engine.engine_core.save_sharded_state(
-        path=args.output, pattern=args.file_pattern, max_size=args.max_file_size
-    )
+    engine_args.save_sharded_state_path = args.output
+    engine_args.save_sharded_state_pattern = args.file_pattern
+    engine_args.save_sharded_state_max_size = args.max_file_size
+    LLM.from_engine_args(engine_args)
 
     # Copy metadata files to output directory
     for file in os.listdir(model_path):

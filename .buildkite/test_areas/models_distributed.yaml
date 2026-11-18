@@ -50,6 +50,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py
+  - vllm/model_executor/model_loader/base_loader.py
   - vllm/model_executor/models/
   - vllm/v1/worker/gpu/model_states/default.py
   - vllm/v1/worker/gpu/pp_utils.py
@@ -82,6 +83,7 @@ steps:
       - tests/conftest.py
       - tests/utils.py
       - vllm/model_executor/model_loader/sharded_state_loader.py
+      - vllm/model_executor/model_loader/base_loader.py
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
       - vllm/v1/attention/backends/
