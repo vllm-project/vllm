@@ -327,7 +327,7 @@ if current_platform.is_rocm():
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
     # Sliding-window decode: window-trimmed block table and rebased seq lens.
@@ -336,14 +336,14 @@ class AiterFlashAttentionDecodeMetadata:
     swa_max_seq_len: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionPrefillMetadata:
     max_query_len: int
     max_seq_len: int
     query_start_loc: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkSlidingWindowMetadata:
     swa_cu_seqlens: torch.Tensor
     swa_seq_starts: torch.Tensor
@@ -353,7 +353,7 @@ class AiterChunkSlidingWindowMetadata:
     swa_workspace: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkContextMetadata:
     workspace: torch.Tensor
     cu_seq_lens_chunk: torch.Tensor
@@ -365,7 +365,7 @@ class AiterChunkContextMetadata:
     swa_metadata: AiterChunkSlidingWindowMetadata | None
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionChunkPrefillMetadata:
     max_query_len: int
     max_seq_len: int
@@ -373,7 +373,7 @@ class AiterFlashAttentionChunkPrefillMetadata:
     chunk_context_metadata: AiterChunkContextMetadata
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterKVSharingMetadata:
     workspace: torch.Tensor
     query_start_loc: torch.Tensor
@@ -417,7 +417,7 @@ class AiterFlashAttentionMetadata:
     kv_sharing_metadata: AiterKVSharingMetadata | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class AsmKvScaleTables:
     """Dense per-slot scale tables the asm decode kernel reads for an fp8 cache.
 
@@ -758,9 +758,9 @@ class AiterFlashAttentionMetadataBuilder(
                     swa_workspace=swa_workspace,
                 )
 
-            # allocate the equal amount of workspace for
-            # each chunk prefill request
-            max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends
+            # Split the workspace only among extends that have context to read.
+            num_extends_with_context = max(int((computed_kv_lens > 0).sum()), 1)
+            max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends_with_context
             num_chunks = cdiv(computed_kv_lens.max().item(), max_context_chunk)
 
             chunk_starts = (

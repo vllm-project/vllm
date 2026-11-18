@@ -13,14 +13,19 @@ from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
+    check_torch_archive_size,
     safe_to_dense,
 )
 
 from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
-from ..video_decoders import incompatible_backend_options
+from ..video_decoders import (
+    SampledFramesCharge,
+    charging_sampled_frames,
+    incompatible_backend_options,
+)
 from .base import MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
@@ -121,19 +126,25 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
     def load_bytes(
         self, data: bytes
     ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        video = self.video_loader.load_bytes(
-            data, num_frames=self.num_frames, **self.kwargs
-        )
-        frames = video[0] if isinstance(video, tuple) else video
         budget = getattr(self.image_io, "decoded_budget", None)
+        # Decoders charge the sampled frames before decoding them, so an
+        # oversized sample is rejected before its frames are allocated.
+        frames_charge = None if budget is None else SampledFramesCharge(budget.charge)
+        with charging_sampled_frames(frames_charge):
+            video = self.video_loader.load_bytes(
+                data, num_frames=self.num_frames, **self.kwargs
+            )
+        frames = video[0] if isinstance(video, tuple) else video
         shape = getattr(frames, "shape", None)
-        if budget is not None and shape is not None and len(shape) >= 3:
+        if frames_charge is not None and shape is not None and len(shape) >= 3:
             decoded_bytes = (
                 frames.numel() * frames.element_size()
                 if isinstance(frames, torch.Tensor)
                 else frames.nbytes
             )
-            budget.charge(decoded_bytes)
+            # Charge what the decoder did not charge up front, e.g. a custom
+            # loader or frames a loader duplicated after decoding.
+            frames_charge(max(0, decoded_bytes - frames_charge.charged_bytes))
         return MediaWithBytes(video, data)
 
     def load_base64(
@@ -244,6 +255,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
+        check_torch_archive_size(data, parameter="video_embeds")
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
@@ -251,7 +263,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
-            return torch.from_numpy(np.load(buffer))
+            return numpy2tensor(np.load(buffer))
 
     def load_bytes(self, data: bytes) -> torch.Tensor:
         if data[:6] == MAGIC_NUMPY_PREFIX:
@@ -264,7 +276,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def load_file(self, filepath: Path) -> torch.Tensor:
         if filepath.suffix == ".npy":
-            return torch.from_numpy(np.load(filepath))
+            return numpy2tensor(np.load(filepath))
 
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
