@@ -44,7 +44,7 @@ def _config(
 
 
 class ToyKernel(VllmJitKernel["ToyKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
         work: int
@@ -52,7 +52,7 @@ class ToyKernel(VllmJitKernel["ToyKernel.CompileKey"]):
         descriptor: tuple[object, ...]
         enabled: bool
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         tokens: int,
@@ -286,11 +286,11 @@ def test_trace_dispatch_rejects_bad_positional_groups_and_duplicates() -> None:
 
 def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
     class HelperKernel(VllmJitKernel["HelperKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -305,11 +305,11 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
             pass
 
     class StarKwargsKernel(VllmJitKernel["StarKwargsKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -335,11 +335,11 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
 
 def test_dispatch_helper_calls_resolve_python_builtins() -> None:
     class BuiltinKernel(VllmJitKernel["BuiltinKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -360,11 +360,11 @@ def test_dispatch_helper_calls_resolve_python_builtins() -> None:
 
 def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> None:
     class BranchKernel(VllmJitKernel["BranchKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             if value > 0:
                 value = 1
             return self.CompileKey(value=value)
@@ -376,11 +376,11 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
             pass
 
     class KwargsReturnKernel(VllmJitKernel["KwargsReturnKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(**{"value": value})
 
         def get_warmup_keys(self) -> list[CompileKey]:
@@ -400,12 +400,12 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
 
 def test_dispatch_can_forward_compile_key_fields() -> None:
     class ForwardingKernel(VllmJitKernel["ForwardingKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             mode: int
             block_size: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -446,12 +446,12 @@ def test_dispatch_can_forward_compile_key_fields() -> None:
 
 def test_forwarded_compile_key_fields_exclude_predicate_only_inputs() -> None:
     class ForwardingKernel(VllmJitKernel["ForwardingKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             mode: int
             block_size: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -480,12 +480,12 @@ def test_forwarded_compile_key_fields_exclude_predicate_only_inputs() -> None:
 
 def test_dispatch_supports_tuple_and_mapping_subscriptions() -> None:
     class SubscriptKernel(VllmJitKernel["SubscriptKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             first: int
             named: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             values: tuple[int, ...],
@@ -506,11 +506,11 @@ def test_dispatch_supports_tuple_and_mapping_subscriptions() -> None:
 
 def test_dispatch_reports_unsupported_expression_with_context() -> None:
     class UnsupportedKernel(VllmJitKernel["UnsupportedKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: object
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value={value})
 
         def get_warmup_keys(self) -> list[CompileKey]:
@@ -543,7 +543,7 @@ def test_warmup_compiles_all_returned_keys_in_order() -> None:
 
 def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
     class CachedKernel(VllmJitKernel["CachedKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
@@ -551,7 +551,7 @@ def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
             self.compiled: list[CachedKernel.CompileKey] = []
             super().__init__()
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value=value)
 
         def get_warmup_keys(self) -> list[CompileKey]:
@@ -629,7 +629,7 @@ def test_registry_expands_requests_and_deduplicates_owner_keys() -> None:
 
 def test_registry_passes_vllm_config_to_default_requests() -> None:
     class ConfigKernel(VllmJitKernel["ConfigKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
@@ -637,7 +637,7 @@ def test_registry_passes_vllm_config_to_default_requests() -> None:
             self.compiled: list[ConfigKernel.CompileKey] = []
             super().__init__()
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value=value)
 
         def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -660,7 +660,7 @@ def test_registry_passes_vllm_config_to_default_requests() -> None:
 
 def test_registry_default_request_supports_config_free_kernel() -> None:
     class ConfigFreeKernel(VllmJitKernel["ConfigFreeKernel.CompileKey"]):
-        @dataclass(frozen=True)
+        @dataclass(frozen=True, slots=True)
         class CompileKey:
             value: int
 
@@ -668,7 +668,7 @@ def test_registry_default_request_supports_config_free_kernel() -> None:
             self.compiled: list[ConfigFreeKernel.CompileKey] = []
             super().__init__()
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value=value)
 
         def get_warmup_keys(self) -> list[CompileKey]:

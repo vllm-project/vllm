@@ -3,8 +3,8 @@
 """Launch-config selection for the ReplaySSM decode kernels (Mamba2
 output_only and GDN).
 
-Mirrors ``mamba_ssm.py``: a hard-coded heuristic per kernel, plus an
-``override`` context manager for benchmarks/tests/config sweeps. Hardware is
+Mirrors `mamba_ssm.py`: a hard-coded heuristic per kernel, plus an
+`override` context manager for benchmarks/tests/config sweeps. Hardware is
 auto-detected (Blackwell vs not) so call sites need not thread it through.
 """
 
@@ -46,10 +46,10 @@ def _gdn_decode(L, is_blackwell):
 
 
 def get_replayssm_config(kernel: str, **shape) -> tuple:
-    """Return the launch config for ``kernel`` (override > tuned default).
+    """Return the launch config for `kernel` (override > tuned default).
 
-    kernel: "mamba2_output_only" or "gdn_decode". ``shape`` carries the keying
-    dims (dstate; ``L`` for the buffer length, default 16); hardware is
+    kernel: "mamba2_output_only" or "gdn_decode". `shape` carries the keying
+    dims (dstate; `L` for the buffer length, default 16); hardware is
     auto-detected.
     """
     if kernel in _overrides:

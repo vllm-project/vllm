@@ -50,12 +50,13 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     """Materialize a meta tensor into an actual tensor on the current device.
     Should be called within the torch device context for the given rank.
     """
+    # Zeroed: loaders only write checkpoint regions, so MoE padding would keep garbage.
     tensor = torch.empty_strided(
         size=tuple(meta_tensor.size()),
         stride=tuple(meta_tensor.stride()),
         dtype=meta_tensor.dtype,
         requires_grad=False,
-    )
+    ).zero_()
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__.copy()
     return tensor
@@ -147,7 +148,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    with info.restore_device:
+    with torch.device("cpu") if info.stage_on_cpu else info.restore_device:
         for name, tensor in get_layer_tensors(layer).items():
             if name not in SKIP_TENSORS and tensor.is_meta:
                 setattr(layer, name, materialize_meta_tensor(tensor))

@@ -1,6 +1,6 @@
 ---
 name: triton-kernel-writing
-description: Write or review Triton kernels for vLLM, with practical guidance for generated-code inspection, launch grids, indexing, specialization, tuning, and representative performance validation.
+description: Write or review Triton kernels for vLLM, with practical guidance for generated-code inspection, launch grids, indexing, specialization, tuning, and representative performance validation. Use when adding, modifying, optimizing, or reviewing a `@triton.jit` kernel in vLLM.
 ---
 
 # Triton Kernel Writing

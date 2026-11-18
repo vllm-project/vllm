@@ -18,9 +18,10 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.engine.logprobs import LogprobsProcessor
+from vllm.v1.structured_output.utils import allocate_token_bitmask
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AccuracyTolerance:
     logprob_atol: float
     greedy_atol: float
@@ -174,7 +175,13 @@ def check_logprobs(
         assert {scores[t].rank for t in top_ids} == set(range(1, requested + 1)), (
             context
         )
-        ordered = sorted(top_ids, key=lambda t: scores[t].rank)
+
+        def rank_of(token_id: int) -> int:
+            rank = scores[token_id].rank
+            assert rank is not None
+            return rank
+
+        ordered = sorted(top_ids, key=rank_of)
         assert all(
             scores[a].logprob >= scores[b].logprob for a, b in zip(ordered, ordered[1:])
         ), f"{context}: top-k scores disagree with their reported ranks"
@@ -428,7 +435,7 @@ class SamplingReference:
             self.matcher = xgr.GrammarMatcher(
                 compiled, override_stop_tokens=sorted(self.stop_ids) or None
             )
-            self.bitmask = xgr.allocate_token_bitmask(1, vocab_size)
+            self.bitmask = allocate_token_bitmask(1, vocab_size)
 
     def accept_history(self, generated_ids: list[int]) -> bool:
         """Validate newly generated grammar tokens, including the final EOS.
@@ -455,8 +462,8 @@ class SamplingReference:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return FP32 logits before and after non-grammar sampling transforms.
 
-        ``raw_logits`` scores the next token after the prompt and
-        ``generated_ids``. Returned tensors do not alias the model's tensor.
+        `raw_logits` scores the next token after the prompt and
+        `generated_ids`. Returned tensors do not alias the model's tensor.
         Normalize the first result to check reported completion logprobs;
         the second supplies the greedy decision reference.
         """

@@ -25,7 +25,7 @@ from vllm.v1.structured_output.backend_outlines import (
 )
 from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 JSON_SCHEMA = {
     "type": "object",
@@ -35,6 +35,14 @@ JSON_SCHEMA = {
     },
     "required": ["invoice_id", "customer"],
     "additionalProperties": False,
+}
+
+GUIDANCE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "count": {"type": "integer", "multipleOf": 2},
+    },
+    "required": ["count"],
 }
 
 
