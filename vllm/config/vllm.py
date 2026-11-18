@@ -612,18 +612,22 @@ class VllmConfig:
         """Whether the output worker times logged iterations with CUDA events.
         Otherwise they are logged without an elapsed time."""
         parallel_config = self.parallel_config
-        return (
+        # With more API servers the frontend does not log iteration details.
+        frontend_logs = (
             self.observability_config.enable_logging_iteration_details
-            and self.device_config.device_type == "cuda"
-            and self.model_config is not None
+            and parallel_config._api_process_count == 1
+        )
+        # The worker ends a timed iteration in sample_tokens.
+        worker_returns_records = (
+            self.model_config is not None
             and self.model_config.runner_type == "generate"
             and not self.is_mm_encoder_only
             and parallel_config.distributed_executor_backend in ("uni", "mp")
-            # With more API servers the frontend does not log iteration details.
-            and parallel_config._api_process_count == 1
             # Only EngineCoreProc publishes the records a dummy batch returns.
             and envs.VLLM_ENABLE_V1_MULTIPROCESSING
         )
+        worker_times = self.device_config.device_type == "cuda"
+        return frontend_logs and worker_returns_records and worker_times
 
     @property
     def max_concurrent_batches(self) -> int:
