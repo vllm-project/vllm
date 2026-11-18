@@ -71,7 +71,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
 )
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, run_on_rank0
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     SecondaryTierManager,
@@ -341,6 +341,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 "setting the CPU tier up now"
             )
             self.async_init = False
+        if self.enable_load_path_autotune and self.config.canonical_layout:
+            # Canonical loads copy per fragment, which is not what is measured.
+            logger.warning(
+                "enable_load_path_autotune is not supported with "
+                "canonical_layout yet; keeping the default load path cutoff"
+            )
+            self.enable_load_path_autotune = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
@@ -590,6 +597,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                enable_load_path_autotune=self.enable_load_path_autotune,
+                run_autotune=run_on_rank0,
             )
         except Exception:
             worker_mmap.cleanup()

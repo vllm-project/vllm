@@ -29,6 +29,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
 )
 from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
+from vllm.v1.kv_offload.cpu.load_path_autotune import autotune_load_min_n
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
@@ -53,8 +54,14 @@ def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
     host_memory_is_pinned: bool = True,
+    autotune: Callable[[list[int], int], int | None] | None = None,
 ):
-    """Resolve the swap_blocks function for a handler at init time."""
+    """Resolve the swap_blocks function for a handler at init time.
+
+    `autotune`, given the handler's copy sizes and the kernel chunk, returns
+    the batch size from which Triton is used (None: DMA only). It replaces
+    the tuned constants and is only called where Triton can serve the handler.
+    """
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
     # The Triton kernel dereferences CPU pointers on the GPU, which is only
     # valid for pinned host memory.
@@ -67,15 +74,19 @@ def _select_swap_blocks_fn(
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
-    # Triton wins only on small, 8-byte-aligned payloads.
-    if (
-        not page_sizes
-        or max(page_sizes) >= THRESHOLD_BYTES
-        or any(s % 8 for s in page_sizes)
-    ):
+    # The Triton kernel copies whole 8-byte words per descriptor.
+    if not page_sizes or any(s % 8 for s in page_sizes):
         return ops.swap_blocks_batch
     chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
+    if autotune is None:
+        # Triton wins only on small payloads.
+        if max(page_sizes) >= THRESHOLD_BYTES:
+            return ops.swap_blocks_batch
+        return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
+    min_n = autotune(sorted(set(page_sizes)), chunk)
+    if min_n is None:
+        return ops.swap_blocks_batch
+    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk, min_n=min_n)
 
 
 @dataclass(slots=True)
@@ -326,6 +337,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
         host_memory_is_pinned: bool = True,
+        swap_blocks_fn: Callable[..., None] | None = None,
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -339,6 +351,8 @@ class SingleDirectionOffloadingHandler:
                 described by the refs' mappings.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
+            swap_blocks_fn: the swap_blocks function to use instead of
+                resolving one from the refs.
 
         """
         assert len(cpu_tensors) > 0
@@ -351,7 +365,7 @@ class SingleDirectionOffloadingHandler:
         self.cpu_tensors = cpu_tensors
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
-        self._swap_blocks_batch = _select_swap_blocks_fn(
+        self._swap_blocks_batch = swap_blocks_fn or _select_swap_blocks_fn(
             layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
         )
         self.blocks_per_chunk = blocks_per_chunk
@@ -828,10 +842,22 @@ class CPUOffloadingWorker(OffloadingWorker):
         defer_host_setup: bool = False,
         prefault_shard: tuple[int, int] | None = None,
         pin_pace: float = 2.0,
+        enable_load_path_autotune: bool = False,
+        run_autotune: Callable[[Callable[[], int | None]], int | None] | None = None,
     ):
         """defer_host_setup leaves pre-faulting and pinning mmap_region to
         start_deferred_setup(); prefault_shard is then the share this worker
-        pre-faults first, and pin_pace paces its pinning (see pin_mmap_region)."""
+        pre-faults first, and pin_pace paces its pinning (see pin_mmap_region).
+
+        enable_load_path_autotune measures the DMA/Triton load cutoff on this
+        GPU instead of using the tuned constants. It reads the pinned host
+        region, so it cannot be combined with defer_host_setup or
+        canonical_layout. run_autotune runs the measurement on one worker and
+        returns its result on every worker, so ranks sharing a PCIe link don't
+        measure at the same time; None measures on this worker."""
+        assert not enable_load_path_autotune or not (
+            defer_host_setup or canonical_layout
+        )
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
@@ -902,9 +928,34 @@ class CPUOffloadingWorker(OffloadingWorker):
             host_memory_is_pinned=host_memory_is_pinned,
         )
         self._store_handler = make_handler(gpu_to_cpu=True)
-        self._load_handler = make_handler(gpu_to_cpu=False)
+
+        load_fn = None
+        if enable_load_path_autotune:
+
+            def autotune(copy_sizes: list[int], bytes_per_chunk: int) -> int | None:
+                def measure() -> int | None:
+                    return autotune_load_min_n(
+                        copy_sizes,
+                        bytes_per_chunk,
+                        max(cpu_tensors, key=torch.Tensor.numel),
+                        kv_caches.tensors[0].tensor.device,
+                    )
+
+                return run_autotune(measure) if run_autotune else measure()
+
+            # Resolved once, so both load handlers share one measurement.
+            load_fn = _select_swap_blocks_fn(
+                kv_caches.group_data_refs,
+                gpu_to_cpu=False,
+                host_memory_is_pinned=host_memory_is_pinned,
+                autotune=autotune,
+            )
+
+        self._load_handler = make_handler(gpu_to_cpu=False, swap_blocks_fn=load_fn)
         # Own stream, so expedited loads do not queue behind regular loads.
-        self._expedited_load_handler = make_handler(gpu_to_cpu=False)
+        self._expedited_load_handler = make_handler(
+            gpu_to_cpu=False, swap_blocks_fn=load_fn
+        )
 
     def start_deferred_setup(self) -> None:
         if self._defer_host_setup and self._setup_thread is None:

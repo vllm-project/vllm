@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import logging
 import random
 import time
@@ -24,6 +25,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import spec as cpu_spec
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -67,6 +69,116 @@ def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gpu_worker._select_swap_blocks_fn(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
     ) is (ops.swap_blocks_batch)
+
+
+@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
+def test_autotuned_min_n_replaces_the_default_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With autotuning, the measured batch size decides, also for pages above
+    the default Triton threshold; None keeps the handler on DMA."""
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+    page = 32 * 1024
+    assert page >= gpu_worker.THRESHOLD_BYTES
+    refs = [
+        [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)],
+        [CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=4096)],
+    ]
+    asked: list[tuple[list[int], int]] = []
+
+    def autotune(copy_sizes: list[int], bytes_per_chunk: int) -> int | None:
+        asked.append((copy_sizes, bytes_per_chunk))
+        return 64
+
+    select = gpu_worker._select_swap_blocks_fn
+    assert select(refs, gpu_to_cpu=False) is ops.swap_blocks_batch
+    fn = select(refs, gpu_to_cpu=False, autotune=autotune)
+    assert fn.keywords == {"bytes_per_chunk": 8192, "min_n": 64}
+    assert asked == [([4096, page], 8192)]
+
+    assert (
+        select(refs, gpu_to_cpu=False, autotune=lambda sizes, chunk: None)
+        is ops.swap_blocks_batch
+    )
+    # Not asked where Triton can't serve the handler.
+    assert select(refs, gpu_to_cpu=True, autotune=autotune) is ops.swap_blocks_batch
+    assert (
+        select(refs, gpu_to_cpu=False, host_memory_is_pinned=False, autotune=autotune)
+        is ops.swap_blocks_batch
+    )
+    assert len(asked) == 1
+
+
+def test_autotune_runs_on_rank0_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rank 0 measures while the others wait, so ranks sharing a PCIe link
+    don't measure at the same time, and every rank gets rank 0's result."""
+    sent: list[object] = []
+
+    class FakeGroup:
+        def __init__(self, rank: int):
+            self.rank_in_group = rank
+
+        def broadcast_object(self, obj=None, src=0):
+            if self.rank_in_group == src:
+                sent.append(obj)
+                return obj
+            return sent[0]
+
+    measured_on: list[int] = []
+
+    def measure(rank: int) -> int | None:
+        measured_on.append(rank)
+        return 128
+
+    for rank in (0, 1):
+        group = FakeGroup(rank)
+        monkeypatch.setattr(cpu_spec, "_all_workers_group", lambda g=group: g)
+        assert cpu_spec.run_on_rank0(functools.partial(measure, rank)) == 128
+
+    assert measured_on == [0]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Triton swap fast path requires CUDA"
+)
+def test_worker_autotunes_its_load_handlers() -> None:
+    """With enable_load_path_autotune, the worker measures once and both load
+    handlers use the result; the store handler is untouched."""
+    page = 4096
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros((64, page), dtype=torch.int8, device="cuda"),
+                page_size_bytes=page,
+            )
+        ],
+        group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]],
+    )
+    results: list[int | None] = []
+
+    def run_autotune(measure):
+        results.append(measure())
+        return results[-1]
+
+    worker = CPUOffloadingWorker(
+        kv_caches=kv_caches,
+        blocks_per_chunk=1,
+        num_cpu_chunks=512,
+        enable_load_path_autotune=True,
+        run_autotune=run_autotune,
+    )
+
+    assert len(results) == 1
+    assert worker._store_handler._swap_blocks_batch is ops.swap_blocks_batch
+    for handler in (worker._load_handler, worker._expedited_load_handler):
+        fn = handler._swap_blocks_batch
+        if results[0] is None:
+            assert fn is ops.swap_blocks_batch
+        else:
+            assert isinstance(fn, functools.partial)
+            assert fn.keywords["min_n"] == results[0]
+    worker.shutdown()
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:

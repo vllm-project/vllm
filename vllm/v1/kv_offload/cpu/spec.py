@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from typing_extensions import override
 
@@ -26,7 +27,24 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
 )
 
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+
 logger = init_logger(__name__)
+
+T = TypeVar("T")
+
+
+def _all_workers_group() -> "GroupCoordinator":
+    from vllm.distributed.parallel_state import (
+        get_inner_dp_world_group,
+        get_world_group,
+    )
+
+    try:
+        return get_inner_dp_world_group()
+    except AssertionError:
+        return get_world_group()
 
 
 def _all_workers_barrier() -> None:
@@ -34,16 +52,14 @@ def _all_workers_barrier() -> None:
 
     A superset of the node-local mmap openers suffices: once the barrier
     releases, every worker sharing the region file has mapped it."""
-    from vllm.distributed.parallel_state import (
-        get_inner_dp_world_group,
-        get_world_group,
-    )
+    _all_workers_group().barrier()
 
-    try:
-        group = get_inner_dp_world_group()
-    except AssertionError:
-        group = get_world_group()
-    group.barrier()
+
+def run_on_rank0(fn: Callable[[], T]) -> T:
+    """Run `fn` on rank 0 while the other workers wait, and return its
+    result on every worker."""
+    group = _all_workers_group()
+    return group.broadcast_object(fn() if group.rank_in_group == 0 else None)
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -112,6 +128,19 @@ class CPUOffloadingSpec(OffloadingSpec):
         )
         if not 0 <= self.async_init_pin_pace < float("inf"):
             raise ValueError("async_init_pin_pace must be a finite number >= 0")
+
+        # Measure the DMA/Triton load cutoff on this GPU at worker init.
+        self.enable_load_path_autotune = bool(
+            self.extra_config.get("enable_load_path_autotune", False)
+        )
+        if self.enable_load_path_autotune and self.async_init:
+            # Autotuning reads the pinned region, which async_init pins only
+            # after the engine has started serving.
+            logger.warning(
+                "enable_load_path_autotune is not supported with async_init "
+                "yet; keeping the default load path cutoff"
+            )
+            self.enable_load_path_autotune = False
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
@@ -229,6 +258,8 @@ class CPUOffloadingSpec(OffloadingSpec):
                 defer_host_setup=self.async_init,
                 prefault_shard=prefault_shard,
                 pin_pace=self.async_init_pin_pace,
+                enable_load_path_autotune=self.enable_load_path_autotune,
+                run_autotune=run_on_rank0,
             )
         except Exception:
             if mmap_region is not None:
