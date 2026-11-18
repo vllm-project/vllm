@@ -257,9 +257,9 @@ class _RDTProducerServer:
         self._blocks: dict[int, int] = {}
         self._serve_wait, self._served_count = 0.0, 0
         self._base_cache: dict[tuple, torch.Tensor] = {}
-        # Per unit, its last publish: the signature (an identical publish
-        # reuses the tensors), the rebuilt tensors, and their generation, a
-        # new one whenever the tensors change. Per consumer and seq, the
+        # Per unit, its last publish: the signature (where its tensors are),
+        # the rebuilt tensors, and their generation, a new one whenever the
+        # tensors move. Per consumer and seq, the
         # bucket's source boxes, built once per generation of its unit.
         self._published: dict[int, tuple[Any, dict[str, torch.Tensor], int]] = {}
         self._gens = itertools.count(1)
@@ -356,12 +356,14 @@ class _RDTProducerServer:
             if event is not None
             else None
         )
-        signature = (tuple(storages.items()), views)
-        published = self._published.get(unit)
-        if published is not None and published[0] == signature:
-            # the same storages and views as last sync: same tensors
-            self._publish(unit, published[1], signature)
-            return
+        # Where the tensors are: each storage's CUDA allocation, size and
+        # offset in it (not its per-export ref counter and event), and the
+        # views. Rebuilding every publish keeps CUDA IPC's ref counting
+        # exact; the same signature keeps the unit's cached sources.
+        signature = (
+            tuple((sid, args[7], args[8], args[9]) for sid, args in storages.items()),
+            views,
+        )
         bases: dict[int, torch.Tensor] = {}
         for sid, reduce_args in storages.items():
             cached = self._base_cache.get(reduce_args)
@@ -388,7 +390,14 @@ class _RDTProducerServer:
 
         """
         published = self._published.get(unit)
-        if published is None or published[1] is not tensors:
+        if (
+            published is not None
+            and signature is not None
+            and published[0] == signature
+        ):
+            # the same memory as last sync: the cached sources still read it
+            published = (signature, tensors, published[2])
+        else:
             for name, t in tensors.items():
                 if self._served.get(name) != (t.dtype, tuple(t.shape)):
                     raise ValueError(

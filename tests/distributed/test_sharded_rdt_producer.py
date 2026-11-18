@@ -212,18 +212,23 @@ class TestServe:
             assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
             s.free()
 
-    def test_the_same_unit_tensors_reuse_the_cached_sources(self, server):
-        """Republishing the same tensors (an identical CUDA-IPC publish)
-        keeps the cached boxes, which read the tensors' current bytes."""
+    def test_a_publish_of_the_same_memory_keeps_the_cached_sources(
+        self, server, monkeypatch
+    ):
+        """Each sync exports the same allocation anew (a new ref counter and
+        event): the cached boxes stay, and read its current bytes."""
+        w = _weights()
+        base = torch.cat([w[N].view(-1).view(torch.uint8), w[M].view(torch.uint8)])
+        w[N] = base[:64].view(torch.bfloat16).view(8, 4)  # what the export shares
+        monkeypatch.setattr(trainer_mod, "rebuild_cuda_tensor", lambda *a: base)
+        views = {N: (1, "bfloat16", [8, 4], [4, 1], 0), M: (1, "float32", [4], [1], 16)}
         s = server()
         s.register_consumer(0, [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]])
-        w = _weights()
-        unit0 = {n: w[n] for n, u in _UNITS.items() if u == 0}
         for sync_idx in (0, 1):
             s.begin_sync([0], sync_idx)
-            for t in unit0.values():
-                t.add_(1)
-            s._publish(0, unit0)
+            w[N].add_(1)
+            export = (None,) * 6 + (0, "alloc", 80, 0, False, sync_idx, 0, sync_idx)
+            s.publish_unit(0, ({1: export}, views, None))
             (flat,) = s.bucket(0, 0, sync_idx)
             if sync_idx == 0:
                 cached = s._sources[0][0]
