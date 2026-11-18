@@ -562,6 +562,10 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
         reuse = self.is_sender and meta == self._sent_meta
         if self.is_sender:
+            if not reuse:
+                # the workers keep this update's metadata even if it fails:
+                # a failed update must not let the next one reuse older ones
+                self._sent_meta = None
             self.client.start_weight_update()
         for broadcaster, metas in slices:
             src = group_ranks.index(broadcaster)
@@ -570,8 +574,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             else:
                 self._broadcast(metas, src)
         if self.is_sender:
+            self._sent_meta = meta  # what the workers hold, whether finish succeeds
             self.client.finish_weight_update()
-            self._sent_meta = meta
         self._post_send_sync()
 
     def _send_update(self, meta: list[ParamMeta], src: int, reuse: bool) -> None:

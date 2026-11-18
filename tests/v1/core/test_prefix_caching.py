@@ -7,6 +7,7 @@ import gc
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from math import lcm
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -61,6 +62,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
+    DFlashSlidingWindowManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -86,6 +88,16 @@ pytestmark = pytest.mark.cpu_test
 
 def _swa_layer(sliding_window: int, **spec_kwargs) -> KVCacheLayerConfig:
     return sliding_window_layer(AttentionSpec(**spec_kwargs), sliding_window)
+
+
+def _dflash_layer(
+    sliding_window: int, num_speculative_tokens: int, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return DFlashSlidingWindowManager.layer_config(
+        AttentionSpec(**spec_kwargs),
+        sliding_window=sliding_window,
+        num_speculative_tokens=num_speculative_tokens,
+    )
 
 
 def _mamba_layer(
@@ -5269,6 +5281,87 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
             )
 
 
+@pytest.mark.parametrize(("num_shared_tokens", "num_held_blocks"), [(32, 3), (40, 2)])
+def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_window(
+    num_shared_tokens, num_held_blocks
+):
+    """A DFlash drafter group backs only each prefill's tail, and a later
+    request's hit needs cached drafter blocks only in the window before that
+    request's end (here tokens 37..43, block 9), not below the hit like plain
+    SWA."""
+    block_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["layer1"],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            new_kv_cache_group(
+                ["draft"],
+                _dflash_layer(
+                    sliding_window=8,
+                    num_speculative_tokens=2,
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    req0 = make_request("0", list(range(40)), block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    blocks = manager.allocate_slots(
+        req0, 40, 0, computed_blocks, full_sequence_must_fit=True
+    )
+    assert blocks is not None
+    _, draft_ids = blocks.get_block_ids()
+    # The 40-token prefill backs drafter blocks from (40 - 10) // 4 = 7 on.
+    assert draft_ids[:7] == [0] * 7 and 0 not in draft_ids[7:]
+    manager.free(req0)
+
+    token_ids = list(range(num_shared_tokens))
+    token_ids += [100 + i for i in range(44 - num_shared_tokens)]
+    req1 = make_request("1", token_ids, block_size, sha256)
+    # A tighter lookup bound keeps the request end: block 6 is null, yet a hit
+    # at 32 still needs nothing below token 37.
+    _, num_bounded_tokens, _ = manager.get_computed_blocks(
+        req1, max_cache_hit_length=32
+    )
+    assert num_bounded_tokens == 32
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == num_shared_tokens
+    _, draft_hit_ids = computed_blocks.get_block_ids()
+    num_hit_blocks = num_shared_tokens // block_size
+    assert draft_hit_ids == [0] * min(9, num_hit_blocks) + draft_ids[9:num_hit_blocks]
+
+    blocks = manager.allocate_slots(
+        req1,
+        44 - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+        full_sequence_must_fit=True,
+    )
+    assert blocks is not None
+    held = [b for b in manager.coordinator.get_blocks("1")[1] if not b.is_null]
+    # The 44-token request's tail from block 8, except blocks the hit left null.
+    assert len(held) == num_held_blocks
+
+
 def test_hybrid_cache_blocks_clamped_to_lcm():
     """HybridKVCacheCoordinator.cache_blocks() clamps to scheduler_block_size.
     Chunks past the last lcm-aligned boundary can never participate in a
@@ -5899,18 +5992,21 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 12) is None
 
 
-def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
-    """Hybrid full+SWA model with a pool sized at the startup minimum should
-    admit a prompt longer than the SWA cap, because SlidingWindowManager
-    recycles blocks during chunked prefill (issue #39734)."""
+@pytest.mark.parametrize(
+    ("make_layer", "num_blocks", "fits"),
+    [
+        (_swa_layer, 46, True),
+        (_swa_layer, 45, False),
+        (partial(_dflash_layer, num_speculative_tokens=2), 45, True),
+        (partial(_dflash_layer, num_speculative_tokens=2), 44, False),
+    ],
+)
+def test_can_fit_full_sequence_swa_cap_admits_long_prompt(make_layer, num_blocks, fits):
+    """Admission reserves the full request's peak holding, not one chunk's."""
     block_size = 16
     sliding_window = 4 * block_size  # 64 tokens
     max_num_batched_tokens = 8 * block_size  # 128 tokens
     max_model_len = 64 * block_size  # 1024 tokens — much larger than the SWA cap
-    # Startup pool sizing: full demands cdiv(max_model_len, bs) = 64 blocks,
-    # SWA demands cdiv(SW-1+max_batched, bs) + 1 = cdiv(191, 16) + 1 = 13.
-    # Pool minimum = 64 + 13 = 77; +1 for the null block.
-    num_blocks = 64 + 13 + 1
 
     config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -5927,7 +6023,7 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
             ),
             new_kv_cache_group(
                 ["layer_swa"],
-                _swa_layer(
+                make_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5947,16 +6043,14 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
         hash_block_size=block_size,
     )
 
-    # A prompt that is shorter than max_model_len but longer than SW + chunk:
-    # cdiv(prompt_len, bs) = 32 blocks. Without the cap, admission would
-    # demand 32 (full) + 32 (SWA) = 64 blocks. With the cap, SWA contributes
-    # only 13, so total = 32 + 13 = 45 ≤ pool size.
+    # The target needs 32 blocks. SWA reserves ceil((63 + 128) / 16) + 1
+    # = 13; DFlash reserves two 66-token tails, each spanning at most 6 blocks.
+    # Including the null block, the admission thresholds are 46 and 45.
     prompt_len = 32 * block_size
     req = make_request("long", list(range(prompt_len)), block_size, sha256)
 
-    assert (
-        manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is not None
-    )
+    blocks = manager.allocate_slots(req, block_size, full_sequence_must_fit=True)
+    assert (blocks is not None) is fits
 
 
 @pytest.mark.parametrize(("reserved_blocks", "fits"), [(4, True), (10, False)])
@@ -6632,6 +6726,68 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
 
 
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_mamba_sparse_retention_caches_decode_resume_state_on_free(lookahead):
+    """Sparse retention caches only the latest decode-crossed Mamba state, once
+    the request is freed, so the next turn replaying the output hits there."""
+    block_size = 16
+    kv_cache_config = _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"])
+    # Lookahead hashes come with MTP, which also reserves speculative blocks.
+    _replace_group(kv_cache_config, 1, num_speculative_blocks=lookahead)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        num_hash_lookahead_tokens=lookahead,
+    )
+
+    prompt = [i for i in range(3) for _ in range(block_size)] + [3] * 4
+    req0 = make_request(
+        "0", prompt, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    for chunk_end in (16, 32, 48, 52):
+        blocks = manager.allocate_slots(
+            req0,
+            chunk_end - req0.num_computed_tokens,
+            num_lookahead_tokens=lookahead,
+        )
+        assert blocks is not None
+        req0.num_computed_tokens = chunk_end
+    # Decode crosses boundaries 64, 80 and 96.
+    for token in range(100, 156):
+        req0.append_output_token_ids(token)
+        blocks = manager.allocate_slots(req0, 1, num_lookahead_tokens=lookahead)
+        assert blocks is not None
+        req0.num_computed_tokens += 1
+
+    pool = manager.block_pool
+
+    def cached_mamba_blocks() -> set[int]:
+        return {
+            i
+            for i, block_hash in enumerate(req0.block_hashes)
+            if pool.get_cached_block(block_hash, kv_cache_group_ids=[1])
+        }
+
+    # Block 2 holds the replay boundary (51 -> 48); block 5 the state at 96.
+    assert cached_mamba_blocks() == {2}
+    manager.free(req0)
+    assert cached_mamba_blocks() == {2, 5}
+
+    req1 = make_request(
+        "1",
+        list(req0.all_token_ids) + [7] * 20,
+        block_size,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 6 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [6, 6]
+
+
 @pytest.mark.skip_global_cleanup
 def test_swa_reachable_block_mask_final_partial_segment():
     """Only a final SWA horizon makes its incomplete segment tail reachable."""
@@ -6977,6 +7133,54 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_full_report_with_dcp_uses_effective_block_size():
+    """Full KV cache report must use the DCP-effective block size when
+    emitting BlockStored events for cached prefix blocks. Using the raw
+    physical page size triggers an assertion in resolve_block_hashes()
+    because hash blocks are sized at physical * dcp_world_size."""
+    physical_block_size = 64
+    dcp_size = 8
+    effective_block_size = physical_block_size * dcp_size
+
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(physical_block_size, num_blocks=8),
+        max_model_len=8192,
+        scheduler_block_size=effective_block_size,
+        hash_block_size=effective_block_size,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        dcp_world_size=dcp_size,
+    )
+
+    token_ids = list(range(2 * effective_block_size))
+
+    # Prime the cache with a request.
+    prime = make_request("prime", token_ids, effective_block_size, sha256)
+    assert manager.allocate_slots(prime, len(token_ids)) is not None
+    prime_events = [e for e in manager.take_events() if isinstance(e, BlockStored)]
+    assert len(prime_events) > 0
+    prime_hashes = prime_events[0].block_hashes
+    manager.free(prime)
+
+    # Trigger the full report path with a prefix-hitting request.
+    trigger = make_request("trigger", token_ids, effective_block_size, sha256)
+    trigger.kv_cache_report_mode = "full"
+
+    # Before the fix this raised AssertionError in resolve_block_hashes().
+    manager.get_computed_blocks(trigger)
+
+    events = manager.take_events()
+    stored_events = [e for e in events if isinstance(e, BlockStored)]
+    assert len(stored_events) > 0
+    for event in stored_events:
+        assert event.block_size == effective_block_size
+        # Announced hashes for the reused prefix must match the hashes that
+        # were stored when the prefix was first cached. Hits stop at
+        # num_tokens - 1, so only complete prefix blocks are reported.
+        assert event.block_hashes == prime_hashes[: len(event.block_hashes)]
+        assert len(event.block_hashes) >= 1
 
 
 def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():

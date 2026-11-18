@@ -153,6 +153,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
+            override_generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),

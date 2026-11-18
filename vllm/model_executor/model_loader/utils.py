@@ -317,8 +317,6 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 
 
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
-    from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
-
     architectures = getattr(model_config.hf_config, "architectures", None) or []
 
     model_cls, arch = model_config.registry.resolve_model_cls(
@@ -336,6 +334,14 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
                 arch,
             )
 
+    return convert_model_cls(model_cls, model_config), arch
+
+
+def convert_model_cls(
+    model_cls: type[nn.Module], model_config: ModelConfig
+) -> type[nn.Module]:
+    from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
+
     convert_type = model_config.convert_type
     if convert_type == "none":
         pass
@@ -348,7 +354,7 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
     else:
         assert_never(convert_type)
 
-    return model_cls, arch
+    return model_cls
 
 
 def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:

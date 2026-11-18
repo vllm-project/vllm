@@ -1487,7 +1487,9 @@ def test_video_processor_from_model_repo(
     )
 
     # --- Alignment check with HF VideoProcessor.sample_frames ---
-    processor = AutoVideoProcessor.from_pretrained(model_repo, trust_remote_code=True)
+    processor = AutoVideoProcessor.from_pretrained(
+        model_repo, trust_remote_code=model_repo == "MiniMaxAI/MiniMax-M3"
+    )
 
     fps_list = [1, 2, 30, 60]
     duration_list = [10, 60, 600]

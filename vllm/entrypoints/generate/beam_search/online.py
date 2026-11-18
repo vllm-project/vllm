@@ -216,6 +216,12 @@ class BeamSearchOnlineMixin(ABC):
                     )
                 )
 
+            # Finished hypotheses never change score. Keep only the ones that
+            # could still be returned, preserving insertion order on ties.
+            if len(completed) > beam_width:
+                completed = sorted(completed, key=sort_beams_key, reverse=True)[
+                    :beam_width
+                ]
             all_beams = new_beams
             if not all_beams:
                 break

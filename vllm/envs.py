@@ -169,6 +169,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -347,7 +348,6 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -1288,10 +1288,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
     # "copy_engine" uses copy engines instead of NCCL kernels: CUDA copy engines
-    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs TP=1 and
-    # fully connected PP GPUs on one node, and fails startup without.
-    # "auto" uses copy engines when every PP rank can, and NCCL otherwise; on
-    # ROCm it keeps NCCL.
+    # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs each PP
+    # chain's GPUs directly connected: on one node, or with CUDA across nodes in
+    # one multi-node NVLink domain with an IMEX channel. It fails startup
+    # without. "auto" uses copy engines when every rank can, and NCCL otherwise;
+    # on ROCm it keeps NCCL.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
     ),
@@ -1516,6 +1517,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # Share DP-shared Engram host tables (EngramConfig.dp_shared_memory) as
+    # HIP VMM host memory instead of /dev/shm. Disabled by default: on some
+    # amdgpu drivers (e.g. 6.16.6) a peer's access to the imported memory
+    # keeps it allocated after every process exits (ROCm/rocm-systems#13573).
+    "VLLM_ROCM_ENGRAM_HIP_VMM": lambda: (
+        os.getenv("VLLM_ROCM_ENGRAM_HIP_VMM", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
@@ -2403,10 +2411,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
-    # Force N-contiguous weight layout for all XPU unquantized linears.
-    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
-        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
-    ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
@@ -2634,6 +2638,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
+        # Where Engram host tables live; the GPU views and graphs are the same.
+        "VLLM_ROCM_ENGRAM_HIP_VMM",
     }
 
     from vllm.config.utils import normalize_value

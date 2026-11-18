@@ -397,7 +397,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -435,7 +435,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -982,7 +982,6 @@ class VllmRunner:
     The default value of some arguments have been modified from
     {class}`~vllm.LLM` as follows:
 
-    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
     - `block_size`: To reduce memory usage, set default to `64` if on XPU
@@ -1001,7 +1000,7 @@ class VllmRunner:
         convert: ConvertOption = "auto",
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",

@@ -1,7 +1,7 @@
 -r ../common.txt
 
 # testing
-pytest
+pytest >= 9.2.0 # monkeypatch.setattr undo must not shadow class attributes (pytest-dev/pytest#10644)
 tensorizer==2.12.1
 pytest-forked
 pytest-asyncio
@@ -37,7 +37,7 @@ nltk>=3.10.4 # pin transitive rouge-score/lm-eval dep for known GHSAs
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
 transformers==5.23.0
-schemathesis>=4.0.0 # Required for openai schema test
+schemathesis>=4.26.2 # Required for openai schema test; 4.26.2 supports pytest 9.2.
 # quantization
 bitsandbytes==0.50.0
 buildkite-test-collector==0.1.9

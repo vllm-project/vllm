@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import dataclasses
 import inspect
 import os
 import queue
@@ -2547,6 +2548,7 @@ def recv_worker():
     worker._remote_agents = {}
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
+    worker._disconnected_remote_engines = set()
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
@@ -2555,6 +2557,7 @@ def recv_worker():
     worker._reqs_to_send = {}
     worker._replicated_pcp_done_sending = set()
     worker._is_hma_required = False
+    worker._report_invalid_block_ids = True
     worker._has_mamba = False
     worker.use_host_buffer = False
     worker.enable_permute_local_kv = False
@@ -3612,6 +3615,35 @@ class TestPeerReplacement:
         assert ("old" not in self.worker._remote_agents) is (missing is True)
         assert self.transport.release_dlist_handle.call_count == (missing is True)
 
+    @pytest.mark.parametrize("disconnected", [False, True])
+    def test_lost_connection_invalidates_peer_with_metadata(
+        self, disconnected, monkeypatch
+    ):
+        # NIXL keeps a peer's metadata after its connection is gone, so the
+        # metadata probe cannot see it; the transfer error has to.
+        class RemoteDisconnectError(RuntimeError):
+            pass
+
+        monkeypatch.setattr(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker."
+            "nixlRemoteDisconnectError",
+            RemoteDisconnectError,
+        )
+        error = (
+            RemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+            if disconnected
+            else RuntimeError("transient")
+        )
+        self.worker.start_load_kv(self._request("old"))
+        self.transport.check_xfer_state.side_effect = error
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        assert ("old" not in self.worker._remote_agents) is disconnected
+        assert self.transport.release_dlist_handle.call_count == disconnected
+        if disconnected:
+            self.transport.remove_remote_agent.assert_called_once_with("old")
+
     @pytest.mark.parametrize("handshake_fails", [False, True])
     def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
         self, handshake_fails
@@ -4019,6 +4051,7 @@ def test_handshake_failure_reports_only_awaited_recvs(
     """A failed cleanup handshake must not complete an already-aborted request."""
     worker = recv_worker
     worker._is_hma_required = is_hma
+    worker._report_invalid_block_ids = not is_hma
     worker._recving_metadata.clear()
     worker._remote_agents = {}
     worker._handshake_lock = contextlib.nullcontext()
@@ -4276,10 +4309,11 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     FailingNixlWrapper,
 )
 @pytest.mark.parametrize("is_hma", [False, True])
+@pytest.mark.parametrize("multiple_kv_cache_groups", [False, True])
 def test_transfer_setup_failure_returns_finished(
-    default_vllm_config, dist_init, is_hma
+    default_vllm_config, dist_init, is_hma, multiple_kv_cache_groups
 ):
-    """Setup failures report the request; only non-HMA reports block IDs."""
+    """Setup failures report the request; block IDs only with one group."""
     block_size = maybe_update_block_size(16)
     vllm_config = create_vllm_config(block_size=block_size)
 
@@ -4288,11 +4322,27 @@ def test_transfer_setup_failure_returns_finished(
         KVConnectorRole.WORKER,
         make_kv_cache_config(block_size=block_size),
     )
+    kv_cache_config = make_kv_cache_config(block_size=block_size)
+    if multiple_kv_cache_groups:
+        # HiSparse adds groups that take no part in the transfer.
+        group = kv_cache_config.kv_cache_groups[0]
+        kv_cache_config.kv_cache_groups.append(
+            dataclasses.replace(
+                group,
+                kv_cache_specs={"hisparse0": next(iter(group.kv_cache_specs.values()))},
+                enable_kv_transfer=False,
+            )
+        )
     connector.connector_worker = FakeNixlConnectorWorker(
-        vllm_config, connector.engine_id, hand_shake_latency=0
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
     )
     connector.connector_worker.nixl_wrapper.fail_transfer_setup = True
-    connector.connector_worker._is_hma_required = is_hma
+    if is_hma:
+        connector.connector_worker._is_hma_required = True
+        connector.connector_worker._report_invalid_block_ids = False
 
     request_id = "test_transfer_fail"
     metadata = NixlConnectorMetadata()
@@ -4327,7 +4377,8 @@ def test_transfer_setup_failure_returns_finished(
     assert request_id in results.finished_recving
     assert results.failed_recving == {request_id}
     invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == (set() if is_hma else {7, 8, 9})
+    reports_blocks = not is_hma and not multiple_kv_cache_groups
+    assert invalid_blocks == ({7, 8, 9} if reports_blocks else set())
 
 
 class _ScriptedXferWrapper(FakeNixlWrapper):

@@ -370,8 +370,7 @@ pub struct ResponsesRequest {
     pub stop: Option<StringOrArray>,
     #[serde(default)]
     pub ignore_eos: bool,
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    pub skip_special_tokens: Option<bool>,
     /// Accepted as a no-op, as on chat completions.
     #[allow(dead_code)]
     #[serde(default = "default_true")]

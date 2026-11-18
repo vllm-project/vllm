@@ -147,9 +147,9 @@ pub struct CompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
     /// Add spaces between special tokens during detokenization. Accepted as a
     /// no-op: the detokenizers of the served tokenizers already emit adjacent

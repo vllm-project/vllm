@@ -50,8 +50,9 @@ class EngramConfig:
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
     memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
-    by FABRIC handle where supported, else /dev/shm (which then needs capacity
-    and a shared IPC namespace). Defaults to enabled whenever the other settings
+    by FABRIC handle where supported (on ROCm, HIP VMM host memory with
+    VLLM_ROCM_ENGRAM_HIP_VMM=1), else /dev/shm (which then needs capacity and a
+    shared IPC namespace). Defaults to enabled whenever the other settings
     allow it, falling back to per-replica tables when DP replicas are not
     co-located on one node or the host cannot hold them."""
 

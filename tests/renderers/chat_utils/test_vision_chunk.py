@@ -21,7 +21,6 @@ def kimi_k2_5_model_config():
     return ModelConfig(
         KIMI_K2_5_MODEL_ID,
         runner="generate",
-        trust_remote_code=True,
         limit_mm_per_prompt={
             "image": 2,
         },
