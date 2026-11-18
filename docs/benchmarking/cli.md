@@ -385,6 +385,12 @@ vllm bench serve \
   --result-filename whisper_bench.json
 ```
 
+For a model that supports speaker diarization, add
+`--extra-body '{"response_format":"diarized_json"}'` to the `openai-audio`
+benchmark. TTFT measures the arrival of the first nonempty text delta. Each
+delta contains a finalized segment, so per-token arrival times are unavailable.
+The final event supplies the input and output token counts.
+
 - **Example 2: Qwen2-Audio**
 
 Qwen2-Audio is a multimodal chat model that can do ASR and speech analysis, so it uses `--backend openai-chat`, and `--endpoint /v1/chat/completions`. It also requires `--enable-multimodal-chat` to enable multimodal chat transformation.

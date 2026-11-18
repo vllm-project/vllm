@@ -758,6 +758,7 @@ async def async_request_openai_audio(
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
         output.input_audio_duration = input_audio_duration
+        diarized = payload.get("response_format") == "diarized_json"
 
         generated_text = ""
         st = time.perf_counter()
@@ -769,6 +770,7 @@ async def async_request_openai_audio(
             ) as response:
                 if response.status == 200:
                     first_chunk_received = False
+                    diarized_done = False
                     stream_error: str | None = None
                     handler = StreamedResponseHandler()
 
@@ -787,6 +789,21 @@ async def async_request_openai_audio(
 
                                 if error := data.get("error"):
                                     stream_error = json.dumps(error)
+                                elif data.get("type") == "transcript.text.delta":
+                                    if not (text := data["delta"]):
+                                        continue
+                                    if not first_chunk_received:
+                                        first_chunk_received = True
+                                        output.ttft = timestamp - st
+                                    # Segment deltas do not expose inter-token times.
+                                    generated_text += text
+                                    most_recent_timestamp = timestamp
+                                elif data.get("type") == "transcript.text.done":
+                                    diarized_done = True
+                                    usage = data.get("usage") or {}
+                                    if usage.get("type") == "tokens":
+                                        output.prompt_len = usage["input_tokens"]
+                                        output.output_tokens = usage["output_tokens"]
                                 elif choices := data.get("choices"):
                                     content = choices[0]["delta"].get("content")
                                     # First token
@@ -818,6 +835,8 @@ async def async_request_openai_audio(
                     if stream_error is not None:
                         output.success = False
                         output.error = stream_error
+                    elif diarized and not diarized_done:
+                        output.error = "Stream ended before transcript.text.done."
                     elif first_chunk_received:
                         output.success = True
                     else:

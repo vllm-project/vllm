@@ -245,6 +245,41 @@ def _make_input(api_url: str, n_tokens: int, endpoint_id: str) -> RequestFuncInp
     )
 
 
+@pytest.mark.parametrize("complete", [True, False])
+def test_diarized_audio_stream(monkeypatch: pytest.MonkeyPatch, complete: bool) -> None:
+    monkeypatch.setattr(request_func_module, "time", _FakeTime(_ScriptedClock()))
+    events: list[dict[str, Any]] = [
+        {"type": "transcript.text.delta", "delta": ""},
+        {"type": "transcript.text.delta", "delta": "Hello"},
+        {"type": "transcript.text.segment", "text": "Hello", "speaker": "A"},
+        {"type": "transcript.text.delta", "delta": " 你好"},
+        {"type": "transcript.text.segment", "text": "你好", "speaker": "B"},
+    ]
+    if complete:
+        events.append(
+            {
+                "type": "transcript.text.done",
+                "text": "Hello 你好",
+                "usage": {"type": "tokens", "input_tokens": 120, "output_tokens": 30},
+            }
+        )
+    chunks = [(0.0, _sse(event)) for event in events]
+    chunks.append((0.0, b"data: [DONE]\n\n"))
+    request = _make_input("http://test/v1/audio/transcriptions", 32, "audio")
+    request.extra_body = {"response_format": "diarized_json"}
+    output = asyncio.run(async_request_openai_audio(request, _FakeSession(chunks)))
+
+    if not complete:
+        assert not output.success
+        assert "transcript.text.done" in output.error
+        return
+    assert output.success, output.error
+    assert output.generated_text == "Hello 你好"
+    assert (output.prompt_len, output.output_tokens) == (120, 30)
+    assert (output.ttft, output.latency) == (2.0, 4.0)
+    assert output.itl == []  # Segment boundaries do not expose token times.
+
+
 def _run(
     request_func,
     api_url: str,
