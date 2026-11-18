@@ -164,9 +164,13 @@ def aux_owned_keys(
     wrote: the full objects from its first own segment on, and the tail."""
     full = [key for key in keys if "/tail/" not in key]
     end = segments[-1][0]
-    own = f"{request_id}@"
     start = next(
-        (begin for begin, salt in segments if salt and salt.startswith(own)), end
+        (
+            begin
+            for begin, salt in segments
+            if salt and salt.rpartition("@")[0] == request_id
+        ),
+        end,
     )
     first = -(-start * len(full) // end) if full else 0
     return full[first:] + list(keys[len(full) :])

@@ -3790,8 +3790,15 @@ def test_worker_without_capture_skips_steps_without_session_rows():
         ([(0, "p@v1"), (32, "r@v2"), (48, "r@v3"), (64, None)], "cdt"),
         ([(0, "p@v1"), (40, "r@v2"), (64, None)], "dt"),
         ([(0, "p@v1"), (64, None)], "t"),
+        ([(0, "r@x@v1"), (32, "r@v2"), (64, None)], "cdt"),
     ],
-    ids=["all-own", "own-from-an-object", "own-inside-an-object", "all-hit"],
+    ids=[
+        "all-own",
+        "own-from-an-object",
+        "own-inside-an-object",
+        "all-hit",
+        "hit-of-a-request-whose-id-starts-with-it",
+    ],
 )
 def test_aux_owned_keys(segments, owned):
     keys = ["j/s/a", "j/s/b", "j/s/c", "j/s/d", "j/s/tail/t"]
