@@ -14,9 +14,10 @@ from fastapi.responses import StreamingResponse
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.renderers import TokenizeParams
+from vllm.renderers import TokenizeParams, merge_kwargs
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
@@ -250,3 +251,27 @@ def reserve_tokens(tok_params: TokenizeParams, num_tokens: int) -> TokenizeParam
         truncate_prompt_tokens=shrink(tok_params.truncate_prompt_tokens),
         pad_prompt_tokens=shrink(tok_params.pad_prompt_tokens),
     )
+
+
+def merge_chat_template_kwargs(
+    chat_template_kwargs: dict[str, Any] | None,
+    add_generation_prompt: bool | None,
+    continue_final_message: bool | None,
+) -> dict[str, Any]:
+    """Merge top-level chat template flags into `chat_template_kwargs`."""
+    merged = merge_kwargs(
+        chat_template_kwargs,
+        {
+            "add_generation_prompt": add_generation_prompt,
+            "continue_final_message": continue_final_message,
+        },
+        unset_values=(None,),
+    )
+
+    if merged.get("add_generation_prompt") and merged.get("continue_final_message"):
+        raise VLLMValidationError(
+            "Cannot set both `continue_final_message` and "
+            "`add_generation_prompt` to True."
+        )
+
+    return merged

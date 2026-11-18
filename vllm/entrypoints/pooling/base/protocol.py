@@ -10,7 +10,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -18,6 +18,8 @@ from vllm.renderers.chat_utils import (
 from vllm.tasks import check_removed_pooling_task
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+from ..utils import merge_chat_template_kwargs
 
 
 def reject_removed_pooling_parameters(data):
@@ -145,7 +147,23 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
 
 class PoolingTokenizeParamsMixin:
-    add_special_tokens: bool
+    add_special_tokens: bool | None
+
+    def _resolve_add_special_tokens(
+        self,
+        default_add_special_tokens: bool | None,
+    ) -> bool:
+        """Resolve the tri-state `add_special_tokens` request field.
+
+        The request field is tri-state: explicit ``True`` / ``False`` always
+        win; ``None`` means "use the per-path default", which is supplied by
+        the caller because it differs between chat and completion paths.
+        """
+        if self.add_special_tokens is not None:
+            return self.add_special_tokens
+        if default_add_special_tokens is not None:
+            return default_add_special_tokens
+        return True
 
     def _build_pooling_tok_params(
         self,
@@ -159,12 +177,27 @@ class PoolingTokenizeParamsMixin:
     ) -> TokenizeParams:
         raise NotImplementedError
 
+    def build_tok_params(
+        self,
+        model_config: ModelConfig,
+        *,
+        default_add_special_tokens: bool | None,
+    ) -> TokenizeParams:
+        raise NotImplementedError
+
 
 class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self,
+        model_config: ModelConfig,
+        *,
+        default_add_special_tokens: bool | None,
+    ) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=self.add_special_tokens,
+            add_special_tokens=self._resolve_add_special_tokens(
+                default_add_special_tokens
+            ),
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
         )
@@ -173,7 +206,12 @@ class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
     padding: Literal["max_length", "do_not_pad"] | None
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self,
+        model_config: ModelConfig,
+        *,
+        default_add_special_tokens: bool | None,
+    ) -> TokenizeParams:
         default_max_total_tokens = model_config.max_model_len
         max_total_tokens: int | None = default_max_total_tokens
         max_output_tokens = 0
@@ -189,7 +227,9 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 
         tok_params = self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=self.add_special_tokens,
+            add_special_tokens=self._resolve_add_special_tokens(
+                default_add_special_tokens
+            ),
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
         )
@@ -215,11 +255,12 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-params]
 
     # --8<-- [start:completion-extra-params]
-    add_special_tokens: bool = Field(
-        default=True,
+    add_special_tokens: bool | None = Field(
+        default=None,
         description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."
+            "If true, special tokens (e.g. BOS) will be added to the prompt. "
+            "If unset (`None`), the model/tokenizer default is used, which for "
+            "some multimodal models is `False` to avoid a duplicate BOS."
         ),
     )
     # --8<-- [end:completion-extra-params]
@@ -227,32 +268,34 @@ class CompletionRequestMixin(OpenAIBaseModel):
 
 class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
-    add_generation_prompt: bool = Field(
-        default=False,
+    add_generation_prompt: bool | None = Field(
+        default=None,
         description=(
             "If true, the generation prompt will be added to the chat template. "
             "This is a parameter used by chat template in tokenizer config of the "
-            "model."
+            "model. If unset (`None`), the chat template's own default is used."
         ),
     )
-    continue_final_message: bool = Field(
-        default=False,
+    continue_final_message: bool | None = Field(
+        default=None,
         description=(
             "If this is set, the chat will be formatted so that the final "
             "message in the chat is open-ended, without any EOS tokens. The "
             "model will continue this message rather than starting a new one. "
             'This allows you to "prefill" part of the model\'s response for it. '
-            "Cannot be used at the same time as `add_generation_prompt`."
+            "Cannot be used at the same time as `add_generation_prompt`. "
+            "If unset (`None`), the chat template's own default is used."
         ),
     )
-    add_special_tokens: bool = Field(
-        default=False,
+    add_special_tokens: bool | None = Field(
+        default=None,
         description=(
             "If true, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false (as is the "
-            "default)."
+            "special tokens so this should be set to false. "
+            "If unset (`None`), the per-path default is used: `False` for the "
+            "chat path, and the model/tokenizer default for the completion path."
         ),
     )
     chat_template: str | None = Field(
@@ -264,11 +307,23 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
             "does not define one."
         ),
     )
+    chat_template_content_format: ChatTemplateContentFormatOption = Field(
+        default="auto",
+        description=(
+            "How to interpret the chat template's content. "
+            "'string' renders message content as plain strings, 'openai' "
+            "renders it as OpenAI-style content parts. "
+            "'auto' uses the model's default content format, resolved by the "
+            "renderer."
+        ),
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
             "Additional keyword args to pass to the template renderer. "
-            "Will be accessible by the chat template."
+            "Will be accessible by the chat template. Top-level flags such as "
+            "`add_generation_prompt` and `continue_final_message` take "
+            "precedence over the same keys set here when they are not `None`."
         ),
     )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
@@ -297,15 +352,19 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
+        content_format = (
+            self.chat_template_content_format
+            if self.chat_template_content_format not in (None, "auto")
+            else default_template_content_format
+        )
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
-            chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(
+            chat_template_content_format=content_format,
+            chat_template_kwargs=merge_chat_template_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                ),
+                add_generation_prompt=self.add_generation_prompt,
+                continue_final_message=self.continue_final_message,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )

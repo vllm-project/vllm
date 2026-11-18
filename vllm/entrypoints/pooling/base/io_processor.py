@@ -13,9 +13,7 @@ from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.chat_utils import (
-    ChatTemplateConfig,
-)
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -101,7 +99,12 @@ class PoolingIOProcessor:
             )
 
             mm_config = self.model_config.multimodal_config
-            tok_params = request.build_tok_params(self.model_config)
+            tok_params = request.build_tok_params(
+                self.model_config,
+                # chat: `None` -> `False`, mirroring the online chat default
+                # and the offline chat path.
+                default_add_special_tokens=False,
+            )
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
@@ -197,9 +200,7 @@ class PoolingIOProcessor:
             )
             for prompt in prompts_seq
         ]
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+        tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
 
         pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:

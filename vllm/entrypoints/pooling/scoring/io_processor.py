@@ -261,7 +261,12 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ]
         num_requests = len(parsed_prompts)
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config,
+            default_add_special_tokens=(
+                self.renderer.default_cmpl_tok_params.add_special_tokens
+            ),
+        )
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -556,7 +561,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             request=request
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config,
+            default_add_special_tokens=(
+                self.renderer.default_cmpl_tok_params.add_special_tokens
+            ),
+        )
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -598,10 +608,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+        tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         prompt_extras = ctx.pooling_params.extra_kwargs
+
+        chat_template_content_format = (
+            ctx.chat_template_content_format or self.chat_template_content_format
+        )
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -616,7 +628,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         if ctx.chat_template is None
                         else ctx.chat_template
                     ),
-                    chat_template_content_format=ctx.chat_template_content_format,
+                    chat_template_content_format=chat_template_content_format,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
@@ -663,17 +675,23 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if self.num_post_process_tokens:
             tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
 
+        chat_template_content_format = (
+            render_params["chat_template_content_format"]
+            or self.chat_template_content_format
+        )
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
             encode_kwargs=tok_params.get_encode_kwargs(),
+            chat_template_content_format=chat_template_content_format,
             chat_template=render_params["chat_template"],
-            chat_template_content_format=render_params["chat_template_content_format"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
             chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
             if prompt_extras
             else None,
+            tok_params=tok_params,
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -722,10 +740,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         data_2: ScoreData,
         encode_kwargs: dict[str, Any],
         chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        tok_params: TokenizeParams | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -736,19 +755,15 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.saved_chat_template_kwargs, chat_template_kwargs
             )
 
-        given_format = chat_template_content_format or self.chat_template_content_format
+        given_format: ChatTemplateContentFormatOption = chat_template_content_format
         content_format: ChatTemplateContentFormat = "string"
         if chat_template is not None:
-            content_format = (
-                resolve_chat_template_content_format(
-                    chat_template,
-                    tools=None,
-                    given_format=given_format,
-                    tokenizer=tokenizer,
-                    model_config=model_config,
-                )
-                if given_format == "auto"
-                else given_format
+            content_format = resolve_chat_template_content_format(
+                chat_template,
+                tools=None,
+                given_format=given_format,
+                tokenizer=tokenizer,
+                model_config=model_config,
             )
 
         conversation, mm_data, mm_uuids = parse_score_messages(
@@ -766,6 +781,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 )
 
         prompt_1, prompt_2 = (message["content"] for message in conversation)
+
+        default_add_special_tokens = (
+            tok_params.add_special_tokens if tok_params is not None else True
+        )
 
         def default_tokenizer_encode():
             assert isinstance(prompt_1, str) and isinstance(prompt_2, str)
@@ -787,7 +806,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         )
                         num_special = (
                             get_num_special_tokens_for_pair(tokenizer)
-                            if local_kwargs.get("add_special_tokens", True)
+                            if local_kwargs.get(
+                                "add_special_tokens", default_add_special_tokens
+                            )
                             else 0
                         )
                         doc_limit_max_length = (
