@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+import uuid
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -1301,18 +1302,60 @@ def test_blocks_per_chunk_must_be_positive():
         build_offloading_config(config, _make_kv_cache_config())
 
 
+def _real_vllm_config(
+    monkeypatch,
+    parallel_config: ParallelConfig,
+    *,
+    enable_sleep_mode: bool = False,
+    enable_extensible_kv_cache: bool = False,
+) -> VllmConfig:
+    """An offloading engine's VllmConfig, built and resolved as for serving."""
+    from vllm.config import CacheConfig, DeviceConfig, ModelConfig
+
+    # Sleep mode and the extensible KV cache are GPU features: the CPU host
+    # running this test answers as a CUDA one would.
+    monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    for capability in ("is_sleep_mode_available", "is_cumem_allocator_available"):
+        monkeypatch.setattr(current_platform, capability, lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    return VllmConfig(
+        model_config=ModelConfig(
+            "facebook/opt-125m", enable_sleep_mode=enable_sleep_mode
+        ),
+        # The block size of `_make_kv_cache_config`.
+        cache_config=CacheConfig(
+            block_size=16, enable_extensible_kv_cache=enable_extensible_kv_cache
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=parallel_config,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector", kv_role="kv_both"
+        ),
+    )
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "backend, placement_known",
     [("mp", True), ("uni", True), ("ray", False), ("external_launcher", False)],
 )
 def test_only_mp_and_uni_report_worker_placement(
-    backend: str, placement_known: bool
+    monkeypatch, backend: str, placement_known: bool
 ) -> None:
     """Other executors do not place workers by the configured node count, so
     the multi-node row namespace cannot rely on it."""
-    config = _make_vllm_config(tensor_parallel_size=2)
-    config.parallel_config.distributed_executor_backend = backend
+    # The CPU platform runs `uni` as `mp` under V1 multiprocessing, so `uni`
+    # turns it off. external_launcher turns it off itself; setting it here
+    # restores it after the test.
+    monkeypatch.setenv(
+        "VLLM_ENABLE_V1_MULTIPROCESSING", "0" if backend == "uni" else "1"
+    )
+    parallel_config = _parallel_config(
+        tensor_parallel_size=2, distributed_executor_backend=backend
+    )
+    config = _real_vllm_config(monkeypatch, parallel_config)
+    assert config.parallel_config.distributed_executor_backend == backend
     parallel = build_offloading_config(config, _make_kv_cache_config()).parallel
     assert parallel.placement_known is placement_known
     assert parallel.spans_nodes is (not placement_known)
@@ -1324,13 +1367,16 @@ def test_only_mp_and_uni_report_worker_placement(
     [(False, False, False), (True, False, True), (False, True, True)],
 )
 def test_kv_cache_remapping_reaches_the_offloading_config(
-    sleep_mode: bool, extensible_kv_cache: bool, remaps_kv_cache: bool
+    monkeypatch, sleep_mode: bool, extensible_kv_cache: bool, remaps_kv_cache: bool
 ) -> None:
     """Sleep mode and the extensible KV cache's weight-update lending both
     release and remap the GPU KV cache memory the mirror registers."""
-    config = _make_vllm_config()
-    config.model_config.enable_sleep_mode = sleep_mode
-    config.cache_config.enable_extensible_kv_cache = extensible_kv_cache
+    config = _real_vllm_config(
+        monkeypatch,
+        _parallel_config(),
+        enable_sleep_mode=sleep_mode,
+        enable_extensible_kv_cache=extensible_kv_cache,
+    )
     offloading = build_offloading_config(config, _make_kv_cache_config())
     assert offloading.remaps_kv_cache is remaps_kv_cache
 
@@ -1454,28 +1500,24 @@ class _TieringSpecSubclass(TieringOffloadingSpec):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "spec_config",
-    [
-        {"spec_name": "TieringAlias"},
-        {"spec_name": "_TieringSpecSubclass", "spec_module_path": __name__},
-    ],
-)
-def test_mirror_registration_follows_the_resolved_spec(
-    monkeypatch, spec_config: dict[str, Any]
-) -> None:
+@pytest.mark.parametrize("resolved_by", ["alias", "spec_module_path"])
+def test_mirror_registration_follows_the_resolved_spec(resolved_by: str) -> None:
     """A registered alias of TieringOffloadingSpec, or a subclass loaded through
     spec_module_path, starts the same mirror, so it registers the KV cache."""
     from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
-    # The factory has no public way to unregister: register on a copy of the
-    # registry, which monkeypatch restores at teardown.
-    monkeypatch.setattr(
-        OffloadingSpecFactory, "_registry", dict(OffloadingSpecFactory._registry)
-    )
-    OffloadingSpecFactory.register_spec(
-        "TieringAlias", "vllm.v1.kv_offload.tiering.spec", "TieringOffloadingSpec"
-    )
+    if resolved_by == "alias":
+        # The factory cannot unregister: a fresh name keeps reruns possible.
+        alias = f"TieringAlias{uuid.uuid4().hex[:8]}"
+        OffloadingSpecFactory.register_spec(
+            alias, "vllm.v1.kv_offload.tiering.spec", "TieringOffloadingSpec"
+        )
+        spec_config = {"spec_name": alias}
+    else:
+        spec_config = {
+            "spec_name": "_TieringSpecSubclass",
+            "spec_module_path": __name__,
+        }
     transfer = _offloading_transfer_config(
         {**spec_config, "secondary_tiers": [{"type": "example"}]}
     )

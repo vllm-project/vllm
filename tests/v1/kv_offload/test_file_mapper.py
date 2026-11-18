@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -14,6 +15,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.file_mapper import FileMapper
 
 # ---------------------------------------------------------------------------
@@ -49,9 +51,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         parallel=OffloadingParallelConfig(
             rank=kwargs.get("rank", 0),
             world_size=kwargs.get("world_size", 1),
-            local_world_size=kwargs.get(
-                "local_world_size", kwargs.get("world_size", 1)
-            ),
+            local_world_size=kwargs.get("world_size", 1),
             tp_size=kwargs.get("tp_size", 1),
             pp_size=kwargs.get("pp_size", 1),
             pcp_size=kwargs.get("pcp_size", 1),
@@ -60,7 +60,6 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             data_parallel_size=1,
             data_parallel_rank_local=None,
             is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
-            placement_known=kwargs.get("placement_known", True),
         ),
         replicated_layout=kwargs.get("replicated_layout", False),
         canonical_layout=kwargs.get("canonical_layout", False),
@@ -177,7 +176,7 @@ def test_multi_node_rows_get_their_own_namespace(
 ):
     """Rows that a multi-node engine stored before the mirror lack the
     remote workers' slots, so they must not hit for one that mirrors them."""
-    fm = make_mapper_from_offloading_spec(
+    fm = _mapper_from_spec(
         world_size=2,
         tp_size=2,
         local_world_size=local_world_size,
@@ -192,7 +191,7 @@ def test_multi_node_rows_keep_their_parallel_layout(multi_node):
     engines of different TP sizes must not share multi-node rows, even for a
     model whose layout one node treats as parallelism-agnostic."""
     base_paths = {
-        make_mapper_from_offloading_spec(
+        _mapper_from_spec(
             world_size=tp_size,
             tp_size=tp_size,
             local_world_size=tp_size // 2 if multi_node else tp_size,
@@ -202,6 +201,14 @@ def test_multi_node_rows_keep_their_parallel_layout(multi_node):
         for tp_size in (2, 4)
     }
     assert len(base_paths) == (2 if multi_node else 1)
+
+
+def _mapper_from_spec(parallel_agnostic: bool = False, **kwargs) -> FileMapper:
+    """The FileMapper a secondary tier builds from a CPU offloading spec."""
+    spec = OffloadingSpecFactory.create_spec(make_offloading_config(**kwargs))
+    return FileMapper.from_offloading_spec(
+        root_dir="/tmp/cache", offloading_spec=spec, parallel_agnostic=parallel_agnostic
+    )
 
 
 def test_parallel_agnostic_collapses_namespace_when_config_allows():

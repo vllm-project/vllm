@@ -24,7 +24,6 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.region_mirror import (
-    MirrorStuckError,
     RegionMirrorClient,
     RegionMirrorHead,
     RegionMirrorHeadWorker,
@@ -201,69 +200,115 @@ def test_strided_views_register_their_whole_storage():
     ]
 
 
+class _FakeNixlAgent:
+    """Stands in for `nixl_utils.NixlWrapper`, the NIXL agent, which reaches
+    memory on other nodes. Records registrations, peers and backends; posted
+    transfers stay in progress until the test opens `gate`, and `fail` or
+    `stuck` names an op ("write" or "read") that ends in an error or never."""
+
+    def __init__(self, name: str = "agent", config=None):
+        self.name = name
+        self.registered: list[tuple[str, list]] = []
+        self.peers: list[str] = []
+        self.backends: list[tuple[str, dict]] = []
+        # (op, GPU addresses) of each transfer as it completes, and each
+        # deregistration.
+        self.calls: list[tuple[str, list[int]]] = []
+        # (op, GPU addresses, head addresses, sizes) of each posted transfer.
+        self.copies: list[tuple[str, list[int], list[int], list[int]]] = []
+        self.gate = threading.Event()
+        self.gate.set()
+        # Set once a transfer has been posted.
+        self.entered = threading.Event()
+        self.fail: str | None = None
+        self.stuck: str | None = None
+        self._posted: dict[int, tuple[str, list[int]]] = {}
+        self._done: set[int] = set()
+
+    def create_backend(self, backend: str, params: dict) -> None:
+        self.backends.append((backend, params))
+
+    def register_memory(self, descs: list, mem_type: str):
+        self.registered.append((mem_type, [(addr, size) for addr, size, *_ in descs]))
+        return self.registered[-1]
+
+    def deregister_memory(self, registration) -> None:
+        self.registered.remove(registration)
+        self.calls.append(("deregister", []))
+
+    def get_agent_metadata(self) -> bytes:
+        return self.name.encode()
+
+    def add_remote_agent(self, metadata: bytes) -> str:
+        self.peers.append(metadata.decode())
+        return self.peers[-1]
+
+    def remove_remote_agent(self, peer: str) -> None:
+        self.peers.remove(peer)
+
+    def get_xfer_descs(self, descs: list, mem_type: str) -> list:
+        return [(addr, size) for addr, size, _ in descs]
+
+    def initialize_xfer(self, op: str, local: list, remote: list, peer: str) -> int:
+        handle = len(self.copies)
+        gpu = [addr for addr, _ in local]
+        self.copies.append(
+            (op.lower(), gpu, [addr for addr, _ in remote], [n for _, n in local])
+        )
+        self._posted[handle] = (op.lower(), gpu)
+        return handle
+
+    def transfer(self, handle: int) -> str:
+        self.entered.set()
+        return self.check_xfer_state(handle)
+
+    def check_xfer_state(self, handle: int) -> str:
+        op, gpu = self._posted[handle]
+        if not self.gate.is_set() or self.stuck == op:
+            return "PROC"
+        if self.fail == op:
+            return "ERR"
+        if handle not in self._done:
+            self._done.add(handle)
+            self.calls.append((op, gpu))
+        return "DONE"
+
+    def release_xfer_handle(self, handle: int) -> None:
+        del self._posted[handle]
+
+
+@pytest.fixture
+def nixl(monkeypatch) -> _FakeNixlAgent:
+    """The NIXL agent every mirror endpoint of the test gets."""
+    agent = _FakeNixlAgent()
+    monkeypatch.setattr(nixl_utils, "NixlWrapper", lambda name, config: agent)
+    monkeypatch.setattr(nixl_utils, "nixl_agent_config", lambda **kwargs: None)
+    return agent
+
+
 @pytest.mark.parametrize(
     "remaps_kv_cache, params",
     [(False, {}), (True, {"engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc"})],
 )
 def test_remapping_agents_do_not_cache_vram_registrations(
-    monkeypatch, remaps_kv_cache, params
+    nixl, remaps_kv_cache, params
 ):
-    agent = MagicMock()
-    monkeypatch.setattr(nixl_utils, "NixlWrapper", MagicMock(return_value=agent))
-    monkeypatch.setattr(nixl_utils, "nixl_agent_config", MagicMock())
-    assert region_mirror._new_agent("a", remaps_kv_cache=remaps_kv_cache) is agent
-    agent.create_backend.assert_called_once_with("UCX", params)
-
-
-class _FakeClient:
-    """Stands in for RegionMirrorClient, the NIXL boundary: copies run when the
-    test lets them, and each one is recorded with its descriptors."""
-
-    def __init__(self):
-        self.calls: list[tuple[str, list[int]]] = []
-        # (op, GPU addresses, head addresses, sizes) of each copy.
-        self.copies: list[tuple[str, list[int], list[int], list[int]]] = []
-        self.gate = threading.Event()
-        self.gate.set()
-        # Set once a copy has started and waits on the gate.
-        self.entered = threading.Event()
-        self.fail: str | None = None
-        self.stuck: str | None = None
-        self.stopped = False
-        self.shut_down = False
-
-    def _copy(self, op: str, gpu: np.ndarray, local: np.ndarray, sizes) -> None:
-        self.entered.set()
-        self.gate.wait()
-        self.calls.append((op, gpu.tolist()))
-        self.copies.append((op, gpu.tolist(), local.tolist(), sizes.tolist()))
-        if self.stuck == op:
-            raise MirrorStuckError(f"{op} stuck")
-        if self.fail == op:
-            raise RuntimeError(f"{op} failed")
-
-    def write(self, gpu, local, sizes) -> None:
-        self._copy("write", gpu, local, sizes)
-
-    def read(self, gpu, local, sizes) -> None:
-        self._copy("read", gpu, local, sizes)
-
-    def stop(self, reason: str = "") -> None:
-        self.stopped = True
-        self.gate.set()
-
-    def unregister_kv_caches(self) -> None:
-        self.calls.append(("unregister", []))
-
-    def restore_kv_caches(self) -> None:
-        self.calls.append(("restore", []))
-
-    def shutdown(self) -> None:
-        self.shut_down = True
+    """A KV cache that can be released and remapped must not stay pinned by
+    UCX's registration cache."""
+    t = _Transfers()
+    client = RegionMirrorClient(
+        region_mirror._storage_ranges(t.kv_caches),
+        b"head",
+        "client",
+        remaps_kv_cache=remaps_kv_cache,
+    )
+    assert nixl.backends == [("UCX", params)]
+    client.shutdown()
 
 
 @pytest.fixture
 def events(monkeypatch) -> list[MagicMock]:
+    """CUDA events of the copies, which order them after the compute stream."""
     recorded: list[MagicMock] = []
 
     def new_event():
@@ -306,17 +351,21 @@ class _Transfers:
 
 
 def _mirror_worker(
-    client: _FakeClient, max_transfer_bytes: int = 1 << 20
-) -> tuple[RegionMirrorWorker, _Transfers]:
+    max_transfer_bytes: int = 1 << 20, timeout_s: float = 30
+) -> tuple[RegionMirrorWorker, _Transfers, RegionMirrorClient]:
+    """A remote worker's mirror over the `nixl` fixture's agent."""
     transfers = _Transfers()
     store, load = slot_planners(transfers.kv_caches, 1, HEAD_LAYOUT, _SLOT_BASE)
-    worker = RegionMirrorWorker(
-        store,
-        load,
-        client,  # type: ignore[arg-type]
-        max_transfer_bytes=max_transfer_bytes,
+    client = RegionMirrorClient(
+        region_mirror._storage_ranges(transfers.kv_caches),
+        b"head",
+        "client",
+        timeout_s=timeout_s,
     )
-    return worker, transfers
+    worker = RegionMirrorWorker(
+        store, load, client, max_transfer_bytes=max_transfer_bytes
+    )
+    return worker, transfers, client
 
 
 def _store(worker: RegionMirrorWorker, t: _Transfers, job_id: int, *blocks: int):
@@ -348,65 +397,68 @@ def _finished(worker: RegionMirrorWorker) -> list[TransferResult]:
     return results
 
 
-def test_store_is_reported_after_its_write_behind_the_compute_stream(events):
-    client = _FakeClient()
-    client.gate.clear()
-    worker, t = _mirror_worker(client)
+def test_store_is_reported_after_its_write_behind_the_compute_stream(nixl, events):
+    nixl.gate.clear()
+    worker, t, _ = _mirror_worker()
     try:
         assert worker.submit_store(1, t.gpu(4, 5), t.cpu(2, 3))
         events[0].record.assert_called_once()
-        assert client.entered.wait(10)
+        assert nixl.entered.wait(10)
         assert worker.get_finished() == []
 
-        client.gate.set()
+        nixl.gate.set()
         [result] = _finished(worker)
         assert result.job_id == 1 and result.success
         assert result.transfer_size == 2 * _PAGE
         events[0].synchronize.assert_called_once()
-        assert client.copies == [
+        assert nixl.copies == [
             ("write", t.addresses(4, 5), t.rows(2, 3), [_PAGE, _PAGE])
         ]
     finally:
         worker.shutdown()
 
 
-def test_load_is_reported_after_its_read(events):
-    client = _FakeClient()
-    worker, t = _mirror_worker(client)
+def test_load_is_reported_after_its_read(nixl, events):
+    worker, t, _ = _mirror_worker()
     try:
         assert worker.submit_load(2, t.cpu(6, 1), t.gpu(3, 7))
         [result] = _finished(worker)
         assert result.job_id == 2 and result.success
         assert result.transfer_size == 2 * _PAGE
-        assert client.copies == [
+        assert nixl.copies == [
             ("read", t.addresses(3, 7), t.rows(6, 1), [_PAGE, _PAGE])
         ]
     finally:
         worker.shutdown()
 
 
-def test_wait_covers_stores_too(events):
-    """The copy reads the GPU blocks, so they cannot be reused before it ends."""
-    client = _FakeClient()
-    worker, t = _mirror_worker(client)
+def test_wait_covers_stores_too(nixl, events):
+    """The copy reads the GPU blocks, so they cannot be reused before it ends;
+    shutting down then releases the KV cache registration and the head."""
+    worker, t, _ = _mirror_worker()
+    assert nixl.registered == [
+        ("VRAM", [(t.kv_caches.tensors[0].tensor.data_ptr(), 16 * _PAGE)])
+    ]
+    assert nixl.peers == ["head"]
     try:
         assert _store(worker, t, 3, 0, 1)
         worker.wait({3})
-        assert client.calls == [("write", t.addresses(0, 1))]
+        assert nixl.calls == [("write", t.addresses(0, 1))]
         assert worker.get_finished()[0].job_id == 3
     finally:
         worker.shutdown()
+    assert nixl.registered == [] and nixl.peers == []
 
 
-def test_unregister_waits_for_copies_in_flight(events):
+def test_unregister_waits_for_copies_in_flight(nixl, events):
     """sleep() does not wait for this thread: a queued store must finish
     while the GPU memory is still registered."""
-    client = _FakeClient()
-    client.gate.clear()
-    worker, t = _mirror_worker(client)
+    nixl.gate.clear()
+    worker, t, _ = _mirror_worker()
+    registration = list(nixl.registered)
     try:
         assert _store(worker, t, 4, 0, 1)
-        assert client.entered.wait(10)
+        assert nixl.entered.wait(10)
         unregistered = threading.Event()
 
         def unregister() -> None:
@@ -417,23 +469,23 @@ def test_unregister_waits_for_copies_in_flight(events):
         thread.start()
         # Still blocked on the copy: the registration must not be dropped yet.
         assert not unregistered.wait(0.2)
-        assert client.calls == []
-        client.gate.set()
+        assert nixl.calls == [] and nixl.registered == registration
+        nixl.gate.set()
         assert unregistered.wait(10)
         thread.join(10)
-        assert client.calls == [("write", t.addresses(0, 1)), ("unregister", [])]
+        assert nixl.calls == [("write", t.addresses(0, 1)), ("deregister", [])]
+        assert nixl.registered == []
         worker.restore_kv_caches()
-        assert client.calls[-1] == ("restore", [])
+        assert nixl.registered == registration
         assert [r.job_id for r in worker.get_finished()] == [4]
     finally:
         worker.shutdown()
 
 
 @pytest.mark.parametrize("op", ["write", "read"])
-def test_failed_copy_reports_a_failed_transfer(events, op):
-    client = _FakeClient()
-    client.fail = op
-    worker, t = _mirror_worker(client)
+def test_failed_copy_reports_a_failed_transfer(nixl, events, op):
+    nixl.fail = op
+    worker, t, _ = _mirror_worker()
     try:
         if op == "write":
             assert _store(worker, t, 4, 0, 1)
@@ -444,11 +496,10 @@ def test_failed_copy_reports_a_failed_transfer(events, op):
         worker.shutdown()
 
 
-def test_a_stuck_transfer_is_never_reported_and_stops_the_engine(events):
+def test_a_stuck_transfer_is_never_reported_and_stops_the_engine(nixl, events):
     """A transfer that may still land must not let the chunk be reused."""
-    client = _FakeClient()
-    client.stuck = "write"
-    worker, t = _mirror_worker(client)
+    nixl.stuck = "write"
+    worker, t, client = _mirror_worker(timeout_s=0.5)
     try:
         assert _store(worker, t, 5, 0, 1)
         # The worker stops the client before it records the stuck transfer,
@@ -459,21 +510,20 @@ def test_a_stuck_transfer_is_never_reported_and_stops_the_engine(events):
     finally:
         worker.shutdown()
     # Its GPU memory may still be written, so it stays registered.
-    assert not client.shut_down
+    assert nixl.registered != [] and nixl.peers == ["head"]
 
 
-def test_loads_overtake_waiting_stores(events):
-    client = _FakeClient()
-    client.gate.clear()
-    worker, t = _mirror_worker(client)
+def test_loads_overtake_waiting_stores(nixl, events):
+    nixl.gate.clear()
+    worker, t, _ = _mirror_worker()
     try:
         for job_id, block in ((6, 0), (7, 1), (8, 2)):
             assert _store(worker, t, job_id, block)
-        assert client.entered.wait(10)
+        assert nixl.entered.wait(10)
         assert _load(worker, t, 9, 5)
-        client.gate.set()
-        _wait_for(lambda: len(client.calls) == 4)
-        assert client.calls == [
+        nixl.gate.set()
+        _wait_for(lambda: len(nixl.calls) == 4)
+        assert nixl.calls == [
             ("write", t.addresses(0)),
             ("read", t.addresses(5)),
             ("write", t.addresses(1)),
@@ -483,18 +533,17 @@ def test_loads_overtake_waiting_stores(events):
         worker.shutdown()
 
 
-def test_expedited_loads_overtake_waiting_loads(events):
-    client = _FakeClient()
-    client.gate.clear()
-    worker, t = _mirror_worker(client)
+def test_expedited_loads_overtake_waiting_loads(nixl, events):
+    nixl.gate.clear()
+    worker, t, _ = _mirror_worker()
     try:
         assert _load(worker, t, 14, 1)
-        assert client.entered.wait(10)
+        assert nixl.entered.wait(10)
         assert _load(worker, t, 15, 2)
         assert _load(worker, t, 16, 3, expedited=True)
-        client.gate.set()
+        nixl.gate.set()
         worker.wait({14, 15, 16})
-        assert client.calls == [
+        assert nixl.calls == [
             ("read", t.addresses(1)),
             ("read", t.addresses(3)),
             ("read", t.addresses(2)),
@@ -503,18 +552,17 @@ def test_expedited_loads_overtake_waiting_loads(events):
         worker.shutdown()
 
 
-def test_large_copies_are_split_and_loads_go_between_their_transfers(events):
-    client = _FakeClient()
-    client.gate.clear()
-    worker, t = _mirror_worker(client, max_transfer_bytes=2 * _PAGE)
+def test_large_copies_are_split_and_loads_go_between_their_transfers(nixl, events):
+    nixl.gate.clear()
+    worker, t, _ = _mirror_worker(max_transfer_bytes=2 * _PAGE)
     try:
         assert _store(worker, t, 12, 0, 1, 2, 3, 4)
-        assert client.entered.wait(10)
+        assert nixl.entered.wait(10)
         assert _load(worker, t, 13, 7)
-        client.gate.set()
+        nixl.gate.set()
         worker.wait({12, 13})
         results = worker.get_finished()
-        assert client.copies == [
+        assert nixl.copies == [
             ("write", t.addresses(0, 1), t.rows(0, 1), [_PAGE, _PAGE]),
             ("read", t.addresses(7), t.rows(7), [_PAGE]),
             ("write", t.addresses(2, 3), t.rows(2, 3), [_PAGE, _PAGE]),
@@ -526,44 +574,20 @@ def test_large_copies_are_split_and_loads_go_between_their_transfers(events):
         worker.shutdown()
 
 
-def test_shutdown_is_prompt_with_copies_waiting(events):
-    client = _FakeClient()
-    client.gate.clear()
-    worker, t = _mirror_worker(client)
+def test_shutdown_is_prompt_with_a_copy_in_flight(nixl, events):
+    """Shutting down abandons a transfer still in flight at once: as it may
+    still land, it is never reported and the GPU memory stays registered."""
+    nixl.gate.clear()
+    worker, t, _ = _mirror_worker()
+    registration = list(nixl.registered)
     assert _store(worker, t, 10, 0, 1)
+    assert nixl.entered.wait(10)
     started = time.monotonic()
     worker.shutdown()
     assert time.monotonic() - started < 5
-    assert client.shut_down
-
-
-class _FakeNixlAgent:
-    """Stands in for `nixl_utils.NixlWrapper`, the NIXL agent: records the
-    memory registered and the peers added."""
-
-    def __init__(self, name: str, config):
-        self.registered: list[tuple[str, list]] = []
-        self.peers: list[str] = []
-
-    def create_backend(self, backend: str, params: dict) -> None:
-        pass
-
-    def register_memory(self, descs: list, mem_type: str):
-        self.registered.append((mem_type, [(addr, size) for addr, size, *_ in descs]))
-        return self.registered[-1]
-
-    def deregister_memory(self, registration) -> None:
-        self.registered.remove(registration)
-
-    def get_agent_metadata(self) -> bytes:
-        return b"head"
-
-    def add_remote_agent(self, metadata: bytes) -> str:
-        self.peers.append(metadata.decode())
-        return self.peers[-1]
-
-    def remove_remote_agent(self, peer: str) -> None:
-        self.peers.remove(peer)
+    with pytest.raises(RuntimeError, match="may still land"):
+        worker.get_finished()
+    assert nixl.registered == registration
 
 
 def test_head_worker_moves_rank_0_slots_and_releases_the_region(monkeypatch):
