@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from tests.quantization.utils import load_model_without_vllm_runner
-from vllm.config import set_current_vllm_config
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -23,6 +23,8 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import (
+    OUT_OF_TREE_QUANTIZATION_PLUGINS,
+    QUANTIZATION_METHODS,
     QuantizationMethods,
     get_quantization_config,
     register_quantization_config,
@@ -150,3 +152,13 @@ def test_custom_quant(model, monkeypatch, dist_init, workspace_init):
         hidden_states = vllm_model(input_ids, positions, None)
         logits = vllm_model.compute_logits(hidden_states)
     assert torch.isfinite(logits).all()
+
+
+@pytest.mark.parametrize("method", list(OUT_OF_TREE_QUANTIZATION_PLUGINS))
+def test_out_of_tree_quantization_points_to_plugin(method: str):
+    """Asking for a method whose plugin isn't installed names the plugin."""
+    if method in QUANTIZATION_METHODS:
+        pytest.skip(f"{OUT_OF_TREE_QUANTIZATION_PLUGINS[method]} is installed")
+    plugin = OUT_OF_TREE_QUANTIZATION_PLUGINS[method]
+    with pytest.raises(ValueError, match=f"pip install {plugin}"):
+        ModelConfig("Qwen/Qwen3-0.6B", quantization=method)

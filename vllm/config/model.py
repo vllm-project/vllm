@@ -1512,6 +1512,15 @@ class ModelConfig:
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
+                plugin = me_quant.OUT_OF_TREE_QUANTIZATION_PLUGINS.get(
+                    self.quantization
+                )
+                if plugin is not None:
+                    raise ValueError(
+                        f"Quantization method {self.quantization} needs the "
+                        f"{plugin} package, which isn't installed. Install it "
+                        f"with `pip install {plugin}`."
+                    )
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."

@@ -57,6 +57,12 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
 ]
 
+# Quantization methods that moved out of tree, and the plugin that provides them.
+OUT_OF_TREE_QUANTIZATION_PLUGINS = {
+    "bitsandbytes": "vllm-bnb-plugin",
+    "gguf": "vllm-gguf-plugin",
+}
+
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
 
