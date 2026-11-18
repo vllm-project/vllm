@@ -291,6 +291,49 @@ def test_oov_decode(tokenizer, fast):
     assert out_ids == [len(tokenizer)]
 
 
+@pytest.mark.parametrize("tokenizer_name", ["openai-community/gpt2"])
+@pytest.mark.parametrize("fast", (True, False))
+@pytest.mark.parametrize(
+    "case",
+    [
+        "genuine_trailing_replacement_char",
+        "trailing_lone_lead_byte",
+    ],
+)
+def test_decode_trailing_replacement_char_flushed_on_finish(
+    tokenizer, fast, case
+):
+    """A trailing U+FFFD is emitted when generation finishes.
+
+    Both incremental detokenizers hold back text ending in U+FFFD as a
+    potential unfinished byte sequence. At finish no later token can
+    complete the sequence, so the held-back text is flushed and the
+    finished text matches a full decode of the same ids.
+    See https://github.com/vllm-project/vllm/issues/68324.
+    """
+    if case == "genuine_trailing_replacement_char":
+        # The model really generated U+FFFD.
+        ids = tokenizer.encode("hello \ufffd", add_special_tokens=False)
+    else:
+        # A lone lead byte: an incomplete UTF-8 sequence at the end of
+        # generation decodes to U+FFFD with replacement. "\u00c3" is the
+        # GPT-2 byte-level token for byte 0xC3.
+        ids = tokenizer.encode("hello ", add_special_tokens=False) + [
+            tokenizer.convert_tokens_to_ids("\u00c3")
+        ]
+
+    decoded_text, out_ids = _run_incremental_decode(
+        tokenizer,
+        ids,
+        skip_special_tokens=True,
+        starting_index=0,
+        fast=fast,
+    )
+
+    assert decoded_text == tokenizer.decode(ids, skip_special_tokens=True)
+    assert out_ids == ids
+
+
 # ---------- convert_ids_list_to_tokens collision tests ----------
 
 

@@ -160,9 +160,23 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     def decode_next(self, next_token_id: int) -> str:
         raise NotImplementedError
 
+    def flush(self) -> str:
+        """Return text held back for a potential unfinished byte sequence.
+
+        Called once when the sequence finishes. The default implementation
+        holds nothing back.
+        """
+        return ""
+
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
         this method is returned"""
+        if finished:
+            # Flush text held back for a potential unfinished byte sequence
+            # (for example a trailing replacement character). At finish no
+            # later token can complete the sequence. The flush is
+            # idempotent, so a repeated finished read emits nothing new.
+            self.output_text += self.flush()
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
@@ -189,6 +203,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.skip_special_tokens = sampling_params.skip_special_tokens
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
+        self.prompt_token_ids = list(request.prompt_token_ids or [])
 
         # Use native prefill to prime the decode stream with prompt tokens.
         # Look up DecodeStream on the module so backend patches (e.g. the
@@ -260,6 +275,28 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 
+    def flush(self) -> str:
+        """Drain text the decode stream held back for an incomplete sequence.
+
+        `DecodeStream` buffers a trailing partial UTF-8 sequence and only
+        releases it once a later token completes it, so at finish the
+        held-back text is the difference between a full decode of the
+        sequence and the text emitted so far. The prefix check keeps this
+        a no-op when incremental decoding already diverged from a full
+        decode.
+        """
+        full = self.tokenizer.decode(
+            self.prompt_token_ids + self.token_ids,
+            skip_special_tokens=self.skip_special_tokens,
+        )
+        prompt_text = self.tokenizer.decode(
+            self.prompt_token_ids, skip_special_tokens=self.skip_special_tokens
+        )
+        expected = full[len(prompt_text) :]
+        if expected.startswith(self.output_text):
+            return expected[len(self.output_text) :]
+        return ""
+
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def __init__(self, tokenizer: TokenizerLike, request: EngineCoreRequest):
@@ -289,6 +326,11 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.read_offset = 0
         # Grows by one string per output token, in place.
         gc_untrack(self.tokens)
+        # Number of prompt tokens held in `self.tokens`. Output tokens are
+        # appended after these, so this bounds the flush window to tokens
+        # still present in `output_token_ids` (a stop match truncates the
+        # ids but not `self.tokens`).
+        self._prompt_window_len = len(self.tokens)
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 
@@ -320,6 +362,23 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.read_offset = read_offset
 
         return decoded_text
+
+    def flush(self) -> str:
+        """Emit text held back for a potential unfinished byte sequence."""
+        retained = self._prompt_window_len + self.num_output_tokens()
+        _, text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=self.tokenizer,
+            all_input_ids=self.token_ids,
+            prev_tokens=self.tokens[:retained],
+            prefix_offset=self.prefix_offset,
+            read_offset=self.read_offset,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+            flush=True,
+        )
+        self.prefix_offset = prefix_offset
+        self.read_offset = read_offset
+        return text
 
 
 def check_stop_strings(
