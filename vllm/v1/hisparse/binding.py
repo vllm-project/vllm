@@ -24,7 +24,7 @@ from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
     get_hisparse_page_layer_configs,
-    is_hisparse_source_layer,
+    get_hisparse_source_layers,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -42,7 +42,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
-    SparseFullAttentionSpec,
     create_kv_cache_views,
 )
 from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
@@ -60,9 +59,7 @@ def resolve_hisparse_specs(
 ) -> dict[str, KVCacheLayerConfig]:
     """Resolve sparse source and indexer block sizes, derive resident and hot
     caches, and fit align-mode Mamba blocks to the resulting attention blocks."""
-    sparse_layers = {
-        name: lc for name, lc in layer_configs.items() if is_hisparse_source_layer(lc)
-    }
+    sparse_layers = get_hisparse_source_layers(layer_configs)
     if not sparse_layers:
         return layer_configs
     block_sizes = {lc.spec.block_size for lc in sparse_layers.values()}
@@ -396,7 +393,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
-            if isinstance(source_specs[layer_name], SparseFullAttentionSpec):
+            if not isinstance(source_specs[layer_name], MLAAttentionSpec):
                 token_rows = source_cache.transpose(1, 2)
                 try:
                     source_cache = token_rows.view(*token_rows.shape[:2], -1)

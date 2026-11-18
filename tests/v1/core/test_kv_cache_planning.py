@@ -104,6 +104,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.SPARSE,
             is_index_group_leader=True,
             topk_buffer_width=topk_buffer_width,
         )
@@ -234,7 +235,6 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     indexer_block_size,
 ):
     from vllm.v1.hisparse.binding import resolve_hisparse_specs
-    from vllm.v1.kv_cache_interface import SparseFullAttentionSpec
 
     monkeypatch.setattr(
         current_platform,
@@ -250,7 +250,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     layer_configs: dict[str, KVCacheLayerConfig] = {}
     for name in sorted(source_names):
         layer_configs[name] = full_layer(
-            SparseFullAttentionSpec(
+            AttentionSpec(
                 block_size=16,
                 num_kv_heads=1,
                 head_size=32,
@@ -261,7 +261,9 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
                     if main_dtype == torch.uint8
                     else KVQuantMode.NONE
                 ),
+                cache_role=SparseCacheRole.SPARSE,
                 topk_buffer_width=35,
+                is_index_group_leader=True,
             )
         )
         layer_configs[f"{name}.indexer"] = full_layer(
@@ -463,6 +465,7 @@ def test_hisparse_pool_must_fit_max_model_len(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         )
@@ -1006,6 +1009,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
                 state_content_bytes=656,
                 block_stride_alignment=656,
                 cache_dtype_str="fp8_ds_mla",
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
