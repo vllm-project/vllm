@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import json
+import os
+import subprocess
+import sys
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -590,6 +595,163 @@ def test_cudagraph_sizes_post_init(
         )
 
 
+@pytest.fixture
+def capture_grid_platform(tmp_path):
+    """Load a real platform plugin before any vLLM configuration is imported."""
+    distribution = tmp_path / "capture_grid_test-0.0.dist-info"
+    distribution.mkdir()
+    (distribution / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: capture-grid-test\nVersion: 0.0\n"
+    )
+    (distribution / "entry_points.txt").write_text(
+        "[vllm.platform_plugins]\n"
+        "capture_grid_test = "
+        "vllm_add_dummy_platform.capture_grid_platform:register\n"
+    )
+    plugin_path = Path(__file__).parents[1] / "plugins/vllm_add_dummy_platform"
+
+    def resolve(strategy, settings, method="ngram"):
+        env = dict(os.environ)
+        env["VLLM_PLUGINS"] = "capture_grid_test"
+        env["VLLM_TEST_CAPTURE_DEFAULTS"] = strategy
+        env["PYTHONPATH"] = os.pathsep.join(
+            (str(tmp_path), str(plugin_path), env.get("PYTHONPATH", ""))
+        )
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _CAPTURE_PLATFORM_CONFIG,
+                json.dumps(settings),
+                method,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+    return resolve
+
+
+_CAPTURE_PLATFORM_CONFIG = """
+import json
+import sys
+
+from vllm.config.utils import replace
+from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
+
+assert type(current_platform).__name__ == "CaptureGridPlatform"
+speculative_config = {"method": sys.argv[2], "num_speculative_tokens": 2}
+if sys.argv[2] == "ngram":
+    speculative_config.update(prompt_lookup_min=1, prompt_lookup_max=1)
+else:
+    speculative_config["model"] = "facebook/opt-125m"
+config = EngineArgs(
+    model="facebook/opt-125m",
+    max_model_len=256,
+    max_num_seqs=16,
+    max_num_batched_tokens=256,
+    speculative_config=speculative_config,
+    compilation_config={
+        "cudagraph_mode": "FULL_AND_PIECEWISE", **json.loads(sys.argv[1]),
+    },
+).create_engine_config()
+
+def sizes(config):
+    c = config.compilation_config
+    return {
+        "prefill": c.prefill_cudagraph_capture_token_sizes,
+        "decode": c.decode_cudagraph_capture_request_sizes,
+        "tokens": c.cudagraph_capture_sizes,
+        "maximum": c.max_cudagraph_capture_size,
+        "budget": c.max_decode_cudagraph_capture_tokens,
+        "draft": config.get_draft_decode_cudagraph_request_sizes(),
+        "varlen": config.get_varlen_decode_cudagraph_token_sizes(
+            config.uniform_decode_query_len
+        ),
+    }
+
+result = json.dumps(sizes(config), sort_keys=True)
+assert result == json.dumps(sizes(replace(config)), sort_keys=True)
+print("CAPTURE_RESULT=" + result)
+"""
+
+
+@pytest.mark.parametrize("strategy", ["legacy", "split"])
+@pytest.mark.parametrize(
+    "settings,expected_prefill,expected_decode",
+    [
+        ({}, None, None),
+        ({"cudagraph_capture_sizes": [1, 6, 12]}, [1, 6, 12], [1, 2, 4]),
+        (
+            {
+                "prefill_cudagraph_capture_token_sizes": [2, 10],
+                "decode_cudagraph_capture_request_sizes": [2, 6],
+            },
+            [2, 10],
+            [2, 6],
+        ),
+        ({"prefill_cudagraph_capture_token_sizes": [2, 10]}, [2, 10], None),
+    ],
+)
+def test_platform_capture_grids_preserve_explicit_settings(
+    capture_grid_platform, strategy, settings, expected_prefill, expected_decode
+):
+    """Platform grids reach real config resolution without overriding users."""
+    completed = capture_grid_platform(strategy, settings)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(
+        next(
+            line.removeprefix("CAPTURE_RESULT=")
+            for line in completed.stdout.splitlines()
+            if line.startswith("CAPTURE_RESULT=")
+        )
+    )
+    prefill = expected_prefill or (
+        [1, 3, 5, 15, 24] if strategy == "legacy" else [1, 5, 17]
+    )
+    decode = expected_decode or ([1, 2, 5, 8] if strategy == "legacy" else [1, 3, 7])
+    assert result["prefill"] == prefill
+    assert result["decode"] == decode
+    assert result["tokens"] == sorted(set(prefill) | {n * 3 for n in decode})
+    assert result["maximum"] == max(result["tokens"])
+    assert result["budget"] == (
+        21
+        if strategy == "split" and "cudagraph_capture_sizes" not in settings
+        else None
+    )
+    assert result["varlen"] == sorted({1, 7, max(decode) * 3})
+
+
+@pytest.mark.parametrize("strategy", ["legacy", "split"])
+def test_platform_capture_grid_reaches_one_token_drafter(
+    capture_grid_platform, strategy
+):
+    """A draft model's later steps use the platform's request grid up to N."""
+    completed = capture_grid_platform(strategy, {}, method="draft_model")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(
+        next(
+            line.removeprefix("CAPTURE_RESULT=")
+            for line in completed.stdout.splitlines()
+            if line.startswith("CAPTURE_RESULT=")
+        )
+    )
+    assert result["draft"] == [1, 3, 16]
+    assert 16 in result["tokens"]
+
+
+def test_platform_capture_grid_cannot_exceed_its_limit(capture_grid_platform):
+    """Reject an invalid platform grid before graph buffers are allocated."""
+    completed = capture_grid_platform("invalid", {})
+    assert completed.returncode != 0
+    assert "Platform CUDA graph sizes must be integers in [1, 7]" in (
+        completed.stdout + completed.stderr
+    )
+
+
 def _mock_config_for_cudagraph_sizes(
     max_num_seqs: int,
     num_speculative_tokens: int,
@@ -655,6 +817,22 @@ _CAPTURE_SIZE_FIELDS = (
 )
 
 
+def _select_capture_defaults_platform(monkeypatch, sm100):
+    from vllm.platforms.interface import DeviceCapability
+
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import RocmPlatform as CapturePlatform
+    else:
+        from vllm.platforms.cuda import CudaPlatformBase as CapturePlatform
+
+    class CaptureDefaultsPlatform(CapturePlatform):
+        @classmethod
+        def get_device_capability(cls, device_id=0):
+            return DeviceCapability(10, 0) if sm100 else DeviceCapability(9, 0)
+
+    monkeypatch.setattr("vllm.config.vllm.current_platform", CaptureDefaultsPlatform())
+
+
 def _resolve_capture_sizes(
     monkeypatch,
     sm100: bool,
@@ -663,11 +841,7 @@ def _resolve_capture_sizes(
 ) -> CompilationConfig:
     """Resolve the capture sizes twice: a resolved config, as
     dataclasses.replace resolves it again, must stay as it is."""
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability_family",
-        lambda family, device_id=0: sm100 and family == 100,
-    )
+    _select_capture_defaults_platform(monkeypatch, sm100)
     compilation_config = CompilationConfig(cudagraph_mode=mode, **kwargs)
     config = _mock_config_for_cudagraph_sizes(
         max_num_seqs=1024,
@@ -1426,7 +1600,7 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
 @pytest.mark.parametrize(
     ("is_blackwell", "expected_max_size"), [(False, 512), (True, 2048)]
 )
-def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
+def test_blackwell_cudagraph_default(monkeypatch, is_blackwell, expected_max_size):
     # On SM100, prefill graphs reach min(8192, max_num_batched_tokens) tokens.
     vllm_config = VllmConfig()
     vllm_config.model_config = MagicMock(enforce_eager=False)
@@ -1440,12 +1614,8 @@ def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
     )
 
-    with patch.object(
-        current_platform,
-        "is_device_capability_family",
-        return_value=is_blackwell,
-    ):
-        vllm_config._set_cudagraph_sizes()
+    _select_capture_defaults_platform(monkeypatch, is_blackwell)
+    vllm_config._set_cudagraph_sizes()
 
     assert (
         vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size

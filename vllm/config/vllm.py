@@ -32,11 +32,10 @@ from .cache import CacheConfig
 from .compilation import (
     CompilationConfig,
     CompilationMode,
+    CUDAGraphCaptureDefaults,
     CUDAGraphMode,
-    decode_cudagraph_capture_grid,
     decode_cudagraph_capture_shapes,
-    prefill_cudagraph_capture_grid,
-    varlen_decode_cudagraph_capture_grid,
+    validate_cudagraph_capture_grid,
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
@@ -823,7 +822,11 @@ class VllmConfig:
             )
         ):
             return []
-        return decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
+        max_requests = self.scheduler_config.max_num_seqs
+        return validate_cudagraph_capture_grid(
+            current_platform.get_decode_cudagraph_capture_grid(max_requests),
+            max_requests,
+        )
 
     def get_varlen_decode_cudagraph_token_sizes(
         self, decode_query_len: int
@@ -834,14 +837,17 @@ class VllmConfig:
         of `decode_query_len` tokens each, within the decode token budget."""
         max_requests = self.compilation_config.max_decode_cudagraph_capture_requests
         assert max_requests is not None
-        return varlen_decode_cudagraph_capture_grid(
-            min(
-                max_requests * decode_query_len,
-                self.scheduler_config.max_num_batched_tokens,
-                self.compilation_config.max_decode_cudagraph_capture_tokens
-                or max_requests * decode_query_len,
+        max_tokens = min(
+            max_requests * decode_query_len,
+            self.scheduler_config.max_num_batched_tokens,
+            self.compilation_config.max_decode_cudagraph_capture_tokens
+            or max_requests * decode_query_len,
+        )
+        return validate_cudagraph_capture_grid(
+            current_platform.get_varlen_decode_cudagraph_capture_grid(
+                max_tokens, self.performance_mode == "interactivity"
             ),
-            self.performance_mode == "interactivity",
+            max_tokens,
         )
 
     @property
@@ -2492,7 +2498,7 @@ class VllmConfig:
         capture as:
 
         ```python
-        default_max_graph_size = 1024 if is_data_center_blackwell else 512
+        default_max_graph_size = platform_defaults.legacy_max_tokens
         decode_query_len = self.uniform_decode_query_len
         max_graph_size = min(
             max_num_seqs * decode_query_len * 2, default_max_graph_size
@@ -2564,11 +2570,8 @@ class VllmConfig:
             # configured.
             uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
-                from vllm.platforms import current_platform
-
-                default_max_graph_size = (
-                    1024 if current_platform.is_device_capability_family(100) else 512
-                )
+                defaults = current_platform.get_cudagraph_capture_defaults(self)
+                default_max_graph_size = defaults.legacy_max_tokens
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs
                 max_cudagraph_capture_size = min(
@@ -2594,9 +2597,12 @@ class VllmConfig:
                         # At most the platform default number of requests,
                         # mirroring the one-token-per-request decode ceiling.
                         max_reqs = min(max_reqs, default_max_graph_size)
-                        counts = [n for n in (1, 2, 4) if n <= max_reqs]
-                        counts += list(range(8, min(max_reqs + 1, 256), 8))
-                        counts += list(range(256, max_reqs + 1, 16))
+                        counts = validate_cudagraph_capture_grid(
+                            current_platform.get_legacy_cudagraph_capture_grid(
+                                max_reqs
+                            ),
+                            max_reqs,
+                        )
                         return sorted(set(counts + [max_reqs]))
 
                     # Dynamic speculative decoding picks the draft width from
@@ -2637,25 +2643,13 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
-                if self.performance_mode == "interactivity":
-                    # Fine-grained CUDA graphs at small batch sizes
-                    # for minimal padding overhead
-                    interactivity_max = min(max_cudagraph_capture_size, 32)
-                    cudagraph_capture_sizes = list(range(1, interactivity_max + 1))
-                else:
-                    cudagraph_capture_sizes = [
-                        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-                    ]
-                if max_cudagraph_capture_size >= 8:
-                    # Step size 8 for small batch sizes, up to 256(not included)
-                    cudagraph_capture_sizes += list(
-                        range(8, min(max_cudagraph_capture_size + 1, 256), 8)
-                    )
-                if max_cudagraph_capture_size >= 256:
-                    # Step size 16 for larger batch sizes
-                    cudagraph_capture_sizes += list(
-                        range(256, max_cudagraph_capture_size + 1, 16)
-                    )
+                cudagraph_capture_sizes = validate_cudagraph_capture_grid(
+                    current_platform.get_legacy_cudagraph_capture_grid(
+                        max_cudagraph_capture_size,
+                        self.performance_mode == "interactivity",
+                    ),
+                    max_cudagraph_capture_size,
+                )
                 # ensure max_num_tokens is captured if within max capture size
                 if (
                     max_num_tokens <= max_cudagraph_capture_size
@@ -2761,22 +2755,19 @@ class VllmConfig:
                 "decode CUDA graphs with decode_cudagraph_capture_request_sizes or "
                 "max_decode_cudagraph_capture_requests."
             )
-        from vllm.platforms import current_platform
-
         shared_sizes = compilation_config.cudagraph_capture_sizes
         shared_max = compilation_config.max_cudagraph_capture_size
         max_num_seqs = self.scheduler_config.max_num_seqs
         max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        # On SM100, unset kinds default to wider grids; elsewhere, and with the
-        # deprecated fields, they default to the shared sizes resolved above.
-        wide_defaults = (
-            not legacy_sizes and current_platform.is_device_capability_family(100)
+        defaults = (
+            CUDAGraphCaptureDefaults()
+            if legacy_sizes
+            else current_platform.get_cudagraph_capture_defaults(self)
         )
-        if (
-            wide_defaults
-            and compilation_config.max_decode_cudagraph_capture_tokens is None
-        ):
-            compilation_config.max_decode_cudagraph_capture_tokens = 8192
+        if compilation_config.max_decode_cudagraph_capture_tokens is None:
+            compilation_config.max_decode_cudagraph_capture_tokens = (
+                defaults.max_decode_tokens
+            )
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2801,13 +2792,16 @@ class VllmConfig:
                 "prefill_cudagraph_capture_token_sizes",
                 "max_prefill_cudagraph_capture_tokens",
             )
-        elif max_prefill_tokens is not None or wide_defaults:
-            prefill_sizes = prefill_cudagraph_capture_grid(
-                min(
-                    8192 if max_prefill_tokens is None else max_prefill_tokens,
-                    max_num_tokens,
+        elif max_prefill_tokens is not None or defaults.max_prefill_tokens is not None:
+            if max_prefill_tokens is None:
+                max_prefill_tokens = defaults.max_prefill_tokens
+            assert max_prefill_tokens is not None
+            prefill_limit = min(max_prefill_tokens, max_num_tokens)
+            prefill_sizes = validate_cudagraph_capture_grid(
+                current_platform.get_prefill_cudagraph_capture_grid(
+                    prefill_limit, self.performance_mode == "interactivity"
                 ),
-                self.performance_mode == "interactivity",
+                prefill_limit,
             )
         else:
             prefill_sizes = list(shared_sizes)
@@ -2820,11 +2814,16 @@ class VllmConfig:
                 "decode_cudagraph_capture_request_sizes",
                 "max_decode_cudagraph_capture_requests",
             )
-        elif max_decode_requests is not None or wide_defaults:
-            decode_sizes = decode_cudagraph_capture_grid(
-                max_num_seqs
-                if max_decode_requests is None
-                else min(max_decode_requests, max_num_seqs)
+        elif (
+            max_decode_requests is not None or defaults.max_decode_requests is not None
+        ):
+            if max_decode_requests is None:
+                max_decode_requests = defaults.max_decode_requests
+            assert max_decode_requests is not None
+            decode_limit = min(max_decode_requests, max_num_seqs)
+            decode_sizes = validate_cudagraph_capture_grid(
+                current_platform.get_decode_cudagraph_capture_grid(decode_limit),
+                decode_limit,
             )
         else:
             # The request counts each target query length rounds the shared sizes

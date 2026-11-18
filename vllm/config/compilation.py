@@ -6,7 +6,7 @@ import enum
 import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import field, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -124,6 +124,54 @@ def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
     step of the largest power of two not above 0.65 * n^(2/3) (2 from 8, 4 from
     16, 8 from 48, 16 from 128, 32 from 352): 64 sizes at 1024."""
     return _walk_grid(max_requests, lambda n: 0.65 * n ** (2 / 3))
+
+
+def legacy_cudagraph_capture_grid(max_size: int, dense_head: bool = False) -> list[int]:
+    """Legacy spacing, used for both shared tokens and uniform request counts."""
+    sizes = (
+        list(range(1, min(max_size, 32) + 1))
+        if dense_head
+        else [n for n in (1, 2, 4) if n <= max_size]
+    )
+    sizes += list(range(8, min(max_size + 1, 256), 8))
+    sizes += list(range(256, max_size + 1, 16))
+    return sorted(set(sizes))
+
+
+@dataclass(frozen=True)
+class CUDAGraphCaptureDefaults:
+    """Default capture limits, separate from explicit compilation settings.
+
+    Leaving both split limits unset preserves the shared token grid. Platforms
+    opting into independent grids supply both prefill and decode limits.
+    """
+
+    legacy_max_tokens: int = 512
+    max_prefill_tokens: int | None = None
+    max_decode_requests: int | None = None
+    max_decode_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.max_prefill_tokens is None) != (self.max_decode_requests is None):
+            raise ValueError("Set both prefill and decode defaults, or neither.")
+        for name, minimum in (
+            ("legacy_max_tokens", 1),
+            ("max_prefill_tokens", 0),
+            ("max_decode_requests", 0),
+            ("max_decode_tokens", 1),
+        ):
+            value = getattr(self, name)
+            if value is None and name != "legacy_max_tokens":
+                continue
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}.")
+
+
+def validate_cudagraph_capture_grid(sizes: list[int], limit: int) -> list[int]:
+    """Normalize a platform grid, rejecting sizes outside its resolved limit."""
+    if any(type(size) is not int or not 1 <= size <= limit for size in sizes):
+        raise ValueError(f"Platform CUDA graph sizes must be integers in [1, {limit}].")
+    return sorted(set(sizes))
 
 
 class CUDAGraphMode(enum.Enum):

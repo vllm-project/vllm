@@ -34,6 +34,7 @@ steps:
     - vllm/utils/
     - vllm/v1/
     - tests/compile
+    - tests/plugins/vllm_add_dummy_platform/vllm_add_dummy_platform/capture_grid_platform.py
   commands:
   # Unit tests directly under compile/; subdirectories run in their own steps.
   - pytest -s -v compile/ --ignore-glob='compile/*/*'
