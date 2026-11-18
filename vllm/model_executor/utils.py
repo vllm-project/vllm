@@ -76,7 +76,7 @@ def _is_integrated_gpu(device: torch.device) -> bool:
     return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
 
 
-# 1-byte dtypes that hold raw bytes, scales or packed data (see copy_weight_).
+# 1-byte dtypes whose bytes are the value (raw bytes, MX scales, packed FP4)
 _BYTE_CONTAINERS = frozenset(
     {torch.uint8, torch.int8, torch.float8_e8m0fnu, torch.float4_e2m1fn_x2}
 )
@@ -87,14 +87,10 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
 
     Model-specific weight loaders should call this instead of `.copy_()` when
     copying a checkpoint tensor to the device. Off integrated GPUs it is a
-    plain `copy_`, except that a copy between two different byte containers
-    (`uint8`, `int8`, `float8_e8m0fnu`, `float4_e2m1fn_x2`) keeps the bytes.
-    These hold scales or packed data: a plain `copy_` would convert an MX
-    scale 2^(b-127) to an integer, and has no conversion for
-    `float4_e2m1fn_x2`. Between `int8` and `uint8` the bytes match either
-    way. Copies into or
-    out of the float8 value formats (`float8_e4m3fn`, `float8_e5m2`, ...)
-    still convert by value, since their bytes are not interchangeable.
+    plain `copy_`, except that a copy between two byte containers (`uint8`,
+    `int8`, `float8_e8m0fnu`, `float4_e2m1fn_x2`) keeps the bytes, where
+    `copy_` would convert E8M0 scales by value. Float8 value formats still
+    convert by value.
 
     On integrated GPUs, a host-to-device copy straight from a safetensors mmap
     takes its page faults inside the driver copy, which is several times slower

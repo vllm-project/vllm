@@ -22,7 +22,7 @@ class Fallback(Exception):
 @dataclass(frozen=True, slots=True)
 class Region:
     """`as_strided` arguments relative to the target's storage offset, in
-    checkpoint-dtype elements. `shape` is the shape of the write's box, or
+    elements of the write's dtype. `shape` is the shape of the write's box, or
     that shape with some dimensions split."""
 
     offset: int
@@ -36,8 +36,7 @@ class Write:
     module: str  # target tensor, by name
     tensor: str
     dst: Region
-    # the destination dtype when the loader casts at copy_ (None: the
-    # checkpoint dtype, a byte copy)
+    # dtype the loader's copy_ casts to; None: a byte copy in the checkpoint dtype
     dtype: "torch.dtype | None" = None
 
 
