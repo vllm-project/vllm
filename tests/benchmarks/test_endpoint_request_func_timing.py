@@ -31,7 +31,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     async_request_openai_chat_completions,
     async_request_openai_completions,
 )
-from vllm.benchmarks.serve import _get_server_metrics_results
+from vllm.benchmarks.serve import _get_server_metrics_results, calculate_metrics
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -276,8 +276,21 @@ def test_diarized_audio_stream(monkeypatch: pytest.MonkeyPatch, complete: bool) 
     assert output.success, output.error
     assert output.generated_text == "Hello 你好"
     assert (output.prompt_len, output.output_tokens) == (120, 30)
-    assert (output.ttft, output.latency) == (2.0, 4.0)
+    assert (output.ttft, output.latency) == (2.0, 6.0)
     assert output.itl == []  # Segment boundaries do not expose token times.
+    metrics, lengths = calculate_metrics(
+        input_requests=[],
+        outputs=[output],
+        dur_s=6.0,
+        tokenizer=None,
+        selected_percentiles=[99],
+        goodput_config_dict={"e2el": 7000},
+        token_timestamps_available=False,
+    )
+    assert lengths == [30] and metrics.output_throughput == 5.0
+    assert metrics.max_output_tokens_per_s is None
+    assert metrics.max_concurrent_requests == 1
+    assert metrics.request_goodput == pytest.approx(1 / 6)
 
 
 def _run(

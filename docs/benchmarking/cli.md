@@ -387,9 +387,12 @@ vllm bench serve \
 
 For a model that supports speaker diarization, add
 `--extra-body '{"response_format":"diarized_json"}'` to the `openai-audio`
-benchmark. TTFT measures the arrival of the first nonempty text delta. Each
-delta contains a finalized segment, so per-token arrival times are unavailable.
-The final event supplies the input and output token counts.
+benchmark. TTFT measures the arrival of the first nonempty text delta, and
+end-to-end latency includes the final event with the input and output token
+counts. Use `--percentile-metrics ttft,e2el` to see both. A run that includes
+diarized requests can report average token throughput, but segment boundaries
+do not provide the token timestamps needed for ITL, TPOT, peak token throughput,
+or the token timeline.
 
 - **Example 2: Qwen2-Audio**
 

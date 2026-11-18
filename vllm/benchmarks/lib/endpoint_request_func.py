@@ -789,7 +789,10 @@ async def async_request_openai_audio(
 
                                 if error := data.get("error"):
                                     stream_error = json.dumps(error)
-                                elif data.get("type") == "transcript.text.delta":
+                                elif (
+                                    diarized
+                                    and data.get("type") == "transcript.text.delta"
+                                ):
                                     if not (text := data["delta"]):
                                         continue
                                     if not first_chunk_received:
@@ -798,8 +801,12 @@ async def async_request_openai_audio(
                                     # Segment deltas do not expose inter-token times.
                                     generated_text += text
                                     most_recent_timestamp = timestamp
-                                elif data.get("type") == "transcript.text.done":
+                                elif (
+                                    diarized
+                                    and data.get("type") == "transcript.text.done"
+                                ):
                                     diarized_done = True
+                                    most_recent_timestamp = timestamp
                                     usage = data.get("usage") or {}
                                     if usage.get("type") == "tokens":
                                         output.prompt_len = usage["input_tokens"]

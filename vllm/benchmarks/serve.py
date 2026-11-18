@@ -373,7 +373,7 @@ class BenchmarkMetrics:
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
     # Max output tokens per second and concurrent requests at that peak
-    max_output_tokens_per_s: float
+    max_output_tokens_per_s: float | None
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
 
@@ -611,6 +611,7 @@ def calculate_metrics(
     tokenizer: TokenizerLike | None,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    token_timestamps_available: bool = True,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     """Calculate the metrics for the benchmark.
 
@@ -621,6 +622,7 @@ def calculate_metrics(
         tokenizer: The tokenizer to use.
         selected_percentiles: The percentiles to select.
         goodput_config_dict: The goodput configuration.
+        token_timestamps_available: Whether the stream exposes individual token times.
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
@@ -657,7 +659,7 @@ def calculate_metrics(
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
             tpot = 0.0
-            if output_len > 1:
+            if token_timestamps_available and output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
                 tpot = latency_minus_ttft / (output_len - 1)
                 tpots.append(tpot)
@@ -704,7 +706,7 @@ def calculate_metrics(
         )
 
     # Calculate max output tokens per second metric
-    max_output_tokens_per_s = 0.0
+    max_output_tokens_per_s = 0.0 if token_timestamps_available else None
     max_concurrent_requests = 0
 
     # Find the time range across all successful requests
@@ -728,6 +730,16 @@ def calculate_metrics(
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
         for output in successful_outputs:
+            request_start_second = int(output.start_time - min_start_time)
+            request_end_second = int(
+                (output.start_time + output.latency) - min_start_time
+            )
+            concurrent_requests_per_second[
+                request_start_second : request_end_second + 1
+            ] += 1
+
+            if not token_timestamps_available:
+                continue
             # Calculate token generation timestamp using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]
@@ -742,30 +754,23 @@ def calculate_metrics(
                 if 0 <= second_bucket < duration_seconds:
                     tokens_per_second[second_bucket] += 1
 
-            # Track concurrent requests for each second this request was active
-            request_start_second = int(output.start_time - min_start_time)
-            request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
-            )
-
-            for second in range(request_start_second, request_end_second + 1):
-                concurrent_requests_per_second[second] += 1
-
         # Find the maximum tokens per second and corresponding
         # concurrent requests
         if len(tokens_per_second) > 0:
-            max_output_tokens_per_s = float(np.max(tokens_per_second))
+            if token_timestamps_available:
+                max_output_tokens_per_s = float(np.max(tokens_per_second))
             max_concurrent_requests = int(np.max(concurrent_requests_per_second))
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
 
             fig = tpl.figure()
-            fig.plot(
-                np.arange(len(tokens_per_second)),
-                tokens_per_second,
-                title="Output tokens per second",
-            )
+            if token_timestamps_available:
+                fig.plot(
+                    np.arange(len(tokens_per_second)),
+                    tokens_per_second,
+                    title="Output tokens per second",
+                )
             fig.plot(
                 np.arange(len(concurrent_requests_per_second)),
                 concurrent_requests_per_second,
@@ -853,6 +858,21 @@ async def benchmark(
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     except KeyError:
         raise ValueError(f"Unknown backend: {endpoint_type}") from None
+
+    token_timestamps_available = not (
+        endpoint_type == "openai-audio"
+        and any(
+            (_merge_overrides(extra_body, req.request_overrides) or {}).get(
+                "response_format"
+            )
+            == "diarized_json"
+            for req in input_requests
+        )
+    )
+    if not token_timestamps_available and "tpot" in goodput_config_dict:
+        raise ValueError(
+            "TPOT goodput requires token timestamps; diarized streams emit segments."
+        )
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     # Use ssl_context if provided, otherwise default to True for https URLs
@@ -1218,6 +1238,7 @@ async def benchmark(
             tokenizer=tokenizer,
             selected_percentiles=selected_percentiles,
             goodput_config_dict=goodput_config_dict,
+            token_timestamps_available=token_timestamps_available,
         )
     else:
         metrics = calculate_metrics_for_embeddings(
@@ -1262,12 +1283,13 @@ async def benchmark(
                     "Output token throughput (tok/s):", metrics.output_throughput
                 )
             )
-            print(
-                "{:<40} {:<10.2f}".format(
-                    "Peak output token throughput (tok/s):",
-                    metrics.max_output_tokens_per_s,
+            if metrics.max_output_tokens_per_s is not None:
+                print(
+                    "{:<40} {:<10.2f}".format(
+                        "Peak output token throughput (tok/s):",
+                        metrics.max_output_tokens_per_s,
+                    )
                 )
-            )
         print(
             "{:<40} {:<10.2f}".format(
                 "Peak concurrent requests:", metrics.max_concurrent_requests
@@ -1446,8 +1468,11 @@ async def benchmark(
 
     if task_type == TaskType.GENERATION and tokenizer:
         process_one_metric("ttft", "TTFT", "Time to First Token")
-        process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
-        process_one_metric("itl", "ITL", "Inter-token Latency")
+        if token_timestamps_available:
+            process_one_metric(
+                "tpot", "TPOT", "Time per Output Token (excl. 1st token)"
+            )
+            process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
     if queue_times is not None:
         process_one_metric(
@@ -2358,8 +2383,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Compute file_name once before using it for plots or saving results
     file_name = compute_result_filename(args, model_id, label, current_dt)
 
-    # Generate timeline plot if requested
-    if args.plot_timeline:
+    # The timeline colors each token interval by its latency.
+    if (
+        args.plot_timeline
+        and benchmark_result.get("max_output_tokens_per_s", 0) is None
+    ):
+        warnings.warn(
+            "Skipping token timeline: diarized streams emit whole segments.",
+            stacklevel=2,
+        )
+    elif args.plot_timeline:
         assert file_name is not None, (
             "file_name must be set when plot_timeline is enabled"
         )
