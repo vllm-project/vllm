@@ -407,7 +407,6 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
         device = self.conv1.weight.device
         dtype = self.conv1.weight.dtype
         input_features = input_features.to(device=device, dtype=dtype)
-        audio_feature_lengths = audio_feature_lengths.to(device=device)
         batch_size = self.max_encoder_batch or input_features.shape[0]
         encoded_parts: list[torch.Tensor] = []
 
@@ -418,8 +417,8 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
 
         hidden = torch.cat(encoded_parts, dim=0)
         chunks = [
-            hidden[idx : idx + 1, : int(token_len.item()) * self.audio_merge_size]
-            for idx, token_len in enumerate(audio_feature_lengths)
+            hidden[idx : idx + 1, : token_len * self.audio_merge_size]
+            for idx, token_len in enumerate(audio_feature_lengths.tolist())
         ]
         return torch.cat(chunks, dim=1)
 
@@ -454,6 +453,7 @@ def _mtd_field_config(
             audio_feature_lengths=MultiModalFieldConfig.flat_from_sizes(
                 "audio",
                 audio_chunk_counts,
+                keep_on_cpu=True,
             ),
             audio_chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_token_lengths=MultiModalFieldConfig.batched(
