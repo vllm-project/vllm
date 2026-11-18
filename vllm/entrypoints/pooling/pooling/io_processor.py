@@ -81,7 +81,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         ]
         num_requests = len(parsed_prompts)
 
-        tok_params = ctx.request.build_tok_params(self.model_config)
+        tok_params = ctx.request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
 
         pooling_params = self.io_processor.merge_pooling_params()
         if pooling_params.task is None:

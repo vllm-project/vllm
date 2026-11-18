@@ -6,6 +6,7 @@ rotation of linear-layer inputs."""
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
@@ -268,6 +269,8 @@ def _online_mxfp4(
     ids=["emulation", "aiter-triton", "aiter-asm"],
 )
 @pytest.mark.parametrize("num_tokens", [16, 256])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_hadamard(
     kernel_cls,
     input_size,
@@ -275,7 +278,6 @@ def test_online_mxfp4_hadamard(
     fused,
     num_tokens,
     default_vllm_config,
-    dist_init,
     monkeypatch,
 ):
     """The rotated layer computes the same GEMM with less MXFP4 error, and
