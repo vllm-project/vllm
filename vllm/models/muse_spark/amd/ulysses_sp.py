@@ -67,14 +67,6 @@ def _enabled_option(vllm_config: VllmConfig) -> bool:
     return value
 
 
-def _on_gfx950() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx950
-
-    return on_gfx950()
-
-
 def _eager_min_tokens(vllm_config: VllmConfig, min_tokens: int) -> int:
     """The smallest step of at least `min_tokens` tokens that runs eagerly: graph
     replays never take the Ulysses path, and piecewise graphs cover the mixed
@@ -128,7 +120,12 @@ def ulysses_prefill_enabled(
             vllm_config.scheduler_config.max_num_batched_tokens,
         )
         return False
-    if not (_on_gfx950() and rocm_aiter_ops.is_enabled()):
+    supported = current_platform.is_rocm()
+    if supported:
+        from vllm.platforms.rocm import on_gfx950
+
+        supported = on_gfx950() and rocm_aiter_ops.is_enabled()
+    if not supported:
         raise ValueError(
             "Muse Spark ulysses_prefill needs a gfx950 GPU with AITER "
             "(VLLM_ROCM_USE_AITER=1)."
