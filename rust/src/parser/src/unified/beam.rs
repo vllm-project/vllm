@@ -50,7 +50,8 @@ use super::{
     UnifiedParserOutput,
 };
 use crate::output_grammar::arguments::{
-    self, ArgumentOptions, ArgumentSyntax, JsonType, ParameterKey, Parameters, ValueOption, one_of,
+    self, ArgumentOptions, ArgumentSyntax, JsonType, ParameterKey, Parameters, ToolGrammarBudget,
+    ValueOption, one_of,
 };
 use crate::output_grammar::{
     self, BuiltOutputGrammar, OutputGrammarContext, tool_grammar_applies, tool_params,
@@ -235,15 +236,19 @@ fn build_output_grammar(
         });
     }
 
+    let mut budget = ToolGrammarBudget::default();
     let mut calls = function_tools
         .iter()
         .map(|tool| {
             let header =
                 Format::const_string(format!(" to={}{CALL_HEADER_END}", tool.function.name));
             let schema = tool.function.parameters.clone().unwrap_or(Value::Bool(true));
-            Format::sequence(vec![header, arguments(&schema, lenient)])
+            Ok(Format::sequence(vec![
+                header,
+                arguments(&schema, lenient, &mut budget)?,
+            ]))
         })
-        .collect::<Vec<_>>();
+        .collect::<output_grammar::Result<Vec<_>>>()?;
     if matches!(choice, BuilderToolChoice::Auto) {
         let names = ctx.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
         let header = Format::sequence(vec![
@@ -253,7 +258,7 @@ fn build_output_grammar(
         ]);
         calls.push(Format::sequence(vec![
             header,
-            arguments(&Value::Bool(true), lenient),
+            arguments(&Value::Bool(true), lenient, &mut budget)?,
         ]));
     }
     let call = one_of(calls);
@@ -293,17 +298,22 @@ fn answer_rest(format: Option<&Format>) -> Vec<Format> {
 /// The arguments under `schema`: its declared parameters in declared or
 /// alphabetical order, required ones mandatory, then any additional ones. If
 /// `lenient`, each value but the last may end by opening the next parameter.
-fn arguments(schema: &Value, lenient: bool) -> Format {
+fn arguments(
+    schema: &Value,
+    lenient: bool,
+    budget: &mut ToolGrammarBudget,
+) -> output_grammar::Result<Format> {
     let options = ArgumentOptions {
         excludes: CALL_TERMINATORS.map(str::to_string).to_vec(),
         ..ArgumentOptions::default()
     };
-    let render = |syntax: BeamArguments| arguments::parameters(schema, &syntax, &options);
-    if lenient {
-        lenient_arguments(render(BeamArguments::Joined), render(BeamArguments::Last))
+    let mut render =
+        |syntax: BeamArguments| arguments::parameters(schema, &syntax, &options, budget);
+    Ok(if lenient {
+        lenient_arguments(render(BeamArguments::Joined)?, render(BeamArguments::Last)?)
     } else {
-        closed_arguments(render(BeamArguments::Closed))
-    }
+        closed_arguments(render(BeamArguments::Closed)?)
+    })
 }
 
 /// Arguments whose values all end with a closer.

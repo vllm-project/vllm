@@ -32,6 +32,7 @@ use super::{
     CLOSE, END_OF_MSG, KimiK3Mode, MESSAGE_CLOSE, OPEN, RESPONSE_CLOSE, RESPONSE_OPEN, THINK_CLOSE,
     THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
 };
+use crate::output_grammar::arguments::ToolGrammarBudget;
 use crate::output_grammar::{
     self, BuiltOutputGrammar, OutputGrammarContext, normalize_tool_choice,
 };
@@ -47,26 +48,27 @@ pub(super) fn build_output_grammar(
     if normalized.is_none() && ctx.answer.is_none() {
         return Ok(None);
     }
-    let calls = normalized.map(
-        |NormalizedToolChoice {
-             function_tools,
-             choice,
-             ..
-         }| {
-            let single_call = choice == BuilderToolChoice::Forced || !ctx.parallel_tool_calls;
-            let tools = Format::tag(
-                TOOLS_OPEN,
-                Format::tags_with_separator(
-                    function_tools.iter().map(call_tag).collect(),
-                    "",
-                    true,
-                    single_call,
-                ),
-                TOOLS_CLOSE,
-            );
-            (choice, tools)
-        },
-    );
+    let calls = if let Some(NormalizedToolChoice {
+        function_tools,
+        choice,
+        ..
+    }) = normalized
+    {
+        let single_call = choice == BuilderToolChoice::Forced || !ctx.parallel_tool_calls;
+        let mut budget = ToolGrammarBudget::default();
+        let tags = function_tools
+            .iter()
+            .map(|tool| call_tag(tool, &mut budget))
+            .collect::<output_grammar::Result<Vec<_>>>()?;
+        let tools = Format::tag(
+            TOOLS_OPEN,
+            Format::tags_with_separator(tags, "", true, single_call),
+            TOOLS_CLOSE,
+        );
+        Some((choice, tools))
+    } else {
+        None
+    };
     let answer = ctx.answer;
 
     let mut elements = match mode {
