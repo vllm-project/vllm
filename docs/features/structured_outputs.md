@@ -156,6 +156,10 @@ difficult to use, but it's really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
+Lark grammars accepted by the xgrammar backend are limited to 64 KiB and must
+compile within the configured `VLLM_REGEX_COMPILATION_TIMEOUT_S` (5 seconds by
+default). Oversized or slow-to-compile grammars are rejected.
+
 ??? code
 
     ```python

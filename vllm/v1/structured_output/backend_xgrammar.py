@@ -33,6 +33,15 @@ else:
 
 logger = init_logger(__name__)
 
+_MAX_LARK_GRAMMAR_SIZE = 64 * 1024
+
+
+def _validate_lark_grammar_size(grammar: str) -> None:
+    if len(grammar.encode("utf-8")) > _MAX_LARK_GRAMMAR_SIZE:
+        raise ValueError(
+            f"Lark grammar exceeds the maximum size of {_MAX_LARK_GRAMMAR_SIZE} bytes"
+        )
+
 
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
@@ -156,7 +165,11 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             if grammar_is_likely_lark(grammar_spec):
-                ctx = self.full_vocab_compiler.compile_lark(grammar_spec)
+                _validate_lark_grammar_size(grammar_spec)
+                ctx = compile_regex_with_timeout(
+                    lambda grammar: self.full_vocab_compiler.compile_lark(grammar),
+                    grammar_spec,
+                )
             else:
                 ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -551,7 +564,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         # but don't compile it. The grammar is passed on unchanged.
         try:
             if grammar_is_likely_lark(so_params.grammar):
-                xgr.Grammar.from_lark(so_params.grammar)
+                _validate_lark_grammar_size(so_params.grammar)
+                compile_regex_with_timeout(xgr.Grammar.from_lark, so_params.grammar)
             else:
                 xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
