@@ -196,6 +196,12 @@ def _topk_topp_kernel(
                     write_pos = tl.where(outlier_mask, cumulative_pos, -1)
                     tl.store(BUFFER_ROW + write_pos, logits_blk, mask=outlier_mask)
 
+                # The compacted outliers are written by one thread and read
+                # back by another. The implicit barriers in tl.sum only fence
+                # shared memory on some backends (e.g. Intel XPU), so fence
+                # global memory before the search reads BUFFER_ROW.
+                tl.debug_barrier()
+
                 # If no finite logits exist (all -inf), clamp min to
                 # max so the search converges to -inf (no masking).
                 min_logit = tl.minimum(min_logit, max_logit)
@@ -508,6 +514,8 @@ def _topk_topp_kernel(
                                 tl.store(
                                     BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask
                                 )
+                            # Make the compacted outliers visible to all threads.
+                            tl.debug_barrier()
 
                             search_range = tl.cast(num_outliers_2, tl.int32)
                             search_iters = tl.cast(
@@ -697,6 +705,9 @@ def _topk_topp_kernel(
                     num_outliers += tl.sum(outlier_mask)
                     write_pos = tl.where(outlier_mask, cumulative_pos, -1)
                     tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
+
+                # Make the compacted outliers visible to all threads.
+                tl.debug_barrier()
 
                 max_range = tl.exp(max_logit - max_sample) / sum_exp_logits
                 min_range = tl.exp(min_logit - max_sample) / sum_exp_logits
