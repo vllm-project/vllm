@@ -16,7 +16,9 @@ reason about temporal order.
 
 import itertools
 import math
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
+from functools import cached_property
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -102,6 +104,7 @@ from .vision import (
 )
 
 if TYPE_CHECKING:
+    from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
     from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -960,118 +963,67 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 # ---------------------------------------------------------------------------
 
 
-class _Gemma4AudioLoRABatch:
-    """Pack batch-added padding out of audio LoRA projections.
+@contextmanager
+def _pack_audio_lora_rows(
+    layers: Sequence[tuple[str, "ReplicatedLinearWithLoRA"]],
+    features: torch.Tensor | list[torch.Tensor],
+) -> Iterator[None]:
+    if not layers:
+        yield
+        return
 
-    The runner maps each clip's original frames to its adapter, whereas the
-    audio tower pads clips to the longest one. Packing only the linear layers
-    preserves the tower's dense attention/convolution layout and checkpoint
-    names. Causal convolutions and masked attention cannot propagate the
-    restored right-padding into valid frames.
-    """
+    assert all(feature.ndim == 2 for feature in features)
+    lengths = [(feature.shape[0] + 3) // 4 for feature in features]
+    rows = sum(lengths)
+    for wrapper in {layer.punica_wrapper for _, layer in layers}:
+        if wrapper.indices_len[0] is not None and (
+            wrapper.token_lora_indices.numel() != rows
+            or wrapper.sampler_indices.numel() != len(lengths)
+        ):
+            raise ValueError(
+                "Gemma 4 requires an adapter mapping for this audio batch only."
+            )
 
-    def __init__(self) -> None:
-        self.row_indices: torch.Tensor | None = None
-        self.clip_starts: torch.Tensor | None = None
-        self.shape: tuple[int, int] | None = None
-        self._installed = False
-        self._punica_wrappers: list[Any] = []
+    stride = max(lengths)
+    if min(lengths) == stride:
+        yield
+        return
 
-    def install(
-        self, audio_tower: nn.Module, embed_audio: nn.Module, manager_ready: bool
-    ) -> None:
-        if self._installed:
-            return
-        from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
+    # Only remove padding introduced by batching. Intrinsic masked frames
+    # still have entries in the runner's adapter mapping.
+    indices = async_tensor_h2d(
+        [i * stride + j for i, length in enumerate(lengths) for j in range(length)],
+        device=features[0].device,
+        dtype=torch.long,
+    )
 
-        for root in (audio_tower, embed_audio):
-            for name, module in root.named_modules():
-                if not isinstance(module, ReplicatedLinearWithLoRA):
-                    continue
-                if module.punica_wrapper not in self._punica_wrappers:
-                    self._punica_wrappers.append(module.punica_wrapper)
-                if name.endswith("relative_k_proj"):
-                    continue
-                module.register_forward_pre_hook(self._pack)
-                module.register_forward_hook(self._unpack)
-        # A profiling call before adapter installation must not prevent hooks
-        # being installed on the actual LoRA wrappers later.
-        self._installed = bool(self._punica_wrappers) or manager_ready
-
-    def prepare(self, lengths: list[int], device: torch.device) -> None:
-        rows = sum(lengths)
-        for wrapper in self._punica_wrappers:
-            if wrapper.indices_len[0] is not None and (
-                wrapper.token_lora_indices.numel() != rows
-            ):
-                raise ValueError(
-                    "Gemma 4 audio LoRA requires an adapter mapping for this "
-                    "audio batch only; mixed-modality encoder batches are "
-                    "not supported by the current model runner."
-                )
-        batch_size, stride = len(lengths), max(lengths)
-        self.shape = (batch_size, stride)
-        if min(lengths) == stride:
-            return
-        self.clip_starts = async_tensor_h2d(
-            list(itertools.accumulate([0, *lengths[:-1]])),
-            device=device,
-            dtype=torch.long,
-        )
-        self.row_indices = async_tensor_h2d(
-            [i * stride + j for i, length in enumerate(lengths) for j in range(length)],
-            device=device,
-            dtype=torch.long,
-        )
-
-    def clear(self) -> None:
-        self.row_indices = None
-        self.clip_starts = None
-        self.shape = None
-
-    def _pack(
-        self, module: nn.Module, args: tuple[torch.Tensor]
-    ) -> tuple[torch.Tensor] | None:
-        if self.row_indices is None:
-            return None
+    def pack(module, args):
         (inputs,) = args
-        assert inputs.shape[:2] == self.shape and inputs.ndim == 3
-        return (inputs.flatten(0, 1).index_select(0, self.row_indices),)
+        assert inputs.ndim == 3 and inputs.shape[:2] == (len(lengths), stride)
+        return (inputs.flatten(0, 1).index_select(0, indices),)
 
-    def _unpack(
-        self,
-        module: nn.Module,
-        args: tuple[torch.Tensor],
-        output: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        if self.row_indices is None:
-            return output
+    def unpack(module, args, output):
         projected = output[0] if isinstance(output, tuple) else output
-        assert self.shape is not None
-        batch_size, stride = self.shape
-        padded = projected.new_zeros(batch_size * stride, projected.shape[-1])
-        padded.index_copy_(0, self.row_indices, projected)
-        padded = padded.view(batch_size, stride, -1)
+        padded = projected.new_zeros(len(lengths) * stride, projected.shape[-1])
+        padded.index_copy_(0, indices, projected)
+        padded = padded.view(len(lengths), stride, -1)
         return (padded, output[1]) if isinstance(output, tuple) else padded
+
+    with ExitStack() as hooks:
+        for name, layer in layers:
+            if not name.endswith("relative_k_proj"):
+                hooks.enter_context(layer.register_forward_pre_hook(pack))
+                hooks.enter_context(layer.register_forward_hook(unpack, prepend=True))
+        yield
 
 
 class _Gemma4AudioAttentionWithLoRA(Gemma4AudioAttention):
-    def __init__(
-        self,
-        config: Gemma4AudioConfig,
-        layer_idx: int,
-        lora_batch: "_Gemma4AudioLoRABatch | None" = None,
-    ):
-        super().__init__(config, layer_idx)
-        self._lora_batch = lora_batch
-
     # Adapted from Transformers v5.22.2 Gemma4AudioAttention.
     # Copyright 2026 The HuggingFace Team. Apache License, Version 2.0.
     def _project_relative_keys(
         self,
         position_embeddings: torch.Tensor,
         batch_size: int,
-        seq_length: int,
     ) -> torch.Tensor:
         relative_proj = self.relative_k_proj
         # Positions are shared, but their learned projection belongs to each
@@ -1079,18 +1031,11 @@ class _Gemma4AudioAttentionWithLoRA(Gemma4AudioAttention):
         relative_keys = relative_proj.base_layer(position_embeddings)
         relative_keys = relative_keys.expand(batch_size, -1, -1)
         wrapper = relative_proj.punica_wrapper
-        if wrapper.indices_len[0] is not None:
-            indices = wrapper.token_lora_indices
-            starts = (
-                self._lora_batch.clip_starts if self._lora_batch is not None else None
-            )
-            if starts is None:
-                assert indices.numel() == batch_size * seq_length, (
-                    "Gemma 4 audio adapter mapping must cover every clip's frames"
-                )
-                slots = indices.reshape(batch_size, seq_length)[:, 0]
-            else:
-                slots = indices.index_select(0, starts)
+        if wrapper.indices_len[1] is not None:
+            # The encoder runner supplies one prompt mapping entry per audio item.
+            slots = wrapper.sampler_indices
+            if slots.numel() != batch_size:
+                raise ValueError("Expected one Gemma 4 audio adapter slot per clip.")
             safe_slots = slots.clamp_min(0)
             lora_a = relative_proj.lora_a_stacked[0][safe_slots, 0]
             lora_b = relative_proj.lora_b_stacked[0][safe_slots, 0]
@@ -1124,9 +1069,7 @@ class _Gemma4AudioAttentionWithLoRA(Gemma4AudioAttention):
         value_states = self._extract_block_context(value_states)
         num_blocks = query_states.shape[1]
 
-        relative_keys = self._project_relative_keys(
-            position_embeddings, batch_size, seq_length
-        )
+        relative_keys = self._project_relative_keys(position_embeddings, batch_size)
         relative_keys = relative_keys.view(
             batch_size, -1, self.num_heads, self.head_dim
         ).to(query_states.dtype)
@@ -1291,9 +1234,6 @@ class Gemma4ForConditionalGeneration(
         self._enable_mm_lora = bool(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
-        self._audio_lora_batch = (
-            _Gemma4AudioLoRABatch() if self._enable_mm_lora else None
-        )
         self.use_data_parallel = bool(
             multimodal_config is not None
             and getattr(multimodal_config, "mm_encoder_tp_mode", None) == "data"
@@ -1327,12 +1267,11 @@ class Gemma4ForConditionalGeneration(
             )
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = AutoModel.from_config(config=config.audio_config)
-                if self._audio_lora_batch is not None:
+                if self._enable_mm_lora:
                     for layer in self.audio_tower.layers:
                         layer.self_attn = _Gemma4AudioAttentionWithLoRA(
                             config.audio_config,
                             layer.self_attn.layer_idx,
-                            self._audio_lora_batch,
                         )
                 # AutoModel.from_config does NOT call post_init(),
                 # which is needed to initialize buffers that are absent
@@ -1981,6 +1920,18 @@ class Gemma4ForConditionalGeneration(
     # Audio processing
     # ------------------------------------------------------------------ #
 
+    @cached_property
+    def _audio_lora_layers(self) -> list[tuple[str, "ReplicatedLinearWithLoRA"]]:
+        from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
+
+        assert self.audio_tower is not None and self.embed_audio is not None
+        return [
+            (name, layer)
+            for root in (self.audio_tower, self.embed_audio)
+            for name, layer in root.named_modules()
+            if isinstance(layer, ReplicatedLinearWithLoRA)
+        ]
+
     def _process_audio_input(
         self,
         audio_input: Gemma4AudioInputs,
@@ -1992,31 +1943,16 @@ class Gemma4ForConditionalGeneration(
 
         assert self.audio_tower is not None
         assert self.embed_audio is not None
-        lora_batch = self._audio_lora_batch
-        if lora_batch is not None:
-            lora_batch.install(
-                self.audio_tower, self.embed_audio, self.lora_manager is not None
-            )
-            features = audio_input["input_features_padded"]
-            assert all(feature.ndim == 2 for feature in features)
-            lora_batch.prepare(
-                [(feature.shape[-2] + 3) // 4 for feature in features],
-                input_features.device,
-            )
-        try:
-            # Run audio tower — mask convention: True=valid, False=padding.
-            audio_outputs = self.audio_tower(input_features, input_features_mask)
-            if isinstance(audio_outputs, tuple):
-                audio_encodings, audio_mask = audio_outputs
-            else:
-                audio_encodings = audio_outputs.last_hidden_state
-                audio_mask = audio_outputs.attention_mask
+        # Run audio tower — mask convention: True=valid, False=padding.
+        audio_outputs = self.audio_tower(input_features, input_features_mask)
+        if isinstance(audio_outputs, tuple):
+            audio_encodings, audio_mask = audio_outputs
+        else:
+            audio_encodings = audio_outputs.last_hidden_state
+            audio_mask = audio_outputs.attention_mask
 
-            # Project into LM embedding space.
-            audio_features = self.embed_audio(inputs_embeds=audio_encodings)
-        finally:
-            if lora_batch is not None:
-                lora_batch.clear()
+        # Project into LM embedding space.
+        audio_features = self.embed_audio(inputs_embeds=audio_encodings)
 
         # Strip padding per-batch element: only keep valid (non-padding)
         # tokens.
@@ -2051,9 +1987,18 @@ class Gemma4ForConditionalGeneration(
                 )
             elif modality == "audio":
                 assert isinstance(multimodal_input, Gemma4AudioInputs)
-                multimodal_embeddings.extend(
-                    self._process_audio_input(multimodal_input)
+                # The manager installs LoRA layers after model construction.
+                layers = (
+                    self._audio_lora_layers
+                    if self._enable_mm_lora and self.lora_manager is not None
+                    else ()
                 )
+                with _pack_audio_lora_rows(
+                    layers, multimodal_input["input_features_padded"]
+                ):
+                    multimodal_embeddings.extend(
+                        self._process_audio_input(multimodal_input)
+                    )
 
         return multimodal_embeddings
 

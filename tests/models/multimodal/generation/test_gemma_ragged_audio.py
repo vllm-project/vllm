@@ -12,6 +12,8 @@ from tests.models.utils import check_logprobs_close
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.platforms import current_platform
 
 MODELS = {
     "Gemma3nForConditionalGeneration": "google/gemma-3n-E2B-it",
@@ -249,3 +251,139 @@ def test_ragged_audio_with_different_adapters(
                     name_0="batched audio",
                     name_1="single audio",
                 )
+
+
+def _gemma4_audio_lora_layer(base, lengths, dtype):
+    from vllm.config.lora import LoRAConfig
+    from vllm.lora.layers import LoRAMapping, ReplicatedLinearWithLoRA
+    from vllm.lora.punica_wrapper import get_punica_wrapper
+
+    config = LoRAConfig(max_loras=2, max_lora_rank=8, lora_dtype=dtype)
+    layer = ReplicatedLinearWithLoRA(base)
+    layer.create_lora_weights(2, config)
+    ids = [1, 0, 2]
+    tokens = [adapter for adapter, n in zip(ids, lengths) for _ in range(n)]
+    wrapper = get_punica_wrapper(
+        len(tokens), len(ids), base.weight.device, lora_config=config
+    )
+    wrapper.update_metadata(LoRAMapping(tokens, ids, is_prefill=True), [1, 2], 3, 64)
+    layer.set_mapping(wrapper)
+    for slot in range(2):
+        layer.set_lora(
+            slot,
+            torch.randn(8, base.input_size, dtype=dtype) / 8,
+            torch.randn(base.output_size, 8, dtype=dtype) / 4,
+        )
+    return layer
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA/ROCm audio adapters"
+)
+@pytest.mark.parametrize("seq_length", [3, 25])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("boolean_mask", [False, True])
+def test_gemma4_relative_positions_use_each_clips_adapter(
+    default_vllm_config, dist_init, seq_length, dtype, boolean_mask
+):
+    from transformers.models.gemma4 import Gemma4AudioConfig
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4AudioAttention
+
+    from vllm.model_executor.models.gemma4_mm import _Gemma4AudioAttentionWithLoRA
+
+    torch.manual_seed(0)
+    config = Gemma4AudioConfig(
+        hidden_size=64,
+        num_attention_heads=4,
+        attention_chunk_size=8,
+        attention_context_left=16,
+        attention_context_right=0,
+        use_clipped_linears=False,
+    )
+    with torch.device("cuda"), torch.inference_mode():
+        reference = Gemma4AudioAttention(config, 0).to(dtype)
+        attention = _Gemma4AudioAttentionWithLoRA(config, 0).to(dtype)
+        attention.load_state_dict(reference.state_dict())
+        hidden = torch.randn(3, seq_length, 64, dtype=dtype)
+        positions = torch.randn(1, attention.context_size // 2 + 1, 64, dtype=dtype)
+        expected_base, weights = reference(hidden, positions)
+        torch.testing.assert_close(attention(hidden, positions)[0], expected_base)
+        base = ReplicatedLinear(
+            64, 64, bias=False, return_bias=False, params_dtype=dtype, disable_tp=True
+        )
+        base.weight.copy_(reference.relative_k_proj.weight)
+        lengths = [seq_length, min(seq_length, 12), seq_length]
+        layer = _gemma4_audio_lora_layer(base, lengths, dtype)
+        attention.relative_k_proj = layer
+        mask = (
+            torch.ones_like(weights[:, :1], dtype=torch.bool)
+            if boolean_mask
+            else torch.zeros_like(weights[:, :1])
+        )
+        actual, actual_weights = attention(hidden, positions, mask)
+        tol = 2e-2 if dtype == torch.bfloat16 else 1e-5
+        for i, slot in enumerate((0, None, 1)):
+            weight = base.weight.float()
+            if slot is not None:
+                a = layer.lora_a_stacked[0][slot, 0].float()
+                b = layer.lora_b_stacked[0][slot, 0].float()
+                weight = weight + b @ a
+            reference.relative_k_proj.weight.copy_(weight)
+            expected, weights = reference(hidden[i : i + 1], positions)
+            torch.testing.assert_close(actual[i : i + 1], expected, rtol=tol, atol=tol)
+            torch.testing.assert_close(
+                actual_weights[i : i + 1], weights, rtol=tol, atol=tol
+            )
+        torch.testing.assert_close(actual[1], expected_base[1], rtol=0, atol=0)
+        assert not torch.allclose(actual[0], expected_base[0], rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA/ROCm audio adapters"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("lengths", [[3, 1, 5], [3, 3, 3]])
+def test_gemma4_audio_lora_packing_preserves_each_clips_rows(
+    default_vllm_config, dist_init, dtype, lengths
+):
+    from vllm.model_executor.models.gemma4_mm import _pack_audio_lora_rows
+
+    torch.manual_seed(0)
+    with torch.device("cuda"), torch.inference_mode():
+        base = ReplicatedLinear(
+            64,
+            32,
+            bias=True,
+            return_bias=True,
+            skip_bias_add=True,
+            params_dtype=dtype,
+            disable_tp=True,
+        )
+        base.weight.normal_(std=0.1)
+        layer = _gemma4_audio_lora_layer(base, lengths, dtype)
+        layers = [("linear", layer)]
+        features = [torch.empty(n * 4, 2) for n in lengths]
+        inputs = torch.randn(3, max(lengths), 64, dtype=dtype)
+        packed = torch.cat([x[:n] for x, n in zip(inputs, lengths)])
+        expected, bias = layer(packed)
+        observed = []
+        with (
+            layer.register_forward_hook(
+                lambda mod, args, out: observed.append(out[0].shape)
+            ),
+            _pack_audio_lora_rows(layers, features),
+        ):
+            actual, actual_bias = layer(inputs)
+        assert observed == [actual.shape]
+        for row, target, n in zip(actual, expected.split(lengths), lengths):
+            torch.testing.assert_close(row[:n], target, rtol=0, atol=0)
+            assert torch.count_nonzero(row[n:]) == 0
+        assert actual_bias is bias
+        torch.testing.assert_close(layer(packed)[0], expected, rtol=0, atol=0)
+        with (
+            pytest.raises(ValueError, match="audio batch only"),
+            _pack_audio_lora_rows(layers, features[:2]),
+        ):
+            pytest.fail("Mismatched mapping reached the encoder")
