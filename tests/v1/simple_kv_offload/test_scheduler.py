@@ -180,12 +180,7 @@ def _make_scratch_kv_cache_config(
 
 def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     """Minimal VllmConfig for scheduler tests (no GPU)."""
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
         max_num_batched_tokens=64,
@@ -211,7 +206,7 @@ def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerFixture:
     """Bundle returned by make_scheduler for convenient access."""
 
