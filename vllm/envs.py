@@ -181,6 +181,7 @@ if TYPE_CHECKING:
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_WEIGHT_SNAPSHOT_DIR: str | None = None
+    VLLM_WEIGHT_SNAPSHOT_AUDIT: bool = False
     VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS: str = ""
     VLLM_WEIGHT_SNAPSHOT_CLEAR: bool = False
     VLLM_WEIGHT_SNAPSHOT_REBUILD: bool = False
@@ -1609,6 +1610,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # parallel sizes, speculative config, GPU capability and torch/CUDA/vLLM
     # versions, so they can be copied to another server with the same setup.
     "VLLM_WEIGHT_SNAPSHOT_DIR": lambda: os.getenv("VLLM_WEIGHT_SNAPSHOT_DIR"),
+    # After a weight snapshot restore, log the live CUDA storages the snapshot
+    # did not cover (to find state a model keeps outside module attributes).
+    "VLLM_WEIGHT_SNAPSHOT_AUDIT": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_SNAPSHOT_AUDIT", "0"))
+    ),
     # Comma-separated "module:function" list of pure weight-preparation
     # functions called during process_weights_after_loading whose output the
     # snapshot overwrites anyway. A save records their output shapes; a
@@ -2596,6 +2602,7 @@ def compile_factors() -> dict[str, object]:
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_WEIGHT_SNAPSHOT_DIR",
+        "VLLM_WEIGHT_SNAPSHOT_AUDIT",
         "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS",
         "VLLM_WEIGHT_SNAPSHOT_CLEAR",
         "VLLM_WEIGHT_SNAPSHOT_REBUILD",
