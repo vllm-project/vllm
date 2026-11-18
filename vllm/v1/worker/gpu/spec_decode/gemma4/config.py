@@ -4,6 +4,7 @@ from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 
 
 class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
+    uses_only_target_kv_for_context = True
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.gemma4.speculator.Gemma4Speculator"
     )

@@ -644,13 +644,14 @@ class SpeculativeConfig:
     confidence. Currently only supported for method="dspark"."""
 
     prefill_context_kv_only: bool = False
-    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
-    to only store the drafter's context K/V, which the decode instance reads:
-    no drafts, no lookahead KV slots, and, for draft models that support it,
-    the draft weights only drafting reads are freed. Requests that decode there
-    run without speculation. Keep the rest of the speculative config as on the
-    decode instance; adaptive verification and dynamic speculative decoding are
-    turned off."""
+    """On a P/D prefill instance, prepare only the context needed by the
+    decode instance. DFlash-based speculators store their context K/V and
+    can release weights used only for drafting. Speculators that read all
+    prompt K/V from the target (e.g. Gemma 4 assistants) need only the
+    drafter's config: the worker runs the target alone. Both modes use Model
+    Runner V2, reserve no draft lookahead slots and run local decoding without
+    speculation. Keep the remaining speculative config the same on both
+    instances."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1489,7 +1490,10 @@ class SpeculativeConfig:
         config_cls.apply_options(self)
 
         if self.prefill_context_kv_only:
-            if not config_cls.projects_context_kv:
+            if not (
+                config_cls.projects_context_kv
+                or config_cls.uses_only_target_kv_for_context
+            ):
                 raise ValueError(
                     "prefill_context_kv_only is not supported with speculative "
                     f"method {self.custom_method or self.method!r}."

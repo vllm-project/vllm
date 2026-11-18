@@ -323,7 +323,12 @@ class Scheduler(SchedulerInterface):
             self.ec_connector.bind_encoder_cache_query(
                 self.encoder_cache_manager.get_cached_num_encoder_embeds
             )
-        speculative_config = vllm_config.speculative_config
+        speculative_config = vllm_config.runner_speculative_config
+        self.max_num_new_slots_for_drafting = (
+            speculative_config.max_num_new_slots_for_drafting
+            if speculative_config is not None
+            else 0
+        )
         self.num_spec_tokens = vllm_config.num_scheduled_spec_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
@@ -726,8 +731,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        spec = self.vllm_config.speculative_config
-        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        draft_slots = self.max_num_new_slots_for_drafting
         input_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.

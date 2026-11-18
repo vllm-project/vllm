@@ -138,6 +138,17 @@ A preempted request's slot is freed without a hook, and the request is added
 again when it resumes, so keep such state per slot and reset it in
 `add_request`.
 
+If the target's transferable KV cache contains all persistent prompt state
+your drafter needs, set `uses_only_target_kv_for_context = True` on its
+`SpeculatorConfig` subclass. Gemma 4 assistants use this capability.
+With `prefill_context_kv_only=true` on the KV producer, the worker reads the
+drafter's config but runs the target alone and loads no drafter weights. The
+decode worker can still use its target step's outputs and reserve temporary
+draft slots. Drafters that build their own prompt K/V must supply that K/V on
+prefill. Transient target state, such as a sparse-index snapshot from the last
+target step, is not part of the KV cache; a drafter that needs it must rebuild
+it on decode before its first proposal.
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON
