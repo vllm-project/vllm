@@ -364,6 +364,15 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
+#################### CSRC BUILD INPUTS ####################
+# What setup.py reads of pyproject.toml and vllm/envs.py (see
+# tools/csrc_build_inputs.py). COPY --from keys on content, so a new runtime env
+# var or a lint rule no longer recompiles every CUDA kernel.
+FROM base AS csrc-inputs
+COPY setup.py pyproject.toml vllm/envs.py tools/csrc_build_inputs.py /in/
+RUN python3 /in/csrc_build_inputs.py /in /out
+#################### CSRC BUILD INPUTS ####################
+
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
 
@@ -409,12 +418,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 
 WORKDIR /workspace
 
-COPY pyproject.toml setup.py CMakeLists.txt ./
+COPY setup.py CMakeLists.txt ./
+COPY --from=csrc-inputs /out/ ./
 COPY tools/build_rust.py tools/build_rust.py
 COPY cmake cmake/
 COPY csrc csrc/
-COPY vllm/envs.py vllm/envs.py
-COPY vllm/__init__.py vllm/__init__.py
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
