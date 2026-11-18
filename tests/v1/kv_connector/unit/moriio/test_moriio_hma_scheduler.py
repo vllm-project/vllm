@@ -20,6 +20,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import zmq
 
 from vllm import SamplingParams
 from vllm.utils.hashing import sha256
@@ -1347,6 +1348,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
             register_local_tensor=lambda _t: b"m",
             get_agent_metadata=lambda: b"a",
             async_wait_reqid=lambda: None,
+            shutdown=lambda: None,
         ),
         world_size=1,
         layer_to_spec={},
@@ -1427,9 +1429,17 @@ def test_register_kv_caches_fails_when_handshake_port_is_taken():
     caches = {"layer0": backing[:2048].view(torch.float16).view(2, 4, 16, 1, 8)}
     geoms = {"layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False)}
     worker = _make_register_worker(caches, geoms)
-    worker._moriio_handshake_listener = (
-        moriio_connector.MoRIIOConnectorWorker._moriio_handshake_listener
-    )
+    bind_errors: list[zmq.ZMQError] = []
+
+    def _listen(*args):
+        try:
+            moriio_connector.MoRIIOConnectorWorker._moriio_handshake_listener(*args)
+        except zmq.ZMQError as error:
+            if error.errno != zmq.EADDRINUSE:
+                raise
+            bind_errors.append(error)
+
+    worker._moriio_handshake_listener = _listen
     raised: list[BaseException] = []
 
     def _register():
@@ -1450,6 +1460,7 @@ def test_register_kv_caches_fails_when_handshake_port_is_taken():
     assert len(raised) == 1
     assert isinstance(raised[0], moriio_common.HandshakeError)
     assert "handshake listener" in str(raised[0])
+    assert len(bind_errors) == 1
     assert worker._moriio_handshake_listener_t is None
 
 

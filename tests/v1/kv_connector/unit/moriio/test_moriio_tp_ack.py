@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 import zmq
 
+from tests.utils import spawn_new_process_for_each_test
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     HandshakeError,
@@ -119,10 +120,11 @@ def _port_is_bound(port: int) -> bool:
 
 
 @pytest.mark.cpu_test
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(30)
+@spawn_new_process_for_each_test
 def test_notify_listener_retry_after_bind_failure_starts_listener():
     """A failed start must not make later calls a no-op: on main,
-    ``notify_thread`` stayed set and every later call skipped the listener."""
+    `notify_thread` stayed set and every later call skipped the listener."""
     wrapper = MoRIIOWrapper()
     with socket.socket() as occupied_port:
         occupied_port.bind(("", 0))
@@ -140,7 +142,8 @@ def test_notify_listener_retry_after_bind_failure_starts_listener():
 
 
 @pytest.mark.cpu_test
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(30)
+@spawn_new_process_for_each_test
 def test_notify_listener_is_bound_and_receives_when_startup_returns():
     """On main the bind happened after async_wait_reqid returned; it must be
     done by then, and the listener must still deliver messages."""
