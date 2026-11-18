@@ -20,6 +20,7 @@ from vllm.renderers.hf import (
     _detect_developer_role_support,
     _ensure_prompt_embeds_placeholder_token,
     _get_hf_base_chat_template_params,
+    _hf_chat_template_kwargs,
     _template_error_reason,
     _try_extract_ast,
     resolve_chat_template,
@@ -27,6 +28,7 @@ from vllm.renderers.hf import (
     resolve_chat_template_kwargs,
     safe_apply_chat_template,
 )
+from vllm.renderers.params import ChatParams
 from vllm.tokenizers import get_tokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -1069,6 +1071,30 @@ class TestApplyChatTemplateEffortTolerant:
                 tokenize=False,
                 reasoning_effort="high",
             )
+
+
+def test_chat_template_response_format_comes_from_the_request():
+    # A client kwarg of the same name never reaches the template.
+    client_kwargs = {"response_format": "client"}
+    kwargs = _hf_chat_template_kwargs(ChatParams(chat_template_kwargs=client_kwargs))
+    assert "response_format" not in kwargs
+
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+    request = ChatCompletionRequest(
+        messages=[],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "a", "schema": schema},
+        },
+    )
+    kwargs = _hf_chat_template_kwargs(
+        ChatParams(
+            chat_template_kwargs=client_kwargs,
+            response_format=request.response_format,
+        )
+    )
+    assert kwargs["response_format"]["type"] == "json_schema"
+    assert kwargs["response_format"]["json_schema"]["schema"] == schema
 
 
 def test_template_error_reason_prefers_template_error():
