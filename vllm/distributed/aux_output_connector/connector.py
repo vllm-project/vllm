@@ -607,11 +607,9 @@ class AuxOutputSchedulerConnector:
             self._session_tails[request.request_id] = (key, start, token_end)
             keys.append(key)
         else:
-            token_end = max(boundary, min(token_end, state.floor))
+            token_end = max(boundary, state.floor)
         segments: list[tuple[int, str | None]] = [
-            segment
-            for segment in request.cache_salt_segments
-            if segment[0] < token_end or segment[0] == 0
+            segment for segment in request.cache_salt_segments if segment[0] < token_end
         ]
         segments.append((token_end, None))
         if not aborted:

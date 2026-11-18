@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.object_store import (
 )
 from vllm.distributed.aux_output_connector.session_objects import (
     SessionObjectWriter,
+    _valid_version_segments,
     salt_aux_session,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -1330,6 +1331,27 @@ def test_held_session_abort_output_nobody_takes_leaves_no_objects():
     scheduler.finish_requests("first", RequestStatus.FINISHED_ABORTED)
     engine.pause()
     assert not engine.client.objects
+
+
+@pytest.mark.parametrize("first_turn", [False, True], ids=["first", "later"])
+def test_held_abort_before_any_output_ends_at_aux_held(first_turn):
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    scheduler = engine.scheduler
+    held, segments = 0, None
+    if first_turn:
+        _run_turn(engine, 1, "first", 40, 5, hash_block_size=4, aux_held=0)
+        segments = engine.segments["first"]
+        held = segments[-1][0]
+    engine.set_version(2)
+    (request,) = _session_requests(
+        ["r"], held + 30, 4, segments=segments, hash_block_size=4, aux_held=held
+    )
+    scheduler.add_request(request)
+    engine.schedule()
+    scheduler.finish_requests("r", RequestStatus.FINISHED_ABORTED)
+    keys, segments = engine.connector.pop_abort_output("r")
+    assert not keys and segments[-1] == (held, None)
+    assert _valid_version_segments(segments)
 
 
 def test_session_retry_after_an_abort_keeps_the_products_of_the_aborted_attempt():
