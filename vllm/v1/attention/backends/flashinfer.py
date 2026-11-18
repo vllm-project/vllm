@@ -61,6 +61,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
+    async_tensor_h2d,
     canonicalize_singleton_dim_strides,
     get_dtype_size,
     is_strictly_contiguous,
@@ -246,11 +247,12 @@ def _make_xqa_ragged_draft_block_mask(
     """Build a packed XQA draft mask for a ragged batch."""
     num_packed = (max_q_len + 31) // 32
     padded = num_packed * 32
-    q_lens_t = torch.tensor(q_lens, device=device)
-    row_lens = torch.repeat_interleave(q_lens_t, q_lens_t)
+    num_rows = sum(q_lens)
+    q_lens_t = async_tensor_h2d(q_lens, device, torch.int64)
+    row_lens = torch.repeat_interleave(q_lens_t, q_lens_t, output_size=num_rows)
     request_starts = torch.cumsum(q_lens_t, dim=0) - q_lens_t
-    row_starts = torch.repeat_interleave(request_starts, q_lens_t)
-    q_idx = torch.arange(sum(q_lens), device=device) - row_starts
+    row_starts = torch.repeat_interleave(request_starts, q_lens_t, output_size=num_rows)
+    q_idx = torch.arange(num_rows, device=device) - row_starts
     kv_idx = torch.arange(padded, device=device).unsqueeze(0)
     bool_mask = kv_idx < row_lens.unsqueeze(1)
     if causal:

@@ -1157,6 +1157,30 @@ def test_flashinfer_xqa_draft_masks():
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer with CUDA is required.",
+)
+def test_flashinfer_xqa_ragged_draft_mask_does_not_sync():
+    """Ragged spec-decode steps rebuild this mask, so it must not sync."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    q_lens = [4, 4, 0, 2, 4]
+    expected = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+        q_lens, 4, True, torch.device("cpu")
+    )
+    prev_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        mask = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+            q_lens, 4, True, torch.device("cuda")
+        )
+    finally:
+        torch.cuda.set_sync_debug_mode(prev_mode)
+    assert torch.equal(mask.cpu(), expected)
+
+
+@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
