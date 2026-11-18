@@ -397,9 +397,9 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
         # Mismatched req is reported via err_reqs/err_msg with no transfers built.
         assert err_reqs == ["d-mismatch"]
         assert err_msg == "KV group count mismatch"
-        assert src_ptrs == []
-        assert dst_ptrs == []
-        assert lengths == []
+        assert src_ptrs.size == 0
+        assert dst_ptrs.size == 0
+        assert lengths.size == 0
 
         worker.shutdown()
 
