@@ -998,15 +998,20 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
 
 @pytest.mark.parametrize(
-    "speculative, hybrid, kv_connector, aiter_found, expected_backend",
+    "speculative, hybrid, kv_connector, aiter_found, use_aiter, expected_backend",
     [
-        (False, False, False, True, AttentionBackendEnum.ROCM_ATTN),
-        (True, False, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (True, False, False, False, AttentionBackendEnum.TRITON_ATTN),
-        (False, True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (False, True, False, False, AttentionBackendEnum.TRITON_ATTN),
-        (True, True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (True, False, True, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, False, False, True, False, AttentionBackendEnum.ROCM_ATTN),
+        (True, False, False, True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, False, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, False, True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, True, False, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (True, True, False, True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, True, True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, False, False, True, True, AttentionBackendEnum.ROCM_ATTN),
+        (True, False, False, True, True, AttentionBackendEnum.ROCM_AITER_FA),
+        (False, True, False, True, True, AttentionBackendEnum.ROCM_AITER_FA),
+        (True, True, False, True, True, AttentionBackendEnum.ROCM_AITER_FA),
+        (True, False, True, True, True, AttentionBackendEnum.ROCM_AITER_FA),
     ],
 )
 def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
@@ -1014,14 +1019,21 @@ def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
     hybrid,
     kv_connector,
     aiter_found,
+    use_aiter,
     expected_backend,
     mock_get_cdna_version,
+    monkeypatch,
 ):
     """Speculative decoding and hybrid models would run ROCM_ATTN's Triton
     fallbacks, so the unified backends rank above it. ROCM_ATTN stays in the
-    list as the last fallback, except with a KV connector."""
+    list as the last fallback, except with a KV connector. VLLM_ROCM_USE_AITER
+    is pinned so the result does not depend on its default."""
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import set_current_vllm_config
     from vllm.platforms.rocm import RocmPlatform, _get_backend_priorities
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", use_aiter)
+    monkeypatch.setattr(rocm_aiter_ops, "_MHA_ENABLED", True)
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace() if speculative else None,
