@@ -763,7 +763,7 @@ def select_mxfp4_moe_backend(
         )
         kernel_cls, rejected = oracle.try_backend(backend, activation_key=act_key)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend))
+            logger.debug_once(oracle.make_log_backend(backend))
             _warn_on_bf16_fallback(backend, requested_activation_key)
             return backend, kernel_cls
         unsupported_reasons.extend((backend, reason) for _, reason in rejected)
@@ -856,7 +856,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
             backend, activation_key=_backend_activation_key(backend)
         )
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend))
+            logger.debug_once(oracle.make_log_backend(backend))
             return backend, kernel_cls
 
     raise NotImplementedError(
