@@ -215,19 +215,19 @@ def test_completion_position_without_logprobs_stays_none(
     assert derendered.top_logprobs[3] is None
 
 
-def test_completion_top_logprobs_keeps_sampled_entry_on_string_collision(
+def test_completion_top_logprobs_keeps_highest_entry_on_string_collision(
     serving_completion,
 ):
     """`/v1/completions` keys `top_logprobs` by token string, and byte-fragment
-    candidates all decode to "". A later candidate must not overwrite the
-    sampled token's entry, or that of a more likely candidate. The entry kept
-    is the first one, which is the sampled token's even when another candidate
-    is more likely."""
+    candidates all decode to "". The entry keeps the highest logprob among the
+    candidates that share the string, so a less likely candidate never
+    overwrites the sampled token's entry, and a more likely one replaces it."""
     tokenizer = get_tokenizer("Qwen/Qwen3-0.6B")
     k = 3
     # Generating a space and Thai digit U+0E58: " " (220), then 8158, the first
     # two of its three bytes. 3023 and 378 are other two-byte leading fragments.
-    # At the last position the sampled 3023 has rank 2, behind 8158.
+    # At the last position the sampled 3023 has rank 2, behind 8158, so the ""
+    # entry holds 8158's logprob.
     rows = np.array(
         [[220, 220, 3023, 378], [8158, 8158, 3023, 378], [3023, 8158, 3023, 378]]
     )
@@ -263,7 +263,7 @@ def test_completion_top_logprobs_keeps_sampled_entry_on_string_collision(
         tokenizer=tokenizer,
     )
     assert coupled.tokens == [" ", "", ""]
-    assert coupled.top_logprobs == [{" ": -0.25, "": -12.25}, {"": -0.5}, {"": -1.5}]
+    assert coupled.top_logprobs == [{" ": -0.25, "": -12.25}, {"": -0.5}, {"": -0.5}]
 
     request = CompletionRequest(model=MODEL_NAME, prompt="hi", logprobs=k)
     generated = _generate(token_ids, processor.logprobs)

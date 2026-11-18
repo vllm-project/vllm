@@ -844,19 +844,23 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         num_output_top_logprobs, bool(logprob_token_ids)
                     ),
                 ):
-                    # Byte fragments all decode to "", so keep the first
-                    # candidate per string; the sampled token is always first.
-                    step_out_top_logprobs.setdefault(
-                        self._get_decoded_token(
-                            top_lp,
-                            top_token_id,
-                            tokenizer,
-                            return_as_token_id=should_return_as_token_id,
-                        ),
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        max(top_lp.logprob, -9999.0),
+                    top_token = self._get_decoded_token(
+                        top_lp,
+                        top_token_id,
+                        tokenizer,
+                        return_as_token_id=should_return_as_token_id,
                     )
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    top_logprob = max(top_lp.logprob, -9999.0)
+                    # Byte fragments all decode to "", so keep the highest
+                    # logprob per string. On a tie the earlier candidate
+                    # stays, and the token at this position is always first.
+                    if (
+                        top_token not in step_out_top_logprobs
+                        or top_logprob > step_out_top_logprobs[top_token]
+                    ):
+                        step_out_top_logprobs[top_token] = top_logprob
                 out_top_logprobs.append(step_out_top_logprobs)
 
             if len(out_text_offset) == 0:

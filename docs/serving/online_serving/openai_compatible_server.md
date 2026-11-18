@@ -173,7 +173,7 @@ The following extra parameters are supported:
 
 #### Logprobs
 
-`top_logprobs` is a dict keyed by each candidate's decoded text, so two candidates that decode to the same string share one entry. This happens with byte-fallback tokens that each hold part of a multi-byte character (Thai, CJK or emoji text), which decode to `""`. When the token at that position (the sampled token, or the prompt token with `echo`) is one of them, the entry keeps that token's logprob, so `top_logprobs[i][tokens[i]] == token_logprobs[i]` holds at every position. A client that instead reads `max(top_logprobs[i].values())` as the top candidate's logprob, as the greedy check in lm-evaluation-harness does, can then take that token for the top pick. Set `return_tokens_as_token_ids` to key every candidate by its token ID (`token_id:{id}`) instead.
+`top_logprobs` is a dict keyed by each candidate's decoded text, so candidates that decode to the same string share one entry. This happens with byte-fallback tokens that each hold part of a multi-byte character (Thai, CJK or emoji text), which decode to `""`. The entry keeps the highest logprob among those candidates (on a tie, the token at that position), so `max(top_logprobs[i].values())` is the logprob of the most likely returned candidate. Where `top_logprobs[i]` is not `None`, `top_logprobs[i][tokens[i]] == token_logprobs[i]` holds unless a candidate with the same text is more likely than the token at that position. Set `return_tokens_as_token_ids` to get one entry per candidate, keyed by token ID (`token_id:{id}`).
 
 ### Chat API
 

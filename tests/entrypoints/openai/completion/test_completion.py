@@ -232,13 +232,16 @@ async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
 
 
 # 8158 is a leading-byte fragment of U+0E58 (Thai digit 8); 3023 and 378 are
-# other leading fragments. All three decode to "" on their own.
+# other leading fragments. All three decode to "" on their own. After "Hello",
+# 8158 is the most likely of the three, so the "" entry is the sampled token's.
 FRAGMENT_REQUEST = dict(
     model=MODEL_NAME,
     prompt="Hello",
     max_tokens=1,
     temperature=0.0,
-    logprobs=2,
+    # Required with logprob_token_ids, which returns every requested token
+    # whatever the count.
+    logprobs=0,
     extra_body={"allowed_token_ids": [8158], "logprob_token_ids": [3023, 378]},
 )
 
