@@ -420,7 +420,8 @@ async fn completion_chunk_stream(
                             return_tokens_as_token_ids,
                         ) {
                             Ok(logprobs) => Some(logprobs),
-                            // A terminal engine error takes precedence over missing logprobs.
+                            // The update that follows may be the engine's error,
+                            // which explains the missing prompt logprobs.
                             Err(error) => {
                                 deferred_prompt_logprobs_error = Some(error);
                                 continue;
@@ -462,14 +463,13 @@ async fn completion_chunk_stream(
                 finished,
             }) => {
                 let delta = decoded.text;
-                // Hold the echo's logprobs error until the request finishes.
+                // Like Python, a terminal engine error ends the stream before
+                // anything else its update carries, logprobs included.
+                if let Some(finished) = &finished {
+                    completion_finish_reason_to_openai(&finished.finish_reason)?;
+                }
                 if let Some(error) = deferred_prompt_logprobs_error.take() {
-                    if let Some(finished) = &finished {
-                        completion_finish_reason_to_openai(&finished.finish_reason)?;
-                        return Err(error);
-                    }
-                    deferred_prompt_logprobs_error = Some(error);
-                    continue;
+                    return Err(error);
                 }
                 // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
                 // The one generated token is only used to drive the engine to a finished event,
@@ -530,10 +530,6 @@ async fn completion_chunk_stream(
                         }
                     }
                     continue;
-                }
-                // Terminal engine errors may arrive without logprobs.
-                if let Some(finished) = &finished {
-                    completion_finish_reason_to_openai(&finished.finish_reason)?;
                 }
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
@@ -1623,6 +1619,50 @@ mod tests {
         .await;
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], Err(ApiError::ServerError { .. })));
+    }
+
+    #[tokio::test]
+    async fn completion_chunk_stream_ends_with_terminal_error_before_its_text() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
+            }),
+            Ok(decoded_delta("Hello", vec![3], None, None)),
+            Ok(decoded_delta(
+                " world",
+                vec![4],
+                None,
+                Some(Finished {
+                    usage: Default::default(),
+                    finish_reason: FinishReason::Error(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
+                    timestamps: Default::default(),
+                }),
+            )),
+        ]);
+        let chunks = completion_chunk_stream(
+            stream,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(chunks.len(), 2);
+        match &chunks[0] {
+            Ok(CompletionSseChunk::Chunk(chunk)) => assert_eq!(chunk.choices[0].text, "Hello"),
+            other => panic!("expected the earlier text chunk, got {other:?}"),
+        }
+        assert!(matches!(&chunks[1], Err(ApiError::ServerError { .. })));
     }
 
     #[tokio::test]
