@@ -8,8 +8,10 @@ These utilities enable efficient batched tensor transfer over NCCL.
 
 import pytest
 import torch
+from torch.multiprocessing.reductions import rebuild_tensor
 
 from vllm.distributed.weight_transfer.packed_tensor import (
+    PackedBufferImporter,
     pack_tensors,
     packed_ipc_consumer,
     packed_ipc_producer,
@@ -493,6 +495,64 @@ class TestPackTensors:
 
 
 # --- Unit Tests: packed_ipc_producer ---
+
+
+def test_packed_ipc_producer_uses_explicit_device(monkeypatch):
+    """Pack and export on CPU using a real PyTorch CPU storage reduction."""
+    cpu_stream = torch.Stream(device="cpu")
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: cpu_stream)
+    weight = torch.tensor([1.0, 2.0])
+    (chunk,) = packed_ipc_producer(
+        iter([("w", weight)]),
+        "backend-key",
+        lambda entry: entry[1],
+        buffer_size_bytes=8,
+        device=weight.device,
+    )
+
+    packed = rebuild_tensor(*chunk.ipc_handle["backend-key"])
+    assert packed.device == weight.device
+    torch.testing.assert_close(packed.view(weight.dtype), weight)
+
+
+def test_packed_ipc_consumer_reuses_backend_mapping():
+    """Use an explicit handle key and open the backend mapping once per export."""
+    weight = torch.tensor([1.0, 2.0])
+    packed = weight.view(torch.uint8)
+    rebuild_count = 0
+
+    def rebuild(*args):
+        nonlocal rebuild_count
+        assert args[6] == 0
+        rebuild_count += 1
+        return packed
+
+    importer = PackedBufferImporter(rebuild_tensor=rebuild)
+    handle = {"backend-key": (None,) * 6 + (7,)}
+
+    def consume():
+        return packed_ipc_consumer(
+            handle,
+            ["w"],
+            [[2]],
+            ["float32"],
+            [8],
+            0,
+            importer,
+            physical_device_id="backend-key",
+        )[0]
+
+    name, first = consume()
+    weight.fill_(3)
+    _, second = consume()
+    assert name == "w"
+    assert rebuild_count == 1
+    torch.testing.assert_close(first, torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(second, weight)
+
+    importer.close()
+    consume()
+    assert rebuild_count == 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

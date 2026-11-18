@@ -110,6 +110,18 @@ mode carries a per-chunk barrier across ranks: without it, a rank could overwrit
 its buffer while its colocated worker is still reading the current chunk. This is
 handled inside `send_weights()`.
 
+Platform plugins can reuse the packed IPC helpers with their own device and
+handle key. Pass `device` and the key (via `gpu_uuid`) to
+`packed_ipc_producer`, and pass the same key as `physical_device_id` to
+`packed_ipc_consumer`. The producer uses PyTorch's registered tensor reduction,
+and the caller must select the accelerator stream for the buffer's device.
+The reducer's arguments must place the device index at position 6 (zero-based)
+so the consumer can substitute its local index.
+
+For a backend-specific rebuild, pass a `PackedBufferImporter(rebuild_tensor=...)`
+to the consumer. Use the same importer across chunks and close it on engine
+shutdown to release its cached mapping.
+
 ## Trainer Without vLLM over HTTP
 
 A colocated trainer can speak the [HTTP endpoints](README.md#api-endpoints)

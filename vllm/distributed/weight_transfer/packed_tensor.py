@@ -317,10 +317,12 @@ def packed_ipc_producer(
     gpu_uuid: str,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    *,
+    device: torch.device | str = "cuda",
 ) -> Iterator[PackedIpcChunk]:
     """Pack tensors into a reusable IPC buffer and yield handles.
 
-    Allocates a single GPU buffer of `buffer_size_bytes` and registers
+    Allocates a single device buffer of `buffer_size_bytes` and registers
     it for IPC once via `reduce_tensor`.  Each chunk's packed data is
     copied into this buffer before yielding, so only one IPC-shared
     allocation exists for the lifetime of the transfer.
@@ -331,14 +333,16 @@ def packed_ipc_producer(
 
     Args:
         iterator: Iterator of (name, tensor) pairs.
-        gpu_uuid: Physical GPU UUID string for this rank.
+        gpu_uuid: IPC handle key for this rank, usually the physical GPU UUID.
         post_iter_func: Applied to each (name, tensor) before packing.
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
             Every chunk is guaranteed to fit within this size.  A
             `ValueError` is raised if any single tensor exceeds it.
+        device: Device for the IPC buffer. The caller must ensure the
+            current accelerator stream is on this device.
 
     """
-    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
+    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device=device)
     _, ipc_args = reduce_tensor(ipc_buffer)
 
     names: list[str] = []
@@ -413,16 +417,23 @@ class PackedBufferImporter:
     engine and closes it on shutdown.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, rebuild_tensor: Callable[..., torch.Tensor] | None = None
+    ) -> None:
+        """Set the backend rebuild function. Defaults to CUDA's rebuild."""
+        self._rebuild_tensor = rebuild_tensor
         self._entry: tuple[tuple, torch.Tensor] | None = None
 
     def rebuild(self, list_args: list) -> torch.Tensor:
-        from torch.multiprocessing.reductions import rebuild_cuda_tensor
-
         key = tuple(list_args)
         if self._entry is not None and self._entry[0] == key:
             return self._entry[1]
-        packed = rebuild_cuda_tensor(*list_args)
+        rebuild_tensor = self._rebuild_tensor
+        if rebuild_tensor is None:
+            from torch.multiprocessing.reductions import rebuild_cuda_tensor
+
+            rebuild_tensor = rebuild_cuda_tensor
+        packed = rebuild_tensor(*list_args)
         self._entry = (key, packed)
         return packed
 
@@ -439,10 +450,12 @@ def packed_ipc_consumer(
     tensor_sizes: list[int],
     device_index: int,
     importer: "PackedBufferImporter | None" = None,
+    *,
+    physical_device_id: str | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
-    Reconstructs the packed buffer via rebuild_cuda_tensor, unpacks
+    Reconstructs the packed buffer via the importer, unpacks
     into individual tensors, and clones each into independent storage
     before returning.
 
@@ -455,28 +468,32 @@ def packed_ipc_consumer(
     stale data and silently corrupt multi-chunk weight transfers.
 
     Args:
-        ipc_handle: Mapping of GPU UUID to rebuild_cuda_tensor args tuple
+        ipc_handle: Mapping of physical device IDs to rebuild argument tuples.
+            Argument 6 is the device index and is rewritten for the receiver.
         names: Parameter names in the packed buffer
         shapes: Parameter shapes
         dtype_names: Parameter dtype name strings (e.g. "float16")
         tensor_sizes: Size in bytes of each parameter in the packed buffer
-        device_index: Local CUDA device index
+        device_index: Local accelerator device index
         importer: Import cache that must be shared across all chunks of one
             export so the buffer mapping is opened and released exactly once
             (see `PackedBufferImporter`). `None` builds an ephemeral one,
             which is only safe for single-chunk consumption.
+        physical_device_id: Explicit handle key. Defaults to the CUDA device
+            UUID for `device_index`.
 
     """
-    props = torch.cuda.get_device_properties(device_index)
-    physical_gpu_id = str(props.uuid)
+    if physical_device_id is None:
+        props = torch.cuda.get_device_properties(device_index)
+        physical_device_id = str(props.uuid)
 
-    if physical_gpu_id not in ipc_handle:
+    if physical_device_id not in ipc_handle:
         raise ValueError(
-            f"IPC handle not found for GPU UUID {physical_gpu_id}. "
-            f"Available UUIDs: {list(ipc_handle.keys())}"
+            f"IPC handle not found for device ID {physical_device_id}. "
+            f"Available IDs: {list(ipc_handle.keys())}"
         )
 
-    args = ipc_handle[physical_gpu_id]
+    args = ipc_handle[physical_device_id]
     list_args = list(args)
     list_args[6] = device_index
     if importer is None:
