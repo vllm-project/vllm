@@ -264,6 +264,10 @@ def mamba_v2_sharded_weight_loader(
     return loader
 
 
+# Output slices of the Mamba2 input projection, in row order.
+MAMBA2_IN_PROJ_SLICES = ("z", "x", "B", "C", "dt")
+
+
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer2]
 @PluggableLayer.register("mamba_mixer2")
@@ -297,7 +301,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        split_in_proj: bool = False,
     ):
+        """`split_in_proj` builds one linear per in_proj slice (`z_proj`, `x_proj`,
+        `B_proj`, `C_proj`, `dt_proj`), so each slice can use its own quantization."""
         super().__init__()
 
         # For TP, the sharding plan is as follows:
@@ -350,6 +357,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
+        self.split_in_proj = split_in_proj
+        if self.split_in_proj and n_groups % self.tp_size != 0:
+            raise ValueError(
+                "Per-slice Mamba2 in_proj requires tensor parallel size to "
+                "divide n_groups."
+            )
+
         if n_groups % self.tp_size == 0:
             self.conv1d = MergedColumnParallelLinear(
                 input_size=conv_kernel_size,
@@ -363,19 +377,28 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prefix=f"{prefix}.conv1d",
             )
 
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[
-                    intermediate_size,
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                    self.num_heads,
-                ],
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
+            slice_sizes = (
+                intermediate_size,
+                intermediate_size,
+                self.groups_ssm_state_size,
+                self.groups_ssm_state_size,
+                self.num_heads,
             )
+            if self.split_in_proj:
+                self._in_proj_slices = [
+                    self._make_slice(
+                        name, hidden_size, size, use_bias, quant_config, prefix
+                    )
+                    for name, size in zip(MAMBA2_IN_PROJ_SLICES, slice_sizes)
+                ]
+            else:
+                self.in_proj = MergedColumnParallelLinear(
+                    input_size=hidden_size,
+                    output_sizes=list(slice_sizes),
+                    bias=use_bias,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.in_proj",
+                )
         else:
             # This is the n_groups == 1 case,
             # where we need to duplicate groups if TP>1.
@@ -602,13 +625,38 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
+    def _make_slice(self, name, input_size, output_size, bias, quant_config, prefix):
+        """One in_proj slice as a column-parallel linear. Returns attribute names,
+        so wrappers (for example LoRA) installed on the attributes after
+        construction are the modules that run."""
+        layer = ColumnParallelLinear(
+            input_size,
+            output_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.{name}_proj",
+        )
+        setattr(self, f"{name}_proj", layer)
+        return (f"{name}_proj",)
+
+    def _project_in(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self.split_in_proj:
+            return self.in_proj(hidden_states)[0]
+        outputs = []
+        for names in self._in_proj_slices:
+            output = hidden_states
+            for name in names:
+                output, _ = getattr(self, name)(output)
+            outputs.append(output)
+        return torch.cat(outputs, dim=-1)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
         # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
+        projected_states = self._project_in(hidden_states)
         if mup_vector is not None:
             projected_states = projected_states * mup_vector
 

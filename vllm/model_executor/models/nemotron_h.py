@@ -404,6 +404,9 @@ class NemotronHMambaDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
+            # Optional per-slice checkpoints: z/x/B/C/dt_proj tensors instead of one
+            # in_proj, so each slice can use its own quantization format.
+            split_in_proj=getattr(config, "mamba_split_in_proj", False),
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
