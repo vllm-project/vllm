@@ -37,7 +37,7 @@ from vllm.v1.engine.core import (
     EngineCoreProc,
     EngineShutdownState,
 )
-from vllm.v1.engine.dp_prefill_hold import ROW_SIZE
+from vllm.v1.engine.dp_state_sync import DPStateSync
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -691,6 +691,9 @@ def _cadenced_dp_engine_core(
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
+    core.dp_state_sync = DPStateSync(
+        core.vllm_config.parallel_config, group=lambda: core.dp_group
+    )
     synced: list[int] = []
 
     def scripted_sync(dp_group, has_unfinished, pending_pause, gather=None):
@@ -732,29 +735,30 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert not core.pending_pause
 
 
-def test_dp_prefill_hold_gathers_rows_every_step(monkeypatch):
-    """The prefill hold needs every rank's row on every step, so the DP
-    all-reduce runs each step and carries them; the wave's end resets it."""
+def test_dp_state_sync_shares_rows_every_step(monkeypatch):
+    """A shared row forces the DP all-reduce every step, which all-gathers
+    every rank's row in rank order; the wave's end reports idle."""
     core, _ = _cadenced_dp_engine_core(monkeypatch, [], dp_sync_interval=32)
     core.dp_group = MagicMock(**{"size.return_value": 2, "rank.return_value": 1})
-    core.scheduler = MagicMock()
-    core.prefill_hold = hold = MagicMock()
-    hold.local_row.return_value = [1.0] * ROW_SIZE
+    received: list[list[list[float]]] = []
+    idle: list[bool] = []
+    core.dp_state_sync.share(
+        3, lambda: [1.0, 2.0, 3.0], received.append, on_idle=lambda: idle.append(True)
+    )
     results = [True, True, False]
 
     def scripted_sync(dp_group, has_unfinished, pending_pause, gather=None):
         assert gather is not None
-        assert gather[1].tolist() == [1.0] * ROW_SIZE
+        assert gather[1].tolist() == [1.0, 2.0, 3.0]
         assert not gather[0].any()
-        gather[0] = 2.0
+        gather[0] = 4.0
         return results.pop(0), False
 
     monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
     for expected in (True, True, False):
         assert DPEngineCoreProc._has_global_unfinished_reqs(core, True) is expected
-    assert hold.update.call_count == 3
-    assert hold.update.call_args.args[0] == [[2.0] * ROW_SIZE, [1.0] * ROW_SIZE]
-    hold.reset.assert_called_once()
+    assert received == [[[4.0] * 3, [1.0, 2.0, 3.0]]] * 3
+    assert idle == [True]
 
 
 @pytest.mark.parametrize(

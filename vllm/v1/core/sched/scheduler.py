@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -79,6 +79,10 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, PrefillQueueState
+    from vllm.v1.engine.dp_state_sync import DPStateSync
 
 logger = init_logger(__name__)
 
@@ -391,9 +395,18 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
-        # `prefill_work` of the last finished step that scheduled tokens. Read
-        # and cleared by the DP prefill hold.
-        self.finished_step_prefill_work: tuple[int, float] | None = None
+        # Cross-DP prefill hold; replaces `throttle_prefills` when set.
+        self.prefill_hold: PrefillHold | None = None
+        if self.scheduler_config.prefill_hold_ttft_target is not None:
+            from vllm.v1.core.sched import dp_prefill_hold
+
+            self.prefill_hold = dp_prefill_hold.PrefillHold(
+                self._prefill_queue_state,
+                self.scheduler_config.prefill_hold_ttft_target,
+                self.scheduler_config.prefill_hold_alpha,
+                self.scheduler_config.max_num_batched_tokens,
+                lag_steps=self.vllm_config.max_concurrent_batches - 1,
+            )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -730,9 +743,6 @@ class Scheduler(SchedulerInterface):
         drafts_needed = not self.can_skip_drafts
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
-        # Prefill tokens scheduled and their attention work.
-        prefill_tokens = 0
-        prefill_attn = 0.0
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -743,8 +753,11 @@ class Scheduler(SchedulerInterface):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
+        hold = self.prefill_hold
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
+            hold.hold
+            if hold is not None
+            else throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
@@ -973,12 +986,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            if request.is_prefill_chunk:
-                prefill_scheduled = True
-                prefill_tokens += num_new_tokens
-                prefill_attn += num_new_tokens * (
-                    request.num_computed_tokens + num_new_tokens / 2
-                )
+            prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -1606,10 +1614,6 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
-                prefill_tokens += num_new_tokens
-                prefill_attn += num_new_tokens * (
-                    num_computed_tokens + num_new_tokens / 2
-                )
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1771,7 +1775,6 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
-            prefill_work=(prefill_tokens, prefill_attn),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1804,6 +1807,8 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        if hold is not None:
+            hold.on_scheduled(scheduler_output, self.requests)
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -2276,8 +2281,8 @@ class Scheduler(SchedulerInterface):
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
-        if scheduler_output.total_num_scheduled_tokens > 0:
-            self.finished_step_prefill_work = scheduler_output.prefill_work
+        if self.prefill_hold is not None:
+            self.prefill_hold.on_step_finished(scheduler_output)
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -3050,6 +3055,10 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.prefill_hold is not None:
+                self.prefill_hold.on_arrival(
+                    request, self.kv_cache_manager.get_num_cached_tokens
+                )
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3062,6 +3071,21 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+    def _prefill_queue_state(self) -> "PrefillQueueState":
+        from vllm.v1.core.sched.dp_prefill_hold import PrefillQueueState
+
+        return PrefillQueueState(
+            self.running,
+            self._inflight_prefills,
+            self.waiting,
+            self.max_num_active_reqs,
+            self.kv_cache_manager.get_num_cached_tokens,
+        )
+
+    def attach_dp_sync(self, sync: "DPStateSync") -> None:
+        if self.prefill_hold is not None:
+            self.prefill_hold.attach_dp(sync)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

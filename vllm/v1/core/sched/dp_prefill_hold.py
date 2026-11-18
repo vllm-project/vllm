@@ -4,8 +4,8 @@
 
 With DP attention + EP, all ranks step in lockstep, so a prefill on one rank
 makes the step mixed for every rank. Each step, every rank reports a row of
-local state (`PrefillHold.local_row`). The rows are all-gathered within the DP
-state all-reduce, and every rank runs the same deterministic
+local state (`PrefillHold.local_row`). The rows are all-gathered by the DP
+engine core's state sync, and every rank runs the same deterministic
 `PrefillHold.update` on them, so all ranks hold or release together.
 
 - Hold while waiting pays: the decode time saved by doing the queued prefill
@@ -22,13 +22,16 @@ state all-reduce, and every rank runs the same deterministic
 
 import math
 import time
-from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from collections import deque
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.request_queue import RequestQueue
+    from vllm.v1.engine.dp_state_sync import DPStateSync
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -163,38 +166,48 @@ class _StepCostFit:
             self.var = max(rss, 0.0) / self.dof
 
 
+class PrefillQueueState(NamedTuple):
+    """A read-only view of the scheduler's queues for the hold."""
+
+    running: Sequence["Request"]
+    inflight_prefills: Collection["Request"]
+    waiting: "RequestQueue"
+    max_active_reqs: int
+    num_cached_tokens: Callable[["Request"], int]
+
+
 class PrefillHold:
     """Decides, once per step and identically on every DP rank, whether all
-    ranks hold their prefills on the next step.
+    ranks hold their prefills on the next step. It needs the DP state sync
+    (`attach_dp`); without it, it never holds.
 
     Args:
-        scheduler: This rank's scheduler.
+        queue_state: Returns a read-only view of the scheduler's queues.
         ttft_target_s: TTFT target `T` in seconds.
         alpha: Weight of one second of TTFT per waiting request against one
             second of decode stall per running request.
         token_budget: Max tokens per step per rank.
         lag_steps: Steps between a decision and the step it takes effect on
-            the GPU beyond the next one (`batch_queue_size - 1`, so 1 with
-            async scheduling and no pipeline parallelism).
-        log_stats: Whether this rank logs a periodic summary.
+            the GPU beyond the next one (`max_concurrent_batches - 1`, so 1
+            with async scheduling and no pipeline parallelism).
 
     """
 
     def __init__(
         self,
-        scheduler: "Scheduler",
+        queue_state: Callable[[], PrefillQueueState],
         ttft_target_s: float,
         alpha: float,
         token_budget: int,
         lag_steps: int = 0,
-        log_stats: bool = False,
     ) -> None:
-        self.scheduler = scheduler
+        self._queue_state = queue_state
         self.ttft_target = ttft_target_s
         self.alpha = alpha
         self.budget = token_budget
         self.lag_steps = lag_steps
-        self.log_stats = log_stats
+        # Whether this rank logs a periodic summary; rank 0 does.
+        self.log_stats = False
         # Whether to hold prefills on the next step.
         self.hold = False
 
@@ -216,47 +229,85 @@ class PrefillHold:
         self._last_sync: float | None = None
         self._arrived = [0, 0, 0]
         self._cached_tokens: dict[str, int] = {}
+        # (output, prefill tokens, attention work) of scheduled steps awaiting
+        # their output, and those of the last finished step not yet reported.
+        self._pending: deque[tuple[SchedulerOutput, int, float]] = deque()
+        self._done: tuple[int, float] | None = None
 
     def reset(self) -> None:
         """Called when all ranks go idle; the rate estimates decay over it."""
         self.hold = False
         self._hold_start = None
         self._skip_sample = True
+        self._pending.clear()
+        self._done = None
 
-    def throttle(self) -> bool:
-        """Whether to hold prefills on this step. The hold applies to all ranks
-        alike, so it overrides the scheduler's per-rank capacity escape."""
-        if self.hold:
-            self.scheduler.prefill_capacity_bound = False
-        return self.hold
+    def attach_dp(self, sync: "DPStateSync") -> None:
+        """Shares this rank's row with the other DP ranks every step."""
+        self.log_stats = sync.rank == 0
+        sync.share(ROW_SIZE, self.local_row, self.update, on_idle=self.reset)
 
-    def on_arrival(self, request: "Request") -> None:
-        cached = self.scheduler.kv_cache_manager.get_num_cached_tokens(request)
-        self._cached_tokens[request.request_id] = cached
+    def on_arrival(
+        self, request: "Request", num_cached_tokens: Callable[["Request"], int]
+    ) -> None:
+        cached_tokens = num_cached_tokens(request)
+        self._cached_tokens[request.request_id] = cached_tokens
         self._arrived[0] += 1
-        self._arrived[1] += request.num_tokens - cached
-        self._arrived[2] += cached
+        self._arrived[1] += request.num_tokens - cached_tokens
+        self._arrived[2] += cached_tokens
+
+    def on_scheduled(
+        self, output: "SchedulerOutput", requests: Mapping[str, "Request"]
+    ) -> None:
+        """Records a scheduled step's prefill tokens and attention work, the
+        sum over prefill chunks of `n * (ctx + n / 2)` for `n` new tokens after
+        `ctx` computed ones. Must run before the scheduler advances
+        `num_computed_tokens`, so that `is_prefill_chunk` is pre-step."""
+        if output.total_num_scheduled_tokens == 0:
+            return
+        num_scheduled = output.num_scheduled_tokens
+        tokens, attn = 0, 0.0
+        # Every request admitted from the waiting queue starts a prefill.
+        chunks = [(r.req_id, r.num_computed_tokens) for r in output.scheduled_new_reqs]
+        cached = output.scheduled_cached_reqs
+        chunks += [
+            (req_id, ctx)
+            for req_id, ctx in zip(cached.req_ids, cached.num_computed_tokens)
+            if requests[req_id].is_prefill_chunk
+        ]
+        for req_id, ctx in chunks:
+            n = num_scheduled[req_id]
+            tokens += n
+            attn += n * (ctx + n / 2)
+        self._pending.append((output, tokens, attn))
+
+    def on_step_finished(self, output: "SchedulerOutput") -> None:
+        """Marks a step recorded by `on_scheduled` as finished, to time it."""
+        for i, (pending, tokens, attn) in enumerate(self._pending):
+            if pending is output:
+                for _ in range(i + 1):
+                    self._pending.popleft()
+                self._done = (tokens, attn)
+                return
 
     def local_row(self) -> list[float]:
         """This rank's row for the next all-gather."""
-        scheduler = self.scheduler
+        running, inflight, waiting, max_active, probe = self._queue_state()
         now = time.monotonic()
         period = 0.0 if self._last_sync is None else now - self._last_sync
         self._last_sync = now
         row = [0.0] * ROW_SIZE
         row[_PERIOD] = period
         row[_SLACK] = self.ttft_target
-        done = scheduler.finished_step_prefill_work
+        done = self._done
         if done is not None:
-            scheduler.finished_step_prefill_work = None
+            self._done = None
             row[_DONE] = 1.0
             row[_DONE_TOKENS], row[_DONE_ATTN] = done
         row[_ARRIVED], row[_ARRIVED_UNCACHED], row[_ARRIVED_CACHED] = self._arrived
         self._arrived = [0, 0, 0]
 
-        chunks = scheduler._inflight_prefills
-        waiting = scheduler.waiting
-        running = scheduler.running
+        chunks = inflight
         if len(self._cached_tokens) > 2 * len(waiting) + 256:
             self._cached_tokens = {
                 r.request_id: self._cached_tokens[r.request_id]
@@ -267,7 +318,7 @@ class PrefillHold:
         if not chunks and not waiting:
             return row
         row[_WORK] = 1.0
-        if not chunks and len(running) >= scheduler.max_num_active_reqs:
+        if not chunks and len(running) >= max_active:
             row[_BLOCKED] = 1.0
             return row
 
@@ -280,7 +331,7 @@ class PrefillHold:
         x = queued = queue_tokens = 0
         x_attn = 0.0
         slack = target
-        for arrival, remaining, ctx in self._prefill_queue():
+        for arrival, remaining, ctx in self._prefill_queue(inflight, waiting, probe):
             if x < budget:
                 n = min(remaining, budget - x)
                 x += n
@@ -299,17 +350,20 @@ class PrefillHold:
         row[_SLACK] = slack
         return row
 
-    def _prefill_queue(self) -> Iterator[tuple[float, int, int]]:
+    def _prefill_queue(
+        self,
+        inflight: Iterable["Request"],
+        waiting: Iterable["Request"],
+        probe: Callable[["Request"], int],
+    ) -> Iterator[tuple[float, int, int]]:
         """(arrival time, uncached tokens left, cached or computed tokens) of
         each request with prefill work, in-progress prefills first."""
-        scheduler = self.scheduler
-        for req in sorted(scheduler._inflight_prefills, key=lambda r: r.arrival_time):
+        for req in sorted(inflight, key=lambda r: r.arrival_time):
             remaining = req.num_tokens - req.num_computed_tokens
             if remaining > 0:
                 yield req.arrival_time, remaining, req.num_computed_tokens
         cached_tokens = self._cached_tokens
-        probe = scheduler.kv_cache_manager.get_num_cached_tokens
-        for req in scheduler.waiting:
+        for req in waiting:
             cached = cached_tokens.get(req.request_id)
             if cached is None:
                 cached = cached_tokens[req.request_id] = probe(req)
