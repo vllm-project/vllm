@@ -462,7 +462,7 @@ def test_fallbacks(loader, reason):
 def test_noop_to_and_constant_fill_stay_direct():
     """A constant write into a checkpoint tensor (padding, as
     `VocabParallelEmbedding` fills) runs while planning and stays out of
-    the plan: post-load processing owns padding."""
+    the plan: replays don't redo it."""
 
     def loader(param, loaded):
         param[4:].fill_(1)

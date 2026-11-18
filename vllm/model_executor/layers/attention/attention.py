@@ -46,6 +46,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.single_type_kv_cache_manager import (
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     SlidingWindowManager,
 )
@@ -711,6 +712,20 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 page_size_padded=shared_page,
             )
+            speculative_config = vllm_config.speculative_config
+            if (
+                self.is_draft_layer
+                and speculative_config is not None
+                and speculative_config.method in ("dflash", "dspark")
+            ):
+                # The DFlash context-KV writer skips null block-table entries.
+                return DFlashSlidingWindowManager.layer_config(
+                    spec,
+                    sliding_window=self.sliding_window,
+                    num_speculative_tokens=vllm_config.num_speculative_tokens,
+                    max_in_flight_steps=vllm_config.max_concurrent_batches,
+                    num_lookahead_tokens=vllm_config.num_lookahead_tokens,
+                )
             return SlidingWindowManager.layer_config(
                 spec, sliding_window=self.sliding_window
             )

@@ -917,7 +917,6 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
-        self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1182,28 +1181,6 @@ class SamplingParams(
                 "allowed_token_ids contains out-of-vocab token id!",
                 parameter="allowed_token_ids",
                 value=invalid_token_ids,
-            )
-
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
-        if not model_config.is_diffusion:
-            return
-
-        # Diffusion models denoise a whole canvas per step with a fixed
-        # temperature schedule, so per-request sampling parameters are not
-        # supported. Penalties are ignored by the sampler with a warning.
-        if (
-            self.temperature != 1.0
-            or self.min_p > _SAMPLING_EPS
-            or self.seed is not None
-            or self.min_tokens > 0
-            or self.logit_bias
-            or self.bad_words
-            or self.allowed_token_ids
-        ):
-            raise VLLMValidationError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
-                "bad_words, and allowed_token_ids sampling parameters "
-                "are not yet supported with diffusion models."
             )
 
     def _validate_structured_outputs(

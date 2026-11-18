@@ -254,6 +254,7 @@ class HYV4MLAAttention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         layer_idx: int = 0,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.config = config
@@ -368,6 +369,7 @@ class HYV4MLAAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            reduce_results=reduce_results,
         )
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
