@@ -19,7 +19,6 @@ def test_synthetic_acceptance_rate(vllm_runner):
     with vllm_runner(
         "meta-llama/Llama-3.2-1B-Instruct",
         block_size=None,
-        trust_remote_code=True,
         speculative_config={
             "method": "eagle3",
             "model": "nm-testing/Llama3_2_1B_speculator.eagle3",

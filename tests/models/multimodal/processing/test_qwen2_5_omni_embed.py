@@ -16,6 +16,7 @@ import torch
 
 from vllm.model_executor.models.qwen2_5_omni_thinker import (
     check_interleaved_audio_video,
+    may_interleave_audio_video,
     merge_interleaved_embeddings,
 )
 from vllm.multimodal.utils import set_mm_embedding_modality
@@ -61,6 +62,27 @@ def test_precomputed_vision_embeddings_preserve_items(model_version, modality):
 
 def _mm_embed(shape: tuple[int, ...], value: float, modality: str) -> torch.Tensor:
     return set_mm_embedding_modality(torch.full(shape, value), modality)
+
+
+@pytest.mark.parametrize(
+    "modalities, expected",
+    [
+        (["image"], False),
+        (["video", "image"], False),
+        (["audio", "image"], False),
+        (["video", "audio"], True),
+        # Untagged embeddings cannot rule interleaving out.
+        ([None, "image"], True),
+    ],
+)
+def test_may_interleave_audio_video(modalities, expected):
+    """Only batches with both audio and video embeddings need the host-side
+    input_ids check for audio-in-video, so others must skip it."""
+    embeds = [
+        torch.zeros(2, 4) if m is None else _mm_embed((2, 4), 0.0, m)
+        for m in modalities
+    ]
+    assert may_interleave_audio_video(embeds) is expected
 
 
 # ---------------------------------------------------------------------------
