@@ -823,16 +823,6 @@ def _accepts_parameters(function: Callable, required: set[str]) -> bool:
     )
 
 
-@functools.lru_cache
-def _aiter_paged_mqa_logits() -> Callable | None:
-    # Picks the kernel and launch knobs per shape.
-    try:
-        from aiter.paged_mqa_logits import paged_mqa_logits
-    except ImportError:
-        return None
-    return paged_mqa_logits
-
-
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -897,31 +887,16 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _USE_FUSED_PAGED_MQA_LOGITS:
+            # Picks the kernel and launch knobs per shape.
+            from aiter.paged_mqa_logits import paged_mqa_logits
+
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,
             )
-            deepgemm_fp8_paged_mqa_logits = (
-                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
-            )
             batch_size, next_n, heads, _ = q_fp8.shape
             out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
-            preshuffle = indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA
-            aiter_paged_mqa_logits = _aiter_paged_mqa_logits()
-            if aiter_paged_mqa_logits is not None:
-                aiter_paged_mqa_logits(
-                    q_fp8,
-                    kv_cache_fp8,
-                    weights,
-                    out_logits,
-                    context_lens,
-                    block_tables,
-                    max_model_len,
-                    Preshuffle=preshuffle,
-                    KVBlockSize=block_size,
-                )
-                return out_logits
-            deepgemm_fp8_paged_mqa_logits(
+            paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
                 weights,
@@ -929,10 +904,8 @@ def rocm_fp8_paged_mqa_logits(
                 context_lens,
                 block_tables,
                 max_model_len,
-                ChunkK=256,
-                Preshuffle=preshuffle,
+                Preshuffle=indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA,
                 KVBlockSize=block_size,
-                WavePerEU=2,
             )
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
