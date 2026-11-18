@@ -3,12 +3,13 @@
 """FlashInfer CuTe-DSL fused MoE experts for Hopper (SM90), unquantized.
 
 `cute_dsl_fused_moe_bf16` runs the MoE layer as routing index maps, a
-gather-fused GEMM1 with the activation in its epilogue and a GEMM2 with the
-router-scaled scatter-reduce finalize; the token permutation is never
-materialized. Tactics come from the FlashInfer autotuner, which the kernel
-warmup runs before CUDA graph capture. Weights are repacked once at load time
-into the kernel's 32-row up/gate interleave (the `FLASHINFER_CUTEDSL` branch
-of `convert_to_unquantized_kernel_format`).
+gather-fused GEMM1 with the activation in its epilogue and a GEMM2 that writes
+one row per (token, top-k slot); a fixed-order float32 combine then applies the
+router weights, so the output is bitwise reproducible. Tactics come from the
+FlashInfer autotuner, which the kernel warmup runs before CUDA graph capture.
+Weights are repacked once at load time into the kernel's 32-row up/gate
+interleave (the `FLASHINFER_CUTEDSL` branch of
+`convert_to_unquantized_kernel_format`).
 """
 
 import torch
@@ -238,6 +239,7 @@ class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
             top_k=self.topk,
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
+            use_fused_finalize=False,
             moe_output=output,
             activation_type=int(
                 getattr(ActivationType, _KERNEL_ACTIVATION[activation])
