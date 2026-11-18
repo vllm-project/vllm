@@ -1069,6 +1069,62 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
         )
 
 
+@skip_unsupported
+def test_top_logprobs_do_not_depend_on_batch_num_logprobs():
+    """The sampler takes one top-k with the batch's largest `logprobs`, so a
+    request's tied top logprobs must keep their order next to a request that
+    asks for more."""
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    prompts = [_random_prompt(10, 50) for _ in range(8)]
+    sp = SamplingParams(temperature=0.0, max_tokens=64, logprobs=5)
+    wide = SamplingParams(temperature=0.0, max_tokens=64, logprobs=20)
+    llm = LLM(
+        model=TEST_MODEL,
+        max_model_len=2048,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        alone = [llm.generate([p], sp, use_tqdm=False)[0] for p in prompts]
+        batched = llm.generate(
+            prompts + prompts[:1], [sp] * len(prompts) + [wide], use_tqdm=False
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, (a, b) in enumerate(zip(alone, batched)):
+        a, b = a.outputs[0], b.outputs[0]
+        assert a.token_ids == b.token_ids, f"Prompt {i}: tokens differ"
+        for step, (x, y) in enumerate(zip(a.logprobs, b.logprobs)):
+            x = [(t, lp.logprob) for t, lp in x.items()]
+            y = [(t, lp.logprob) for t, lp in y.items()]
+            assert x == y, f"Prompt {i}, step {step}: {x} alone vs {y} batched"
+
+
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize("wide", [2, 5, 20])
+def test_tied_top_logprob_ids_do_not_depend_on_k(wide: int):
+    from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+
+    torch.manual_seed(0)
+    num_rows, vocab_size = 64, 128256
+    # bf16 logits, with each row's max tied with another token.
+    logits = (torch.randn(num_rows, vocab_size, device="cuda") * 3).bfloat16().float()
+    rows = torch.arange(num_rows, device="cuda")
+    top = logits.argmax(dim=-1)
+    other = (top + vocab_size // 2) % vocab_size
+    logits[rows, other] = logits[rows, top]
+    sampled = torch.zeros(num_rows, dtype=torch.int64, device="cuda")
+
+    # Column 0 is the sampled token, the top-k follows.
+    narrow = compute_topk_scores(logits, 1, sampled).logprob_token_ids[:, 1:]
+    batch = compute_topk_scores(logits, wide, sampled).logprob_token_ids[:, 1:]
+    assert torch.equal(narrow[:, 0], batch[:, 0])
+    assert torch.equal(narrow[:, 0], torch.minimum(top, other))
+    assert torch.equal(batch[:, 1], torch.maximum(top, other))
+
+
 def LLM_with_max_seqs(
     model: str,
     max_num_seqs: int,
