@@ -268,13 +268,22 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         staging_plan = prefill.host_staging_plan if prefill is not None else None
         assert staging_plan is not None
+        num_decodes = self._prefill_num_decodes(attn_metadata)
         staged_cache = cache.stage_prefill_rows(
-            kv_cache, staging_plan, attn_metadata.num_decodes
+            kv_cache, staging_plan, num_decodes
         )
         req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
-        if attn_metadata.num_decodes > 0:
-            req_ids = req_ids - attn_metadata.num_decodes
+        if num_decodes > 0:
+            req_ids = req_ids - num_decodes
         return staged_cache, staging_plan.block_table, req_ids
+
+    @staticmethod
+    def _prefill_num_decodes(attn_metadata: Any) -> int:
+        # A ShardQ-narrowed batch reports no decodes but still stages against
+        # the full batch's prefill rows.
+        return getattr(attn_metadata, "shardq_num_decodes", 0) or (
+            attn_metadata.num_decodes
+        )
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any
@@ -283,7 +292,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
-        cache.ensure_prefill_gpu_sources(plan, attn_metadata.num_decodes)
+        num_decodes = self._prefill_num_decodes(attn_metadata)
+        cache.ensure_prefill_gpu_sources(plan, num_decodes)
         assert plan.gpu_row_ids is not None
         return plan
 

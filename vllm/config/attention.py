@@ -146,13 +146,19 @@ class AttentionConfig:
     for its slice of the tokens with all heads, and all-to-all exchanges move
     the query and the attention output between the layouts. Applies to steps
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
-    FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
-    KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
-    the DCP group equal to the TP group), each rank attends a gathered copy of
-    its tokens' context instead of the DCP-local cache. A mixed step's decode
-    tokens stay sharded by head (on the DCP path under DCP). On ROCm,
-    DeepSeek-V4.1 shards only its indexer prefill this way and all-gathers the
-    top-k back; its attention stays sharded by head."""
+    FlashInfer sparse MLA backend, or on FlashMLA sparse with a quantized
+    DeepSeek DS-MLA KV cache. Under DCP (on FlashInfer and SM100, with the DCP
+    group equal to the TP group), each rank attends a gathered copy of its
+    tokens' context instead of the DCP-local cache. On FlashMLA sparse,
+    HiSparse host-backed KV is supported only with the quantized DS-MLA cache
+    formats and only with DCP and PCP disabled; when all attention layers use
+    ShardQ the existing model-level sequence-parallel path is enabled
+    automatically. PCP is not supported. A mixed step's decode tokens stay
+    sharded by head (on the DCP path under DCP); steps whose HiSparse decode
+    boundary disagrees with the ShardQ speculative-verification boundary skip
+    ShardQ for that step. On ROCm, DeepSeek-V4.1 shards only its indexer
+    prefill this way and all-gathers the top-k back; its attention stays
+    sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most

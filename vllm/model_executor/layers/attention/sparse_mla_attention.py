@@ -282,6 +282,10 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
+    # Number of decode requests before the shardq-narrowed batch. Backends that
+    # stage host rows against the full batch need it to align prefill rows.
+    # `shardq` itself is inherited from MLACommonMetadata.
+    shardq_num_decodes: int = 0
     # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0
     # The KV cache holds every DCP rank's KV shard (a DCP ShardQ step's
@@ -325,6 +329,7 @@ def build_shardq_metadata(
         metadata,
         num_decodes=0,
         num_decode_tokens=0,
+        shardq_num_decodes=metadata.num_decodes,
         req_id_per_token=metadata.req_id_per_token[
             shardq.local_token_ids + num_decode_tokens
         ],
@@ -921,6 +926,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     # Whether forward_mqa also runs a DCP ShardQ step's gathered context
     # (kv_gathered metadata) and is validated.
     supports_dcp_shardq: ClassVar[bool] = False
+    # Whether forward_mqa can run ShardQ metadata on a host-backed cache.
+    supports_shardq_with_hisparse: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -1012,7 +1019,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.use_shardq = (
             self.supports_shardq
             and vllm_config.attention_config.sparse_mla_shard_q
-            and vllm_config.attention_config.hisparse_config is None
+            and (
+                vllm_config.attention_config.hisparse_config is None
+                or self.supports_shardq_with_hisparse
+            )
             and parallel_config.tensor_parallel_size > 1
             and (
                 dcp_size == 1

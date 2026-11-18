@@ -147,7 +147,7 @@ Priority is **1 = highest** (tried first).
 
 --8<-- "gen:priority-mla"
 
-> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASH_ATTN_MLA_SPARSE_FA4` (then `FLASHINFER_MLA_SPARSE`) is preferred for low query-head counts (<= 16) on SM 10.x, while `FLASHMLA_SPARSE` is preferred otherwise.
+> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASH_ATTN_MLA_SPARSE_FA4` (then `FLASHINFER_MLA_SPARSE`) is preferred for low query-head counts (<= 16) on SM 10.x, while `FLASHMLA_SPARSE` is preferred otherwise. `sparse_mla_shard_q` can also run with HiSparse host-backed KV on `FLASHMLA_SPARSE` with a quantized DS-MLA cache; DCP and PCP remain unsupported. See [HiSparse](hisparse.md#prefill-shardq) for the composition rules.
 >
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 

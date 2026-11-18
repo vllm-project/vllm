@@ -195,6 +195,18 @@ prefix extends beyond the GPU-resident indexer prefix, the scheduler asks
 host prefix boundary. If that suffix is unavailable, all groups fall back to
 the shorter prefix they share.
 
+## Prefill ShardQ
+
+On FlashMLA sparse with a quantized DS-MLA KV cache, HiSparse composes with
+token-sharded prefill. Each TP rank prefills its token shard with all heads;
+`SparseMLACommonImpl.use_shardq` stays enabled when the backend reports
+`supports_shardq_with_hisparse`. HiSparse stages host rows against the full-batch
+chunks, and `shardq_num_decodes` keeps the full-batch decode offsets aligned.
+When all attention layers use ShardQ, `DeepseekV32Model` enables the existing
+model-level sequence-parallel path automatically. DCP and PCP are not supported.
+Mixed speculative-verification steps whose HiSparse decode boundary disagrees
+with the ShardQ boundary skip ShardQ for that step.
+
 ## Spill transaction
 
 A resident block cannot be reused until its contents have been handed to the
