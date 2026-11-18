@@ -1,0 +1,179 @@
+meta:
+  title: "Ministral-3-Reasoning"
+  slug: "ministral-3-reasoning"
+  provider: "Mistral AI"
+  description: "Ministral 3 Reasoning family (3B/8B/14B) with BF16 weights, vision support, and 256K context"
+  date_added: 2025-12-02
+  date_updated: 2026-05-06
+  tasks:
+    - multimodal
+  related_recipes:
+    - mistralai/Ministral-3-14B-Instruct-2512
+    - mistralai/Mistral-Large-3-675B-Instruct-2512
+  hardware:
+    h200: verified
+    gb200: verified
+    mi300x: verified
+
+model:
+  model_id: "mistralai/Ministral-3-8B-Reasoning-2512"
+  min_vllm_version: "0.11.0"
+  architecture: dense
+  parameter_count: "8B"
+  active_parameters: "8B"
+  context_length: 262144
+  base_args:
+    - "--tokenizer_mode"
+    - "mistral"
+    - "--config_format"
+    - "mistral"
+    - "--load_format"
+    - "mistral"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Mistral tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "mistral"
+  reasoning:
+    description: "Mistral reasoning parser extracts <think>...</think> into message.reasoning"
+    args:
+      - "--reasoning-parser"
+      - "mistral"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 22
+    description: "Native BF16 weights (8B)"
+
+  "3b":
+    model_id: "mistralai/Ministral-3-3B-Reasoning-2512"
+    precision: bf16
+    vram_minimum_gb: 8
+    description: "Smallest 3B variant with tied embeddings"
+
+  "14b":
+    model_id: "mistralai/Ministral-3-14B-Reasoning-2512"
+    precision: bf16
+    vram_minimum_gb: 32
+    description: "Largest 14B variant; 2xH200 recommended for full context"
+    extra_args:
+      - "--tensor-parallel-size"
+      - "2"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--no-enable-prefix-caching"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Ministral-3 Reasoning comes with BF16 weights in 3 sizes:
+
+  - 3B (tied embeddings)
+  - 8B, 14B (independent embeddings/outputs)
+
+  Each variant has vision support and 256K max context. On GB200, we observe significant
+  speed-ups with NVFP4 Marlin fallback for older GPUs.
+
+  ## Prerequisites
+
+  - Hardware: 1x H200 (3B/8B), 2x H200 recommended for 14B with full context
+  - vLLM >= 0.11.0
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Launch command
+
+  3B or 8B on 1x H200:
+
+  ```bash
+  vllm serve mistralai/Ministral-3-8B-Reasoning-2512 \
+    --tokenizer_mode mistral --config_format mistral --load_format mistral \
+    --enable-auto-tool-choice --tool-call-parser mistral \
+    --reasoning-parser mistral
+  ```
+
+  14B on 2x H200:
+
+  ```bash
+  vllm serve mistralai/Ministral-3-14B-Reasoning-2512 \
+    --tensor-parallel-size 2 \
+    --tokenizer_mode mistral --config_format mistral --load_format mistral \
+    --enable-auto-tool-choice --tool-call-parser mistral \
+    --reasoning-parser mistral
+  ```
+
+  Key flags:
+  - `enable-auto-tool-choice`: required for tool usage
+  - `tool-call-parser mistral`: required for tool usage
+  - `reasoning-parser mistral`: required to extract reasoning content
+
+  ## Client Usage
+
+  Streaming reasoning + answer:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  stream = client.chat.completions.create(
+      model="mistralai/Ministral-3-8B-Reasoning-2512",
+      messages=[{"role": "user", "content": "Solve: use 2,5,6,3 to make 24."}],
+      stream=True, temperature=0.7, top_p=0.95, max_tokens=262144,
+  )
+  for chunk in stream:
+      delta = chunk.choices[0].delta
+      # vLLM 0.11.0 uses reasoning_content; 0.11.1+ uses reasoning.
+      rc = getattr(delta, "reasoning", getattr(delta, "reasoning_content", None))
+      if rc:
+          print(rc, end="", flush=True)
+      if delta.content:
+          print(delta.content, end="", flush=True)
+  ```
+
+  ## Troubleshooting
+
+  - OOM on 14B: use `--tensor-parallel-size 2` or lower `--max-model-len`.
+
+  ## References
+
+  - [Ministral-3-8B-Reasoning](https://huggingface.co/mistralai/Ministral-3-8B-Reasoning-2512)
+  - [Ministral-3-3B-Reasoning](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512)
+  - [Ministral-3-14B-Reasoning](https://huggingface.co/mistralai/Ministral-3-14B-Reasoning-2512)

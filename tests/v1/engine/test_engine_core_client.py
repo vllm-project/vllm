@@ -142,6 +142,9 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
+        def getsockopt_string(self, _option):
+            return "inproc://dummy"
+
     monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
@@ -217,7 +220,6 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.eng_start_index = 0
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
     return client
@@ -311,7 +313,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     client.current_wave = 0
     client.resources = SimpleNamespace(stats_update_task=None)
     client.stats_update_address = "inproc://scale-down-stats"
-    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    client.scale_sock_addr = "inproc://scale-down-notify"
     pause_started = asyncio.Event()
 
     async def pause_scheduler(*args, **kwargs):
@@ -323,11 +325,11 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     with (
         zmq.asyncio.Context() as ctx,
         ctx.socket(zmq.XPUB) as coordinator,
-        ctx.socket(zmq.PAIR) as first_req_socket,
+        ctx.socket(zmq.PAIR) as scale_socket,
     ):
         client.ctx = ctx
         coordinator.bind(client.stats_update_address)
-        first_req_socket.bind(client.first_req_sock_addr)
+        scale_socket.bind(client.scale_sock_addr)
         client._ensure_stats_update_task()
         scale_task = None
         try:
@@ -448,7 +450,7 @@ def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
 )
-def test_apply_ready_response_syncs_block_size(effective_size, other_size):
+def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
@@ -456,8 +458,11 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
+    client.coordinator_input_address = None
+    client.coordinator_output_address = None
 
     payload = msgspec.msgpack.encode(
         EngineCoreReadyResponse(
@@ -478,6 +483,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
             instance_id="test-instance",
             supports_lora=False,
             max_loras=0,
+            coord_store_port=1234,
+            coordinator_input_address="tcp://127.0.0.1:1235",
+            coordinator_output_address="tcp://127.0.0.1:1236",
         )
     )
     fields = msgspec.msgpack.decode(payload)
@@ -498,6 +506,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
 
     client._apply_ready_response(b"")
     assert cache_config.effective_attention_block_size is None
+    assert client.vllm_config.parallel_config._coord_store_port == 1234
+    assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+    assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
@@ -508,6 +519,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
 
@@ -599,7 +611,7 @@ def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None)
     return msg
 
 
-@dataclass
+@dataclass(slots=True)
 class TestMessage:
     """Test dataclass for verifying custom type serialization."""
 
@@ -1149,7 +1161,7 @@ async def test_engine_core_client_util_method_nested_structures(
             )
             assert isinstance(result, dict) and len(result) == 2
             assert "list1" in result and "list2" in result
-            for key, lst in result.items():
+            for lst in result.values():
                 assert isinstance(lst, list) and len(lst) == 2
                 for item in lst:
                     assert isinstance(item, TestMessage) and item.message == "nested2"
@@ -1381,7 +1393,7 @@ async def test_kv_cache_events_dp(
 
         # Create and add 25 requests
         # NOTE: attempts to force routing to both dp groups but can be flaky
-        for i in range(25):
+        for _ in range(25):
             await asyncio.sleep(0.01)
             request = make_request(sampling_params, custom_tokens)
             await client.add_request_async(request)
@@ -1478,13 +1490,18 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor = MagicMock()
 
         # Only implement the methods that are actually called during init
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
-        mock_spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        mock_layer = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+            )
         )
 
-        mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
+        mock_executor.get_kv_cache_layer_configs.return_value = [
+            {"default": mock_layer}
+        ]
         mock_executor.get_supported_kv_cache_layouts.return_value = [["LBNHC"]]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
@@ -1513,7 +1530,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
 
         vllm_config = EngineArgs(
-            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
+            model="deepseek-ai/DeepSeek-V2-Lite"
         ).create_engine_config()
         engine_core_proc = EngineCoreProc(
             vllm_config=vllm_config,
@@ -1578,6 +1595,7 @@ def test_apply_ready_response_retains_kv_event_sources():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
 
     def ready(rank: int, config: KVEventsConfig | None) -> bytes:

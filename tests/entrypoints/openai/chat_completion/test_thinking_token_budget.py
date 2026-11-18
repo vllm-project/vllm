@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""E2E tests for ``thinking_token_budget`` with reasoning models.
+"""E2E tests for `thinking_token_budget` with reasoning models.
 
 Covers Qwen3-0.6B and Qwen3.5 FP8 + MTP.
 """
@@ -213,16 +213,45 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default"], indirect=True)
+async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
+    """/v1/responses applies thinking_token_budget like /v1/chat/completions."""
+    extra_body = {"thinking_token_budget": THINK_BUDGET}
+    chat = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES,
+        max_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        input=MESSAGES,
+        max_output_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+
+    reasoning = "".join(
+        part.text
+        for item in response.output
+        if item.type == "reasoning"
+        for part in item.content or []
+    )
+    assert reasoning == chat.choices[0].message.reasoning
+
+
+@pytest.mark.asyncio
 @multi_gpu_only(num_gpus=2)
 @requires_fp8
 async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_plain(
     server_qwen35_fp8_mtp_tp2,
 ):
-    """Concurrent chat requests: some with ``thinking_token_budget``, some without.
+    """Concurrent chat requests: some with `thinking_token_budget`, some without.
 
     Exercises the scheduler / input processor under a mixed batch on the same
     Qwen3.5 FP8 + MTP (TP=2) server. Budgeted calls are checked with
-    ``_count_reasoning_decode_token_ids_between_markers`` on full token ids.
+    `_count_reasoning_decode_token_ids_between_markers` on full token ids.
     """
     _batch_spec: list[tuple[Literal["budget"], int] | tuple[Literal["plain"], None]] = [
         ("budget", 1),

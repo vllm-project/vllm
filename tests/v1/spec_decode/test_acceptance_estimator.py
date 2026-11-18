@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``predict`` writes one probability into two index spaces at once.
+"""`predict` writes one probability into two index spaces at once.
 
 Adaptive verification reads the estimate in this step's batch order, while the
 next step's refit reads it in persistent request-state slots. A mix-up between
@@ -12,17 +12,29 @@ metrics to hint at.
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    _MAX_LOG_ODDS,
     OnlineAcceptanceEstimator,
+    _accumulate_kernel,
+    _refit_kernel,
 )
 
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA required for acceptance estimator tests", allow_module_level=True)
+if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
+    pytest.skip(
+        "CUDA/XPU required for acceptance estimator tests", allow_module_level=True
+    )
 
 MAX_NUM_REQS = 16
 NUM_STEPS = 4
 VOCAB_SIZE = 2048
+
+# predict() reduces the vocabulary in blocks of this width and then combines the
+# per-block partials. VOCAB_SIZE is narrower than one block, so tests using it
+# never exercise that combine; the multi-block tests below size their vocabulary
+# from this instead.
+VOCAB_BLOCK_SIZE = 4096
 
 
 def _make_estimator(device: torch.device) -> OnlineAcceptanceEstimator:
@@ -54,14 +66,40 @@ def _expected_probs(
     return torch.sigmoid(weight.double() * feature + bias[steps].double()).float()
 
 
+def _reference_feature(logits: torch.Tensor) -> torch.Tensor:
+    """logit(q_max) for one row, in fp64, by a different route than the kernel.
+
+    Masks the top token out and reduces the remainder, so `1 + complement` is
+    never formed. The kernel instead excludes the top entry inside its own block
+    and rescales the other blocks' partials, so agreement is evidence about the
+    value rather than about a shared formula.
+    """
+    scaled = logits.double()
+    top = scaled.max(dim=-1, keepdim=True)
+    rest = scaled.scatter(-1, top.indices, float("-inf"))
+    return -torch.logsumexp(rest - top.values, dim=-1)[0]
+
+
+def _predict_one_row(
+    estimator: OnlineAcceptanceEstimator, logits: torch.Tensor, device
+) -> torch.Tensor:
+    """Score a single [1, vocab] row at draft position 0 and return its feature."""
+    idx_mapping = torch.zeros(1, device=device, dtype=torch.int32)
+    draft_step = torch.tensor(0, device=device, dtype=torch.int32)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
+    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
+    return estimator.features[0, 0]
+
+
 @pytest.mark.parametrize("tokens_per_req", [1, NUM_STEPS])
 def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
     """One row per request (per-step drafting) and a whole block at once.
 
     Which one it is is inferred from whether the draft step is per-row, so the
-    two cases differ only in how ``draft_step`` is shaped.
+    two cases differ only in how `draft_step` is shaped.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = _make_estimator(device)
     num_reqs = 5
@@ -101,7 +139,7 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
 
 def test_predict_skips_cudagraph_padded_rows():
     """Padded rows carry slot -1 and must not land on a live request."""
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = _make_estimator(device)
     num_reqs, num_padded = 3, 6
@@ -157,7 +195,7 @@ def test_refit_recovers_a_shared_slope_and_per_position_intercepts():
     so the arrowhead solve is only correct if it recovers both from data whose
     positions differ in level but not in slope.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     true_slope = 0.6
     true_bias = torch.tensor([1.4, 0.9, 0.4, -0.1], device=device)
@@ -189,7 +227,7 @@ def test_refit_survives_a_position_with_no_observations():
     Its statistics stay zero while the others accumulate, which is the degenerate
     case the arrowhead denominator has to tolerate.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
     estimator.REFIT_INTERVAL = 5
@@ -220,7 +258,7 @@ def test_step_damping_scales_with_the_evidence():
     isolates the damping factor n / (n + DAMPING_OBSERVATIONS). The slope/
     intercept coupling is zeroed so the two parameters can be checked apart.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     damping = OnlineAcceptanceEstimator.DAMPING_OBSERVATIONS
     per_position_n = 20.0
 
@@ -259,16 +297,143 @@ def test_step_damping_scales_with_the_evidence():
     assert refit_with(0.0) == (0.0, 0.0)
 
 
+@pytest.mark.parametrize("complement_mass", [1e-3, 1e-6, 1e-12])
+def test_feature_resolves_a_tiny_complement_mass(complement_mass: float):
+    """A confident row's whole signal lives below an fp32 ulp of 1.0.
+
+    The feature is -log of the mass on every token but the top one. Summing all
+    of it, including the top token's own unit term, and subtracting 1 afterwards
+    cancels that mass away entirely once it drops under ~6e-8 -- and a drafter
+    on an easy continuation is far more confident than that. Spread the mass
+    over the tail so no single competitor is close to the top token.
+    """
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+
+    # Top logit at 0; the rest share `complement_mass` of relative mass.
+    logits = torch.full(
+        (1, VOCAB_SIZE), float(torch.tensor(complement_mass / (VOCAB_SIZE - 1)).log())
+    ).to(device)
+    logits[0, 0] = 0.0
+
+    feature = _predict_one_row(estimator, logits, device)
+    expected = _reference_feature(logits)
+
+    # The tail holds `complement_mass` by construction, so the reference should
+    # land on -log of it. Guards the test's own setup, loosely: the logit written
+    # into each tail slot is fp32-rounded.
+    torch.testing.assert_close(
+        expected.item(), -torch.tensor(complement_mass).log().item(), rtol=1e-5, atol=0
+    )
+    # rtol is ~3 orders looser than fp32 needs here, to stay robust across
+    # backends' exp(); the bug this pins produced 40.0 against a true 27.63.
+    torch.testing.assert_close(feature.double(), expected, rtol=1e-5, atol=0)
+
+
+# Three blocks, the last one partial, so the masked tail is covered too.
+MULTI_BLOCK_VOCAB = 2 * VOCAB_BLOCK_SIZE + 1536
+
+
+@pytest.mark.parametrize("max_block", [0, 1, 2])
+def test_feature_combines_blocks_around_the_global_max(max_block: int):
+    """The top token's block must be found among several, not assumed.
+
+    Each block reduces against its own local max, so the partials are on
+    different scales and only become comparable once rescaled by the global
+    max. Exactly one block holds the top token and must contribute its
+    excluding sum; the rest contribute in full. Pointing that exclusion at the
+    wrong block subtracts a token that is not the maximum and leaves the real
+    one in, which is wrong by a factor of e^(gap) -- invisible with a
+    single-block vocabulary, where the max's block is trivially block 0.
+
+    Mass is spread over every block, in decreasing decades, so a block whose
+    partial is dropped or left unrescaled changes the result.
+    """
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+    complement_mass = 1e-9
+
+    weights = torch.zeros(MULTI_BLOCK_VOCAB, dtype=torch.float64)
+    for block in range(3):
+        start = block * VOCAB_BLOCK_SIZE
+        end = min(start + VOCAB_BLOCK_SIZE, MULTI_BLOCK_VOCAB)
+        weights[start:end] = 10.0**-block
+    top_idx = max_block * VOCAB_BLOCK_SIZE + 7
+    weights[top_idx] = 0.0
+    weights *= complement_mass / weights.sum()
+
+    logits = weights.log().float()[None, :].to(device)
+    logits[0, top_idx] = 0.0
+
+    feature = _predict_one_row(estimator, logits, device)
+    expected = _reference_feature(logits)
+    # The tail carries `complement_mass` by construction.
+    torch.testing.assert_close(
+        expected.item(),
+        -torch.tensor(complement_mass).log().item(),
+        rtol=1e-5,
+        atol=0,
+    )
+    torch.testing.assert_close(feature.double(), expected, rtol=1e-5, atol=0)
+
+
+@pytest.mark.parametrize("num_tied", [2, 3])
+@pytest.mark.parametrize("placement", ["same_block", "across_blocks"])
+def test_feature_drops_exactly_one_tied_maximum(num_tied: int, placement: str):
+    """Tied maxima: remove exactly one, keep the rest.
+
+    The complement is the mass on every token *except the single most likely
+    one*, so k tokens at the maximum leave k-1 of them in it, and the feature
+    is -log(k-1): 0 for a 2-way tie, -log 2 for a 3-way. Dropping all k instead
+    reports a complement of 0 -- a one-hot row -- clamping the feature to
+    +MAX_LOG_ODDS, i.e. maximal confidence for a maximally ambiguous row, the
+    exact inversion of the truth.
+
+    Both placements are needed because they fail differently, and each is blind
+    to the other's bug:
+
+    - `same_block` catches excluding by value (`logits == block_max`)
+      without adding the other tied copies back, which zeroes every tied entry
+      inside the block at once. Spread across blocks it would hit one entry per
+      block and look correct.
+    - `across_blocks` catches excluding from every block whose local max ties
+      the global max, instead of from the single selected one. Within one block
+      there is no second block to wrongly exclude from.
+
+    The floor is low enough that the ~12k other tokens contribute ~1e-22, so the
+    surviving ties are effectively the entire complement.
+    """
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+
+    if placement == "same_block":
+        tied = [5 + i for i in range(num_tied)]
+    else:
+        tied = [block * VOCAB_BLOCK_SIZE + 5 for block in range(num_tied)]
+    logits = torch.full((1, MULTI_BLOCK_VOCAB), -60.0, device=device)
+    logits[0, tied] = 0.0
+
+    feature = _predict_one_row(estimator, logits, device)
+    expected = -torch.tensor(float(num_tied - 1)).log().item()
+    # Spelled out before the value check: this is the inversion that matters,
+    # and it reports better than "40.0 != -0.69" would.
+    assert feature.item() < _MAX_LOG_ODDS, (
+        f"{num_tied} tied maxima ({placement}) scored as a one-hot row, so an "
+        "ambiguous draft was handed maximal confidence"
+    )
+    torch.testing.assert_close(feature.item(), expected, rtol=0, atol=1e-5)
+
+
 def test_feature_ignores_which_token_was_drawn():
     """The score must depend on the draft distribution, not on the draw.
 
     This is what keeps rejection sampling lossless: if the score read the drawn
     token, trimming a draft would condition on the token being trimmed and tilt
-    the emitted distribution toward the drafter's confident modes. ``predict``
+    the emitted distribution toward the drafter's confident modes. `predict`
     takes no token argument, and this pins that -- two rows with identical
     logits must score identically no matter what was sampled from them.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = _make_estimator(device)
 
@@ -292,3 +457,34 @@ def test_feature_ignores_which_token_was_drawn():
         atol=2e-3,
         rtol=2e-3,
     )
+
+
+def test_warmup_covers_every_batch_size_and_the_refit():
+    """After warmup, no batch size and no refit may JIT-compile during serving."""
+    device = current_platform.device_type
+
+    def compiled_variants() -> set:
+        return {
+            (kernel.fn.__name__, key)
+            for kernel in (_accumulate_kernel, _refit_kernel)
+            for caches in kernel.device_caches.values()
+            for key in caches[0]
+        }
+
+    estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 2
+    slots = torch.arange(REFIT_NUM_REQS, device=device, dtype=torch.int32)
+    num_accepted = torch.ones(REFIT_NUM_REQS, device=device)
+    features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device)
+    _drive_round(estimator, features[:1], num_accepted[:1], slots[:1])
+    estimator.warmup()
+    warmed = compiled_variants()
+
+    for num_reqs in (8, 300):
+        _drive_round(
+            estimator, features[:num_reqs], num_accepted[:num_reqs], slots[:num_reqs]
+        )
+    torch.accelerator.synchronize()
+
+    assert estimator._refits == 1
+    assert compiled_variants() == warmed

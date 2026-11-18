@@ -3,12 +3,14 @@
 """Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
 
 Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``). The +1 look-ahead
+position ahead of the target model (`draft_lookahead`). The +1 look-ahead
 feature past the processed boundary is used when its encoder output is present
 and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+import weakref
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +30,7 @@ from vllm.multimodal.inputs import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import reserve_encoder_cache_residency
 
 pytestmark = pytest.mark.cpu_test
 
@@ -72,6 +75,9 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
     manager.is_captured.return_value = True
     manager.supports_modality.side_effect = lambda modality: (
         EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    manager.supports_batch.side_effect = lambda modality, mm_kwargs: (
+        EncoderCudaGraphManager.supports_batch(manager, modality, mm_kwargs)
     )
     runner.cudagraph_manager = manager
     with patch(
@@ -133,15 +139,21 @@ def _make_runner(
     )
 
 
-def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, num_computed_tokens=0, prefill_len large.
+def _gather(
+    runner: EncoderRunner,
+    *,
+    num_scheduled: int,
+    draft_lookahead: int,
+    num_computed: int = 0,
+):
+    # Single prefilling request, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        num_computed_tokens=np.array([0]),
+        num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -179,6 +191,31 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
     assert [e.modality for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
+
+
+@pytest.mark.parametrize("draft_lookahead", [1, 3])
+@pytest.mark.parametrize("num_computed", [8, 9])
+def test_draft_lookahead_ignores_freed_feature(draft_lookahead, num_computed):
+    """A consumed feature may be freed without removing its request metadata."""
+    freed = _feature("freed", offset=0, length=8)
+    current = _feature("current", offset=8, length=8)
+    runner = _make_runner([freed, current], cached=[freed, current])
+    runner.encoder_cache.free_encoder_cache(freed.identifier)
+
+    mm_embeds, is_mm_embed = _gather(
+        runner,
+        num_scheduled=4,
+        draft_lookahead=draft_lookahead,
+        num_computed=num_computed,
+    )
+
+    start = num_computed + draft_lookahead - current.mm_position.offset
+    expected = runner.encoder_cache.encoder_outputs[current.identifier][
+        start : start + 4
+    ]
+    assert len(mm_embeds) == 1
+    torch.testing.assert_close(mm_embeds[0], expected)
+    assert is_mm_embed.tolist() == [True] * 4
 
 
 def test_draft_lookahead_raises_on_interior_miss():
@@ -393,3 +430,82 @@ def test_encoder_timing_stats_registry():
     assert stats["r1"]["num_encoder_calls"] == 2
     assert stats["r1"]["encoder_forward_secs"] >= 0
     assert runner.get_encoder_timing_stats() == {}
+
+
+def test_consumed_cpu_input_updates_are_request_local_and_replayable():
+    """Release one occurrence, keep layout/embeddings, then restore encode input."""
+    pixels = torch.ones(8, HIDDEN)
+    feature = replace(_feature("same", 0, 8), data=_embeds_item(pixels))
+    later = replace(feature, mm_position=PlaceholderRange(offset=16, length=8))
+    source = [feature, later]
+    cache = EncoderCache()
+    cache.add_request("a", source)
+    cache.add_request("b", source)
+    cache.encoder_outputs["same"] = torch.ones(8, HIDDEN)
+    cache.update_encoder_inputs("a", {0: None})
+    assert cache.mm_features["a"][0].data is None
+    assert cache.mm_features["a"][0].mm_position is feature.mm_position
+    assert cache.mm_features["a"][1].data is feature.data
+    assert cache.mm_features["b"][0].data is feature.data
+    assert source[0].data is not None
+    assert "same" in cache.encoder_outputs
+    cache.free_encoder_cache("same")
+    cache.update_encoder_inputs("a", {0: source[0].data})
+    runner = EncoderRunner(
+        model=torch.nn.Module(),
+        max_num_tokens=32,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    hashes, inputs = runner.prepare_mm_inputs({"a": [0]})
+    assert hashes == ["same"]
+    assert inputs == [(feature.modality, feature.data)]
+
+
+def test_consumed_cpu_input_releases_storage_before_request_finishes():
+    """The request may stay alive after its worker-owned storage is freed."""
+    cache = EncoderCache()
+    pixels = torch.ones(8, HIDDEN)
+    ref = weakref.ref(pixels)
+    cache.add_request("a", [replace(_feature("h", 0, 8), data=_embeds_item(pixels))])
+    del pixels
+    assert ref() is not None
+    cache.update_encoder_inputs("a", {0: None})
+    assert ref() is None
+    assert "a" in cache.mm_features
+
+
+# ------------------ encoder cache residency profiling ------------------ #
+def _dummy_outputs(num_items: int, tokens: int, hidden: int = 16):
+    return [torch.zeros(tokens, hidden, dtype=torch.bfloat16) for _ in range(num_items)]
+
+
+def test_residency_reservation_covers_the_cache_shortfall():
+    """The dummy batch only covers the compute budget; the cache may hold more."""
+    cache: dict[str, torch.Tensor] = {}
+    outputs = _dummy_outputs(num_items=2, tokens=100)
+
+    cache_bytes = reserve_encoder_cache_residency(cache, outputs, 1000)
+
+    # 1000 tokens of capacity, 200 already resident in the dummy outputs.
+    assert cache["tmp_residency"].shape == (800, 16)
+    assert cache["tmp_residency"].dtype == torch.bfloat16
+    assert cache_bytes == 1000 * 16 * 2
+
+
+def test_residency_reservation_is_a_noop_when_the_batch_already_fills_the_cache():
+    cache: dict[str, torch.Tensor] = {}
+    outputs = _dummy_outputs(num_items=2, tokens=100)
+
+    cache_bytes = reserve_encoder_cache_residency(cache, outputs, 200)
+
+    assert cache == {}
+    assert cache_bytes == 200 * 16 * 2
+
+
+def test_residency_reservation_tolerates_no_dummy_outputs():
+    cache: dict[str, torch.Tensor] = {}
+    assert reserve_encoder_cache_residency(cache, [], 1000) == 0
+    assert cache == {}
