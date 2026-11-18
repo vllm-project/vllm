@@ -2163,6 +2163,9 @@ class EngineCoreProc(EngineCore):
             cache_config_info=self.vllm_config.cache_config.metrics_info(),
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
+            supports_prompt_logprobs=(
+                not self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ),
         )
 
     def process_input_sockets(
@@ -2244,10 +2247,8 @@ class EngineCoreProc(EngineCore):
                             self._handle_mm_cache_miss(req, e)
                             continue
                         except VLLMValidationError as e:
-                            # Note(arpera):
-                            # Currently we validate in engine core
-                            # only if request uses the same structured output backend
-                            # as engine core latched
+                            # Report request validation errors without terminating
+                            # the engine.
                             self._handle_request_validation_error(req, e)
                             continue
                         except Exception:

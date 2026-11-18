@@ -9,7 +9,10 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
-from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputSchedulerConnector,
+    retained_objects,
+)
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -459,7 +462,10 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
+            AuxOutputSchedulerConnector(
+                self.kv_cache_manager,
+                retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0],
+            )
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -1243,13 +1249,15 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Include encoder inputs needed to replay the prefix tail.
-                    ec_computed_tokens = num_computed_tokens
+                    # Computed tokens after the replay rewind applied later by
+                    # _mark_prefix_replay; must match its calculation.
+                    # Used for the encoder-input and prefill-deferral checks.
+                    effective_computed_tokens = num_computed_tokens
                     if not window_loaded:
-                        ec_computed_tokens = max(
+                        effective_computed_tokens = max(
                             0, num_computed_tokens - self.prefix_replay_tokens
                         )
-                    if self._ec_transfer_pending(request, ec_computed_tokens):
+                    if self._ec_transfer_pending(request, effective_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1272,8 +1280,9 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+                    effective_computed_tokens = num_computed_tokens
 
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    if self._ec_transfer_pending(request, effective_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1306,7 +1315,10 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                elif (
+                    defer_prefills
+                    and effective_computed_tokens < request.num_tokens - 1
+                ):
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
                     break
@@ -3330,6 +3342,8 @@ class Scheduler(SchedulerInterface):
         stale vision embeddings are not reused.
         """
         self.encoder_cache_manager.reset()
+        if self.ec_connector is not None:
+            self.ec_connector.reset()
 
     def make_stats(
         self,
