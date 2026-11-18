@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
-MAX_LOGPROB_TOKEN_IDS = 128
+MAX_LOGPROB_TOKEN_IDS = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
@@ -63,7 +63,7 @@ def _verify_num_sequences(value: int, parameter_name: str) -> None:
 
 
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
-    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    """Validate `thinking_token_budget`; return `None` if unset."""
     if value is None:
         return None
     if isinstance(value, (bool, float)) or not isinstance(value, int):
@@ -285,7 +285,7 @@ class SamplingParams(
     n: int = 1
     """Number of outputs to return for the given prompt request.
 
-    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    The maximum allowed value is controlled by the `VLLM_MAX_N_SEQUENCES`
     environment variable (default: 16384).
 
     NOTE:
@@ -311,7 +311,7 @@ class SamplingParams(
     means greedy sampling."""
     watermarking: bool | None = None
     """Whether to apply the engine's configured watermark to this request.
-    ``None`` defaults to enabled."""
+    `None` defaults to enabled."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""
@@ -357,9 +357,13 @@ class SamplingParams(
     """Token IDs to score per causal prompt row: an integer array of shape
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
-    prompt_logprob_start + i + 1, so the last prompt row is excluded."""
+    prompt_logprob_start + i + 1, so the last prompt row is excluded.
+    See docs/training/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
-    """First causal prompt row to score; defaults to the first row."""
+    """First causal prompt row to score with prompt_logprobs and
+    prompt_logprob_token_ids; defaults to the first row. Earlier prompt
+    positions get None prompt logprobs. Set skip_reading_prefix_cache=False to
+    reuse local cached rows before it."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -913,8 +917,6 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
-        self._validate_spec_decode(speculative_config)
-        self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1034,18 +1036,21 @@ class SamplingParams(
                 )
             # In-vocab IDs fit int32, like the runner's other token ID buffers.
             self.prompt_logprob_token_ids = np.ascontiguousarray(ids, dtype=np.int32)
-            if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
+
+        if self.prompt_logprob_start is not None:
+            if ids is None and self.prompt_logprobs is None:
+                raise VLLMValidationError(
+                    "prompt_logprob_start requires prompt_logprobs or "
+                    "prompt_logprob_token_ids.",
+                    parameter="prompt_logprob_start",
+                    value=self.prompt_logprob_start,
+                )
+            if self.prompt_logprob_start < 0:
                 raise VLLMValidationError(
                     "prompt_logprob_start must be non-negative.",
                     parameter="prompt_logprob_start",
                     value=self.prompt_logprob_start,
                 )
-        elif self.prompt_logprob_start is not None:
-            raise VLLMValidationError(
-                "prompt_logprob_start requires prompt_logprob_token_ids.",
-                parameter="prompt_logprob_start",
-                value=self.prompt_logprob_start,
-            )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
         """Validate stop_token_ids are within vocabulary range."""
@@ -1118,10 +1123,6 @@ class SamplingParams(
             raise ValueError(
                 "trace_decode_token_ids is not supported with prompt_logprob_token_ids."
             )
-        if speculative_config is not None:
-            raise ValueError(
-                "trace_decode_token_ids is not supported with speculative decoding."
-            )
         if self.structured_outputs is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with structured outputs."
@@ -1180,42 +1181,6 @@ class SamplingParams(
                 "allowed_token_ids contains out-of-vocab token id!",
                 parameter="allowed_token_ids",
                 value=invalid_token_ids,
-            )
-
-    def _validate_spec_decode(
-        self,
-        speculative_config: SpeculativeConfig | None,
-    ) -> None:
-        if speculative_config is None:
-            return
-
-        # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_p > _SAMPLING_EPS or self.logit_bias:
-            raise VLLMValidationError(
-                "The min_p and logit_bias sampling parameters "
-                "are not yet supported with speculative decoding."
-            )
-
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
-        if not model_config.is_diffusion:
-            return
-
-        # Diffusion models denoise a whole canvas per step with a fixed
-        # temperature schedule, so per-request sampling parameters are not
-        # supported. Penalties are ignored by the sampler with a warning.
-        if (
-            self.temperature != 1.0
-            or self.min_p > _SAMPLING_EPS
-            or self.seed is not None
-            or self.min_tokens > 0
-            or self.logit_bias
-            or self.bad_words
-            or self.allowed_token_ids
-        ):
-            raise VLLMValidationError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
-                "bad_words, and allowed_token_ids sampling parameters "
-                "are not yet supported with diffusion models."
             )
 
     def _validate_structured_outputs(
@@ -1517,6 +1482,12 @@ class BeamSearchParams(
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        if not math.isfinite(self.length_penalty):
+            raise VLLMValidationError(
+                f"length_penalty must be finite, got {self.length_penalty}.",
+                parameter="length_penalty",
+                value=self.length_penalty,
+            )
 
     def configure_logprobs(
         self, sampling_params: SamplingParams, config: "VllmConfig"
@@ -1527,7 +1498,7 @@ class BeamSearchParams(
         if not ids:
             raise ValueError("Beam search allowed_token_ids must not be empty")
         if self.structured_outputs is not None:
-            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            # Grammar candidates can exceed the MAX_LOGPROB_TOKEN_IDS exact-ID limit.
             raise ValueError(
                 "Beam allowlists with structured outputs are not supported"
             )
@@ -1539,9 +1510,6 @@ class BeamSearchParams(
         if config.model_config.is_diffusion:
             # The diffusion sampler does not consume logprob_token_ids.
             raise ValueError("Beam allowlists with diffusion models are not supported")
-        if not config.use_v2_model_runner:
-            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
-            raise ValueError("Beam allowlists require the V2 model runner")
         # Score the original distribution without applying a sampling mask.
         sampling_params.logprobs = None
         sampling_params.logprob_token_ids = ids

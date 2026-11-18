@@ -37,7 +37,7 @@ class ParakeetConfig(ParakeetEncoderConfig):
         )
 
 
-@dataclass(kw_only=True, frozen=True)
+@dataclass(kw_only=True, frozen=True, slots=True)
 class ExtractorConfig:
     feature_size: int
     sampling_rate: int

@@ -7,7 +7,6 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
@@ -19,16 +18,13 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
-    get_visible_memory_node,
+    get_worker_memory_nodes,
 )
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.worker.cpu_model_runner import CPUModelRunner
+from vllm.v1.worker.cpu.model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -45,7 +41,7 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node(
+        allowed_memory_nodes = get_worker_memory_nodes(
             vllm_config.parallel_config.assigned_physical_gpu_ids
         )
         allowed_cpu_list = get_allowed_cpu_list()
@@ -76,7 +72,7 @@ class CPUWorker(Worker):
         torch.ops._C.init_cpu_memory_env([memory_node])
 
         memory_status = get_memory_node_info(memory_node)
-        memory_fraction = vllm_config.cache_config.gpu_memory_utilization
+        memory_fraction = vllm_config.cache_config.resolved_gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
         )
@@ -145,23 +141,21 @@ class CPUWorker(Worker):
             self.local_rank,
             current_platform.dist_backend,
         )
-        if self.use_v2_model_runner:
-            logger.info_once("Using V2 Model Runner")
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        if self.use_v2_model_runner:
-            from vllm.v1.worker.cpu.model_runner import (
-                CPUModelRunner as CPUModelRunnerV2,
+        if current_platform.uses_standalone_cpu_model_runner():
+            from vllm.v1.worker.cpu.standalone_model_runner import (
+                StandaloneCPUModelRunner,
             )
 
-            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+            self.model_runner: CPUModelRunner = StandaloneCPUModelRunner(  # type: ignore
                 self.vllm_config, self.device
             )
         else:
-            self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
+            self.model_runner = CPUModelRunner(self.vllm_config, self.device)
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
@@ -267,14 +261,16 @@ class CPUWorker(Worker):
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
-        # profile_run skips the MRV2 scheduler-driven kernels, so without this
+        # profile_run skips the scheduler-driven kernels, so without this
         # their Triton JIT lands in the first request's TTFT.
-        kernel_config = self.vllm_config.kernel_config
-        if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
-            from vllm.v1.worker.gpu.warmup import warmup_kernels
+        if self.vllm_config.kernel_config.enable_jit_warmup:
+            if current_platform.uses_standalone_cpu_model_runner():
+                from vllm.v1.worker.cpu.warmup import warmup_kernels
+            else:
+                from vllm.v1.worker.gpu.warmup import warmup_kernels
 
             warmup_kernels(
-                cast("GPUModelRunner", self.model_runner),
+                self.model_runner,
                 self.execute_model,
                 self.sample_tokens,
             )
