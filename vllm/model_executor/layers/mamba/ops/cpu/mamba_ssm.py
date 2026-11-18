@@ -4,7 +4,6 @@
 import torch
 
 import vllm._cpu_ops as ops
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 def _mamba_chunk_scan_combined_fwd_cpu(
@@ -78,67 +77,3 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     all_states = all_states.to(out_dtype)
 
     return all_states
-
-
-def selective_state_update(
-    state,
-    x,
-    dt,
-    A,
-    B,
-    C,
-    D=None,
-    z=None,
-    dt_bias=None,
-    dt_softplus=False,
-    state_batch_indices=None,
-    dst_state_batch_indices=None,
-    null_block_id=NULL_BLOCK_ID,
-    out=None,
-    num_accepted_tokens=None,
-    cu_seqlens=None,
-    is_blackwell=False,
-    enable_stochastic_rounding=False,
-    cache_philox_rounds=0,
-):
-    """CPU implementation for selective_state_update."""
-    # Ensure out tensor exists
-    if out is None:
-        out = torch.empty_like(x if x.dim() == 2 else x)
-
-    _state = state.unsqueeze(1) if state.dim() == 3 else state
-    _x = x.unsqueeze(1) if x.dim() == 2 else x
-    _dt = dt.unsqueeze(1) if dt.dim() == 2 else dt
-    _A = A.unsqueeze(0) if A.dim() == 2 else A
-    _B = B.unsqueeze(1) if B.dim() == 2 else B
-    _C = C.unsqueeze(1) if C.dim() == 2 else C
-    _D = D.unsqueeze(0) if (D is not None and D.dim() == 1) else D
-    _z = z.unsqueeze(1) if (z is not None and z.dim() == 2) else z
-    _dt_bias = (
-        dt_bias.unsqueeze(0)
-        if (dt_bias is not None and dt_bias.dim() == 1)
-        else dt_bias
-    )
-    _out = out.unsqueeze(1) if out.dim() == 2 else out
-
-    _sbi = state_batch_indices
-    _dsbi = dst_state_batch_indices
-    ops.selective_state_update_cpu(
-        _state,
-        _x,
-        _dt,
-        _A,
-        _B,
-        _C,
-        _D,
-        _z,
-        _dt_bias,
-        dt_softplus,
-        _sbi,
-        _dsbi,
-        null_block_id,
-        _out,
-        num_accepted_tokens,
-        cu_seqlens,
-    )
-    return _out.squeeze(1) if out.dim() == 2 else _out

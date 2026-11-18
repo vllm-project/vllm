@@ -193,33 +193,37 @@ def test_engram_config_cli_optional(options, provided, dp_shared_memory):
         assert args.engram_config.dp_shared_memory is dp_shared_memory
 
 
+@pytest.mark.parametrize("field", ["backend", "prefill_backend"])
 @pytest.mark.parametrize(
-    ("nested", "options", "expected"),
+    ("nested", "flag", "expected"),
     [
-        (MambaConfig(), [], None),
-        ({"prefill_backend": "flashinfer"}, [], "flashinfer"),
-        ({}, ["--mamba-prefill-backend", "triton"], "triton"),
+        (None, None, None),
+        ("flashinfer", None, "flashinfer"),
+        (None, "triton", "triton"),
     ],
 )
-def test_mamba_prefill_backend_passes_through_to_mamba_config(
-    nested, options, expected
+def test_mamba_backend_flags_pass_through_to_mamba_config(
+    field, nested, flag, expected
 ):
-    """The flag sets `MambaConfig.prefill_backend`; unset, it leaves the field."""
-    original = deepcopy(nested)
+    """Each flag sets its `MambaConfig` field; unset, it leaves the field."""
+    nested_config = MambaConfig(**{field: nested})
+    original = deepcopy(nested_config)
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    options = [f"--mamba-{field.replace('_', '-')}", flag] if flag else []
     namespace = parser.parse_args(["--model", "facebook/opt-125m", *options])
-    namespace.mamba_config = nested
+    namespace.mamba_config = nested_config
     args = EngineArgs.from_cli_args(namespace)
 
-    assert args.create_engine_config().mamba_config.prefill_backend == expected
-    assert nested == original
+    assert getattr(args.create_engine_config().mamba_config, field) == expected
+    assert nested_config == original
 
 
-def test_mamba_prefill_backend_and_mamba_config_field_are_mutually_exclusive():
+@pytest.mark.parametrize("field", ["backend", "prefill_backend"])
+def test_mamba_backend_flag_and_mamba_config_field_are_mutually_exclusive(field):
     args = EngineArgs(
         model="facebook/opt-125m",
-        mamba_config=MambaConfig(prefill_backend="triton"),
-        mamba_prefill_backend="triton",
+        mamba_config=MambaConfig(**{field: "triton"}),
+        **{f"mamba_{field}": "triton"},
     )
     with pytest.raises(ValueError, match="mutually exclusive"):
         args.create_engine_config()

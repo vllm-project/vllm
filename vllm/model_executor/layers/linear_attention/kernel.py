@@ -23,12 +23,14 @@ logger = init_logger(__name__)
 class LinearAttnSelectorConfig:
     """What kernels are selected by, extracted from the engine config like
     `AttentionSelectorConfig`: the platform, the layer's KV cache spec and the
-    activation dtype (None when unknown)."""
+    activation dtype (None when unknown), and the requested features."""
 
     platform: PlatformEnum
     device_capability: DeviceCapability | None
     kv_cache_spec: "KVCacheSpec | None" = None
     dtype: torch.dtype | None = None
+    use_stochastic_rounding: bool = False
+    use_ssu_algorithm: bool = False
 
     @classmethod
     def from_current_platform(
@@ -43,11 +45,14 @@ class LinearAttnSelectorConfig:
         except NotImplementedError:
             capability = None
         model_config = vllm_config.model_config
+        mamba_config = vllm_config.mamba_config
         return cls(
             current_platform._enum,
             capability,
             kv_cache_spec,
             model_config.dtype if model_config is not None else None,
+            use_stochastic_rounding=mamba_config.enable_stochastic_rounding,
+            use_ssu_algorithm=mamba_config.ssu_algorithm is not None,
         )
 
 
