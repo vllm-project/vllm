@@ -26,14 +26,13 @@ from vllm.model_executor.kernels.mhc.torch import (
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC,
-    HAS_AITER_MHC_FUSED,
-    HAS_AITER_MHC_FUSED_NORM,
     HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
-    HAS_AITER_MHC_PRE_NORM,
     HAS_TILELANG_MHC,
     MHCFusedPostPreOp,
     MHCPreDelayedOp,
     MHCPreOp,
+    _aiter_mhc_op_accepts_norm,
+    _has_aiter_mhc_fused,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
@@ -1297,7 +1296,7 @@ def _rocm_mhc_inputs(num_tokens=2, hidden_size=256, hc_mult=4):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
+def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch, default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs()
     rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
@@ -1318,10 +1317,11 @@ def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
         ref[2], (ref[2].shape[-1],), norm_weight, norm_eps
     )
     monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC", True)
-    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_PRE_NORM", False)
     monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+    op = MHCPreOp()
+    op._aiter_supports_norm = False
 
-    out = object.__new__(MHCPreOp).forward_hip(
+    out = op.forward_hip(
         residual,
         fn,
         hc_scale,
@@ -1341,7 +1341,7 @@ def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
+def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch, default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs()
     x = torch.randn((2, 256), dtype=torch.bfloat16, device=DEVICE)
@@ -1365,10 +1365,11 @@ def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
     expected_layer_input = F.rms_norm(
         pre_ref[2], (pre_ref[2].shape[-1],), norm_weight, norm_eps
     )
-    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_FUSED", False)
     monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+    op = MHCFusedPostPreOp()
+    op._use_aiter = False
 
-    out = object.__new__(MHCFusedPostPreOp).forward_hip(
+    out = op.forward_hip(
         x,
         residual,
         post_layer_mix,
@@ -1541,6 +1542,15 @@ requires_rocm_mhc_overlap = pytest.mark.skipif(
 )
 
 
+def _stub_sublayers(decoder, attn, ffn):
+    """Stand plain callables in for the decoder's attention and FFN. Neither
+    has a first GEMM that reads the seam's MXFP8 layer input."""
+    attn.fused_wqa_wkv = nn.Identity()
+    ffn.use_mega_moe, ffn.shared_experts = False, None
+    decoder.attn, decoder.ffn = attn, ffn
+    decoder.attn_seam_mxfp8 = decoder.ffn_seam_mxfp8 = False
+
+
 def _mega_mhc_inputs(num_tokens, hidden_size=5120):
     residual, fn, _, hc_base, norm_weight = _rocm_mhc_inputs(
         num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=4
@@ -1692,7 +1702,9 @@ def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     nn.Module.__init__(layer)
     layer.mono = None
     layer.use_mega_mhc = True
+    layer.use_sequence_parallel = False
     layer.hidden_size = hidden_size
+    _stub_sublayers(layer, lambda x: x, lambda x: x)
     layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_attn_fn_packed = layer.hc_ffn_fn_packed = None
@@ -1856,8 +1868,11 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    _stub_sublayers(
+        decoder,
+        lambda positions, x, _: x * 0.5,
+        lambda x, input_ids: x * 0.25,
+    )
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
@@ -2055,8 +2070,11 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
     decoder.attn_norm = decoder.ffn_norm = RMSNorm(hidden_size, 1e-6).to(
         device=DEVICE, dtype=torch.bfloat16
     )
-    decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    _stub_sublayers(
+        decoder,
+        lambda positions, x, _: x * 0.5,
+        lambda x, input_ids: x * 0.25,
+    )
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 4 * hidden_size) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 4 * hidden_size) * 0.02
@@ -2098,10 +2116,10 @@ def test_deepseek_v41_rocm_first_layer_unfolded_entry(monkeypatch, default_vllm_
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_rocm() and HAS_AITER_MHC and HAS_AITER_MHC_PRE_NORM),
+    not (current_platform.is_rocm() and _aiter_mhc_op_accepts_norm("mhc_pre")),
     reason="AITER mHC with fused RMSNorm required",
 )
-def test_mhc_pre_rocm_aiter_fuses_norm():
+def test_mhc_pre_rocm_aiter_fuses_norm(default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
         num_tokens=2, hidden_size=7168
@@ -2124,7 +2142,7 @@ def test_mhc_pre_rocm_aiter_fuses_norm():
         ref[2], (ref[2].shape[-1],), norm_weight, norm_eps
     )
 
-    out = object.__new__(MHCPreOp).forward_hip(
+    out = MHCPreOp().forward_hip(
         residual,
         fn,
         hc_scale,
@@ -2145,11 +2163,13 @@ def test_mhc_pre_rocm_aiter_fuses_norm():
 
 @pytest.mark.skipif(
     not (
-        current_platform.is_rocm() and HAS_AITER_MHC_FUSED and HAS_AITER_MHC_FUSED_NORM
+        current_platform.is_rocm()
+        and _has_aiter_mhc_fused()
+        and _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
     ),
     reason="AITER fused mHC with RMSNorm required",
 )
-def test_mhc_fused_rocm_aiter_fuses_norm():
+def test_mhc_fused_rocm_aiter_fuses_norm(default_vllm_config):
     set_random_seed(0)
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
         num_tokens=2, hidden_size=7168
@@ -2176,7 +2196,7 @@ def test_mhc_fused_rocm_aiter_fuses_norm():
         pre_ref[2], (pre_ref[2].shape[-1],), norm_weight, norm_eps
     )
 
-    out = object.__new__(MHCFusedPostPreOp).forward_hip(
+    out = MHCFusedPostPreOp().forward_hip(
         x,
         residual,
         post_layer_mix,
