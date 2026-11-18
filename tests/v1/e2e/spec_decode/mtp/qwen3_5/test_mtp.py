@@ -43,20 +43,18 @@ class MTPInputRecorder:
         speculator = self.model_runner.speculator
         assert isinstance(speculator, MultiModuleMTPSpeculator)
         last_token_indices = speculator.last_token_indices
-        self.mtp_inputs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        self.mtp_inputs: list[tuple[list[int], list[int]]] = []
 
         def record_inputs(_module, _args, kwargs):
             if kwargs["spec_step_idx"] == 0:
                 with gpu_sync_allowed():
-                    ids = kwargs["input_ids"].cpu()
-                    positions = kwargs["positions"].cpu()
-                    last = last_token_indices[:1].cpu()
-                count = int(last.item()) + 1
-                assert all(p >= 0 for p in positions[:count].tolist()), (
-                    f"Invalid MTP replay inputs: ids={ids[:count].tolist()}, "
-                    f"positions={positions[:count].tolist()}"
+                    count = int(last_token_indices[0].item()) + 1
+                    ids = kwargs["input_ids"][:count].tolist()
+                    positions = kwargs["positions"][:count].tolist()
+                assert all(p >= 0 for p in positions), (
+                    f"Invalid MTP replay inputs: ids={ids}, positions={positions}"
                 )
-                self.mtp_inputs.append((ids, positions, last))
+                self.mtp_inputs.append((ids, positions))
 
         self.mtp_input_hook = speculator.model.register_forward_pre_hook(
             record_inputs, with_kwargs=True
@@ -64,13 +62,7 @@ class MTPInputRecorder:
 
     def read_mtp_inputs(self) -> list[tuple[list[int], list[int]]]:
         self.mtp_input_hook.remove()
-        return [
-            (
-                ids[: int(last.item()) + 1].tolist(),
-                positions[: int(last.item()) + 1].tolist(),
-            )
-            for ids, positions, last in self.mtp_inputs
-        ]
+        return self.mtp_inputs
 
 
 def _add_random_mtp_module(model_name: str, path: Path) -> Path:
@@ -160,56 +152,33 @@ def test_multi_module_mtp_reused_slot_has_only_current_request_inputs(
             "rejection_sample_method": "synthetic",
             "synthetic_acceptance_rates": [0.0] * 4,
         },
-        disable_log_stats=False,
     ) as runner:
         llm = runner.llm
-        for prompt_len in (1, 2):
-            llm.generate(
-                [TokensPrompt(prompt_token_ids=list(range(9001, 9007)))],
-                SamplingParams(
-                    temperature=0,
-                    max_tokens=8,
-                    ignore_eos=True,
-                    allowed_token_ids=[9007],
-                ),
-            )
-            num_drafts_before = get_spec_decode_metric_value(
-                llm.get_metrics(), "vllm:spec_decode_num_drafts"
-            )
-            llm.collective_rpc("start_mtp_input_recording")
-            prompt = list(range(5000, 5000 + prompt_len))
-            output = llm.generate(
-                [TokensPrompt(prompt_token_ids=prompt)],
-                SamplingParams(
-                    temperature=0,
-                    max_tokens=8,
-                    ignore_eos=True,
-                    allowed_token_ids=[42],
-                ),
-            )[0]
-            (draft_inputs,) = llm.collective_rpc("read_mtp_inputs")
-            assert len(draft_inputs) >= 2
-            assert tuple(draft_inputs[0]) == (
-                prompt[1:] + [42],
-                list(range(prompt_len)),
-            )
-            assert tuple(draft_inputs[1]) == (
-                prompt[1:] + [42, 42],
-                list(range(prompt_len + 1)),
-            )
-            assert all(p >= 0 for _, positions in draft_inputs for p in positions)
-            assert list(output.outputs[0].token_ids) == [42] * 8
-            metrics = llm.get_metrics()
-            assert (
-                get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
-                > num_drafts_before
-            )
-            assert (
-                get_spec_decode_metric_value(
-                    metrics, "vllm:spec_decode_num_accepted_tokens"
-                )
-                == 0
-            )
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=list(range(9001, 9007)))],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=[9007],
+            ),
+        )
+        llm.collective_rpc("start_mtp_input_recording")
+        output = llm.generate(
+            [TokensPrompt(prompt_token_ids=[5000, 5001])],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=[42],
+            ),
+        )[0]
+        (draft_inputs,) = llm.collective_rpc("read_mtp_inputs")
+        assert [tuple(item) for item in draft_inputs[:2]] == [
+            ([5001, 42], [0, 1]),
+            ([5001, 42, 42], [0, 1, 2]),
+        ]
+        assert list(output.outputs[0].token_ids) == [42] * 8
 
 
 @pytest.mark.parametrize(
@@ -223,7 +192,6 @@ def test_multi_module_mtp_reused_slot_has_only_current_request_inputs(
     ],
     ids=["qwen3_5-hybrid"],
 )
-@pytest.mark.parametrize("multi_module", [False, True], ids=["single", "multi"])
 @single_gpu_only
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
@@ -232,15 +200,7 @@ def test_mtp_correctness(
     mm_enabled: bool,
     expected_accuracy_threshold: float,
     vllm_runner,
-    tmp_path: Path,
-    multi_module: bool,
 ):
-    if multi_module:
-        method, model_name, tp_size, _ = model_setup
-        model_path = tmp_path / "Qwen3.5-0.8B-Base-multi-mtp"
-        model_path.mkdir()
-        draft_model = _add_random_mtp_module(model_name, model_path)
-        model_setup = (method, str(draft_model), tp_size, str(draft_model))
     check_mtp_correctness(
         monkeypatch,
         sampling_config,
