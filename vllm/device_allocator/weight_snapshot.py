@@ -176,16 +176,13 @@ def _walk(value, key: str, depth: int, seen: set[int]) -> Iterator[tuple[str, ob
 
 def collect_state(
     roots: dict[str, nn.Module],
-) -> tuple[
-    list[tuple[str, torch.Tensor]], dict[str, object], dict[str, list[str]], list[str]
-]:
-    """CUDA tensors (deduplicated by view), scalars, the other keys each tensor was
-    reached under, in a stable order keyed by module path and attribute name, and
-    the keys of state this snapshot cannot hold (pinned host tensors)."""
+) -> tuple[list[tuple[str, torch.Tensor]], dict[str, object], dict[str, list[str]]]:
+    """CUDA and pinned host tensors (deduplicated by view), scalars, and the other
+    keys each tensor was reached under, in a stable order keyed by module path and
+    attribute name. Pinned host tensors hold offloaded tables (e.g. embeddings)."""
     tensors: list[tuple[str, torch.Tensor]] = []
     scalars: dict[str, object] = {}
     aliases: dict[str, list[str]] = {}
-    unsupported: list[str] = []
     seen: dict[tuple, str] = {}
     visited: set[int] = set()
     for root_name, root in roots.items():
@@ -196,11 +193,7 @@ def collect_state(
                 base = f"{root_name}/{mod_name}/{attr}"
                 for key, v in _walk(value, base, _DEPTH, visited):
                     if isinstance(v, torch.Tensor):
-                        if v.numel() == 0:
-                            continue
-                        if not v.is_cuda:
-                            if v.is_pinned():
-                                unsupported.append(key)
+                        if not (v.is_cuda or v.is_pinned()) or v.numel() == 0:
                             continue
                         ident = (v.data_ptr(), v.nbytes, tuple(v.shape), v.dtype)
                         if ident in seen:
@@ -210,7 +203,7 @@ def collect_state(
                         tensors.append((key, v))
                     else:
                         scalars[key] = v
-    return tensors, scalars, aliases, unsupported
+    return tensors, scalars, aliases
 
 
 def _describe(tensors, aliases) -> list[dict]:
@@ -237,15 +230,7 @@ def _pinned() -> torch.Tensor:
 def save(roots: dict[str, nn.Module], path: Path) -> None:
     torch.accelerator.synchronize()
     t0 = time.perf_counter()
-    tensors, scalars, aliases, unsupported = collect_state(roots)
-    if unsupported:
-        # A partial snapshot would restore wrong weights without any error.
-        logger.warning(
-            "Weight snapshot not saved: the model keeps state the snapshot cannot "
-            "hold (pinned host tensors, e.g. %s)",
-            unsupported[:3],
-        )
-        return
+    tensors, scalars, aliases = collect_state(roots)
     header = json.dumps(
         {"magic": _MAGIC, "tensors": _describe(tensors, aliases), "scalars": scalars}
     ).encode()
@@ -321,7 +306,7 @@ def _open_direct(path: Path) -> int:
 
 def restore(roots: dict[str, nn.Module], path: Path) -> None:
     """Copy the snapshot into the dummy-initialized model state."""
-    tensors, scalars, aliases, _ = collect_state(roots)
+    tensors, scalars, aliases = collect_state(roots)
     fd = _open_direct(path)
     try:
         header, offset = _read_header(fd)
